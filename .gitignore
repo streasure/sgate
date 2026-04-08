@@ -1,0 +1,52 @@
+# 构建产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.temp
+
+# 编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 依赖目录
+vendor/
+
+# 测试覆盖率文件
+coverage.out
+
+# 环境变量文件
+.env
+
+# 配置文件
+config/*.yaml
+!config/config.yaml.example
+
+# 构建目录
+build/
+bin/
+
+# 文档生成目录
+docs/_build/
+
+# 操作系统文件
+Thumbs.db
+.DS_Store
+
+# 其他无需上传的文件
+*.backup
+*.bak
+*.old
+*.orig
+

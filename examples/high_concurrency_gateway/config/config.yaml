@@ -1,0 +1,45 @@
+# 服务端口
+port: 8080
+
+# 日志级别
+logLevel: info
+
+# 协议配置
+transports:
+  - protocol: tcp
+    port: 8083
+    type: ""
+  - protocol: udp
+    port: 8084
+    type: ""
+  - protocol: tcp
+    port: 8085
+    type: websocket
+
+# 工作池配置
+workerPool:
+  minWorkers: 400
+  maxWorkers: 1600
+  queueSize: 16000000
+  queueSizeThreshold: 1000
+
+# 速率限制配置
+rateLimiter:
+  rate: 500000
+  burst: 1000000
+  window: 1s
+
+# 安全配置
+security:
+  authSecret: "default_secret"
+  authRoutes:
+    - "getConnections"
+    - "broadcast"
+
+# 告警配置
+alerts:
+  activeConnectionsThreshold: 10000
+  failedMessagesThreshold: 100
+  processingTimeThreshold: 1000
+  redisErrorsThreshold: 10
+  queueLengthThreshold: 10000

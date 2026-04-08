@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package gateway;
+
+option go_package = "github.com/streasure/sgate/gateway/protobuf";
+
+// Message 消息结构
+message Message {
+  string connection_id = 1;
+  string user_uuid = 2;
+  string route = 3;
+  map<string, string> payload = 4;
+}
+
+// ErrorResponse 错误响应结构
+message ErrorResponse {
+  string route = 1;
+  ErrorData data = 2;
+}
+
+// ErrorData 错误数据结构
+message ErrorData {
+  string message = 1;
+  string error = 2;
+  string data = 3;
+}
+
+// ConnectionInfo 连接信息结构
+message ConnectionInfo {
+  string connection_id = 1;
+  string user_uuid = 2;
+  string remote_addr = 3;
+  string local_addr = 4;
+  int64 created_at = 5;
+  string status = 6;
+}
+
+// BroadcastData 广播数据结构
+message BroadcastData {
+  bytes message = 1;
+  int64 timestamp = 2;
+}
+
+// GroupInfo 推送组信息结构
+message GroupInfo {
+  string group_id = 1;
+  string group_name = 2;
+  repeated string user_uuids = 3;
+  int64 created_at = 4;
+}
+
+// GroupRequest 组操作请求结构
+message GroupRequest {
+  string action = 1; // create, delete, add_user, remove_user
+  string group_id = 2;
+  string group_name = 3;
+  string user_uuid = 4;
+}
+
+// GroupResponse 组操作响应结构
+message GroupResponse {
+  string status = 1;
+  string message = 2;
+  GroupInfo group_info = 3;
+}
