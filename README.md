@@ -407,8 +407,4 @@ go build -o sgate main.go
 
 MIT License
 
-## 联系方式
 
-- 作者：SGate Team
-- 邮箱：contact@sgate.io
-- 网站：https://sgate.io
