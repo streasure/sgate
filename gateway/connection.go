@@ -759,6 +759,78 @@ func (cm *ConnectionManager) UpdateUserConnection(connectionID string, oldUserUU
 	cm.UpdateConnectionUserUUID(connectionID, newUserUUID)
 }
 
+// StartConnectionChecker 启动连接检查器
+// 功能: 定期检查不活跃的连接并自动清理
+// 参数:
+//	timeout: 连接超时时间
+//	interval: 检查间隔
+func (cm *ConnectionManager) StartConnectionChecker(timeout time.Duration, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				cm.checkInactiveConnections(timeout)
+			}
+		}
+	}()
+}
+
+// checkInactiveConnections 检查不活跃的连接
+// 功能: 检查所有连接，清理超过超时时间的不活跃连接
+// 参数:
+//	timeout: 连接超时时间
+func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
+	now := time.Now().UnixMilli()
+	timeoutMs := int64(timeout / time.Millisecond)
+
+	// 收集需要清理的连接ID
+	var connectionsToRemove []string
+
+	cm.connections.Range(func(key, value interface{}) bool {
+		connectionID := key.(string)
+		conn := value.(*Connection)
+
+		// 检查连接是否超过超时时间
+		if now-conn.LastActive > timeoutMs {
+			connectionsToRemove = append(connectionsToRemove, connectionID)
+		}
+		return true
+	})
+
+	// 清理不活跃的连接
+	for _, connectionID := range connectionsToRemove {
+		conn := cm.GetConnection(connectionID)
+		if conn != nil {
+			// 发送超时通知
+			timeoutMessage := &protobuf.Message{
+				Route: "timeout",
+				Payload: map[string]string{
+					"reason":  "inactive",
+					"message": "Connection timeout due to inactivity",
+				},
+			}
+
+			// 序列化消息
+			responseData, err := proto.Marshal(timeoutMessage)
+			if err == nil {
+				// 发送超时通知（不检查错误，因为连接可能已关闭）
+				conn.Conn.Write(responseData)
+			}
+
+			// 关闭连接
+			conn.Conn.Close()
+
+			// 从连接管理器中移除
+			cm.RemoveConnection(connectionID)
+
+			tlog.Info("清理不活跃连接", "connectionID", connectionID, "userUUID", conn.UserUUID)
+		}
+	}
+}
+
 // GetConnectionInfo 获取连接信息
 // 功能: 获取指定连接的详细信息
 // 参数:

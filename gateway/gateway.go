@@ -144,8 +144,8 @@ type Gateway struct {
 	metrics            *metrics.Metrics    // 指标收集器
 	transportType      map[string]string   // 端口到传输类型的映射
 	rateLimiter        *RateLimiter        // 速率限制器
-	authSecret         string              // 认证密钥
-	authRoutes         map[string]bool     // 需要认证的路由
+	authSecret         atomic.Value        // 认证密钥，使用atomic.Value存储
+	authRoutes         atomic.Value        // 需要认证的路由，使用atomic.Value存储
 	ctx                context.Context     // 上下文
 	tlsConfig          *tls.Config         // TLS配置
 	clusterID          string              // 集群ID
@@ -154,10 +154,10 @@ type Gateway struct {
 	whitelistBlacklist *WhitelistBlacklist // 白名单和黑名单管理器
 	workerMutex        sync.Mutex          // 工作池互斥锁
 	workerCount        int                 // 当前工作线程数
-	minWorkers         int                 // 最小工作线程数
-	maxWorkers         int                 // 最大工作线程数
-	workerQueueSize    int                 // 工作队列大小阈值
-	cfg                *config.Config      // 配置实例
+	minWorkers         atomic.Int32        // 最小工作线程数，使用atomic.Int32存储
+	maxWorkers         atomic.Int32        // 最大工作线程数，使用atomic.Int32存储
+	workerQueueSize    atomic.Int32        // 工作队列大小阈值，使用atomic.Int32存储
+	cfg                atomic.Value        // 配置实例，使用atomic.Value存储
 	wsConnections      sync.Map            // 活跃的WebSocket连接
 	configPath         string              // 配置文件路径
 	configUpdateChan   chan *config.Config // 配置更新通道
@@ -176,6 +176,20 @@ func NewGateway() *Gateway {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		tlog.Warn("加载配置失败，使用默认配置", "error", err)
+	}
+
+	// 设置日志级别
+	switch cfg.LogLevel {
+	case "debug":
+		tlog.SetLogLevel(tlog.DebugLevel)
+	case "info":
+		tlog.SetLogLevel(tlog.InfoLevel)
+	case "warn":
+		tlog.SetLogLevel(tlog.WarnLevel)
+	case "error":
+		tlog.SetLogLevel(tlog.ErrorLevel)
+	default:
+		tlog.SetLogLevel(tlog.InfoLevel)
 	}
 
 	// 初始化白名单和黑名单管理器
@@ -230,8 +244,6 @@ func NewGateway() *Gateway {
 		metrics:           metrics.NewMetrics(),              // 创建指标收集器
 		transportType:     make(map[string]string),           // 创建端口到传输类型的映射
 		rateLimiter:       NewRateLimiter(rateLimitRate, rateLimitWindow), // 创建速率限制器
-		authSecret:        authSecret,                        // 认证密钥
-		authRoutes:        authRoutes,                        // 需要认证的路由
 		ctx:               ctx,
 		tlsConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -246,15 +258,19 @@ func NewGateway() *Gateway {
 		},
 		whitelistBlacklist: whitelistBlacklist, // 白名单和黑名单管理器
 		workerCount:        0,                  // 当前工作线程数
-		minWorkers:         minWorkers,         // 最小工作线程数
-		maxWorkers:         maxWorkers,         // 最大工作线程数
-		workerQueueSize:    workerQueueSize,    // 工作队列大小阈值
-		cfg:                cfg,                // 配置实例
 		configPath:         "config/config.yaml", // 配置文件路径
 		configUpdateChan:   make(chan *config.Config), // 配置更新通道
 		cache:              NewCache(),               // 缓存管理器
 		loadBalancer:       NewLoadBalancer(),        // 负载均衡器
 	}
+
+	// 使用atomic.Value存储配置
+	gw.authSecret.Store(authSecret)
+	gw.authRoutes.Store(authRoutes)
+	gw.minWorkers.Store(int32(minWorkers))
+	gw.maxWorkers.Store(int32(maxWorkers))
+	gw.workerQueueSize.Store(int32(workerQueueSize))
+	gw.cfg.Store(cfg)
 
 	// 启动速率限制器
 	gw.rateLimiter.Start()
@@ -272,6 +288,9 @@ func NewGateway() *Gateway {
 
 	// 启动WebSocket心跳检查
 	go gw.wsHeartbeatChecker()
+
+	// 启动连接检查器，清理不活跃连接
+	gw.connectionManager.StartConnectionChecker(5*time.Minute, 30*time.Second)
 
 	// 启动配置热加载监听器
 	go gw.configWatcher()
@@ -296,7 +315,7 @@ func (g *Gateway) addWorker() {
 	g.workerMutex.Lock()
 	defer g.workerMutex.Unlock()
 
-	if g.workerCount >= g.maxWorkers {
+	if g.workerCount >= int(g.maxWorkers.Load()) {
 		return
 	}
 
@@ -310,7 +329,7 @@ func (g *Gateway) removeWorker() {
 	g.workerMutex.Lock()
 	defer g.workerMutex.Unlock()
 
-	if g.workerCount <= g.minWorkers {
+	if g.workerCount <= int(g.minWorkers.Load()) {
 		return
 	}
 
@@ -342,7 +361,7 @@ func (g *Gateway) workerPoolManager() {
 			averageProcessingTime := g.metrics.GetAverageProcessingTime()
 			
 			// 计算负载指标
-			loadFactor := float64(queueLength) / float64(g.workerQueueSize)
+			loadFactor := float64(queueLength) / float64(g.workerQueueSize.Load())
 			connectionFactor := float64(activeConnections) / float64(500) // 每500个连接增加一个线程
 			timeFactor := averageProcessingTime / float64(5) // 处理时间超过5ms增加线程
 			
@@ -350,26 +369,26 @@ func (g *Gateway) workerPoolManager() {
 			totalLoad := loadFactor + connectionFactor + timeFactor
 			
 			// 根据综合负载动态调整工作线程数
-			if totalLoad > 0.8 && g.workerCount < g.maxWorkers {
+			if totalLoad > 0.8 && g.workerCount < int(g.maxWorkers.Load()) {
 				// 负载较高，添加工作线程
 				// 一次添加多个线程，根据负载程度
 				addCount := int(totalLoad * 2) // 增加更多线程以快速响应负载
 				if addCount > 20 {
 					addCount = 20 // 最多一次添加20个线程
 				}
-				for i := 0; i < addCount && g.workerCount < g.maxWorkers; i++ {
+				for i := 0; i < addCount && g.workerCount < int(g.maxWorkers.Load()); i++ {
 					g.addWorker()
 				}
 				// 更新工作线程数指标
 				g.metrics.SetWorkerCount(int64(g.workerCount))
-			} else if totalLoad < 0.2 && g.workerCount > g.minWorkers {
+			} else if totalLoad < 0.2 && g.workerCount > int(g.minWorkers.Load()) {
 				// 负载较低，移除工作线程
 				// 一次移除多个线程，快速减少空闲线程
-				removeCount := g.workerCount - g.minWorkers
+				removeCount := g.workerCount - int(g.minWorkers.Load())
 				if removeCount > 5 {
 					removeCount = 5 // 最多一次移除5个线程
 				}
-				for i := 0; i < removeCount && g.workerCount > g.minWorkers; i++ {
+				for i := 0; i < removeCount && g.workerCount > int(g.minWorkers.Load()); i++ {
 					g.removeWorker()
 				}
 				// 更新工作线程数指标
@@ -494,23 +513,19 @@ func (g *Gateway) configWatcher() {
 
 // handleConfigUpdate 处理配置更新
 func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
-	// 更新配置
-	g.cfg = newCfg
-
 	// 更新认证路由
 	authRoutes := make(map[string]bool)
 	for _, route := range newCfg.Security.AuthRoutes {
 		authRoutes[route] = true
 	}
-	g.authRoutes = authRoutes
 
-	// 更新认证密钥
-	g.authSecret = newCfg.Security.AuthSecret
-
-	// 更新工作池配置
-	g.minWorkers = newCfg.WorkerPool.MinWorkers
-	g.maxWorkers = newCfg.WorkerPool.MaxWorkers
-	g.workerQueueSize = newCfg.WorkerPool.QueueSizeThreshold
+	// 使用atomic.Value更新配置（无锁操作）
+	g.cfg.Store(newCfg)
+	g.authSecret.Store(newCfg.Security.AuthSecret)
+	g.authRoutes.Store(authRoutes)
+	g.minWorkers.Store(int32(newCfg.WorkerPool.MinWorkers))
+	g.maxWorkers.Store(int32(newCfg.WorkerPool.MaxWorkers))
+	g.workerQueueSize.Store(int32(newCfg.WorkerPool.QueueSizeThreshold))
 
 	// 更新速率限制器配置
 	g.rateLimiter = NewRateLimiter(newCfg.RateLimiter.Rate, newCfg.RateLimiter.Window)
@@ -1550,7 +1565,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 		}
 
 		// 验证token
-		claims, err := ValidateToken(token, g.authSecret)
+		claims, err := ValidateToken(token, g.authSecret.Load().(string))
 		if err != nil {
 			// 发送未授权响应
 			errorMsg := NewErrorMessage("error", "Invalid token", err.Error(), "")
@@ -1715,7 +1730,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 //
 //	bool: 是否需要认证
 func (g *Gateway) requiresAuth(route string) bool {
-	return g.authRoutes[route]
+	return g.authRoutes.Load().(map[string]bool)[route]
 }
 
 // 预分配的HTTP响应缓冲区
