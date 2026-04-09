@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/panjf2000/gnet/v2/pkg/pool/bytebuffer"
 	"github.com/streasure/sgate/gateway/protobuf"
 	"google.golang.org/protobuf/proto"
 	tlog "github.com/streasure/treasure-slog"
@@ -362,31 +361,27 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 	}
 
 	// 序列化消息
-	buf := bytebuffer.Get()
-	defer bytebuffer.Put(buf)
-
 	var responseData []byte
 	var err error
 
-	if protoMsg, ok := message.(*protobuf.Message); ok {
+	switch msg := message.(type) {
+	case *protobuf.Message:
 		// 使用Protocol Buffers序列化
-		responseData, err = proto.Marshal(protoMsg)
-	} else if errorMsg, ok := message.(*protobuf.ErrorResponse); ok {
+		responseData, err = proto.Marshal(msg)
+	case *protobuf.ErrorResponse:
 		// 使用Protocol Buffers序列化错误消息
-		responseData, err = proto.Marshal(errorMsg)
-	} else {
+		responseData, err = proto.Marshal(msg)
+	case map[string]string:
 		// 转换为Protocol Buffers消息
-		if msgMap, ok := message.(map[string]string); ok {
-			protoMsg := &protobuf.Message{
-				Route:   "message",
-				Payload: msgMap,
-			}
-			responseData, err = proto.Marshal(protoMsg)
-		} else {
-			// 不支持的消息类型
-			tlog.Error("不支持的消息类型", "type", message)
-			return false
+		protoMsg := &protobuf.Message{
+			Route:   "message",
+			Payload: msg,
 		}
+		responseData, err = proto.Marshal(protoMsg)
+	default:
+		// 不支持的消息类型
+		tlog.Error("不支持的消息类型", "type", message)
+		return false
 	}
 
 	if err != nil {
@@ -395,9 +390,7 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 		return false
 	}
 
-	buf.Write(responseData)
-
-	if _, err := conn.Conn.Write(buf.B); err != nil {
+	if _, err := conn.Conn.Write(responseData); err != nil {
 		// 输出错误日志
 		tlog.Error("发送消息失败", "connectionID", connectionID, "error", err)
 		// 连接可能已关闭，从连接管理器中移除
@@ -417,82 +410,55 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 //	message: 消息内容
 func (cm *ConnectionManager) Broadcast(message interface{}) {
 	// 先序列化消息，减少锁的持有时间
-	var buf *bytebuffer.ByteBuffer
+	var responseData []byte
+	var marshalErr error
 
 	// 处理不同类型的消息
-	if protoMsg, ok := message.(*protobuf.Message); ok {
+	switch msg := message.(type) {
+	case *protobuf.Message:
 		// 使用Protocol Buffers序列化
-		buf = bytebuffer.Get()
-		responseData, marshalErr := proto.Marshal(protoMsg)
-		if marshalErr != nil {
-			tlog.Error("序列化广播消息失败", "error", marshalErr)
-			bytebuffer.Put(buf)
-			return
-		}
-		buf.Write(responseData)
-	} else if errorMsg, ok := message.(*protobuf.ErrorResponse); ok {
+		responseData, marshalErr = proto.Marshal(msg)
+	case *protobuf.ErrorResponse:
 		// 使用Protocol Buffers序列化错误消息
-		buf = bytebuffer.Get()
-		responseData, marshalErr := proto.Marshal(errorMsg)
-		if marshalErr != nil {
-			tlog.Error("序列化广播消息失败", "error", marshalErr)
-			bytebuffer.Put(buf)
-			return
+		responseData, marshalErr = proto.Marshal(msg)
+	case map[string]string:
+		// 如果是map[string]string，直接创建Protocol Buffers消息
+		protoMsg := &protobuf.Message{
+			Route:   "broadcast",
+			Payload: msg,
 		}
-		buf.Write(responseData)
-	} else {
-		// 转换为Protocol Buffers消息
-		buf = bytebuffer.Get()
-		var responseData []byte
-		var marshalErr error
-
-		if msgMap, ok := message.(map[string]string); ok {
-			// 如果是map[string]string，直接创建Protocol Buffers消息
-			protoMsg := &protobuf.Message{
-				Route:   "broadcast",
-				Payload: msgMap,
-			}
-			responseData, marshalErr = proto.Marshal(protoMsg)
-		} else if msgStr, ok := message.(string); ok {
-			// 如果是字符串，包装成Protocol Buffers消息
-			protoMsg := &protobuf.Message{
-				Route: "broadcast",
-				Payload: map[string]string{
-					"data": msgStr,
-				},
-			}
-			responseData, marshalErr = proto.Marshal(protoMsg)
-		} else {
-			// 不支持的消息类型
-			tlog.Error("不支持的消息类型", "type", message)
-			bytebuffer.Put(buf)
-			return
+		responseData, marshalErr = proto.Marshal(protoMsg)
+	case string:
+		// 如果是字符串，包装成Protocol Buffers消息
+		protoMsg := &protobuf.Message{
+			Route: "broadcast",
+			Payload: map[string]string{
+				"data": msg,
+			},
 		}
-
-		if marshalErr != nil {
-			// 输出错误日志
-			tlog.Error("序列化广播消息失败", "error", marshalErr)
-			bytebuffer.Put(buf)
-			return
-		}
-		buf.Write(responseData)
+		responseData, marshalErr = proto.Marshal(protoMsg)
+	default:
+		// 不支持的消息类型
+		tlog.Error("不支持的消息类型", "type", message)
+		return
 	}
 
-	// 定义连接信息结构
-	type connInfo struct {
-		id   string      // 连接ID
-		conn *Connection // Connection结构体
+	if marshalErr != nil {
+		// 输出错误日志
+		tlog.Error("序列化广播消息失败", "error", marshalErr)
+		return
 	}
 
 	// 预先分配切片，减少内存分配
-	var connections []connInfo
+	var connections []*Connection
 	cm.connections.Range(func(key, value interface{}) bool {
-		connections = append(connections, connInfo{
-			id:   key.(string),
-			conn: value.(*Connection),
-		})
+		connections = append(connections, value.(*Connection))
 		return true
 	})
+
+	if len(connections) == 0 {
+		return
+	}
 
 	// 使用并发发送消息
 	successCount := int32(0) // 成功发送计数
@@ -509,32 +475,31 @@ func (cm *ConnectionManager) Broadcast(message interface{}) {
 
 	semaphore := make(chan struct{}, concurrencyLimit)
 
-	for _, info := range connections {
+	for _, c := range connections {
 		wg.Add(1)
 		semaphore <- struct{}{} // 获取信号量
 
-		go func(id string, c *Connection) {
+		go func(conn *Connection) {
 			defer func() {
 				wg.Done()
 				<-semaphore // 释放信号量
 			}()
 
-			if _, err := c.Conn.Write(buf.B); err != nil {
+			if _, err := conn.Conn.Write(responseData); err != nil {
 				// 输出错误日志
-				tlog.Error("广播消息失败", "connectionID", id, "error", err)
+				tlog.Error("广播消息失败", "error", err)
 				atomic.AddInt32(&errorCount, 1)
 			} else {
 				atomic.AddInt32(&successCount, 1)
 				// 更新最后活跃时间
-				c.LastActive = time.Now().UnixMilli()
+				conn.LastActive = time.Now().UnixMilli()
 			}
-		}(info.id, info.conn)
+		}(c)
 	}
 
 	// 等待所有发送完成
 	wg.Wait()
 
-	bytebuffer.Put(buf)
 	// 输出调试日志
 	tlog.Debug("广播完成", "success", atomic.LoadInt32(&successCount), "error", atomic.LoadInt32(&errorCount))
 }

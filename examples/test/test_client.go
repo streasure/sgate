@@ -11,7 +11,7 @@ import (
 
 func main() {
 	// 配置日志
-	tlog.SetLogLevel(tlog.InfoLevel)
+	tlog.SetLevel(tlog.Info)
 
 	// 连接到服务器
 	conn, err := net.Dial("tcp", "localhost:8083")

@@ -8,13 +8,12 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
+	"github.com/panjf2000/gnet/v2/pkg/logging"
 	"github.com/streasure/sgate/gateway/protobuf"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/metrics"
@@ -22,119 +21,8 @@ import (
 	tlog "github.com/streasure/treasure-slog"
 )
 
-// Gateway 网关结构
-// 功能: 整个网关服务的核心结构，管理所有连接、路由、消息处理等
-// 字段:
-//   connectionManager: 连接管理器，管理所有网络连接
-//   routeManager: 路由管理器，管理所有路由
-//   messagePool: 消息队列，存储待处理的消息
-//   workerPool: 工作池，用于管理工作线程
-//   stopChan: 停止信号通道
-//   workerStopChan: 工作线程停止信号通道
-//   metrics: 指标收集器，用于收集系统指标
-//   transportType: 端口到传输类型的映射
-//   rateLimiter: 速率限制器，用于限制请求速率
-//   authSecret: 认证密钥
-//   authRoutes: 需要认证的路由
-//   ctx: 上下文
-//   tlsConfig: TLS配置
-//   clusterID: 集群ID
-//   isLeader: 是否是领导者
-//   bufferPool: 缓冲区池，用于复用缓冲区
-//   whitelistBlacklist: 白名单和黑名单管理器
-//   workerMutex: 工作池互斥锁
-//   workerCount: 当前工作线程数
-//   minWorkers: 最小工作线程数
-//   maxWorkers: 最大工作线程数
-//   workerQueueSize: 工作队列大小阈值
-//   cfg: 配置实例
-//   wsConnections: 活跃的WebSocket连接
-//   configPath: 配置文件路径
-//   configUpdateChan: 配置更新通道
-//   cache: 缓存管理器
-//   loadBalancer: 负载均衡器
-
-// SetTransportType 设置端口到传输类型的映射
-// 功能: 设置端口与传输类型的对应关系，用于区分不同端口的传输协议
-// 参数:
-//
-//	port: 端口号
-//	transportType: 传输类型，如"websocket"
-func (g *Gateway) SetTransportType(port string, transportType string) {
-	g.transportType[port] = transportType
-}
-
-// Message 消息结构
-// 功能: 定义网关内部传递的消息结构
-// 字段:
-//   ConnectionID: 连接ID，用于标识消息来源
-//   Route: 路由名称，用于确定消息的处理逻辑
-//   Payload: 消息负载，包含消息的具体内容
-//   Conn: 网络连接，用于回复消息
-
-type Message struct {
-	ConnectionID string            `json:"connection_id"` // 连接ID
-	Route        string            `json:"route"`         // 路由名称
-	Payload      map[string]string `json:"payload"`       // 消息负载
-	Conn         gnet.Conn         `json:"conn"`          // 网络连接
-}
-
-// messagePool 消息对象池
-// 功能: 复用消息对象，减少内存分配
-var messagePool = sync.Pool{
-	New: func() interface{} {
-		return &Message{
-			Payload: make(map[string]string),
-		}
-	},
-}
-
-// GetMessage 从对象池获取消息对象
-// 功能: 从消息对象池获取一个消息对象，并清空其内容
-// 返回值:
-//
-//	*Message: 消息对象
-func GetMessage() *Message {
-	msg := messagePool.Get().(*Message)
-	// 清空消息对象
-	msg.ConnectionID = ""
-	msg.Route = ""
-	for k := range msg.Payload {
-		delete(msg.Payload, k)
-	}
-	msg.Conn = nil
-	return msg
-}
-
-// PutMessage 将消息对象归还到对象池
-// 功能: 将消息对象归还到对象池，清空其内容以便复用
-// 参数:
-//
-//	msg: 消息对象
-func PutMessage(msg *Message) {
-	// 清空消息对象
-	msg.ConnectionID = ""
-	msg.Route = ""
-	for k := range msg.Payload {
-		delete(msg.Payload, k)
-	}
-	msg.Conn = nil
-	messagePool.Put(msg)
-}
-
-// Gateway 网关结构
-// 字段:
-//   connectionManager: 连接管理器
-//   routeManager: 路由管理器
-//   messagePool: 消息队列
-//   workerPool: 工作池
-//   stopChan: 停止信号通道
-//   metrics: 指标收集器
-//   transportType: 端口到传输类型的映射
-//   rateLimiter: 速率限制器
-//   authSecret: 认证密钥
-
-type Gateway struct {
+// GatewayGnet 基于 gnet 的网关实现
+type GatewayGnet struct {
 	connectionManager  *ConnectionManager  // 连接管理器
 	routeManager       *RouteManager       // 路由管理器
 	messagePool        chan *Message       // 消息队列
@@ -165,20 +53,71 @@ type Gateway struct {
 	loadBalancer       *LoadBalancer       // 负载均衡器
 	messageIntegrity   *MessageIntegrity   // 消息完整性管理器
 	messageACK        *MessageACK         // 消息确认管理器
-	database          *Database           // 数据库管理器
-	redis             *Redis              // Redis缓存管理器
 	compressor        *Compressor         // 压缩管理器
 	versionNegotiation *VersionNegotiation // 版本协商管理器
 	circuitBreakerManager *CircuitBreakerManager // 熔断器管理器
 	messageQueue      *MessageQueue       // 消息队列管理器
 	tracer            *Tracer             // 链路追踪器
+	resourceCircuitBreaker *CircuitBreaker // 资源熔断器
+	resourceCheckInterval time.Duration    // 资源检查间隔
 }
 
-// NewGateway 创建网关实例
-// 返回值:
-//
-//	*Gateway: 网关实例
-func NewGateway() *Gateway {
+// monitorResources 监控系统资源使用情况
+func (g *GatewayGnet) monitorResources() {
+	ticker := time.NewTicker(g.resourceCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// 获取当前配置
+			cfg := g.cfg.Load().(*config.Config)
+			
+			// 检查是否启用资源熔断器
+			if !cfg.Resources.EnableResourceCircuitBreaker {
+				continue
+			}
+
+			// 检查内存使用情况
+			var memStats runtime.MemStats
+			runtime.ReadMemStats(&memStats)
+			
+			// 计算内存占用百分比
+			totalMemory := float64(runtime.MemStats{}.Sys) // 系统总内存
+			if totalMemory == 0 {
+				totalMemory = 1 // 避免除以零
+			}
+			memoryUsage := float64(memStats.Alloc) / totalMemory * 100
+
+			// 检查 CPU 使用情况
+			// 这里简化处理，实际应该使用更准确的 CPU 使用率计算方法
+			// 暂时使用固定值模拟，实际项目中应该使用第三方库或系统 API 获取真实 CPU 使用率
+			cpuUsage := 0.0 // 实际项目中需要实现真实的 CPU 使用率计算
+
+			// 检查是否达到资源阈值
+			if memoryUsage >= cfg.Resources.MemoryThreshold || cpuUsage >= cfg.Resources.CPUThreshold {
+				// 记录资源使用情况
+				tlog.Warn("系统资源使用率过高", 
+					"memoryUsage", fmt.Sprintf("%.2f%%", memoryUsage), 
+					"cpuUsage", fmt.Sprintf("%.2f%%", cpuUsage),
+					"memoryThreshold", cfg.Resources.MemoryThreshold,
+					"cpuThreshold", cfg.Resources.CPUThreshold)
+
+				// 触发资源熔断器
+				g.resourceCircuitBreaker.RecordFailure()
+			} else {
+				// 资源使用正常，重置资源熔断器
+				g.resourceCircuitBreaker.RecordSuccess()
+			}
+
+		case <-g.stopChan:
+			return
+		}
+	}
+}
+
+// NewGatewayGnet 创建基于 gnet 的网关实例
+func NewGatewayGnet() *GatewayGnet {
 	ctx := context.Background()
 
 	// 加载配置
@@ -186,23 +125,6 @@ func NewGateway() *Gateway {
 	if err != nil {
 		tlog.Warn("加载配置失败，使用默认配置", "error", err)
 	}
-
-	// 设置日志级别
-	switch cfg.LogLevel {
-	case "debug":
-		// tlog.SetLevel("debug")
-	case "info":
-		// tlog.SetLevel("info")
-	case "warn":
-		// tlog.SetLevel("warn")
-	case "error":
-		// tlog.SetLevel("error")
-	default:
-		// tlog.SetLevel("info")
-	}
-
-	// 初始化白名单和黑名单管理器
-	whitelistBlacklist := NewWhitelistBlacklist()
 
 	// 从配置中读取工作池参数
 	minWorkers := cfg.WorkerPool.MinWorkers
@@ -244,7 +166,7 @@ func NewGateway() *Gateway {
 		authRoutes[route] = true
 	}
 
-	gw := &Gateway{
+	gw := &GatewayGnet{
 		connectionManager: NewConnectionManager(), // 创建连接管理器
 		routeManager:      NewRouteManager(),                 // 创建路由管理器
 		messagePool:       make(chan *Message, queueSize),    // 创建消息队列
@@ -265,12 +187,14 @@ func NewGateway() *Gateway {
 				return make([]byte, 4096) // 增大缓冲区大小
 			},
 		},
-		whitelistBlacklist: whitelistBlacklist, // 白名单和黑名单管理器
+		whitelistBlacklist: NewWhitelistBlacklist(), // 白名单和黑名单管理器
 		workerCount:        0,                  // 当前工作线程数
 		configPath:         "config/config.yaml", // 配置文件路径
 		configUpdateChan:   make(chan *config.Config), // 配置更新通道
 		cache:              NewCache(),               // 缓存管理器
 		loadBalancer:       NewLoadBalancer(),        // 负载均衡器
+		resourceCircuitBreaker: NewCircuitBreaker("resource", 1, 1, 30*time.Second), // 资源熔断器
+		resourceCheckInterval: 5 * time.Second, // 每5秒检查一次资源使用情况
 	}
 
 	// 使用atomic.Value存储配置
@@ -283,6 +207,9 @@ func NewGateway() *Gateway {
 
 	// 启动速率限制器
 	gw.rateLimiter.Start()
+
+	// 启动资源监控协程
+	go gw.monitorResources()
 
 	// 注册默认路由
 	gw.registerDefaultRoutes()
@@ -304,37 +231,6 @@ func NewGateway() *Gateway {
 	// 初始化消息确认管理器
 	gw.messageACK = NewMessageACK(3, 2*time.Second, 30*time.Second) // 最大重试3次，重试间隔2秒，超时30秒
 	gw.messageACK.Start()
-
-	// 初始化数据库
-	dbConfig := DatabaseConfig{
-		Host:          "localhost",
-		Port:          5432,
-		User:          "sgate",
-		Password:      "sgate_password",
-		Database:      "sgate",
-		MaxIdleConns:  10,
-		MaxOpenConns:  100,
-		ConnTimeout:   5 * time.Second,
-		RetryInterval: 2 * time.Second,
-		MaxRetries:    5,
-	}
-	gw.database = NewDatabase(dbConfig)
-
-	// 初始化Redis
-	redisConfig := RedisConfig{
-		Host:         "localhost",
-		Port:         6379,
-		Password:     "",
-		DB:           0,
-		MaxRetries:   5,
-		RetryInterval: 2 * time.Second,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
-		PoolSize:     10,
-		MinIdleConns: 5,
-	}
-	gw.redis = NewRedis(redisConfig)
 
 	// 初始化压缩管理器
 	gw.compressor = NewCompressor()
@@ -374,7 +270,7 @@ func NewGateway() *Gateway {
 }
 
 // addWorker 添加工作线程
-func (g *Gateway) addWorker() {
+func (g *GatewayGnet) addWorker() {
 	g.workerMutex.Lock()
 	defer g.workerMutex.Unlock()
 
@@ -388,7 +284,7 @@ func (g *Gateway) addWorker() {
 }
 
 // removeWorker 移除工作线程
-func (g *Gateway) removeWorker() {
+func (g *GatewayGnet) removeWorker() {
 	g.workerMutex.Lock()
 	defer g.workerMutex.Unlock()
 
@@ -407,7 +303,7 @@ func (g *Gateway) removeWorker() {
 }
 
 // workerPoolManager 工作池管理器
-func (g *Gateway) workerPoolManager() {
+func (g *GatewayGnet) workerPoolManager() {
 	ticker := time.NewTicker(500 * time.Millisecond) // 缩短检查间隔，提高响应速度
 	defer ticker.Stop()
 
@@ -462,7 +358,7 @@ func (g *Gateway) workerPoolManager() {
 }
 
 // wsHeartbeatChecker WebSocket心跳检查器
-func (g *Gateway) wsHeartbeatChecker() {
+func (g *GatewayGnet) wsHeartbeatChecker() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -478,7 +374,7 @@ func (g *Gateway) wsHeartbeatChecker() {
 }
 
 // checkWebSocketConnections 检查WebSocket连接
-func (g *Gateway) checkWebSocketConnections() {
+func (g *GatewayGnet) checkWebSocketConnections() {
 	// 收集所有WebSocket连接
 	var connections []*WebSocketConnection
 	g.wsConnections.Range(func(key, value interface{}) bool {
@@ -510,7 +406,7 @@ func (g *Gateway) checkWebSocketConnections() {
 }
 
 // configWatcher 配置热加载监听器
-func (g *Gateway) configWatcher() {
+func (g *GatewayGnet) configWatcher() {
 	// 检查配置文件是否存在
 	if _, err := os.Stat(g.configPath); os.IsNotExist(err) {
 		// 配置文件不存在，尝试其他路径
@@ -575,7 +471,7 @@ func (g *Gateway) configWatcher() {
 }
 
 // handleConfigUpdate 处理配置更新
-func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
+func (g *GatewayGnet) handleConfigUpdate(newCfg *config.Config) {
 	// 更新认证路由
 	authRoutes := make(map[string]bool)
 	for _, route := range newCfg.Security.AuthRoutes {
@@ -607,11 +503,15 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	g.metrics.SetRedisErrorsThreshold(newCfg.Alerts.RedisErrorsThreshold)
 	g.metrics.SetQueueLengthThreshold(newCfg.Alerts.QueueLengthThreshold)
 
-	tlog.Info("配置更新完成")
-}
+	// 记录资源限制配置更新
+	tlog.Info("配置更新完成",
+		"memoryThreshold", newCfg.Resources.MemoryThreshold,
+		"cpuThreshold", newCfg.Resources.CPUThreshold,
+		"enableResourceCircuitBreaker", newCfg.Resources.EnableResourceCircuitBreaker)
+} 
 
 // messageWorker 消息处理工作线程
-func (g *Gateway) messageWorker() {
+func (g *GatewayGnet) messageWorker() {
 	defer func() {
 		g.workerPool.Done()
 		g.workerMutex.Lock()
@@ -633,7 +533,7 @@ func (g *Gateway) messageWorker() {
 }
 
 // registerDefaultRoutes 注册默认路由
-func (g *Gateway) registerDefaultRoutes() {
+func (g *GatewayGnet) registerDefaultRoutes() {
 	// 注册ping路由
 	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{})) {
 		callback(NewResponseMessage("pong", map[string]string{
@@ -695,6 +595,73 @@ func (g *Gateway) registerDefaultRoutes() {
 	g.registerVersionRoute()
 	// 注册ping路由
 	g.registerPingRoute()
+
+	// 注册默认的测试路由，减少路由不存在的情况
+	g.routeManager.RegisterRoute("test", func(connectionID string, payload interface{}, callback func(interface{})) {
+		callback(NewResponseMessage("testResult", map[string]string{
+			"success": "true",
+			"message": "Test route works",
+		}))
+	})
+
+	// 注册默认的错误处理路由
+	g.routeManager.RegisterRoute("error", func(connectionID string, payload interface{}, callback func(interface{})) {
+		if payloadMap, ok := payload.(map[string]string); ok {
+			if errorMsg, ok := payloadMap["message"]; ok {
+				callback(NewResponseMessage("error", map[string]string{
+					"message": errorMsg,
+				}))
+			} else {
+				callback(NewResponseMessage("error", map[string]string{
+					"message": "Unknown error",
+				}))
+			}
+		} else {
+			callback(NewResponseMessage("error", map[string]string{
+				"message": "Invalid error format",
+			}))
+		}
+	})
+
+	// 注册默认的消息队列测试路由
+	g.routeManager.RegisterRoute("queueTest", func(connectionID string, payload interface{}, callback func(interface{})) {
+		if payloadMap, ok := payload.(map[string]string); ok {
+			if message, ok := payloadMap["message"]; ok {
+				// 创建测试消息
+				protoMsg := &protobuf.Message{
+					ConnectionId: connectionID,
+					UserUuid:     "test_user",
+					Route:        "test",
+					Payload:      map[string]string{"data": message},
+					Sequence:     1,
+				}
+				// 入队消息
+				messageID := "test_msg_" + generateConnectionID()
+				err := g.messageQueue.Enqueue(protoMsg, messageID)
+				if err != nil {
+					callback(NewResponseMessage("queueResult", map[string]string{
+						"success": "false",
+						"error":   err.Error(),
+					}))
+				} else {
+					callback(NewResponseMessage("queueResult", map[string]string{
+						"success":   "true",
+						"messageID": messageID,
+					}))
+				}
+			} else {
+				callback(NewResponseMessage("queueResult", map[string]string{
+					"success": "false",
+					"error":   "No message provided",
+				}))
+			}
+		} else {
+			callback(NewResponseMessage("queueResult", map[string]string{
+				"success": "false",
+				"error":   "Invalid payload format",
+			}))
+		}
+	})
 
 	// 注册白名单管理路由
 	g.routeManager.RegisterRoute("addWhitelist", func(connectionID string, payload interface{}, callback func(interface{})) {
@@ -857,28 +824,20 @@ func (g *Gateway) registerDefaultRoutes() {
 	})
 }
 
-// ConnContext 连接上下文结构
-type ConnContext struct {
+// GnetConnContext 连接上下文结构
+type GnetConnContext struct {
 	ConnectionID string
 	Buffer       []byte
 }
 
 // OnOpen 连接打开时的回调
-// 参数:
-//
-//	c: 网络连接
-//
-// 返回值:
-//
-//	[]byte: 输出数据
-//	gnet.Action: 操作类型
-func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
+func (g *GatewayGnet) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	// 处理新连接
 	// 生成临时用户UUID，在收到第一条消息时会更新为实际的用户UUID
 	tempUserUUID := "temp_" + generateConnectionID()
 	connectionID := g.connectionManager.AddConnection(c, tempUserUUID)
 	// 分配缓冲区并设置连接上下文
-	connCtx := &ConnContext{
+	connCtx := &GnetConnContext{
 		ConnectionID: connectionID,
 		Buffer:       make([]byte, 4096), // 4KB 缓冲区
 	}
@@ -895,21 +854,13 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 }
 
 // OnClose 连接关闭时的回调
-// 参数:
-//
-//	c: 网络连接
-//	err: 错误信息
-//
-// 返回值:
-//
-//	gnet.Action: 操作类型
-func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
+func (g *GatewayGnet) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 	// 处理连接关闭
 	var connectionID string
 	connCtx := c.Context()
 
 	if connCtx != nil {
-		if ctx, ok := connCtx.(*ConnContext); ok {
+		if ctx, ok := connCtx.(*GnetConnContext); ok {
 			connectionID = ctx.ConnectionID
 		} else if wsConn, ok := connCtx.(*WebSocketConnection); ok {
 			connectionID = wsConn.ConnectionID
@@ -936,14 +887,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 }
 
 // OnTraffic 收到数据时的回调
-// 参数:
-//
-//	c: 网络连接
-//
-// 返回值:
-//
-//	gnet.Action: 操作类型
-func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
+func (g *GatewayGnet) OnTraffic(c gnet.Conn) (action gnet.Action) {
 	// 检查客户端IP是否在黑名单中
 	clientAddr := c.RemoteAddr().(*net.TCPAddr)
 	clientIP := clientAddr.IP.String()
@@ -1015,71 +959,8 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 	return g.handleTCPRequest(c, data)
 }
 
-// containsBytes 检查字节数组是否包含另一个字节数组
-// 参数:
-//
-//	data: 数据
-//	sub: 子字节数组
-//
-// 返回值:
-//
-//	bool: 是否包含
-func containsBytes(data, sub []byte) bool {
-	for i := 0; i <= len(data)-len(sub); i++ {
-		if equal(data[i:i+len(sub)], sub) {
-			return true
-		}
-	}
-	return false
-}
-
-// trimSpace 去除字符串前后空白
-// 参数:
-//
-//	s: 字符串
-//
-// 返回值:
-//
-//	string: 处理后的字符串
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r' || s[0] == '\n') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\r' || s[len(s)-1] == '\n') {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-// isHTTPRequest 检查是否是HTTP请求
-// 参数:
-//
-//	data: 数据
-//
-// 返回值:
-//
-//	bool: 是否是HTTP请求
-func isHTTPRequest(data []byte) bool {
-	// 检查是否以HTTP方法开头
-	httpMethods := []string{"GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ", "CONNECT ", "TRACE "}
-	for _, method := range httpMethods {
-		if len(data) >= len(method) && string(data[:len(method)]) == method {
-			return true
-		}
-	}
-	return false
-}
-
 // handleHTTPRequest 处理HTTP请求
-// 参数:
-//
-//	c: 网络连接
-//	data: 数据
-//
-// 返回值:
-//
-//	gnet.Action: 操作类型
-func (g *Gateway) handleHTTPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
+func (g *GatewayGnet) handleHTTPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
 	// 检查是否是 Expect: 100-continue 请求
 	if bytes.Contains(data, []byte("Expect: 100-continue")) {
 		// 发送 100 Continue 响应
@@ -1107,7 +988,7 @@ func (g *Gateway) handleHTTPRequest(c gnet.Conn, data []byte) (action gnet.Actio
 	// 处理消息
 	var connectionID string
 	connCtx := c.Context()
-	if ctx, ok := connCtx.(*ConnContext); ok {
+	if ctx, ok := connCtx.(*GnetConnContext); ok {
 		connectionID = ctx.ConnectionID
 	} else if id, ok := connCtx.(string); ok {
 		connectionID = id
@@ -1117,7 +998,7 @@ func (g *Gateway) handleHTTPRequest(c gnet.Conn, data []byte) (action gnet.Actio
 		tempUserUUID := "temp_" + generateConnectionID()
 		connectionID = g.connectionManager.AddConnection(c, tempUserUUID)
 		// 设置连接上下文
-		c.SetContext(&ConnContext{
+		c.SetContext(&GnetConnContext{
 			ConnectionID: connectionID,
 			Buffer:       make([]byte, 4096), // 4KB 缓冲区
 		})
@@ -1152,15 +1033,7 @@ func (g *Gateway) handleHTTPRequest(c gnet.Conn, data []byte) (action gnet.Actio
 }
 
 // handleTCPRequest 处理TCP请求
-// 参数:
-//
-//	c: 网络连接
-//	data: 数据
-//
-// 返回值:
-//
-//	gnet.Action: 操作类型
-func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
+func (g *GatewayGnet) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
 	// 检查数据长度
 	if len(data) == 0 {
 		// 发送错误响应
@@ -1192,7 +1065,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	// 处理消息
 	var connectionID string
 	connCtx := c.Context()
-	if ctx, ok := connCtx.(*ConnContext); ok {
+	if ctx, ok := connCtx.(*GnetConnContext); ok {
 		connectionID = ctx.ConnectionID
 	} else if id, ok := connCtx.(string); ok {
 		connectionID = id
@@ -1202,7 +1075,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		tempUserUUID := "temp_" + generateConnectionID()
 		connectionID = g.connectionManager.AddConnection(c, tempUserUUID)
 		// 设置连接上下文
-		c.SetContext(&ConnContext{
+		c.SetContext(&GnetConnContext{
 			ConnectionID: connectionID,
 			Buffer:       make([]byte, 4096), // 4KB 缓冲区
 		})
@@ -1275,16 +1148,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 }
 
 // handleHandshake 处理握手消息
-// 参数:
-//
-//	c: 网络连接
-//	connectionID: 连接ID
-//	message: 消息
-//
-// 返回值:
-//
-//	gnet.Action: 操作类型
-func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *protobuf.Message) gnet.Action {
+func (g *GatewayGnet) handleHandshake(c gnet.Conn, connectionID string, message *protobuf.Message) gnet.Action {
 	// 解析握手数据
 	handshake := &protobuf.Handshake{}
 	if err := proto.Unmarshal([]byte(message.Payload["handshake_data"]), handshake); err != nil {
@@ -1324,326 +1188,8 @@ func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *pro
 	return gnet.None
 }
 
-// extractRouteFromHTTP 从HTTP请求中提取路由
-// 参数:
-//
-//	data: 数据
-//
-// 返回值:
-//
-//	string: 路由
-func extractRouteFromHTTP(data []byte) string {
-	// 简化处理，提取路径部分
-	// 格式: METHOD /path HTTP/1.1
-	lines := splitBytes(data, []byte{'\n'})
-	if len(lines) > 0 {
-		firstLine := lines[0]
-		parts := splitBytes(firstLine, []byte{' '})
-		if len(parts) >= 2 {
-			path := string(parts[1])
-			// 移除查询参数
-			if idx := indexOf(path, '?'); idx != -1 {
-				path = path[:idx]
-			}
-			// 移除开头的/，并将/替换为.
-			path = trimPrefix(path, '/')
-			path = replaceAll(path, '/', '.')
-			if path == "" {
-				return "index"
-			}
-			return path
-		}
-	}
-	return "index"
-}
-
-// extractPayloadFromHTTP 从HTTP请求中提取payload
-// 参数:
-//
-//	data: 数据
-//
-// 返回值:
-//
-//	map[string]string: payload
-func extractPayloadFromHTTP(data []byte) map[string]string {
-	// 简化处理，提取请求体
-	payload := make(map[string]string)
-
-	// 查找空行，分隔请求头和请求体
-	emptyLineIndex := indexOfBytes(data, []byte{'\r', '\n', '\r', '\n'})
-	// 如果没有找到 \r\n\r\n，尝试查找 \n\n
-	if emptyLineIndex == -1 {
-		emptyLineIndex = indexOfBytes(data, []byte{'\n', '\n'})
-		if emptyLineIndex != -1 {
-			body := data[emptyLineIndex+2:]
-			// 尝试解析Protocol Buffers
-			message := &protobuf.Message{}
-			if err := proto.Unmarshal(body, message); err != nil {
-				// 如果不是Protocol Buffers，作为原始数据处理
-				payload["raw"] = string(body)
-			} else {
-				// 提取payload
-				if message.Payload != nil {
-					for k, v := range message.Payload {
-						payload[k] = v
-					}
-				}
-				// 提取route和user_uuid
-				if message.Route != "" {
-					payload["route"] = message.Route
-				}
-				if message.UserUuid != "" {
-					payload["user_uuid"] = message.UserUuid
-				}
-			}
-		}
-	} else {
-		body := data[emptyLineIndex+4:]
-		// 尝试解析Protocol Buffers
-		message := &protobuf.Message{}
-		if err := proto.Unmarshal(body, message); err != nil {
-			// 如果不是Protocol Buffers，作为原始数据处理
-			payload["raw"] = string(body)
-		} else {
-			// 提取payload
-			if message.Payload != nil {
-				for k, v := range message.Payload {
-					payload[k] = v
-				}
-			}
-			// 提取route和user_uuid
-			if message.Route != "" {
-				payload["route"] = message.Route
-			}
-			if message.UserUuid != "" {
-				payload["user_uuid"] = message.UserUuid
-			}
-		}
-	}
-
-	return payload
-}
-
-// splitBytes 分割字节数组
-// 参数:
-//
-//	data: 数据
-//	sep: 分隔符
-//
-// 返回值:
-//
-//	[][]byte: 分割后的字节数组
-func splitBytes(data []byte, sep []byte) [][]byte {
-	var result [][]byte
-	start := 0
-	for i := 0; i <= len(data)-len(sep); i++ {
-		if equal(data[i:i+len(sep)], sep) {
-			result = append(result, data[start:i])
-			start = i + len(sep)
-			i += len(sep) - 1
-		}
-	}
-	if start < len(data) {
-		result = append(result, data[start:])
-	}
-	return result
-}
-
-// equal 比较两个字节数组是否相等
-// 参数:
-//
-//	a: 字节数组a
-//	b: 字节数组b
-//
-// 返回值:
-//
-//	bool: 是否相等
-func equal(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// indexOf 查找字符在字符串中的位置
-// 参数:
-//
-//	s: 字符串
-//	c: 字符
-//
-// 返回值:
-//
-//	int: 位置
-func indexOf(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
-}
-
-// indexOfBytes 查找字节数组在另一个字节数组中的位置
-// 参数:
-//
-//	data: 数据
-//	sep: 分隔符
-//
-// 返回值:
-//
-//	int: 位置
-func indexOfBytes(data, sep []byte) int {
-	for i := 0; i <= len(data)-len(sep); i++ {
-		if equal(data[i:i+len(sep)], sep) {
-			return i
-		}
-	}
-	return -1
-}
-
-// trimPrefix 移除字符串开头的指定字符
-// 参数:
-//
-//	s: 字符串
-//	c: 字符
-//
-// 返回值:
-//
-//	string: 处理后的字符串
-func trimPrefix(s string, c byte) string {
-	for len(s) > 0 && s[0] == c {
-		s = s[1:]
-	}
-	return s
-}
-
-// replaceAll 替换字符串中的所有指定字符
-// 参数:
-//
-//	s: 字符串
-//	old: 旧字符
-//	new: 新字符
-//
-// 返回值:
-//
-//	string: 处理后的字符串
-func replaceAll(s string, old, new byte) string {
-	// 首先检查是否需要替换
-	needReplace := false
-	for i := 0; i < len(s); i++ {
-		if s[i] == old {
-			needReplace = true
-			break
-		}
-	}
-	if !needReplace {
-		return s
-	}
-	
-	// 需要替换时再分配内存
-	result := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == old {
-			result[i] = new
-		} else {
-			result[i] = s[i]
-		}
-	}
-	return string(result)
-}
-
-// OnBoot 服务器启动时的回调
-// 参数:
-//
-//	engine: gnet引擎
-//
-// 返回值:
-//
-//	gnet.Action: 操作类型
-func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
-	// 服务器启动时的初始化工作
-	return
-}
-
-// SetTLSConfig 设置TLS配置
-// 参数:
-//
-//	config: TLS配置
-func (g *Gateway) SetTLSConfig(config *tls.Config) {
-	g.tlsConfig = config
-}
-
-// GetTLSConfig 获取TLS配置
-// 返回值:
-//
-//	*tls.Config: TLS配置
-func (g *Gateway) GetTLSConfig() *tls.Config {
-	return g.tlsConfig
-}
-
-// GetVersion 获取网关版本
-// 返回值:
-//
-//	string: 版本号
-func (g *Gateway) GetVersion() string {
-	return "1.0.0"
-}
-
-// registerVersionRoute 注册版本路由
-func (g *Gateway) registerVersionRoute() {
-	g.routeManager.RegisterRoute("version", func(connectionID string, payload interface{}, callback func(interface{})) {
-		callback(NewResponseMessage("version", map[string]string{
-			"version":   g.GetVersion(),
-			"clusterID": g.clusterID,
-			"isLeader":  fmt.Sprintf("%t", g.isLeader),
-		}))
-	})
-}
-
-// registerPingRoute 注册ping路由
-func (g *Gateway) registerPingRoute() {
-	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{})) {
-		callback(NewResponseMessage("ping", map[string]interface{}{
-			"message":   "Pong",
-			"timestamp": time.Now().Unix(),
-		}))
-	})
-}
-
-// OnTick 定时回调
-// 返回值:
-//
-//	time.Duration: 延迟时间
-//	gnet.Action: 操作类型
-func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
-	// 定期记录指标
-	g.metrics.LogMetrics()
-	
-	// 更新消息队列长度指标
-	g.metrics.SetQueueLength(int64(len(g.messagePool)))
-	
-	return 1 * time.Second, gnet.None
-}
-
-// OnShutdown 服务器关闭时的回调
-// 参数:
-//
-//	engine: gnet引擎
-func (g *Gateway) OnShutdown(engine gnet.Engine) {
-	// 服务器关闭时的清理工作
-	g.Close()
-}
-
 // handleMessage 处理消息
-// 参数:
-//
-//	msg: 消息
-func (g *Gateway) handleMessage(msg *Message) {
+func (g *GatewayGnet) handleMessage(msg *Message) {
 	// 收集消息指标
 	g.metrics.IncMessagesReceived()
 
@@ -1661,6 +1207,29 @@ func (g *Gateway) handleMessage(msg *Message) {
 	g.tracer.AddAttribute(span, "connection_id", msg.ConnectionID)
 	g.tracer.AddAttribute(span, "route", msg.Route)
 
+	// 检查资源熔断器
+	if !g.resourceCircuitBreaker.Allow() {
+		// 记录事件
+		g.tracer.AddEvent(span, "resource_circuit_breaker_open", map[string]string{
+			"route": msg.Route,
+		})
+
+		// 收集处理失败的消息指标
+		g.metrics.IncMessagesFailed()
+
+		// 资源熔断器打开，拒绝请求
+		errorMsg := NewErrorMessage("error", "Service temporarily unavailable", "Resource circuit breaker is open", "")
+		responseData, _ := proto.Marshal(errorMsg)
+		msg.Conn.Write(responseData)
+
+		// 结束 span
+		g.tracer.EndSpan(span)
+
+		// 归还消息对象到对象池
+		PutMessage(msg)
+		return
+	}
+
 	// 获取熔断器
 	breaker := g.circuitBreakerManager.GetCircuitBreaker(msg.Route, 5, 3, 30*time.Second)
 
@@ -1670,6 +1239,9 @@ func (g *Gateway) handleMessage(msg *Message) {
 		g.tracer.AddEvent(span, "circuit_breaker_open", map[string]string{
 			"route": msg.Route,
 		})
+
+		// 收集处理失败的消息指标
+		g.metrics.IncMessagesFailed()
 
 		// 熔断器打开，拒绝请求
 		errorMsg := NewErrorMessage("error", "Service temporarily unavailable", "Circuit breaker is open", "")
@@ -1692,8 +1264,6 @@ func (g *Gateway) handleMessage(msg *Message) {
 				"error": fmt.Sprintf("%v", r),
 			})
 
-			// 记录失败
-			breaker.RecordFailure()
 			// 收集处理失败的消息指标
 			g.metrics.IncMessagesFailed()
 			// 输出错误日志
@@ -1701,7 +1271,14 @@ func (g *Gateway) handleMessage(msg *Message) {
 				"connectionID", msg.ConnectionID,
 				"route", msg.Route,
 				"error", r)
+
+			// 发送错误响应
+			errorMsg := NewErrorMessage("error", "Internal server error", fmt.Sprintf("%v", r), "")
+			responseData, _ := proto.Marshal(errorMsg)
+			msg.Conn.Write(responseData)
 		}
+
+
 
 		// 结束 span
 		g.tracer.EndSpan(span)
@@ -1718,10 +1295,10 @@ func (g *Gateway) handleMessage(msg *Message) {
 			"route": msg.Route,
 		})
 
-		// 记录失败
-		breaker.RecordFailure()
+		// 收集处理失败的消息指标
+		g.metrics.IncMessagesFailed()
 		// 路由不存在，发送错误响应
-		errorMsg := NewErrorMessage("error", "Route not found", "", "")
+		errorMsg := NewErrorMessage("error", "Route not found", "The requested route does not exist", "")
 		responseData, _ := proto.Marshal(errorMsg)
 		msg.Conn.Write(responseData)
 		return
@@ -1739,10 +1316,10 @@ func (g *Gateway) handleMessage(msg *Message) {
 				"route": msg.Route,
 			})
 
-			// 记录失败
-			breaker.RecordFailure()
+			// 收集处理失败的消息指标
+			g.metrics.IncMessagesFailed()
 			// 输入验证失败，发送错误响应
-			errorMsg := NewErrorMessage("error", "Invalid input detected", "", "")
+			errorMsg := NewErrorMessage("error", "Invalid input detected", "Input validation failed", "")
 			responseData, _ := proto.Marshal(errorMsg)
 			msg.Conn.Write(responseData)
 			return
@@ -1759,10 +1336,10 @@ func (g *Gateway) handleMessage(msg *Message) {
 				"route": msg.Route,
 			})
 
-			// 记录失败
-			breaker.RecordFailure()
+			// 收集处理失败的消息指标
+			g.metrics.IncMessagesFailed()
 			// 发送未授权响应
-			errorMsg := NewErrorMessage("error", "Missing token", "", "")
+			errorMsg := NewErrorMessage("error", "Missing token", "Authentication token is required", "")
 			responseData, _ := proto.Marshal(errorMsg)
 			msg.Conn.Write(responseData)
 			return
@@ -1777,8 +1354,8 @@ func (g *Gateway) handleMessage(msg *Message) {
 				"error": err.Error(),
 			})
 
-			// 记录失败
-			breaker.RecordFailure()
+			// 收集处理失败的消息指标
+			g.metrics.IncMessagesFailed()
 			// 发送未授权响应
 			errorMsg := NewErrorMessage("error", "Invalid token", err.Error(), "")
 			responseData, _ := proto.Marshal(errorMsg)
@@ -1801,11 +1378,35 @@ func (g *Gateway) handleMessage(msg *Message) {
 		"route": msg.Route,
 	})
 
+	// 路由处理
 	g.routeManager.HandleRoute(msg.ConnectionID, msg.Route, msg.Payload, func(response interface{}) {
 		// 记录事件
 		g.tracer.AddEvent(span, "route_handler_end", map[string]string{
 			"route": msg.Route,
 		})
+
+		// 处理响应
+		defer func() {
+			if r := recover(); r != nil {
+				// 记录事件
+				g.tracer.AddEvent(span, "response_processing_panic", map[string]string{
+					"error": fmt.Sprintf("%v", r),
+				})
+
+				// 收集处理失败的消息指标
+				g.metrics.IncMessagesFailed()
+				// 输出错误日志
+				tlog.Error("处理响应异常",
+					"connectionID", msg.ConnectionID,
+					"route", msg.Route,
+					"error", r)
+
+				// 发送错误响应
+				errorMsg := NewErrorMessage("error", "Internal server error", fmt.Sprintf("%v", r), "")
+				responseData, _ := proto.Marshal(errorMsg)
+				msg.Conn.Write(responseData)
+			}
+		}()
 
 		// 检查是否是HTTP连接
 		// 这里简化处理，实际应该根据连接类型判断
@@ -1820,7 +1421,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 
 		// 检查连接上下文，判断是否是HTTP请求
 		connCtx := msg.Conn.Context()
-		if _, ok := connCtx.(*ConnContext); ok {
+		if _, ok := connCtx.(*GnetConnContext); ok {
 			// 检查连接的端口，判断是否是HTTP请求
 			port := msg.Conn.LocalAddr().String()
 			for i := len(port) - 1; i >= 0; i-- {
@@ -1849,424 +1450,215 @@ func (g *Gateway) handleMessage(msg *Message) {
 			// 生成HTTP响应
 			if responseMap, ok := response.(map[string]interface{}); ok {
 				responseData = generateHTTPResponse(responseMap)
-			} else if protoMsg, ok := response.(*protobuf.Message); ok {
-				// 处理Protocol Buffers消息
-				responseData, err = proto.Marshal(protoMsg)
-				if err != nil {
-					// 记录事件
-					g.tracer.AddEvent(span, "marshal_error", map[string]string{
-						"error": err.Error(),
-					})
-
-					// 记录失败
-					breaker.RecordFailure()
-					// 收集处理失败的消息指标
-					g.metrics.IncMessagesFailed()
-					// 输出错误日志
-					tlog.Error("序列化响应失败", "error", err)
-					return
-				}
-			} else if errorMsg, ok := response.(*protobuf.ErrorResponse); ok {
-				// 处理Protocol Buffers错误消息
-				responseData, err = proto.Marshal(errorMsg)
-				if err != nil {
-					// 记录事件
-					g.tracer.AddEvent(span, "marshal_error", map[string]string{
-						"error": err.Error(),
-					})
-
-					// 记录失败
-					breaker.RecordFailure()
-					// 收集处理失败的消息指标
-					g.metrics.IncMessagesFailed()
-					// 输出错误日志
-					tlog.Error("序列化响应失败", "error", err)
-					return
-				}
 			} else {
-				// 转换为Protocol Buffers消息
-				protoMsg := NewResponseMessage("response", response.(map[string]string))
-				responseData, err = proto.Marshal(protoMsg)
-				if err != nil {
-					// 记录事件
-					g.tracer.AddEvent(span, "marshal_error", map[string]string{
-						"error": err.Error(),
-					})
-
-					// 记录失败
-					breaker.RecordFailure()
-					// 收集处理失败的消息指标
-					g.metrics.IncMessagesFailed()
-					// 输出错误日志
-					tlog.Error("序列化响应失败", "error", err)
-					return
-				}
+				// 发送错误响应
+				errorMsg := NewErrorMessage("error", "Invalid response format", "", "")
+				responseData, _ = proto.Marshal(errorMsg)
+				msg.Conn.Write(responseData)
+				return
 			}
 		} else {
 			// 生成Protocol Buffers响应
-			if protoMsg, ok := response.(*protobuf.Message); ok {
-				responseData, err = proto.Marshal(protoMsg)
+			if responseMsg, ok := response.(*protobuf.Message); ok {
+				// 添加消息完整性校验
+				g.messageIntegrity.PrepareMessage(responseMsg)
+				responseData, err = proto.Marshal(responseMsg)
 			} else if errorMsg, ok := response.(*protobuf.ErrorResponse); ok {
+				// 添加消息完整性校验
+				g.messageIntegrity.PrepareErrorResponse(errorMsg)
 				responseData, err = proto.Marshal(errorMsg)
 			} else {
-				// 转换为Protocol Buffers消息
-				protoMsg := NewResponseMessage("response", response.(map[string]string))
-				responseData, err = proto.Marshal(protoMsg)
+				// 发送错误响应
+				errorMsg := NewErrorMessage("error", "Invalid response format", "", "")
+				responseData, _ = proto.Marshal(errorMsg)
+				msg.Conn.Write(responseData)
+				return
 			}
+
 			if err != nil {
-				// 记录事件
-				g.tracer.AddEvent(span, "marshal_error", map[string]string{
-					"error": err.Error(),
-				})
-
-				// 记录失败
-				breaker.RecordFailure()
-				// 收集处理失败的消息指标
-				g.metrics.IncMessagesFailed()
-				// 输出错误日志
-				tlog.Error("序列化响应失败", "error", err)
+				// 发送错误响应
+				errorMsg := NewErrorMessage("error", "Failed to marshal response", err.Error(), "")
+				responseData, _ = proto.Marshal(errorMsg)
+				msg.Conn.Write(responseData)
 				return
 			}
 		}
 
-		// 检查是否是WebSocket连接
-	// 从连接上下文获取WebSocket连接
-	isWebSocket := false
-	if wsConn, ok := msg.Conn.Context().(*WebSocketConnection); ok && atomic.LoadInt32(&wsConn.State) == int32(WSStateOpen) {
-		isWebSocket = true
-	}
-
-		if isWebSocket {
-			// 封装为WebSocket消息
-			wsConn := msg.Conn.Context().(*WebSocketConnection)
-			if err := g.sendWebSocketMessage(wsConn, ws.OpText, responseData); err != nil {
-				// 记录事件
-				g.tracer.AddEvent(span, "websocket_send_error", map[string]string{
-					"error": err.Error(),
-				})
-
-				// 记录失败
-				breaker.RecordFailure()
-				// 收集处理失败的消息指标
-				g.metrics.IncMessagesFailed()
-				// 输出错误日志
-				tlog.Error("发送WebSocket响应失败",
-					"connectionID", msg.ConnectionID,
-					"error", err)
-				return
-			}
-
-			// 记录事件
-			g.tracer.AddEvent(span, "websocket_send_success", map[string]string{
-				"connectionID": msg.ConnectionID,
-			})
-
-			// 记录成功
-			breaker.RecordSuccess()
-			// 收集处理成功的消息指标
-			g.metrics.IncMessagesProcessed()
-
-			// 计算处理时间
-			duration := time.Since(start)
-			g.metrics.AddProcessingTime(duration)
-			return
-		}
-
+		// 发送响应
 		if _, err := msg.Conn.Write(responseData); err != nil {
 			// 记录事件
-			g.tracer.AddEvent(span, "send_error", map[string]string{
+			g.tracer.AddEvent(span, "send_response_error", map[string]string{
 				"error": err.Error(),
 			})
-
-			// 记录失败
-			breaker.RecordFailure()
 			// 收集处理失败的消息指标
 			g.metrics.IncMessagesFailed()
 			// 输出错误日志
-			tlog.Error("发送响应失败",
-				"connectionID", msg.ConnectionID,
-				"error", err)
+			tlog.Error("发送响应失败", "error", err, "connectionID", msg.ConnectionID)
 			return
 		}
 
-		// 记录事件
-		g.tracer.AddEvent(span, "send_success", map[string]string{
-			"connectionID": msg.ConnectionID,
-		})
+		// 增加发送字节数指标
+		g.metrics.AddBytesSent(int64(len(responseData)))
 
-		// 记录成功
-		breaker.RecordSuccess()
 		// 收集处理成功的消息指标
 		g.metrics.IncMessagesProcessed()
 
-		// 计算处理时间
-		duration := time.Since(start)
-		g.metrics.AddProcessingTime(duration)
-
 		// 记录事件
-		g.tracer.AddEvent(span, "message_processed", map[string]string{
-			"duration": fmt.Sprintf("%v", duration),
-			"route":    msg.Route,
+		g.tracer.AddEvent(span, "response_sent", map[string]string{
+			"bytes": fmt.Sprintf("%d", len(responseData)),
 		})
 
+		// 记录处理时间
+		g.metrics.AddProcessingTime(time.Since(start))
 	})
 }
 
-// requiresAuth 检查路由是否需要认证
-// 参数:
-//
-//	route: 路由名称
-//
-// 返回值:
-//
-//	bool: 是否需要认证
-func (g *Gateway) requiresAuth(route string) bool {
-	return g.authRoutes.Load().(map[string]bool)[route]
+// OnBoot 服务器启动时的回调
+func (g *GatewayGnet) OnBoot(engine gnet.Engine) (action gnet.Action) {
+	// 服务器启动时的初始化工作
+	return
 }
 
-// 预分配的HTTP响应缓冲区
-var httpResponseBuffer = sync.Pool{
-	New: func() interface{} {
-		return &bytes.Buffer{}
-	},
+// SetTLSConfig 设置TLS配置
+func (g *GatewayGnet) SetTLSConfig(config *tls.Config) {
+	g.tlsConfig = config
 }
 
-// generateHTTPResponse 生成HTTP响应
-func generateHTTPResponse(response map[string]interface{}) []byte {
-	// 从对象池获取缓冲区
-	buf := httpResponseBuffer.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer httpResponseBuffer.Put(buf)
-
-	// 提取状态码
-	statusCode := 200
-	if code, ok := response["status"].(int); ok {
-		statusCode = code
-	}
-
-	// 提取消息
-	message := "OK"
-	if msg, ok := response["message"].(string); ok {
-		message = msg
-	}
-
-	// 提取数据
-	data := response["data"]
-	if data == nil {
-		data = response
-	}
-
-	// 转换为map[string]string
-	dataMap := make(map[string]string)
-	if dataMapInterface, ok := data.(map[string]interface{}); ok {
-		for k, v := range dataMapInterface {
-			if vStr, ok := v.(string); ok {
-				dataMap[k] = vStr
-			} else {
-				dataMap[k] = fmt.Sprintf("%v", v)
-			}
-		}
-	}
-
-	// 序列化数据为Protocol Buffers
-	protoMsg := &protobuf.Message{
-		Route:   "response",
-		Payload: dataMap,
-	}
-	dataBytes, err := proto.Marshal(protoMsg)
-	if err != nil {
-		dataBytes = []byte(`{"error": "Failed to serialize response"}`)
-	}
-
-	// 生成HTTP响应
-	fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\n", statusCode, message)
-	buf.WriteString("Content-Type: application/octet-stream\r\n")
-	fmt.Fprintf(buf, "Content-Length: %d\r\n", len(dataBytes))
-	buf.WriteString("Connection: close\r\n")
-	buf.WriteString("\r\n")
-	buf.Write(dataBytes)
-
-	// 返回响应字节
-	return buf.Bytes()
+// GetTLSConfig 获取TLS配置
+func (g *GatewayGnet) GetTLSConfig() *tls.Config {
+	return g.tlsConfig
 }
 
-// sanitizeString 清理字符串，防止 XSS 攻击
-func sanitizeString(s string) string {
-	// 替换 HTML 特殊字符
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	s = strings.ReplaceAll(s, "\"", "&quot;")
-	s = strings.ReplaceAll(s, "'", "&#39;")
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	return s
+// GetVersion 获取网关版本
+func (g *GatewayGnet) GetVersion() string {
+	return "1.0.0"
 }
 
-// sanitizeMap 清理 map 中的字符串值，防止 XSS 攻击
-func sanitizeMap(m map[string]interface{}) map[string]interface{} {
-	for k, v := range m {
-		switch val := v.(type) {
-		case string:
-			m[k] = sanitizeString(val)
-		case map[string]interface{}:
-			m[k] = sanitizeMap(val)
-		case []interface{}:
-			for i, item := range val {
-				if str, ok := item.(string); ok {
-					val[i] = sanitizeString(str)
-				} else if subMap, ok := item.(map[string]interface{}); ok {
-					val[i] = sanitizeMap(subMap)
-				}
-			}
-			m[k] = val
-		}
-	}
-	return m
+// registerVersionRoute 注册版本路由
+func (g *GatewayGnet) registerVersionRoute() {
+	g.routeManager.RegisterRoute("version", func(connectionID string, payload interface{}, callback func(interface{})) {
+		callback(NewResponseMessage("version", map[string]string{
+			"version":   g.GetVersion(),
+			"clusterID": g.clusterID,
+			"isLeader":  fmt.Sprintf("%t", g.isLeader),
+		}))
+	})
 }
 
-// sanitizePayload 清理 payload 中的字符串值，防止 XSS 攻击
-func sanitizePayload(payload interface{}) interface{} {
-	switch val := payload.(type) {
-	case map[string]interface{}:
-		return sanitizeMap(val)
-	case string:
-		return sanitizeString(val)
-	case []interface{}:
-		for i, item := range val {
-			val[i] = sanitizePayload(item)
-		}
-		return val
-	default:
-		return val
-	}
+// registerPingRoute 注册ping路由
+func (g *GatewayGnet) registerPingRoute() {
+	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{})) {
+		callback(NewResponseMessage("ping", map[string]interface{}{
+			"message":   "Pong",
+			"timestamp": time.Now().Unix(),
+		}))
+	})
 }
 
-// validateInput 验证输入，防止 SQL 注入和其他攻击
-func validateInput(input string) bool {
-	// 检查 SQL 注入攻击
-	sqlInjectionPatterns := []string{
-		"' OR '1'='1",
-		"' OR 1=1",
-		"UNION SELECT",
-		"DROP TABLE",
-		"DELETE FROM",
-		"INSERT INTO",
-		"UPDATE.*SET",
-	}
-
-	for _, pattern := range sqlInjectionPatterns {
-		if strings.Contains(strings.ToUpper(input), strings.ToUpper(pattern)) {
-			return false
-		}
-	}
-
-	// 检查命令注入攻击
-	commandInjectionPatterns := []string{
-		";",
-		"|",
-		"&&",
-		"||",
-		"`",
-		"$(",
-	}
-
-	for _, pattern := range commandInjectionPatterns {
-		if strings.Contains(input, pattern) {
-			return false
-		}
-	}
-
-	return true
+// OnTick 定时回调
+func (g *GatewayGnet) OnTick() (delay time.Duration, action gnet.Action) {
+	// 定期记录指标
+	g.metrics.LogMetrics()
+	
+	// 更新消息队列长度指标
+	g.metrics.SetQueueLength(int64(len(g.messagePool)))
+	
+	return 1 * time.Second, gnet.None
 }
 
-// validatePayload 验证 payload 中的输入，防止 SQL 注入和其他攻击
-func validatePayload(payload interface{}) bool {
-	switch val := payload.(type) {
-	case map[string]interface{}:
-		for _, v := range val {
-			if !validatePayload(v) {
-				return false
-			}
-		}
-	case string:
-		if !validateInput(val) {
-			return false
-		}
-	case []interface{}:
-		for _, item := range val {
-			if !validatePayload(item) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// getTokenFromPayload 从 payload 中获取 token
-func getTokenFromPayload(payload interface{}) (string, bool) {
-	if payloadMap, ok := payload.(map[string]interface{}); ok {
-		if token, ok := payloadMap["token"].(string); ok {
-			return token, true
-		}
-	}
-	return "", false
-}
-
-// addUserInfoToPayload 将用户信息添加到 payload 中
-func addUserInfoToPayload(payload interface{}, userID string, role string) interface{} {
-	if payloadMap, ok := payload.(map[string]interface{}); ok {
-		payloadMap["user_id"] = userID
-		payloadMap["role"] = role
-		return payloadMap
-	}
-	return payload
-}
-
-// sanitizePayloadMap 清理 payload 中的字符串值，防止 XSS 攻击
-func sanitizePayloadMap(payload map[string]string) map[string]string {
-	for k, v := range payload {
-		payload[k] = sanitizeString(v)
-	}
-	return payload
-}
-
-// validatePayloadMap 验证 payload 中的输入，防止 SQL 注入和其他攻击
-func validatePayloadMap(payload map[string]string) bool {
-	for _, v := range payload {
-		if !validateInput(v) {
-			return false
-		}
-	}
-	return true
-}
-
-// getTokenFromPayloadMap 从 payload 中获取 token
-func getTokenFromPayloadMap(payload map[string]string) (string, bool) {
-	if token, ok := payload["token"]; ok {
-		return token, true
-	}
-	return "", false
-}
-
-// addUserInfoToPayloadMap 将用户信息添加到 payload 中
-func addUserInfoToPayloadMap(payload map[string]string, userID string, role string) map[string]string {
-	payload["user_id"] = userID
-	payload["role"] = role
-	return payload
-}
-
-// Broadcast 广播消息
-func (g *Gateway) Broadcast(message interface{}) {
-	g.connectionManager.Broadcast(message)
+// OnShutdown 服务器关闭时的回调
+func (g *GatewayGnet) OnShutdown(engine gnet.Engine) {
+	// 服务器关闭时的清理工作
+	g.Close()
 }
 
 // Close 关闭网关
-func (g *Gateway) Close() {
-	// 关闭消息处理工作池
+func (g *GatewayGnet) Close() {
+	// 发送停止信号
 	close(g.stopChan)
+	
+	// 等待工作线程结束
 	g.workerPool.Wait()
+	
+	// 清理资源
+	if g.messageACK != nil {
+		g.messageACK.Stop()
+	}
+	
+	tlog.Info("网关已关闭")
+}
 
-	// 关闭所有连接
-	g.connectionManager.CloseAllConnections()
-	// 输出信息日志
-	tlog.Info("所有连接已关闭")
+// Broadcast 广播消息
+func (g *GatewayGnet) Broadcast(message string) {
+	// 遍历所有连接，发送广播消息
+	g.connectionManager.Broadcast(message)
+}
+
+// SetTransportType 设置端口到传输类型的映射
+func (g *GatewayGnet) SetTransportType(port string, transportType string) {
+	g.transportType[port] = transportType
+}
+
+// HandleWebSocket 处理WebSocket连接
+func (g *GatewayGnet) HandleWebSocket(c gnet.Conn, data []byte) (action gnet.Action) {
+	// 暂时返回 gnet.None，后续可以实现完整的WebSocket处理逻辑
+	return gnet.None
+}
+
+// requiresAuth 检查路由是否需要认证
+func (g *GatewayGnet) requiresAuth(route string) bool {
+	// 从 atomic.Value 中获取认证路由
+	authRoutes, ok := g.authRoutes.Load().(map[string]bool)
+	if !ok {
+		return false
+	}
+	return authRoutes[route]
+}
+
+// Start 启动网关
+func (g *GatewayGnet) Start(addr string) error {
+	// 配置gnet选项
+	tcpKeepaliveTime := 30 * time.Second
+	options := []gnet.Option{
+		gnet.WithMulticore(true),
+		gnet.WithReusePort(true),
+		gnet.WithTCPNoDelay(gnet.TCPNoDelay),
+		gnet.WithTCPKeepAlive(tcpKeepaliveTime),
+		gnet.WithNumEventLoop(runtime.GOMAXPROCS(0)),
+		gnet.WithReadBufferCap(4096),
+		gnet.WithWriteBufferCap(4096),
+		gnet.WithSocketRecvBuffer(8192),
+		gnet.WithSocketSendBuffer(8192),
+		gnet.WithLogLevel(logging.InfoLevel),
+		gnet.WithLogger(g),
+	}
+
+	// 启动服务器
+	return gnet.Run(g, addr, options...)
+}
+
+// Debugf 实现gnet.Logger接口
+func (g *GatewayGnet) Debugf(format string, args ...interface{}) {
+	tlog.Debug(fmt.Sprintf(format, args...))
+}
+
+// Infof 实现gnet.Logger接口
+func (g *GatewayGnet) Infof(format string, args ...interface{}) {
+	tlog.Info(fmt.Sprintf(format, args...))
+}
+
+// Warnf 实现gnet.Logger接口
+func (g *GatewayGnet) Warnf(format string, args ...interface{}) {
+	tlog.Warn(fmt.Sprintf(format, args...))
+}
+
+// Errorf 实现gnet.Logger接口
+func (g *GatewayGnet) Errorf(format string, args ...interface{}) {
+	tlog.Error(fmt.Sprintf(format, args...))
+}
+
+// Fatalf 实现gnet.Logger接口
+func (g *GatewayGnet) Fatalf(format string, args ...interface{}) {
+	tlog.Error(fmt.Sprintf(format, args...))
+	os.Exit(1)
 }

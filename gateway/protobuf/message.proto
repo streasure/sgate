@@ -1,31 +1,65 @@
 syntax = "proto3";
 
-package gateway;
+package sgate.protobuf;
 
-option go_package = "github.com/streasure/sgate/gateway/protobuf";
+option go_package = "./protobuf";
 
 // Message 消息结构
+// 字段:
+//   connection_id: 连接ID
+//   user_uuid: 用户UUID
+//   route: 路由
+//   payload: 消息负载
+//   timestamp: 时间戳（防重放）
+//   checksum: 校验和（完整性校验）
+//   signature: 签名（可选，用于安全验证）
+//   sequence: 消息序列号
+//   require_ack: 是否需要确认
+//   compression: 压缩类型
+//   original_size: 原始大小
+//   compressed_size: 压缩后大小
+//   protocol_version: 协议版本
 message Message {
   string connection_id = 1;
   string user_uuid = 2;
   string route = 3;
   map<string, string> payload = 4;
+  int64 timestamp = 5;           // 时间戳（防重放）
+  string checksum = 6;           // 校验和（完整性校验）
+  bytes signature = 7;           // 签名（可选）
+  int64 sequence = 8;            // 消息序列号
+  bool require_ack = 9;          // 是否需要确认
+  CompressionType compression = 10; // 压缩类型
+  int32 original_size = 11;      // 原始大小
+  int32 compressed_size = 12;    // 压缩后大小
+  string protocol_version = 13;   // 协议版本
 }
 
-// ErrorResponse 错误响应结构
+// 压缩类型
+enum CompressionType {
+  COMPRESSION_TYPE_NONE = 0;      // 不压缩
+  COMPRESSION_TYPE_GZIP = 1;      // GZIP压缩
+  COMPRESSION_TYPE_ZSTD = 2;      // ZSTD压缩
+  COMPRESSION_TYPE_LZ4 = 3;       // LZ4压缩
+}
+
+// ErrorResponse 错误响应
 message ErrorResponse {
   string route = 1;
-  ErrorData data = 2;
+  ErrorData error = 2;
+  int64 timestamp = 3;           // 时间戳
+  string checksum = 4;           // 校验和
+  string protocol_version = 5;    // 协议版本
 }
 
-// ErrorData 错误数据结构
+// ErrorData 错误数据
 message ErrorData {
   string message = 1;
-  string error = 2;
-  string data = 3;
+  string code = 2;
+  string details = 3;
 }
 
-// ConnectionInfo 连接信息结构
+// ConnectionInfo 连接信息
 message ConnectionInfo {
   string connection_id = 1;
   string user_uuid = 2;
@@ -33,33 +67,79 @@ message ConnectionInfo {
   string local_addr = 4;
   int64 created_at = 5;
   string status = 6;
+  int64 last_active = 7;
+  int64 timestamp = 8;           // 时间戳
+  string checksum = 9;           // 校验和
 }
 
-// BroadcastData 广播数据结构
+// BroadcastData 广播数据
 message BroadcastData {
-  bytes message = 1;
-  int64 timestamp = 2;
+  string route = 1;
+  map<string, string> data = 2;
+  string sender = 3;
+  int64 timestamp = 4;           // 时间戳
+  string checksum = 5;           // 校验和
+  string protocol_version = 6;    // 协议版本
 }
 
-// GroupInfo 推送组信息结构
+// GroupInfo 组信息
 message GroupInfo {
   string group_id = 1;
   string group_name = 2;
-  repeated string user_uuids = 3;
+  int32 user_count = 3;
   int64 created_at = 4;
+  int64 timestamp = 5;           // 时间戳
+  string checksum = 6;           // 校验和
 }
 
-// GroupRequest 组操作请求结构
+// GroupRequest 组请求
 message GroupRequest {
-  string action = 1; // create, delete, add_user, remove_user
+  string action = 1;              // create, add, remove, delete
   string group_id = 2;
   string group_name = 3;
   string user_uuid = 4;
+  int64 timestamp = 5;           // 时间戳
+  string checksum = 6;           // 校验和
+  string protocol_version = 7;    // 协议版本
 }
 
-// GroupResponse 组操作响应结构
+// GroupResponse 组响应
 message GroupResponse {
-  string status = 1;
+  string status = 1;              // success, error
   string message = 2;
   GroupInfo group_info = 3;
+  int64 timestamp = 4;           // 时间戳
+  string checksum = 5;           // 校验和
+  string protocol_version = 6;    // 协议版本
+}
+
+// Acknowledgement 确认消息
+message Acknowledgement {
+  int64 sequence = 1;            // 消息序列号
+  string status = 2;              // success, failed, timeout
+  string error = 3;               // 错误信息
+  int64 received_at = 4;          // 接收时间
+  int64 timestamp = 5;            // 时间戳
+  string checksum = 6;            // 校验和
+  string protocol_version = 7;     // 协议版本
+}
+
+// Handshake 握手消息
+message Handshake {
+  string protocol_version = 1;     // 客户端支持的协议版本
+  repeated string supported_versions = 2; // 支持的版本列表
+  string client_type = 3;          // 客户端类型：mobile, web, desktop
+  string client_version = 4;       // 客户端版本
+  string device_id = 5;            // 设备ID
+  int64 timestamp = 6;             // 时间戳
+  string checksum = 7;             // 校验和
+}
+
+// FlowControl 流量控制
+message FlowControl {
+  int32 window_size = 1;           // 滑动窗口大小
+  int32 available_tokens = 2;      // 可用令牌数
+  int64 reset_time = 3;            // 重置时间
+  int64 timestamp = 4;             // 时间戳
+  string checksum = 5;             // 校验和
 }

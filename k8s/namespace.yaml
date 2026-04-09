@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sgate
+  labels:
+    name: sgate
+    app.kubernetes.io/name: sgate
+    app.kubernetes.io/component: gateway

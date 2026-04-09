@@ -70,6 +70,9 @@ type Metrics struct {
 	bytesReceived     int64 // 接收的字节数
 	bytesSent         int64 // 发送的字节数
 
+	// 熔断器指标
+	circuitBreakerFailures int64 // 熔断器失败次数
+
 	// 告警阈值
 	activeConnectionsThreshold int64 // 活跃连接数阈值
 	failedMessagesThreshold    int64 // 失败消息数阈值
@@ -223,6 +226,7 @@ func (m *Metrics) Reset() {
 	atomic.StoreInt64(&m.whitelistAllows, 0)
 	atomic.StoreInt64(&m.bytesReceived, 0)
 	atomic.StoreInt64(&m.bytesSent, 0)
+	atomic.StoreInt64(&m.circuitBreakerFailures, 0)
 	m.cpuUsage = 0
 }
 
@@ -238,6 +242,7 @@ func (m *Metrics) LogMetrics() {
 		"messagesReceived", m.GetMessagesReceived(),
 		"messagesProcessed", m.GetMessagesProcessed(),
 		"messagesFailed", m.GetMessagesFailed(),
+		"circuitBreakerFailures", m.GetCircuitBreakerFailures(),
 		"averageProcessingTime", m.GetAverageProcessingTime(),
 		"maxProcessingTime", m.GetMaxProcessingTime(),
 		"redisConnections", m.GetRedisConnections(),
@@ -477,4 +482,14 @@ func (m *Metrics) AddBytesSent(bytes int64) {
 // GetBytesSent 获取发送的字节数
 func (m *Metrics) GetBytesSent() int64 {
 	return atomic.LoadInt64(&m.bytesSent)
+}
+
+// IncCircuitBreakerFailures 增加熔断器失败次数
+func (m *Metrics) IncCircuitBreakerFailures() {
+	atomic.AddInt64(&m.circuitBreakerFailures, 1)
+}
+
+// GetCircuitBreakerFailures 获取熔断器失败次数
+func (m *Metrics) GetCircuitBreakerFailures() int64 {
+	return atomic.LoadInt64(&m.circuitBreakerFailures)
 }

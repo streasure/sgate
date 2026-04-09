@@ -42,6 +42,15 @@ func PutRequestMessage(msg *protobuf.Message) {
 			delete(msg.Payload, k)
 		}
 	}
+	msg.Timestamp = 0
+	msg.Checksum = ""
+	msg.Signature = nil
+	msg.Sequence = 0
+	msg.RequireAck = false
+	msg.Compression = protobuf.CompressionType_COMPRESSION_TYPE_NONE
+	msg.OriginalSize = 0
+	msg.CompressedSize = 0
+	msg.ProtocolVersion = ""
 	requestMessagePool.Put(msg)
 }
 
@@ -60,6 +69,15 @@ func PutResponseMessage(msg *protobuf.Message) {
 			delete(msg.Payload, k)
 		}
 	}
+	msg.Timestamp = 0
+	msg.Checksum = ""
+	msg.Signature = nil
+	msg.Sequence = 0
+	msg.RequireAck = false
+	msg.Compression = protobuf.CompressionType_COMPRESSION_TYPE_NONE
+	msg.OriginalSize = 0
+	msg.CompressedSize = 0
+	msg.ProtocolVersion = ""
 	responseMessagePool.Put(msg)
 }
 
@@ -71,11 +89,14 @@ func GetErrorMessage() *protobuf.ErrorResponse {
 // PutErrorMessage 归还错误消息到对象池
 func PutErrorMessage(msg *protobuf.ErrorResponse) {
 	msg.Route = ""
-	if msg.Data != nil {
-		msg.Data.Message = ""
-		msg.Data.Error = ""
-		msg.Data.Data = ""
+	if msg.Error != nil {
+		msg.Error.Message = ""
+		msg.Error.Code = ""
+		msg.Error.Details = ""
 	}
+	msg.Timestamp = 0
+	msg.Checksum = ""
+	msg.ProtocolVersion = ""
 	errorMessagePool.Put(msg)
 }
 
@@ -113,10 +134,10 @@ func NewResponseMessage(route string, data interface{}) *protobuf.Message {
 func NewErrorMessage(route, message, err, data string) *protobuf.ErrorResponse {
 	msg := GetErrorMessage()
 	msg.Route = route
-	msg.Data = &protobuf.ErrorData{
+	msg.Error = &protobuf.ErrorData{
 		Message: message,
-		Error:   err,
-		Data:    data,
+		Code:    err,
+		Details: data,
 	}
 	return msg
 }

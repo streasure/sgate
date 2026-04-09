@@ -43,3 +43,9 @@ alerts:
   processingTimeThreshold: 1000
   redisErrorsThreshold: 10
   queueLengthThreshold: 10000
+
+# 资源限制配置
+resources:
+  memoryThreshold: 95.0
+  cpuThreshold: 95.0
+  enableResourceCircuitBreaker: true

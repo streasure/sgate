@@ -1,33 +1,78 @@
-name: CI
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v3
-
+    
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
         go-version: '1.20'
-
+    
+    - name: Install dependencies
+      run: go mod tidy
+    
     - name: Build
       run: go build -v ./...
-
+    
     - name: Test
       run: go test -v ./...
-
+    
     - name: Lint
       run: |
         go install golang.org/x/lint/golint@latest
         golint ./...
+    
+    - name: Build Docker image
+      run: docker build -t sgate:latest .
 
-    - name: Vet
-      run: go vet ./...
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    
+    - name: Build and push Docker image
+      run: |
+        docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/sgate:latest .
+        docker push ${{ secrets.DOCKERHUB_USERNAME }}/sgate:latest
+
+  kubernetes-deploy:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Configure Kubernetes context
+      run: |
+        echo "${{ secrets.KUBE_CONFIG }}" > kubeconfig.yml
+        export KUBECONFIG=kubeconfig.yml
+    
+    - name: Deploy to Kubernetes
+      run: |
+        kubectl apply -f k8s/namespace.yaml
+        kubectl apply -f k8s/configmap.yaml
+        kubectl apply -f k8s/secret.yaml
+        kubectl apply -f k8s/deployment.yaml
+        kubectl rollout status deployment/sgate -n sgate

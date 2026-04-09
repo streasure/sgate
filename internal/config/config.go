@@ -30,6 +30,7 @@ type Config struct {
 	RateLimiter RateLimiterConfig `yaml:"rateLimiter"` // 速率限制配置
 	Alerts      AlertConfig    `yaml:"alerts"`      // 告警配置
 	Security    SecurityConfig `yaml:"security"`    // 安全配置
+	Resources   ResourceConfig `yaml:"resources"`   // 系统资源配置
 }
 
 // RedisConfig Redis配置结构
@@ -122,6 +123,18 @@ type SecurityConfig struct {
 	DefaultWhitelist  []string `yaml:"defaultWhitelist"`  // 默认白名单
 	DefaultBlacklist  []string `yaml:"defaultBlacklist"`  // 默认黑名单
 	AuthRoutes        []string `yaml:"authRoutes"`        // 需要认证的路由列表
+}
+
+// ResourceConfig 系统资源配置结构
+// 字段:
+//   MemoryThreshold: 内存占用阈值（百分比）
+//   CPUThreshold: CPU占用阈值（百分比）
+//   EnableResourceCircuitBreaker: 是否启用资源熔断器
+
+type ResourceConfig struct {
+	MemoryThreshold              float64 `yaml:"memoryThreshold"`              // 内存占用阈值（百分比）
+	CPUThreshold                 float64 `yaml:"cpuThreshold"`                 // CPU占用阈值（百分比）
+	EnableResourceCircuitBreaker bool    `yaml:"enableResourceCircuitBreaker"` // 是否启用资源熔断器
 }
 
 // Transport 传输协议配置
@@ -239,6 +252,11 @@ func loadDefaultConfig() *Config {
 			DefaultWhitelist:  []string{"127.0.0.1", "::1"}, // 默认白名单
 			DefaultBlacklist:  []string{}, // 默认黑名单
 			AuthRoutes:        []string{"getConnections", "broadcast", "ws.broadcast"}, // 默认需要认证的路由
+		},
+		Resources: ResourceConfig{
+			MemoryThreshold:              95.0, // 默认内存占用阈值 95%
+			CPUThreshold:                 95.0, // 默认CPU占用阈值 95%
+			EnableResourceCircuitBreaker: true, // 默认启用资源熔断器
 		},
 	}
 }

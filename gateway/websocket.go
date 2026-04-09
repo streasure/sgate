@@ -40,17 +40,17 @@ type WebSocketConnection struct {
 
 // WebSocket状态常量
 const (
-	StateHandshake = iota
-	StateOpen
-	StateClosing
-	StateClosed
+	WSStateHandshake = iota
+	WSStateOpen
+	WSStateClosing
+	WSStateClosed
 )
 
 // NewWebSocketConnection 创建新的WebSocket连接
 func NewWebSocketConnection(conn gnet.Conn) *WebSocketConnection {
 	wsConn := wsConnectionPool.Get().(*WebSocketConnection)
 	wsConn.Conn = conn
-	atomic.StoreInt32(&wsConn.State, int32(StateHandshake))
+	atomic.StoreInt32(&wsConn.State, int32(WSStateHandshake))
 	wsConn.Buffer = wsConn.Buffer[:0] // 重置缓冲区
 	wsConn.ConnectionID = ""
 	wsConn.LastPingTime = time.Now()
@@ -92,16 +92,16 @@ func (g *Gateway) HandleWebSocket(c gnet.Conn, data []byte) (action gnet.Action)
 	}
 
 	switch atomic.LoadInt32(&wsConn.State) {
-	case int32(StateHandshake):
+	case int32(WSStateHandshake):
 		// 处理握手
 		return g.handleWebSocketHandshake(wsConn, data)
-	case int32(StateOpen):
+	case int32(WSStateOpen):
 		// 处理消息
 		return g.handleWebSocketMessage(wsConn, data)
-	case int32(StateClosing):
+	case int32(WSStateClosing):
 		// 处理关闭
 		return gnet.Close
-	case int32(StateClosed):
+	case int32(WSStateClosed):
 		// 连接已关闭
 		return gnet.Close
 	default:
@@ -172,7 +172,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	}
 
 	// 更新状态
-	atomic.StoreInt32(&wsConn.State, int32(StateOpen))
+	atomic.StoreInt32(&wsConn.State, int32(WSStateOpen))
 	tlog.Debug("WebSocket握手成功")
 
 	return gnet.None
@@ -378,7 +378,7 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 	}
 
 	// 更新状态
-	atomic.StoreInt32(&wsConn.State, int32(StateClosed))
+	atomic.StoreInt32(&wsConn.State, int32(WSStateClosed))
 	// 从连接管理器中移除
 	if wsConn.ConnectionID != "" {
 		g.connectionManager.RemoveConnection(wsConn.ConnectionID)
@@ -412,7 +412,7 @@ func (g *Gateway) handleWebSocketPongFrame(wsConn *WebSocketConnection) {
 // sendWebSocketMessage 发送WebSocket消息
 func (g *Gateway) sendWebSocketMessage(wsConn *WebSocketConnection, opCode ws.OpCode, payload []byte) error {
 	// 检查连接状态
-	if atomic.LoadInt32(&wsConn.State) != int32(StateOpen) {
+	if atomic.LoadInt32(&wsConn.State) != int32(WSStateOpen) {
 		return fmt.Errorf("websocket connection not open")
 	}
 
