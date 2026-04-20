@@ -84,11 +84,27 @@ type WorkerPoolConfig struct {
 //   Rate: 速率限制（每秒请求数）
 //   Burst: 突发限制
 //   Window: 时间窗口
+//   UserRateLimit: 用户维度限流配置
 
 type RateLimiterConfig struct {
-	Rate   int           `yaml:"rate"`   // 速率限制（每秒请求数）
-	Burst  int           `yaml:"burst"`  // 突发限制
-	Window time.Duration `yaml:"window"` // 时间窗口
+	Rate         int           `yaml:"rate"`         // 速率限制（每秒请求数）
+	Burst        int           `yaml:"burst"`        // 突发限制
+	Window       time.Duration `yaml:"window"`       // 时间窗口
+	UserRateLimit UserRateLimitConfig `yaml:"userRateLimit"` // 用户维度限流配置
+}
+
+// UserRateLimitConfig 用户维度限流配置
+// 字段:
+//   Enabled: 是否启用用户维度限流
+//   Rate: 每秒允许的请求数
+//   Burst: 突发请求数
+//   Action: 触发限流时的动作
+
+type UserRateLimitConfig struct {
+	Enabled bool   `yaml:"enabled"` // 是否启用用户维度限流
+	Rate    int    `yaml:"rate"`    // 每秒允许的请求数
+	Burst   int    `yaml:"burst"`   // 突发请求数
+	Action  string `yaml:"action"`   // 触发限流时的动作：close=踢掉连接，reject=拒绝请求
 }
 
 // AlertConfig 告警配置结构
@@ -237,6 +253,12 @@ func loadDefaultConfig() *Config {
 			Rate:   1000, // 默认速率限制
 			Burst:  2000, // 默认突发限制
 			Window: 1 * time.Second, // 默认时间窗口
+			UserRateLimit: UserRateLimitConfig{
+				Enabled: false, // 默认不启用用户维度限流
+				Rate:    20,    // 默认每秒20次
+				Burst:   30,    // 默认突发30次
+				Action:  "close", // 默认踢掉连接
+			},
 		},
 		Alerts: AlertConfig{
 			ActiveConnectionsThreshold: 1000, // 活跃连接数阈值

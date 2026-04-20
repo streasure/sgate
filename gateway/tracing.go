@@ -30,9 +30,10 @@ type TraceEvent struct {
 
 // Tracer 追踪器
 type Tracer struct {
-	traces     map[string][]*TraceSpan // 追踪映射
-	mutex      sync.RWMutex            // 互斥锁
-	cleanupInterval time.Duration       // 清理间隔
+	traces         map[string][]*TraceSpan // 追踪映射
+	mutex          sync.RWMutex            // 互斥锁
+	cleanupInterval time.Duration           // 清理间隔
+	sampleRate     float64                 // 采样率
 }
 
 // NewTracer 创建追踪器
@@ -48,6 +49,7 @@ func NewTracer(cleanupInterval time.Duration) *Tracer {
 	tracer := &Tracer{
 		traces:          make(map[string][]*TraceSpan),
 		cleanupInterval: cleanupInterval,
+		sampleRate:      0.1, // 10%采样率，平衡性能和追踪完整性
 	}
 
 	// 启动清理任务
@@ -74,14 +76,17 @@ func (t *Tracer) StartSpan(traceID, spanName, parentSpanID string) *TraceSpan {
 		Events:       make([]TraceEvent, 0),
 	}
 
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
+	// 采样逻辑：只追踪1%的请求
+	if t.sampleRate >= 1.0 || (t.sampleRate > 0 && float64(time.Now().UnixNano()%10000)/10000.0 < t.sampleRate) {
+		t.mutex.Lock()
+		defer t.mutex.Unlock()
 
-	if _, exists := t.traces[traceID]; !exists {
-		t.traces[traceID] = make([]*TraceSpan, 0)
+		if _, exists := t.traces[traceID]; !exists {
+			t.traces[traceID] = make([]*TraceSpan, 0)
+		}
+
+		t.traces[traceID] = append(t.traces[traceID], span)
 	}
-
-	t.traces[traceID] = append(t.traces[traceID], span)
 
 	return span
 }

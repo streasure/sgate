@@ -1,575 +1,565 @@
 package gateway
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
-
-	"github.com/go-redis/redis/v8"
-	tlog "github.com/streasure/treasure-slog"
 )
 
-// Redis Redis管理器
-type Redis struct {
-	client         *redis.Client
-	ctx            context.Context
-	cancel         context.CancelFunc
-	config         RedisConfig
-	isConnected    bool
-	reconnectCount int
+type ConnectionState struct {
+	ConnectionID  string    `json:"connection_id"`
+	UserUUID      string    `json:"user_uuid"`
+	ServerID      string    `json:"server_id"`
+	Protocol      string    `json:"protocol"`
+	RemoteAddr    string    `json:"remote_addr"`
+	ConnectedAt   time.Time `json:"connected_at"`
+	LastActiveAt  time.Time `json:"last_active_at"`
 }
 
-// RedisConfig Redis配置
-type RedisConfig struct {
+type MemoryCache struct {
+	mu         sync.RWMutex
+	data       map[string]*CacheEntry
+	userCache  map[string]string
+	groupCache map[string]map[string]bool
+	stats      CacheStats
+}
+
+type CacheEntry struct {
+	Value      interface{}
+	ExpireAt   time.Time
+	CreatedAt  time.Time
+	AccessCount int64
+}
+
+type CacheStats struct {
+	Hits   int64
+	Misses int64
+	Sets   int64
+	Gets   int64
+}
+
+var (
+	globalCache     *MemoryCache
+	cacheOnce       sync.Once
+	singleflightMap singleflightGroup
+)
+
+type singleflightGroup struct {
+	mu sync.Map
+}
+
+type singleflightCall struct {
+	wg  sync.WaitGroup
+	val interface{}
+	err error
+}
+
+func (g *singleflightGroup) Do(key string, fn func() (interface{}, error)) (interface{}, error) {
+	if c, ok := g.mu.Load(key); ok {
+		call := c.(*singleflightCall)
+		call.wg.Wait()
+		return call.val, call.err
+	}
+
+	c := &singleflightCall{}
+	c.wg.Add(1)
+	g.mu.Store(key, c)
+	c.val, c.err = fn()
+	c.wg.Done()
+	g.mu.Delete(key)
+
+	return c.val, c.err
+}
+
+func GetGlobalCache() *MemoryCache {
+	cacheOnce.Do(func() {
+		globalCache = NewMemoryCache()
+	})
+	return globalCache
+}
+
+func NewMemoryCache() *MemoryCache {
+	c := &MemoryCache{
+		data:       make(map[string]*CacheEntry),
+		userCache:  make(map[string]string),
+		groupCache: make(map[string]map[string]bool),
+	}
+	go c.cleanupLoop()
+	return c
+}
+
+func (c *MemoryCache) cleanupLoop() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		c.cleanup()
+	}
+}
+
+func (c *MemoryCache) cleanup() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	for key, entry := range c.data {
+		if !entry.ExpireAt.IsZero() && now.After(entry.ExpireAt) {
+			delete(c.data, key)
+		}
+	}
+}
+
+func (c *MemoryCache) Set(key string, value interface{}, expiration time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	expireAt := time.Time{}
+	if expiration > 0 {
+		expireAt = time.Now().Add(expiration)
+	}
+
+	c.data[key] = &CacheEntry{
+		Value:      value,
+		ExpireAt:   expireAt,
+		CreatedAt:  time.Now(),
+	}
+	atomic.AddInt64(&c.stats.Sets, 1)
+
+	return nil
+}
+
+func (c *MemoryCache) Get(key string) (interface{}, error) {
+	c.mu.RLock()
+	entry, exists := c.data[key]
+	c.mu.RUnlock()
+
+	if !exists {
+		atomic.AddInt64(&c.stats.Misses, 1)
+		return nil, nil
+	}
+
+	if !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt) {
+		c.mu.Lock()
+		delete(c.data, key)
+		c.mu.Unlock()
+		atomic.AddInt64(&c.stats.Misses, 1)
+		return nil, nil
+	}
+
+	atomic.AddInt64(&entry.AccessCount, 1)
+	atomic.AddInt64(&c.stats.Gets, 1)
+	atomic.AddInt64(&c.stats.Hits, 1)
+
+	return entry.Value, nil
+}
+
+func (c *MemoryCache) GetOrSet(key string, fn func() (interface{}, error), expiration time.Duration) (interface{}, error) {
+	val, err := c.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if val != nil {
+		return val, nil
+	}
+
+	newVal, err := singleflightMap.Do(key, fn)
+	if err != nil {
+		return nil, err
+	}
+
+	if newVal != nil {
+		c.Set(key, newVal, expiration)
+	}
+
+	return newVal, nil
+}
+
+func (c *MemoryCache) Delete(key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.data, key)
+	return nil
+}
+
+func (c *MemoryCache) Exists(key string) bool {
+	c.mu.RLock()
+	entry, exists := c.data[key]
+	c.mu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	if !entry.ExpireAt.IsZero() && time.Now().After(entry.ExpireAt) {
+		c.mu.Lock()
+		delete(c.data, key)
+		c.mu.Unlock()
+		return false
+	}
+
+	return true
+}
+
+func (c *MemoryCache) Increment(key string) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, exists := c.data[key]
+	if !exists {
+		c.data[key] = &CacheEntry{Value: int64(1)}
+		return 1, nil
+	}
+
+	switch v := entry.Value.(type) {
+	case int64:
+		v++
+		entry.Value = v
+		return v, nil
+	case int:
+		v++
+		entry.Value = int64(v)
+		return int64(v), nil
+	}
+	return 0, nil
+}
+
+func (c *MemoryCache) Decrement(key string) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, exists := c.data[key]
+	if !exists {
+		c.data[key] = &CacheEntry{Value: int64(-1)}
+		return -1, nil
+	}
+
+	switch v := entry.Value.(type) {
+	case int64:
+		v--
+		entry.Value = v
+		return v, nil
+	case int:
+		v--
+		entry.Value = int64(v)
+		return int64(v), nil
+	}
+	return 0, nil
+}
+
+func (c *MemoryCache) HashSet(key, field string, value interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var hash map[string]interface{}
+	entry, exists := c.data[key]
+	if !exists {
+		hash = make(map[string]interface{})
+		c.data[key] = &CacheEntry{Value: hash}
+	} else {
+		var ok bool
+		hash, ok = entry.Value.(map[string]interface{})
+		if !ok {
+			hash = make(map[string]interface{})
+			c.data[key] = &CacheEntry{Value: hash}
+		}
+	}
+	hash[field] = value
+	return nil
+}
+
+func (c *MemoryCache) HashGet(key, field string) (interface{}, error) {
+	c.mu.RLock()
+	entry, exists := c.data[key]
+	c.mu.RUnlock()
+
+	if !exists {
+		return nil, nil
+	}
+
+	hash, ok := entry.Value.(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	return hash[field], nil
+}
+
+func (c *MemoryCache) HashDelete(key string, fields ...string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, exists := c.data[key]
+	if !exists {
+		return nil
+	}
+
+	hash, ok := entry.Value.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	for _, field := range fields {
+		delete(hash, field)
+	}
+	return nil
+}
+
+func (c *MemoryCache) SetAdd(key string, members ...interface{}) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var set map[string]bool
+	entry, exists := c.data[key]
+	if !exists {
+		set = make(map[string]bool)
+		c.data[key] = &CacheEntry{Value: set}
+	} else {
+		var ok bool
+		set, ok = entry.Value.(map[string]bool)
+		if !ok {
+			set = make(map[string]bool)
+			c.data[key] = &CacheEntry{Value: set}
+		}
+	}
+
+	for _, m := range members {
+		set[fmt.Sprintf("%v", m)] = true
+	}
+	return int64(len(set)), nil
+}
+
+func (c *MemoryCache) SetMembers(key string) ([]string, error) {
+	c.mu.RLock()
+	entry, exists := c.data[key]
+	c.mu.RUnlock()
+
+	if !exists {
+		return []string{}, nil
+	}
+
+	set, ok := entry.Value.(map[string]bool)
+	if !ok {
+		return []string{}, nil
+	}
+
+	members := make([]string, 0, len(set))
+	for m := range set {
+		members = append(members, m)
+	}
+	return members, nil
+}
+
+func (c *MemoryCache) SetContains(key string, member interface{}) (bool, error) {
+	c.mu.RLock()
+	entry, exists := c.data[key]
+	c.mu.RUnlock()
+
+	if !exists {
+		return false, nil
+	}
+
+	set, ok := entry.Value.(map[string]bool)
+	if !ok {
+		return false, nil
+	}
+
+	return set[fmt.Sprintf("%v", member)], nil
+}
+
+func (c *MemoryCache) AcquireLock(key string, value string, expiration time.Duration) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	_, exists := c.data[key]
+	if exists {
+		return false, nil
+	}
+
+	c.data[key] = &CacheEntry{
+		Value:    value,
+		ExpireAt: time.Now().Add(expiration),
+	}
+	return true, nil
+}
+
+func (c *MemoryCache) ReleaseLock(key string, value string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, exists := c.data[key]
+	if !exists {
+		return false, nil
+	}
+
+	if entry.Value == value {
+		delete(c.data, key)
+		return true, nil
+	}
+	return false, nil
+}
+
+func (c *MemoryCache) UserLogin(userUUID, connectionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	oldConnID, exists := c.userCache[userUUID]
+	if exists {
+		delete(c.data, oldConnID)
+	}
+	c.userCache[userUUID] = connectionID
+}
+
+func (c *MemoryCache) UserLogout(userUUID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.userCache, userUUID)
+}
+
+func (c *MemoryCache) GetUserConnection(userUUID string) (string, bool) {
+	c.mu.RLock()
+	connID, exists := c.userCache[userUUID]
+	c.mu.RUnlock()
+	return connID, exists
+}
+
+func (c *MemoryCache) JoinGroup(groupID, userUUID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.groupCache[groupID]; !exists {
+		c.groupCache[groupID] = make(map[string]bool)
+	}
+	c.groupCache[groupID][userUUID] = true
+}
+
+func (c *MemoryCache) LeaveGroup(groupID, userUUID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if users, exists := c.groupCache[groupID]; exists {
+		delete(users, userUUID)
+		if len(users) == 0 {
+			delete(c.groupCache, groupID)
+		}
+	}
+}
+
+func (c *MemoryCache) GetGroupMembers(groupID string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if users, exists := c.groupCache[groupID]; exists {
+		members := make([]string, 0, len(users))
+		for u := range users {
+			members = append(members, u)
+		}
+		return members
+	}
+	return []string{}
+}
+
+func (c *MemoryCache) GetGroupMemberCount(groupID string) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if users, exists := c.groupCache[groupID]; exists {
+		return len(users)
+	}
+	return 0
+}
+
+func (c *MemoryCache) GetStats() map[string]interface{} {
+	return map[string]interface{}{
+		"hits":     atomic.LoadInt64(&c.stats.Hits),
+		"misses":   atomic.LoadInt64(&c.stats.Misses),
+		"sets":     atomic.LoadInt64(&c.stats.Sets),
+		"gets":     atomic.LoadInt64(&c.stats.Gets),
+		"keys":     c.Count(),
+	}
+}
+
+func (c *MemoryCache) Count() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.data)
+}
+
+func (c *MemoryCache) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data = make(map[string]*CacheEntry)
+	c.userCache = make(map[string]string)
+	c.groupCache = make(map[string]map[string]bool)
+}
+
+type DistributedManager struct {
+	cache *MemoryCache
+}
+
+func newDistributedManager() *DistributedManager {
+	return NewDistributedManager()
+}
+
+func NewDistributedManager() *DistributedManager {
+	return &DistributedManager{
+		cache: GetGlobalCache(),
+	}
+}
+
+func (dm *DistributedManager) RegisterConnection(state *ConnectionState) error {
+	dm.cache.UserLogin(state.UserUUID, state.ConnectionID)
+	return dm.cache.Set("conn:"+state.ConnectionID, state, 5*time.Minute)
+}
+
+func (dm *DistributedManager) UnregisterConnection(connectionID string) error {
+	dm.cache.Delete("conn:" + connectionID)
+	return nil
+}
+
+func (dm *DistributedManager) GetConnection(connectionID string) (*ConnectionState, error) {
+	val, _ := dm.cache.Get("conn:" + connectionID)
+	if val == nil {
+		return nil, nil
+	}
+	return val.(*ConnectionState), nil
+}
+
+func (dm *DistributedManager) GetAllConnections() ([]*ConnectionState, error) {
+	return []*ConnectionState{}, nil
+}
+
+func (dm *DistributedManager) GetStats() (map[string]interface{}, error) {
+	return dm.cache.GetStats(), nil
+}
+
+func (dm *DistributedManager) Close() {
+	dm.cache.Close()
+}
+
+type CacheConfig struct {
+	Enabled      bool
 	Host         string
 	Port         int
 	Password     string
 	DB           int
-	MaxRetries   int
-	RetryInterval time.Duration
-	DialTimeout  time.Duration
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
 	PoolSize     int
 	MinIdleConns int
+	KeyPrefix    string
 }
 
-// NewRedis 创建Redis管理器
-func NewRedis(config RedisConfig) *Redis {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	r := &Redis{
-		ctx:     ctx,
-		cancel:  cancel,
-		config:  config,
-	}
-
-	// 初始化Redis连接
-	go r.connect()
-
-	return r
-}
-
-// connect 连接Redis
-func (r *Redis) connect() {
-	r.client = redis.NewClient(&redis.Options{
-		Addr:         fmt.Sprintf("%s:%d", r.config.Host, r.config.Port),
-		Password:     r.config.Password,
-		DB:           r.config.DB,
-		MaxRetries:   r.config.MaxRetries,
-		MinRetryBackoff: r.config.RetryInterval,
-		MaxRetryBackoff: r.config.RetryInterval * 5,
-		DialTimeout:  r.config.DialTimeout,
-		ReadTimeout:  r.config.ReadTimeout,
-		WriteTimeout: r.config.WriteTimeout,
-		PoolSize:     r.config.PoolSize,
-		MinIdleConns: r.config.MinIdleConns,
-	})
-
-	// 测试连接
-	for i := 0; i < r.config.MaxRetries; i++ {
-		_, err := r.client.Ping(r.ctx).Result()
-		if err == nil {
-			r.isConnected = true
-			r.reconnectCount = 0
-			tlog.Info("Redis连接成功", "host", r.config.Host, "port", r.config.Port, "db", r.config.DB)
-			return
-		}
-
-		tlog.Error("Redis连接失败", "error", err, "retry", i+1, "maxRetries", r.config.MaxRetries)
-		time.Sleep(r.config.RetryInterval)
-	}
-
-	tlog.Error("Redis连接失败，达到最大重试次数")
-}
-
-// Close 关闭Redis连接
-func (r *Redis) Close() error {
-	r.cancel()
-	if r.client != nil {
-		return r.client.Close()
-	}
-	return nil
-}
-
-// IsConnected 检查Redis连接状态
-func (r *Redis) IsConnected() bool {
-	if r.client == nil {
-		return false
-	}
-
-	_, err := r.client.Ping(r.ctx).Result()
-	if err != nil {
-		r.isConnected = false
-		tlog.Error("Redis连接已断开", "error", err)
-		// 尝试重连
-		go r.connect()
-		return false
-	}
-
-	r.isConnected = true
-	return true
-}
-
-// Set 设置键值对
-func (r *Redis) Set(key string, value interface{}, expiration time.Duration) error {
-	if !r.IsConnected() {
-		return fmt.Errorf("redis not connected")
-	}
-
-	// 序列化值
-	var serializedValue interface{}
-	switch v := value.(type) {
-	case string:
-		serializedValue = v
-	case int, int64, float64, bool:
-		serializedValue = v
-	default:
-		// 对于复杂类型，序列化为JSON
-		data, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		serializedValue = string(data)
-	}
-
-	return r.client.Set(r.ctx, key, serializedValue, expiration).Err()
-}
-
-// Get 获取值
-func (r *Redis) Get(key string, dest interface{}) error {
-	if !r.IsConnected() {
-		return fmt.Errorf("redis not connected")
-	}
-
-	val, err := r.client.Get(r.ctx, key).Result()
-	if err == redis.Nil {
-		return fmt.Errorf("key not found")
-	}
-	if err != nil {
-		return err
-	}
-
-	// 反序列化值
-	switch d := dest.(type) {
-	case *string:
-		*d = val
-	case *int:
-		var i int
-		if _, err := fmt.Sscanf(val, "%d", &i); err != nil {
-			return err
-		}
-		*d = i
-	case *int64:
-		var i int64
-		if _, err := fmt.Sscanf(val, "%d", &i); err != nil {
-			return err
-		}
-		*d = i
-	case *float64:
-		var f float64
-		if _, err := fmt.Sscanf(val, "%f", &f); err != nil {
-			return err
-		}
-		*d = f
-	case *bool:
-		var b bool
-		if _, err := fmt.Sscanf(val, "%t", &b); err != nil {
-			return err
-		}
-		*d = b
-	default:
-		// 对于复杂类型，从JSON反序列化
-		return json.Unmarshal([]byte(val), dest)
-	}
-
-	return nil
-}
-
-// Delete 删除键
-func (r *Redis) Delete(key string) error {
-	if !r.IsConnected() {
-		return fmt.Errorf("redis not connected")
-	}
-
-	return r.client.Del(r.ctx, key).Err()
-}
-
-// Exists 检查键是否存在
-func (r *Redis) Exists(key string) (bool, error) {
-	if !r.IsConnected() {
-		return false, fmt.Errorf("redis not connected")
-	}
-
-	result, err := r.client.Exists(r.ctx, key).Result()
-	if err != nil {
-		return false, err
-	}
-
-	return result > 0, nil
-}
-
-// Expire 设置键过期时间
-func (r *Redis) Expire(key string, expiration time.Duration) error {
-	if !r.IsConnected() {
-		return fmt.Errorf("redis not connected")
-	}
-
-	return r.client.Expire(r.ctx, key, expiration).Err()
-}
-
-// GetTTL 获取键剩余过期时间
-func (r *Redis) GetTTL(key string) (time.Duration, error) {
-	if !r.IsConnected() {
-		return 0, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.TTL(r.ctx, key).Result()
-}
-
-// Increment 递增计数器
-func (r *Redis) Increment(key string) (int64, error) {
-	if !r.IsConnected() {
-		return 0, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.Incr(r.ctx, key).Result()
-}
-
-// Decrement 递减计数器
-func (r *Redis) Decrement(key string) (int64, error) {
-	if !r.IsConnected() {
-		return 0, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.Decr(r.ctx, key).Result()
-}
-
-// HashSet 设置哈希表字段
-func (r *Redis) HashSet(key, field string, value interface{}) error {
-	if !r.IsConnected() {
-		return fmt.Errorf("redis not connected")
-	}
-
-	// 序列化值
-	var serializedValue interface{}
-	switch v := value.(type) {
-	case string:
-		serializedValue = v
-	case int, int64, float64, bool:
-		serializedValue = v
-	default:
-		// 对于复杂类型，序列化为JSON
-		data, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		serializedValue = string(data)
-	}
-
-	return r.client.HSet(r.ctx, key, field, serializedValue).Err()
-}
-
-// HashGet 获取哈希表字段
-func (r *Redis) HashGet(key, field string, dest interface{}) error {
-	if !r.IsConnected() {
-		return fmt.Errorf("redis not connected")
-	}
-
-	val, err := r.client.HGet(r.ctx, key, field).Result()
-	if err == redis.Nil {
-		return fmt.Errorf("field not found")
-	}
-	if err != nil {
-		return err
-	}
-
-	// 反序列化值
-	switch d := dest.(type) {
-	case *string:
-		*d = val
-	case *int:
-		var i int
-		if _, err := fmt.Sscanf(val, "%d", &i); err != nil {
-			return err
-		}
-		*d = i
-	case *int64:
-		var i int64
-		if _, err := fmt.Sscanf(val, "%d", &i); err != nil {
-			return err
-		}
-		*d = i
-	case *float64:
-		var f float64
-		if _, err := fmt.Sscanf(val, "%f", &f); err != nil {
-			return err
-		}
-		*d = f
-	case *bool:
-		var b bool
-		if _, err := fmt.Sscanf(val, "%t", &b); err != nil {
-			return err
-		}
-		*d = b
-	default:
-		// 对于复杂类型，从JSON反序列化
-		return json.Unmarshal([]byte(val), dest)
-	}
-
-	return nil
-}
-
-// HashDelete 删除哈希表字段
-func (r *Redis) HashDelete(key string, fields ...string) error {
-	if !r.IsConnected() {
-		return fmt.Errorf("redis not connected")
-	}
-
-	return r.client.HDel(r.ctx, key, fields...).Err()
-}
-
-// HashExists 检查哈希表字段是否存在
-func (r *Redis) HashExists(key, field string) (bool, error) {
-	if !r.IsConnected() {
-		return false, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.HExists(r.ctx, key, field).Result()
-}
-
-// ListPush 向列表尾部添加元素
-func (r *Redis) ListPush(key string, values ...interface{}) (int64, error) {
-	if !r.IsConnected() {
-		return 0, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.RPush(r.ctx, key, values...).Result()
-}
-
-// ListPop 从列表头部弹出元素
-func (r *Redis) ListPop(key string) (string, error) {
-	if !r.IsConnected() {
-		return "", fmt.Errorf("redis not connected")
-	}
-
-	return r.client.LPop(r.ctx, key).Result()
-}
-
-// ListLen 获取列表长度
-func (r *Redis) ListLen(key string) (int64, error) {
-	if !r.IsConnected() {
-		return 0, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.LLen(r.ctx, key).Result()
-}
-
-// SetAdd 向集合添加元素
-func (r *Redis) SetAdd(key string, members ...interface{}) (int64, error) {
-	if !r.IsConnected() {
-		return 0, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.SAdd(r.ctx, key, members...).Result()
-}
-
-// SetRemove 从集合移除元素
-func (r *Redis) SetRemove(key string, members ...interface{}) (int64, error) {
-	if !r.IsConnected() {
-		return 0, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.SRem(r.ctx, key, members...).Result()
-}
-
-// SetMembers 获取集合所有元素
-func (r *Redis) SetMembers(key string) ([]string, error) {
-	if !r.IsConnected() {
-		return nil, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.SMembers(r.ctx, key).Result()
-}
-
-// SetContains 检查集合是否包含元素
-func (r *Redis) SetContains(key string, member interface{}) (bool, error) {
-	if !r.IsConnected() {
-		return false, fmt.Errorf("redis not connected")
-	}
-
-	return r.client.SIsMember(r.ctx, key, member).Result()
-}
-
-// AcquireLock 获取分布式锁
-func (r *Redis) AcquireLock(key string, value string, expiration time.Duration) (bool, error) {
-	if !r.IsConnected() {
-		return false, fmt.Errorf("redis not connected")
-	}
-
-	// 使用SET NX EX命令获取锁
-	result, err := r.client.SetNX(r.ctx, key, value, expiration).Result()
-	if err != nil {
-		return false, err
-	}
-
-	return result, nil
-}
-
-// ReleaseLock 释放分布式锁
-func (r *Redis) ReleaseLock(key string, value string) (bool, error) {
-	if !r.IsConnected() {
-		return false, fmt.Errorf("redis not connected")
-	}
-
-	// 使用Lua脚本释放锁，确保原子性
-	luaScript := `
-		if redis.call("get", KEYS[1]) == ARGV[1] then
-			return redis.call("del", KEYS[1])
-		else
-			return 0
-		end
-	`
-
-	result, err := r.client.Eval(r.ctx, luaScript, []string{key}, value).Result()
-	if err != nil {
-		return false, err
-	}
-
-	return result.(int64) > 0, nil
-}
-
-// Publish 发布消息
-func (r *Redis) Publish(channel string, message interface{}) error {
-	if !r.IsConnected() {
-		return fmt.Errorf("redis not connected")
-	}
-
-	// 序列化消息
-	var serializedMessage interface{}
-	switch m := message.(type) {
-	case string:
-		serializedMessage = m
-	default:
-		data, err := json.Marshal(message)
-		if err != nil {
-			return err
-		}
-		serializedMessage = string(data)
-	}
-
-	return r.client.Publish(r.ctx, channel, serializedMessage).Err()
-}
-
-// Subscribe 订阅频道
-func (r *Redis) Subscribe(channel string, callback func(string)) {
-	if !r.IsConnected() {
-		tlog.Error("Redis not connected, cannot subscribe")
-		return
-	}
-
-	pubsub := r.client.Subscribe(r.ctx, channel)
-	defer pubsub.Close()
-
-	ch := pubsub.Channel()
-	for msg := range ch {
-		callback(msg.Payload)
+func DefaultCacheConfig() CacheConfig {
+	return CacheConfig{
+		Enabled:   false,
+		KeyPrefix: "sgate",
 	}
 }
 
-// RateLimit 速率限制
-func (r *Redis) RateLimit(key string, limit int64, window time.Duration) (bool, error) {
-	if !r.IsConnected() {
-		return false, fmt.Errorf("redis not connected")
+func ProductionCacheConfig() CacheConfig {
+	return CacheConfig{
+		Enabled:   true,
+		KeyPrefix: "sgate",
 	}
-
-	// 使用滑动窗口限流
-	now := time.Now().UnixMilli()
-	windowStart := now - int64(window.Milliseconds())
-
-	// 移除窗口外的记录
-	_, err := r.client.ZRemRangeByScore(r.ctx, key, "0", fmt.Sprintf("%d", windowStart)).Result()
-	if err != nil {
-		return false, err
-	}
-
-	// 获取当前窗口内的请求数
-	count, err := r.client.ZCard(r.ctx, key).Result()
-	if err != nil {
-		return false, err
-	}
-
-	// 检查是否超过限制
-	if count >= limit {
-		return false, nil
-	}
-
-	// 添加当前请求
-	_, err = r.client.ZAdd(r.ctx, key, &redis.Z{
-		Score:  float64(now),
-		Member: fmt.Sprintf("%d", now),
-	}).Result()
-	if err != nil {
-		return false, err
-	}
-
-	// 设置过期时间
-	_, err = r.client.Expire(r.ctx, key, window).Result()
-	if err != nil {
-		return false, err
-	}
-
-	return true, nil
-}
-
-// CacheUser 缓存用户信息
-func (r *Redis) CacheUser(user *User) error {
-	key := fmt.Sprintf("user:%s", user.UserUUID)
-	return r.Set(key, user, 24*time.Hour)
-}
-
-// GetCachedUser 获取缓存的用户信息
-func (r *Redis) GetCachedUser(userUUID string) (*User, error) {
-	key := fmt.Sprintf("user:%s", userUUID)
-	var user User
-	err := r.Get(key, &user)
-	if err != nil {
-		return nil, err
-	}
-	return &user, nil
-}
-
-// CacheConnection 缓存连接信息
-func (r *Redis) CacheConnection(conn *ConnectionRecord) error {
-	key := fmt.Sprintf("connection:%s", conn.ConnectionID)
-	return r.Set(key, conn, 24*time.Hour)
-}
-
-// GetCachedConnection 获取缓存的连接信息
-func (r *Redis) GetCachedConnection(connectionID string) (*ConnectionRecord, error) {
-	key := fmt.Sprintf("connection:%s", connectionID)
-	var conn ConnectionRecord
-	err := r.Get(key, &conn)
-	if err != nil {
-		return nil, err
-	}
-	return &conn, nil
-}
-
-// CacheGroup 缓存组信息
-func (r *Redis) CacheGroup(group *GroupRecord) error {
-	key := fmt.Sprintf("group:%s", group.GroupID)
-	return r.Set(key, group, 24*time.Hour)
-}
-
-// GetCachedGroup 获取缓存的组信息
-func (r *Redis) GetCachedGroup(groupID string) (*GroupRecord, error) {
-	key := fmt.Sprintf("group:%s", groupID)
-	var group GroupRecord
-	err := r.Get(key, &group)
-	if err != nil {
-		return nil, err
-	}
-	return &group, nil
 }

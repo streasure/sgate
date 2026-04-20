@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,12 +43,36 @@ type Connection struct {
 //   userConnections: 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
 //   groups: 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
 //   count: 连接数量，使用原子操作进行更新，确保并发安全
+//   connectionStats: 连接统计信息，使用原子操作进行更新
 
 type ConnectionManager struct {
 	connections     sync.Map // 本地连接映射，使用 sync.Map 实现并发安全
 	userConnections sync.Map // 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
 	groups          sync.Map // 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
 	count           int32    // 连接数量，使用原子操作进行更新
+	// 连接统计信息
+	connectionStats struct {
+		totalConnections    int64 // 总连接数
+		activeConnections   int64 // 活跃连接数
+		closedConnections   int64 // 关闭的连接数
+		connectionTimeouts  int64 // 超时的连接数
+		connectionErrors    int64 // 出错的连接数
+		avgConnectionTime   int64 // 平均连接时间
+		maxConnectionTime   int64 // 最大连接时间
+		minConnectionTime   int64 // 最小连接时间
+		totalConnectionTime int64 // 总连接时间
+	} // 连接统计信息
+	// 连接质量监控
+	connectionQuality struct {
+		totalMessages       int64 // 总消息数
+		failedMessages      int64 // 失败的消息数
+		avgMessageLatency   int64 // 平均消息延迟
+		maxMessageLatency   int64 // 最大消息延迟
+		minMessageLatency   int64 // 最小消息延迟
+		totalMessageLatency int64 // 总消息延迟
+	} // 连接质量监控
+	// 互斥锁，用于保护统计信息的更新
+	statsMutex sync.Mutex
 }
 
 // connectionPool 连接对象池
@@ -85,6 +111,7 @@ func getConnection(connectionID string, conn gnet.Conn, userUUID, remoteAddr, lo
 // 参数:
 //	c: Connection结构体
 func putConnection(c *Connection) {
+	// 清除引用，避免内存泄漏
 	c.ID = ""
 	c.UserUUID = ""
 	c.Conn = nil
@@ -93,6 +120,7 @@ func putConnection(c *Connection) {
 	c.CreatedAt = 0
 	c.Status = ""
 	c.LastActive = 0
+	// 归还到对象池
 	connectionPool.Put(c)
 }
 
@@ -119,13 +147,11 @@ func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) stri
 	// 获取远程地址和本地地址
 	remoteAddr := ""
 	localAddr := ""
-	if conn != nil {
-		if addr := conn.RemoteAddr(); addr != nil {
-			remoteAddr = addr.String()
-		}
-		if addr := conn.LocalAddr(); addr != nil {
-			localAddr = addr.String()
-		}
+	if conn != nil && conn.RemoteAddr() != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+	if conn != nil && conn.LocalAddr() != nil {
+		localAddr = conn.LocalAddr().String()
 	}
 
 	// 从对象池获取Connection
@@ -134,6 +160,12 @@ func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) stri
 	// 存储连接信息到本地
 	cm.connections.Store(connectionID, connection)
 	atomic.AddInt32(&cm.count, 1)
+
+	// 更新连接统计信息
+	cm.statsMutex.Lock()
+	cm.connectionStats.totalConnections++
+	cm.connectionStats.activeConnections++
+	cm.statsMutex.Unlock()
 
 	// 单一登录模式: 如果用户已有连接，踢掉旧连接
 	if userUUID != "" {
@@ -166,6 +198,10 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 	if conn == nil {
 		return
 	}
+	if conn.Conn == nil {
+		cm.RemoveConnection(connectionID)
+		return
+	}
 
 	// 发送下线通知
 	kickMessage := &protobuf.Message{
@@ -180,13 +216,15 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 	responseData, err := proto.Marshal(kickMessage)
 	if err != nil {
 		tlog.Error("序列化踢人消息失败", "error", err)
-	} else {
+	} else if conn.Conn != nil {
 		// 发送下线通知（不检查错误，因为连接可能已关闭）
 		conn.Conn.Write(responseData)
 	}
 
 	// 关闭连接
-	conn.Conn.Close()
+	if conn.Conn != nil {
+		conn.Conn.Close()
+	}
 
 	// 从连接管理器中移除
 	cm.RemoveConnection(connectionID)
@@ -206,6 +244,26 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 		// 获取Connection中的userUUID
 		connection := conn.(*Connection)
 		userUUID := connection.UserUUID
+
+		// 计算连接时间
+		connectionTime := time.Now().UnixMilli() - connection.CreatedAt
+
+		// 更新连接统计信息
+		cm.statsMutex.Lock()
+		cm.connectionStats.activeConnections--
+		cm.connectionStats.closedConnections++
+		cm.connectionStats.totalConnectionTime += connectionTime
+		// 更新最小、最大和平均连接时间
+		if cm.connectionStats.minConnectionTime == 0 || connectionTime < cm.connectionStats.minConnectionTime {
+			cm.connectionStats.minConnectionTime = connectionTime
+		}
+		if connectionTime > cm.connectionStats.maxConnectionTime {
+			cm.connectionStats.maxConnectionTime = connectionTime
+		}
+		if cm.connectionStats.closedConnections > 0 {
+			cm.connectionStats.avgConnectionTime = cm.connectionStats.totalConnectionTime / cm.connectionStats.closedConnections
+		}
+		cm.statsMutex.Unlock()
 
 		// 归还Connection到对象池
 		putConnection(connection)
@@ -345,10 +403,17 @@ func (cm *ConnectionManager) UpdateConnectionStatus(connectionID string, status 
 // 返回值:
 //	bool: 是否发送成功
 func (cm *ConnectionManager) SendToConnection(connectionID string, message interface{}) bool {
+	startTime := time.Now().UnixMilli()
+	
 	conn := cm.GetConnection(connectionID)
 	if conn == nil {
 		// 输出警告日志
 		tlog.Warn("连接不存在", "connectionID", connectionID)
+		// 更新连接质量统计
+		cm.statsMutex.Lock()
+		cm.connectionQuality.totalMessages++
+		cm.connectionQuality.failedMessages++
+		cm.statsMutex.Unlock()
 		return false
 	}
 
@@ -357,6 +422,11 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 		// 连接已关闭，从连接管理器中移除
 		tlog.Warn("连接已关闭，从连接管理器中移除", "connectionID", connectionID)
 		cm.RemoveConnection(connectionID)
+		// 更新连接质量统计
+		cm.statsMutex.Lock()
+		cm.connectionQuality.totalMessages++
+		cm.connectionQuality.failedMessages++
+		cm.statsMutex.Unlock()
 		return false
 	}
 
@@ -381,22 +451,57 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 	default:
 		// 不支持的消息类型
 		tlog.Error("不支持的消息类型", "type", message)
+		// 更新连接质量统计
+		cm.statsMutex.Lock()
+		cm.connectionQuality.totalMessages++
+		cm.connectionQuality.failedMessages++
+		cm.statsMutex.Unlock()
 		return false
 	}
 
 	if err != nil {
 		// 输出错误日志
 		tlog.Error("序列化消息失败", "error", err)
+		// 更新连接质量统计
+		cm.statsMutex.Lock()
+		cm.connectionQuality.totalMessages++
+		cm.connectionQuality.failedMessages++
+		cm.statsMutex.Unlock()
 		return false
 	}
 
-	if _, err := conn.Conn.Write(responseData); err != nil {
+	// 使用Writev方法发送响应，减少内存拷贝
+	if _, err := conn.Conn.Writev([][]byte{responseData}); err != nil {
 		// 输出错误日志
 		tlog.Error("发送消息失败", "connectionID", connectionID, "error", err)
 		// 连接可能已关闭，从连接管理器中移除
 		cm.RemoveConnection(connectionID)
+		// 更新连接质量统计
+		cm.statsMutex.Lock()
+		cm.connectionQuality.totalMessages++
+		cm.connectionQuality.failedMessages++
+		cm.statsMutex.Unlock()
 		return false
 	}
+
+	// 计算消息延迟
+	latency := time.Now().UnixMilli() - startTime
+
+	// 更新连接质量统计
+	cm.statsMutex.Lock()
+	cm.connectionQuality.totalMessages++
+	cm.connectionQuality.totalMessageLatency += latency
+	// 更新最小、最大和平均消息延迟
+	if cm.connectionQuality.minMessageLatency == 0 || latency < cm.connectionQuality.minMessageLatency {
+		cm.connectionQuality.minMessageLatency = latency
+	}
+	if latency > cm.connectionQuality.maxMessageLatency {
+		cm.connectionQuality.maxMessageLatency = latency
+	}
+	if cm.connectionQuality.totalMessages > 0 {
+		cm.connectionQuality.avgMessageLatency = cm.connectionQuality.totalMessageLatency / cm.connectionQuality.totalMessages
+	}
+	cm.statsMutex.Unlock()
 
 	// 更新最后活跃时间
 	conn.LastActive = time.Now().UnixMilli()
@@ -542,6 +647,23 @@ func generateConnectionID() string {
 	return time.Now().Format("20060102150405") + "-" + randomString(8)
 }
 
+// 全局随机数生成器，使用sync.Once确保只初始化一次
+var (
+	rng     *rand.Rand
+	rngOnce sync.Once
+	rngMu   sync.Mutex
+)
+
+// getRand 获取随机数生成器
+func getRand() *rand.Rand {
+	rngOnce.Do(func() {
+		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	})
+	rngMu.Lock()
+	defer rngMu.Unlock()
+	return rng
+}
+
 // randomString 生成随机字符串
 // 功能: 生成指定长度的随机字符串
 // 参数:
@@ -552,8 +674,9 @@ func generateConnectionID() string {
 func randomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	result := make([]byte, length)
+	r := getRand()
 	for i := range result {
-		result[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+		result[i] = charset[r.Intn(len(charset))]
 	}
 	return string(result)
 }
@@ -788,6 +911,11 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 			// 关闭连接
 			conn.Conn.Close()
 
+			// 更新连接超时统计信息
+			cm.statsMutex.Lock()
+			cm.connectionStats.connectionTimeouts++
+			cm.statsMutex.Unlock()
+
 			// 从连接管理器中移除
 			cm.RemoveConnection(connectionID)
 
@@ -805,4 +933,82 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 //	*Connection: Connection结构体，如果连接不存在则返回nil
 func (cm *ConnectionManager) GetConnectionInfo(connectionID string) *Connection {
 	return cm.GetConnection(connectionID)
+}
+
+// GetConnectionStats 获取连接统计信息
+// 功能: 获取连接管理器的统计信息
+// 返回值:
+//	map[string]interface{}: 连接统计信息
+func (cm *ConnectionManager) GetConnectionStats() map[string]interface{} {
+	cm.statsMutex.Lock()
+	defer cm.statsMutex.Unlock()
+	
+	return map[string]interface{}{
+		"totalConnections":    cm.connectionStats.totalConnections,
+		"activeConnections":   cm.connectionStats.activeConnections,
+		"closedConnections":   cm.connectionStats.closedConnections,
+		"connectionTimeouts":  cm.connectionStats.connectionTimeouts,
+		"connectionErrors":    cm.connectionStats.connectionErrors,
+		"avgConnectionTime":   cm.connectionStats.avgConnectionTime,
+		"maxConnectionTime":   cm.connectionStats.maxConnectionTime,
+		"minConnectionTime":   cm.connectionStats.minConnectionTime,
+		"totalConnectionTime": cm.connectionStats.totalConnectionTime,
+		"totalMessages":       cm.connectionQuality.totalMessages,
+		"failedMessages":      cm.connectionQuality.failedMessages,
+		"avgMessageLatency":   cm.connectionQuality.avgMessageLatency,
+		"maxMessageLatency":   cm.connectionQuality.maxMessageLatency,
+		"minMessageLatency":   cm.connectionQuality.minMessageLatency,
+		"totalMessageLatency": cm.connectionQuality.totalMessageLatency,
+	}
+}
+
+// ResetConnectionStats 重置连接统计信息
+// 功能: 重置连接管理器的统计信息
+func (cm *ConnectionManager) ResetConnectionStats() {
+	cm.statsMutex.Lock()
+	defer cm.statsMutex.Unlock()
+	
+	// 重置连接统计信息
+	cm.connectionStats = struct {
+		totalConnections    int64 // 总连接数
+		activeConnections   int64 // 活跃连接数
+		closedConnections   int64 // 关闭的连接数
+		connectionTimeouts  int64 // 超时的连接数
+		connectionErrors    int64 // 出错的连接数
+		avgConnectionTime   int64 // 平均连接时间
+		maxConnectionTime   int64 // 最大连接时间
+		minConnectionTime   int64 // 最小连接时间
+		totalConnectionTime int64 // 总连接时间
+	}{}
+	
+	// 重置连接质量监控
+	cm.connectionQuality = struct {
+		totalMessages       int64 // 总消息数
+		failedMessages      int64 // 失败的消息数
+		avgMessageLatency   int64 // 平均消息延迟
+		maxMessageLatency   int64 // 最大消息延迟
+		minMessageLatency   int64 // 最小消息延迟
+		totalMessageLatency int64 // 总消息延迟
+	}{}
+}
+
+// LogConnectionStats 记录连接统计信息
+// 功能: 输出连接管理器的统计信息到日志
+func (cm *ConnectionManager) LogConnectionStats() {
+	stats := cm.GetConnectionStats()
+	tlog.Info("连接统计信息", 
+		"totalConnections", stats["totalConnections"],
+		"activeConnections", stats["activeConnections"],
+		"closedConnections", stats["closedConnections"],
+		"connectionTimeouts", stats["connectionTimeouts"],
+		"connectionErrors", stats["connectionErrors"],
+		"avgConnectionTime", fmt.Sprintf("%dms", stats["avgConnectionTime"]),
+		"maxConnectionTime", fmt.Sprintf("%dms", stats["maxConnectionTime"]),
+		"minConnectionTime", fmt.Sprintf("%dms", stats["minConnectionTime"]),
+		"totalMessages", stats["totalMessages"],
+		"failedMessages", stats["failedMessages"],
+		"avgMessageLatency", fmt.Sprintf("%dms", stats["avgMessageLatency"]),
+		"maxMessageLatency", fmt.Sprintf("%dms", stats["maxMessageLatency"]),
+		"minMessageLatency", fmt.Sprintf("%dms", stats["minMessageLatency"]),
+	)
 }

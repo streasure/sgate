@@ -112,7 +112,7 @@ func (g *Gateway) ReadinessCheck() *ReadinessStatus {
 	}
 
 	// 检查工作池是否就绪
-	if g.workerCount < int(g.minWorkers.Load()) {
+	if g.workerCount.Load() < g.minWorkers.Load() {
 		status.Ready = false
 		status.Reason = "Worker pool is not ready"
 		return status
@@ -160,7 +160,7 @@ func (g *Gateway) checkRateLimiter() Check {
 
 // checkWorkerPool 检查工作池
 func (g *Gateway) checkWorkerPool() Check {
-	if g.workerCount < int(g.minWorkers.Load()) {
+	if g.workerCount.Load() < g.minWorkers.Load() {
 		return Check{
 			Status:  "warn",
 			Message: "Worker count is below minimum",

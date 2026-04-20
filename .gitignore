@@ -5,6 +5,10 @@
 *.so
 *.dylib
 
+# 编译出来的二进制文件
+sgate
+sgate.exe
+
 # 日志文件
 *.log
 logs/
@@ -49,4 +53,5 @@ Thumbs.db
 *.bak
 *.old
 *.orig
+*.exe
 
