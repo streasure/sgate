@@ -13,6 +13,7 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"github.com/spf13/cast"
 	"github.com/streasure/sgate/gateway/protobuf"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/metrics"
@@ -70,8 +71,15 @@ func (g *GatewayGnet) monitorResources() {
 	for {
 		select {
 		case <-ticker.C:
-			// 获取当前配置
-			cfg := g.cfg.Load().(*config.Config)
+			// 获取当前配置（安全的类型断言）
+			cfgVal := g.cfg.Load()
+			if cfgVal == nil {
+				continue
+			}
+			cfg, ok := cfgVal.(*config.Config)
+			if !ok {
+				continue
+			}
 
 			// 检查是否启用资源熔断器
 			if !cfg.Resources.EnableResourceCircuitBreaker {
@@ -98,8 +106,8 @@ func (g *GatewayGnet) monitorResources() {
 			if memoryUsage >= cfg.Resources.MemoryThreshold || cpuUsage >= cfg.Resources.CPUThreshold {
 				// 记录资源使用情况
 				tlog.Warn("系统资源使用率过高",
-					"memoryUsage", fmt.Sprintf("%.2f%%", memoryUsage),
-					"cpuUsage", fmt.Sprintf("%.2f%%", cpuUsage),
+					"memoryUsage", cast.ToString(memoryUsage)+"%",
+					"cpuUsage", cast.ToString(cpuUsage)+"%",
 					"memoryThreshold", cfg.Resources.MemoryThreshold,
 					"cpuThreshold", cfg.Resources.CPUThreshold)
 
@@ -542,7 +550,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	// 注册getConnections路由
 	g.routeManager.RegisterRoute("getConnections", func(connectionID string, payload interface{}, callback func(interface{})) {
 		callback(NewResponseMessage("connections", map[string]string{
-			"count": fmt.Sprintf("%d", g.connectionManager.GetConnectionCount()),
+			"count": cast.ToString(g.connectionManager.GetConnectionCount()),
 		}))
 	})
 
@@ -572,12 +580,12 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	g.routeManager.RegisterRoute("health", func(connectionID string, payload interface{}, callback func(interface{})) {
 		callback(NewResponseMessage("health", map[string]string{
 			"status":            "healthy",
-			"timestamp":         fmt.Sprintf("%d", time.Now().UnixMilli()),
-			"activeConnections": fmt.Sprintf("%d", g.connectionManager.GetConnectionCount()),
-			"totalConnections":  fmt.Sprintf("%d", g.metrics.GetConnectionsTotal()),
-			"messagesReceived":  fmt.Sprintf("%d", g.metrics.GetMessagesReceived()),
-			"messagesProcessed": fmt.Sprintf("%d", g.metrics.GetMessagesProcessed()),
-			"messagesFailed":    fmt.Sprintf("%d", g.metrics.GetMessagesFailed()),
+			"timestamp":         cast.ToString(time.Now().UnixMilli()),
+			"activeConnections": cast.ToString(g.connectionManager.GetConnectionCount()),
+			"totalConnections":  cast.ToString(g.metrics.GetConnectionsTotal()),
+			"messagesReceived":  cast.ToString(g.metrics.GetMessagesReceived()),
+			"messagesProcessed": cast.ToString(g.metrics.GetMessagesProcessed()),
+			"messagesFailed":    cast.ToString(g.metrics.GetMessagesFailed()),
 		}))
 	})
 
@@ -886,6 +894,14 @@ func (g *GatewayGnet) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 
 // OnTraffic 收到数据时的回调
 func (g *GatewayGnet) OnTraffic(c gnet.Conn) (action gnet.Action) {
+	// 添加 panic recovery 保护
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error("OnTraffic panic recovered", "error", cast.ToString(r))
+			action = gnet.Close
+		}
+	}()
+
 	// 获取客户端 IP（处理 TCP 和 UDP）
 	var clientIP string
 	switch addr := c.RemoteAddr().(type) {
@@ -1062,7 +1078,7 @@ func (g *GatewayGnet) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Ac
 	// 对于简单路由，直接处理跳过消息队列和限流
 	if route == "ping" {
 		response := NewResponseMessage("pong", map[string]string{
-			"timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
+			"timestamp": cast.ToString(time.Now().UnixMilli()),
 		})
 		responseData, _ := proto.Marshal(response)
 		c.Writev([][]byte{responseData})
@@ -1186,7 +1202,7 @@ func (g *GatewayGnet) handleMessage(msg *Message) {
 	// 处理路由
 	defer func() {
 		if r := recover(); r != nil {
-			errorMsg := NewErrorMessage("error", "Internal server error", fmt.Sprintf("%v", r), "")
+			errorMsg := NewErrorMessage("error", "Internal server error", cast.ToString(r), "")
 			responseData, _ := proto.Marshal(errorMsg)
 			msg.Conn.Writev([][]byte{responseData})
 		}
@@ -1211,7 +1227,23 @@ func (g *GatewayGnet) handleMessage(msg *Message) {
 			return
 		}
 
-		claims, err := ValidateToken(token, g.authSecret.Load().(string))
+		// 安全获取 authSecret
+		authSecretVal := g.authSecret.Load()
+		if authSecretVal == nil {
+			errorMsg := NewErrorMessage("error", "Server configuration error", "", "")
+			responseData, _ := proto.Marshal(errorMsg)
+			msg.Conn.Writev([][]byte{responseData})
+			return
+		}
+		authSecret, ok := authSecretVal.(string)
+		if !ok {
+			errorMsg := NewErrorMessage("error", "Server configuration error", "", "")
+			responseData, _ := proto.Marshal(errorMsg)
+			msg.Conn.Writev([][]byte{responseData})
+			return
+		}
+
+		claims, err := ValidateToken(token, authSecret)
 		if err != nil {
 			errorMsg := NewErrorMessage("error", "Invalid token", err.Error(), "")
 			responseData, _ := proto.Marshal(errorMsg)
@@ -1280,7 +1312,7 @@ func (g *GatewayGnet) registerVersionRoute() {
 		callback(NewResponseMessage("version", map[string]string{
 			"version":   g.GetVersion(),
 			"clusterID": g.clusterID,
-			"isLeader":  fmt.Sprintf("%t", g.isLeader),
+			"isLeader":  cast.ToString(g.isLeader),
 		}))
 	})
 }
@@ -1348,7 +1380,11 @@ func (g *GatewayGnet) HandleWebSocket(c gnet.Conn, data []byte) (action gnet.Act
 // requiresAuth 检查路由是否需要认证
 func (g *GatewayGnet) requiresAuth(route string) bool {
 	// 从 atomic.Value 中获取认证路由
-	authRoutes, ok := g.authRoutes.Load().(map[string]bool)
+	authRoutesVal := g.authRoutes.Load()
+	if authRoutesVal == nil {
+		return false
+	}
+	authRoutes, ok := authRoutesVal.(map[string]bool)
 	if !ok {
 		return false
 	}

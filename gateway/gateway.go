@@ -14,6 +14,7 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
+	"github.com/spf13/cast"
 	"github.com/streasure/sgate/gateway/protobuf"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/metrics"
@@ -49,11 +50,11 @@ func (mm *MemoryMonitor) Start(g *Gateway) {
 
 				// 输出内存使用日志
 				tlog.Debug("内存使用情况",
-					"heapAlloc", fmt.Sprintf("%.2f MB", float64(memStats.HeapAlloc)/1024/1024),
+					"heapAlloc", cast.ToString(float64(memStats.HeapAlloc)/1024/1024)+" MB",
 					"heapObjects", memStats.HeapObjects,
-					"bufferUsage", fmt.Sprintf("%.2f MB", float64(g.bufferUsage.Load())/1024/1024),
+					"bufferUsage", cast.ToString(float64(g.bufferUsage.Load())/1024/1024)+" MB",
 					"bufferCount", g.bufferCount.Load(),
-					"objectPoolUsage", fmt.Sprintf("%.2f MB", float64(g.objectPoolUsage.Load())/1024/1024),
+					"objectPoolUsage", cast.ToString(float64(g.objectPoolUsage.Load())/1024/1024)+" MB",
 				)
 			}
 		}
@@ -998,7 +999,7 @@ func (g *Gateway) registerDefaultRoutes() {
 	// 注册getConnections路由
 	g.routeManager.RegisterRoute("getConnections", func(connectionID string, payload interface{}, callback func(interface{})) {
 		callback(NewResponseMessage("connections", map[string]string{
-			"count": fmt.Sprintf("%d", g.connectionManager.GetConnectionCount()),
+			"count": cast.ToString(g.connectionManager.GetConnectionCount()),
 		}))
 	})
 
@@ -1028,12 +1029,12 @@ func (g *Gateway) registerDefaultRoutes() {
 	g.routeManager.RegisterRoute("health", func(connectionID string, payload interface{}, callback func(interface{})) {
 		callback(NewResponseMessage("health", map[string]string{
 			"status":            "healthy",
-			"timestamp":         fmt.Sprintf("%d", time.Now().UnixMilli()),
-			"activeConnections": fmt.Sprintf("%d", g.connectionManager.GetConnectionCount()),
-			"totalConnections":  fmt.Sprintf("%d", g.metrics.GetConnectionsTotal()),
-			"messagesReceived":  fmt.Sprintf("%d", g.metrics.GetMessagesReceived()),
-			"messagesProcessed": fmt.Sprintf("%d", g.metrics.GetMessagesProcessed()),
-			"messagesFailed":    fmt.Sprintf("%d", g.metrics.GetMessagesFailed()),
+			"timestamp":         cast.ToString(time.Now().UnixMilli()),
+			"activeConnections": cast.ToString(g.connectionManager.GetConnectionCount()),
+			"totalConnections":  cast.ToString(g.metrics.GetConnectionsTotal()),
+			"messagesReceived":  cast.ToString(g.metrics.GetMessagesReceived()),
+			"messagesProcessed": cast.ToString(g.metrics.GetMessagesProcessed()),
+			"messagesFailed":    cast.ToString(g.metrics.GetMessagesFailed()),
 		}))
 	})
 
@@ -1876,7 +1877,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 	if msg.Route == "ping" {
 		// 直接处理 ping 路由，避免复杂的处理流程
 		response := NewResponseMessage("pong", map[string]string{
-			"timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
+			"timestamp": cast.ToString(time.Now().UnixMilli()),
 		})
 		responseData, _ := proto.Marshal(response)
 		msg.Conn.Write(responseData)
@@ -1906,7 +1907,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 	} else if msg.Route == "getConnections" {
 		// 直接处理 getConnections 路由
 		response := NewResponseMessage("connections", map[string]string{
-			"count": fmt.Sprintf("%d", g.connectionManager.GetConnectionCount()),
+			"count": cast.ToString(g.connectionManager.GetConnectionCount()),
 		})
 		responseData, _ := proto.Marshal(response)
 		msg.Conn.Write(responseData)
@@ -1935,12 +1936,12 @@ func (g *Gateway) handleMessage(msg *Message) {
 		// 直接处理 health 路由
 		response := NewResponseMessage("health", map[string]string{
 			"status":            "healthy",
-			"timestamp":         fmt.Sprintf("%d", time.Now().UnixMilli()),
-			"activeConnections": fmt.Sprintf("%d", g.connectionManager.GetConnectionCount()),
-			"totalConnections":  fmt.Sprintf("%d", g.metrics.GetConnectionsTotal()),
-			"messagesReceived":  fmt.Sprintf("%d", g.metrics.GetMessagesReceived()),
-			"messagesProcessed": fmt.Sprintf("%d", g.metrics.GetMessagesProcessed()),
-			"messagesFailed":    fmt.Sprintf("%d", g.metrics.GetMessagesFailed()),
+			"timestamp":         cast.ToString(time.Now().UnixMilli()),
+			"activeConnections": cast.ToString(g.connectionManager.GetConnectionCount()),
+			"totalConnections":  cast.ToString(g.metrics.GetConnectionsTotal()),
+			"messagesReceived":  cast.ToString(g.metrics.GetMessagesReceived()),
+			"messagesProcessed": cast.ToString(g.metrics.GetMessagesProcessed()),
+			"messagesFailed":    cast.ToString(g.metrics.GetMessagesFailed()),
 		})
 		responseData, _ := proto.Marshal(response)
 		msg.Conn.Write(responseData)
@@ -2075,8 +2076,34 @@ func (g *Gateway) handleMessage(msg *Message) {
 			return
 		}
 
+		// 安全获取 authSecret
+		authSecretVal := g.authSecret.Load()
+		if authSecretVal == nil {
+			g.tracer.AddEvent(span, "config_error", map[string]string{
+				"route": msg.Route,
+				"error": "authSecret is nil",
+			})
+			breaker.RecordFailure()
+			errorMsg := NewErrorMessage("error", "Server configuration error", "", "")
+			responseData, _ := proto.Marshal(errorMsg)
+			msg.Conn.Write(responseData)
+			return
+		}
+		authSecret, ok := authSecretVal.(string)
+		if !ok {
+			g.tracer.AddEvent(span, "config_error", map[string]string{
+				"route": msg.Route,
+				"error": "authSecret type error",
+			})
+			breaker.RecordFailure()
+			errorMsg := NewErrorMessage("error", "Server configuration error", "", "")
+			responseData, _ := proto.Marshal(errorMsg)
+			msg.Conn.Write(responseData)
+			return
+		}
+
 		// 验证token
-		claims, err := ValidateToken(token, g.authSecret.Load().(string))
+		claims, err := ValidateToken(token, authSecret)
 		if err != nil {
 			// 记录事件
 			g.tracer.AddEvent(span, "invalid_token", map[string]string{
@@ -2234,7 +2261,15 @@ func (g *Gateway) handleMessage(msg *Message) {
 //
 //	bool: 是否需要认证
 func (g *Gateway) requiresAuth(route string) bool {
-	return g.authRoutes.Load().(map[string]bool)[route]
+	authRoutesVal := g.authRoutes.Load()
+	if authRoutesVal == nil {
+		return false
+	}
+	authRoutes, ok := authRoutesVal.(map[string]bool)
+	if !ok {
+		return false
+	}
+	return authRoutes[route]
 }
 
 // sanitizeString 清理字符串，防止 XSS 攻击

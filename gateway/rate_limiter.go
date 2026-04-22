@@ -93,6 +93,9 @@ func (rl *RateLimiter) Allow(dimension, key string) bool {
 
 	if !exists {
 		rl.mu.Lock()
+		if _, exists = rl.tokensByDimension[dimension]; !exists {
+			rl.tokensByDimension[dimension] = make(map[string]*TokenBucket)
+		}
 		if bucket, exists = rl.tokensByDimension[dimension][key]; !exists {
 			config := rl.dimensionConfigs[dimension]
 			if config.MaxTokens == 0 {

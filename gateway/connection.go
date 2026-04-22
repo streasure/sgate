@@ -15,25 +15,45 @@ import (
 
 // Connection 连接结构体
 // 功能: 封装连接的所有信息，替代map[string]interface{}
-// 字段:
-//   ID: 连接唯一标识
-//   UserUUID: 用户UUID，用于用户-连接映射
+// 优化: 为支持百万级并发，减少内存占用
+//   id: 连接唯一标识
+//   UserUUID: 用户UUID
 //   Conn: 底层网络连接
 //   RemoteAddr: 远程地址
-//   LocalAddr: 本地地址
 //   CreatedAt: 创建时间戳
-//   Status: 连接状态
 //   LastActive: 最后活跃时间
+//   Status: 连接状态 (0=active, 1=closing, 2=closed)
 
 type Connection struct {
-	ID         string    // 连接唯一标识
-	UserUUID   string    // 用户UUID
-	Conn       gnet.Conn // 底层网络连接
-	RemoteAddr string    // 远程地址
-	LocalAddr  string    // 本地地址
+	id         string    // 连接唯一标识 (约50字节)
+	UserUUID   string    // 用户UUID (约50字节)
+	Conn       gnet.Conn // 底层网络连接 (8字节指针)
+	RemoteAddr string    // 远程地址 (约30字节)
 	CreatedAt  int64     // 创建时间戳
-	Status     string    // 连接状态
 	LastActive int64     // 最后活跃时间
+	Status     int8      // 连接状态
+}
+
+func (c *Connection) ID() string {
+	return c.id
+}
+
+func (c *Connection) Send(data []byte) error {
+	_, err := c.Conn.Write(data)
+	return err
+}
+
+func (c *Connection) Sendv(datas [][]byte) error {
+	_, err := c.Conn.Writev(datas)
+	return err
+}
+
+func (c *Connection) Close() error {
+	return c.Conn.Close()
+}
+
+func (c *Connection) RemoteAddrStr() string {
+	return c.RemoteAddr
 }
 
 // ConnectionManager 连接管理器
@@ -94,33 +114,27 @@ var connectionPool = sync.Pool{
 //
 // 返回值:
 //	*Connection: Connection结构体
-func getConnection(connectionID string, conn gnet.Conn, userUUID, remoteAddr, localAddr, status string) *Connection {
+func getConnection(connectionID string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
 	c := connectionPool.Get().(*Connection)
-	c.ID = connectionID
+	c.id = connectionID
 	c.UserUUID = userUUID
 	c.Conn = conn
 	c.RemoteAddr = remoteAddr
-	c.LocalAddr = localAddr
 	c.CreatedAt = time.Now().UnixMilli()
-	c.Status = status
+	c.Status = 0
 	c.LastActive = time.Now().UnixMilli()
 	return c
 }
 
 // putConnection 归还Connection到对象池
-// 参数:
-//	c: Connection结构体
 func putConnection(c *Connection) {
-	// 清除引用，避免内存泄漏
-	c.ID = ""
+	c.id = ""
 	c.UserUUID = ""
 	c.Conn = nil
 	c.RemoteAddr = ""
-	c.LocalAddr = ""
 	c.CreatedAt = 0
-	c.Status = ""
+	c.Status = 0
 	c.LastActive = 0
-	// 归还到对象池
 	connectionPool.Put(c)
 }
 
@@ -141,21 +155,13 @@ func NewConnectionManager() *ConnectionManager {
 // 返回值:
 //	string: 连接ID
 func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) string {
-	// 生成连接ID
 	connectionID := generateConnectionID()
 
-	// 获取远程地址和本地地址
 	remoteAddr := ""
-	localAddr := ""
 	if conn != nil && conn.RemoteAddr() != nil {
 		remoteAddr = conn.RemoteAddr().String()
 	}
-	if conn != nil && conn.LocalAddr() != nil {
-		localAddr = conn.LocalAddr().String()
-	}
-
-	// 从对象池获取Connection
-	connection := getConnection(connectionID, conn, userUUID, remoteAddr, localAddr, "active")
+	connection := getConnection(connectionID, conn, userUUID, remoteAddr)
 
 	// 存储连接信息到本地
 	cm.connections.Store(connectionID, connection)
@@ -379,19 +385,15 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUs
 // 功能: 更新指定连接的状态
 // 参数:
 //	connectionID: 连接ID
-//	status: 新的状态
-func (cm *ConnectionManager) UpdateConnectionStatus(connectionID string, status string) {
+//	status: 新的状态 (0=active, 1=closing, 2=closed)
+func (cm *ConnectionManager) UpdateConnectionStatus(connectionID string, status int8) {
 	conn := cm.GetConnection(connectionID)
 	if conn == nil {
-		tlog.Warn("连接不存在", "connectionID", connectionID)
 		return
 	}
 
 	conn.Status = status
 	conn.LastActive = time.Now().UnixMilli()
-
-	// 输出调试日志
-	tlog.Debug("连接状态已更新", "connectionID", connectionID, "status", status)
 }
 
 // SendToConnection 发送消息到指定连接
@@ -418,11 +420,8 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 	}
 
 	// 检查连接是否已关闭
-	if conn.Status == "closed" {
-		// 连接已关闭，从连接管理器中移除
-		tlog.Warn("连接已关闭，从连接管理器中移除", "connectionID", connectionID)
+	if conn.Status == 2 {
 		cm.RemoveConnection(connectionID)
-		// 更新连接质量统计
 		cm.statsMutex.Lock()
 		cm.connectionQuality.totalMessages++
 		cm.connectionQuality.failedMessages++
@@ -767,7 +766,7 @@ func (cm *ConnectionManager) SendToUser(userUUID string, message interface{}) bo
 	}
 
 	// 发送消息
-	return cm.SendToConnection(connection.ID, message)
+	return cm.SendToConnection(connection.id, message)
 }
 
 // SendToGroup 发送消息到指定推送组
