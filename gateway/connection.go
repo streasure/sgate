@@ -664,7 +664,7 @@ func (cm *ConnectionManager) CloseAllConnections() {
 //
 //	string: 连接ID
 func generateConnectionID() string {
-	return time.Now().Format("20060102150405") + "-" + randomString(8)
+	return time.Now().Format("20060102150405") + "-" + randomString(12)
 }
 
 // randomString 生成随机字符串
