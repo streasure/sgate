@@ -1,16 +1,17 @@
 package gateway
 
 import (
+	"crypto/rand"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/streasure/sgate/gateway/protobuf"
-	"google.golang.org/protobuf/proto"
 	tlog "github.com/streasure/treasure-slog"
+	"google.golang.org/protobuf/proto"
 )
 
 // Connection 连接结构体
@@ -105,6 +106,7 @@ var connectionPool = sync.Pool{
 
 // getConnection 从对象池获取Connection
 // 参数:
+//
 //	connectionID: 连接ID
 //	conn: 底层网络连接
 //	userUUID: 用户UUID
@@ -113,6 +115,7 @@ var connectionPool = sync.Pool{
 //	status: 连接状态
 //
 // 返回值:
+//
 //	*Connection: Connection结构体
 func getConnection(connectionID string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
 	c := connectionPool.Get().(*Connection)
@@ -140,6 +143,7 @@ func putConnection(c *Connection) {
 
 // NewConnectionManager 创建连接管理器实例
 // 返回值:
+//
 //	*ConnectionManager: 连接管理器实例
 func NewConnectionManager() *ConnectionManager {
 	return &ConnectionManager{}
@@ -149,10 +153,12 @@ func NewConnectionManager() *ConnectionManager {
 // 功能: 将新的网络连接添加到连接管理器中，并生成唯一的连接ID
 // 单一登录模式: 如果用户已有连接，会踢掉旧连接
 // 参数:
+//
 //	conn: 网络连接
 //	userUUID: 用户UUID
 //
 // 返回值:
+//
 //	string: 连接ID
 func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) string {
 	connectionID := generateConnectionID()
@@ -196,6 +202,7 @@ func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) stri
 // kickConnection 踢掉指定连接
 // 功能: 向指定连接发送下线通知并断开连接
 // 参数:
+//
 //	connectionID: 要踢掉的连接ID
 //	reason: 踢人原因
 //	message: 踢人消息
@@ -241,6 +248,7 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 // RemoveConnection 移除连接
 // 功能: 从连接管理器中移除指定的连接，并更新连接计数
 // 参数:
+//
 //	connectionID: 连接ID
 func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	conn, exists := cm.connections.LoadAndDelete(connectionID)
@@ -294,9 +302,11 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 // GetConnection 获取连接
 // 功能: 根据连接ID获取对应的Connection结构体
 // 参数:
+//
 //	connectionID: 连接ID
 //
 // 返回值:
+//
 //	*Connection: Connection结构体，如果连接不存在则返回nil
 func (cm *ConnectionManager) GetConnection(connectionID string) *Connection {
 	if conn, ok := cm.connections.Load(connectionID); ok {
@@ -308,9 +318,11 @@ func (cm *ConnectionManager) GetConnection(connectionID string) *Connection {
 // GetGnetConnection 获取底层gnet连接
 // 功能: 根据连接ID获取对应的gnet.Conn
 // 参数:
+//
 //	connectionID: 连接ID
 //
 // 返回值:
+//
 //	gnet.Conn: 网络连接，如果连接不存在则返回nil
 func (cm *ConnectionManager) GetGnetConnection(connectionID string) gnet.Conn {
 	if conn := cm.GetConnection(connectionID); conn != nil {
@@ -322,9 +334,11 @@ func (cm *ConnectionManager) GetGnetConnection(connectionID string) gnet.Conn {
 // GetConnectionByUserUUID 根据用户UUID获取连接
 // 功能: 根据用户UUID获取对应的Connection结构体（单一登录模式）
 // 参数:
+//
 //	userUUID: 用户UUID
 //
 // 返回值:
+//
 //	*Connection: Connection结构体，如果连接不存在则返回nil
 func (cm *ConnectionManager) GetConnectionByUserUUID(userUUID string) *Connection {
 	if connectionID, ok := cm.userConnections.Load(userUUID); ok {
@@ -336,6 +350,7 @@ func (cm *ConnectionManager) GetConnectionByUserUUID(userUUID string) *Connectio
 // UpdateConnectionUserUUID 更新连接的用户UUID
 // 功能: 更新指定连接的用户UUID（单一登录模式：如果新用户已有连接，会踢掉旧连接）
 // 参数:
+//
 //	connectionID: 连接ID
 //	newUserUUID: 新的用户UUID
 func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUserUUID string) {
@@ -384,6 +399,7 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUs
 // UpdateConnectionStatus 更新连接状态
 // 功能: 更新指定连接的状态
 // 参数:
+//
 //	connectionID: 连接ID
 //	status: 新的状态 (0=active, 1=closing, 2=closed)
 func (cm *ConnectionManager) UpdateConnectionStatus(connectionID string, status int8) {
@@ -399,14 +415,16 @@ func (cm *ConnectionManager) UpdateConnectionStatus(connectionID string, status 
 // SendToConnection 发送消息到指定连接
 // 功能: 向指定的连接发送消息，并处理连接关闭的情况
 // 参数:
+//
 //	connectionID: 连接ID
 //	message: 消息内容
 //
 // 返回值:
+//
 //	bool: 是否发送成功
 func (cm *ConnectionManager) SendToConnection(connectionID string, message interface{}) bool {
 	startTime := time.Now().UnixMilli()
-	
+
 	conn := cm.GetConnection(connectionID)
 	if conn == nil {
 		// 输出警告日志
@@ -511,6 +529,7 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 // Broadcast 广播消息
 // 功能: 向所有连接广播消息，使用并发方式提高性能
 // 参数:
+//
 //	message: 消息内容
 func (cm *ConnectionManager) Broadcast(message interface{}) {
 	// 先序列化消息，减少锁的持有时间
@@ -611,6 +630,7 @@ func (cm *ConnectionManager) Broadcast(message interface{}) {
 // GetConnectionCount 获取连接数
 // 功能: 获取当前连接管理器中的连接数量
 // 返回值:
+//
 //	int: 连接数
 func (cm *ConnectionManager) GetConnectionCount() int {
 	return int(atomic.LoadInt32(&cm.count))
@@ -641,41 +661,35 @@ func (cm *ConnectionManager) CloseAllConnections() {
 // generateConnectionID 生成连接ID
 // 功能: 生成唯一的连接ID，格式为时间戳-随机字符串
 // 返回值:
+//
 //	string: 连接ID
 func generateConnectionID() string {
 	return time.Now().Format("20060102150405") + "-" + randomString(8)
 }
 
-// 全局随机数生成器，使用sync.Once确保只初始化一次
-var (
-	rng     *rand.Rand
-	rngOnce sync.Once
-	rngMu   sync.Mutex
-)
-
-// getRand 获取随机数生成器
-func getRand() *rand.Rand {
-	rngOnce.Do(func() {
-		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-	})
-	rngMu.Lock()
-	defer rngMu.Unlock()
-	return rng
-}
-
 // randomString 生成随机字符串
-// 功能: 生成指定长度的随机字符串
+// 功能: 生成指定长度的随机字符串，使用crypto/rand提供更安全的随机数
 // 参数:
+//
 //	length: 字符串长度
 //
 // 返回值:
+//
 //	string: 随机字符串
 func randomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	result := make([]byte, length)
-	r := getRand()
+	charsetLength := big.NewInt(int64(len(charset)))
+
 	for i := range result {
-		result[i] = charset[r.Intn(len(charset))]
+		// 使用crypto/rand生成安全的随机数
+		num, err := rand.Int(rand.Reader, charsetLength)
+		if err != nil {
+			// 如果crypto/rand失败，回退到时间戳作为后备
+			result[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+		} else {
+			result[i] = charset[num.Int64()]
+		}
 	}
 	return string(result)
 }
@@ -683,6 +697,7 @@ func randomString(length int) string {
 // CreateGroup 创建推送组
 // 功能: 创建一个新的推送组
 // 参数:
+//
 //	groupID: 组ID
 //	groupName: 组名称
 func (cm *ConnectionManager) CreateGroup(groupID string, groupName string) {
@@ -701,6 +716,7 @@ func (cm *ConnectionManager) CreateGroup(groupID string, groupName string) {
 // DeleteGroup 删除推送组
 // 功能: 删除一个推送组
 // 参数:
+//
 //	groupID: 组ID
 func (cm *ConnectionManager) DeleteGroup(groupID string) {
 	// 检查组是否存在
@@ -718,6 +734,7 @@ func (cm *ConnectionManager) DeleteGroup(groupID string) {
 // AddUserToGroup 添加用户到推送组
 // 功能: 将用户添加到指定的推送组
 // 参数:
+//
 //	groupID: 组ID
 //	userUUID: 用户UUID
 func (cm *ConnectionManager) AddUserToGroup(groupID string, userUUID string) {
@@ -735,6 +752,7 @@ func (cm *ConnectionManager) AddUserToGroup(groupID string, userUUID string) {
 // RemoveUserFromGroup 从推送组中移除用户
 // 功能: 将用户从指定的推送组中移除
 // 参数:
+//
 //	groupID: 组ID
 //	userUUID: 用户UUID
 func (cm *ConnectionManager) RemoveUserFromGroup(groupID string, userUUID string) {
@@ -752,10 +770,12 @@ func (cm *ConnectionManager) RemoveUserFromGroup(groupID string, userUUID string
 // SendToUser 发送消息到指定用户
 // 功能: 向指定用户的连接发送消息（单一登录模式）
 // 参数:
+//
 //	userUUID: 用户UUID
 //	message: 消息内容
 //
 // 返回值:
+//
 //	bool: 是否发送成功
 func (cm *ConnectionManager) SendToUser(userUUID string, message interface{}) bool {
 	// 获取用户的连接（单一登录模式）
@@ -772,10 +792,12 @@ func (cm *ConnectionManager) SendToUser(userUUID string, message interface{}) bo
 // SendToGroup 发送消息到指定推送组
 // 功能: 向指定推送组的所有用户发送消息
 // 参数:
+//
 //	groupID: 组ID
 //	message: 消息内容
 //
 // 返回值:
+//
 //	bool: 是否发送成功
 func (cm *ConnectionManager) SendToGroup(groupID string, message interface{}) bool {
 	// 检查组是否存在
@@ -799,9 +821,11 @@ func (cm *ConnectionManager) SendToGroup(groupID string, message interface{}) bo
 // GetUserConnections 获取用户的连接（单一登录模式）
 // 功能: 获取指定用户的连接ID（单一登录模式下最多返回一个）
 // 参数:
+//
 //	userUUID: 用户UUID
 //
 // 返回值:
+//
 //	[]string: 连接ID列表（单一登录模式下最多一个）
 func (cm *ConnectionManager) GetUserConnections(userUUID string) []string {
 	// 获取用户的连接（单一登录模式）
@@ -814,9 +838,11 @@ func (cm *ConnectionManager) GetUserConnections(userUUID string) []string {
 // GetGroupUsers 获取推送组的所有用户
 // 功能: 获取指定推送组的所有用户UUID
 // 参数:
+//
 //	groupID: 组ID
 //
 // 返回值:
+//
 //	[]string: 用户UUID列表
 func (cm *ConnectionManager) GetGroupUsers(groupID string) []string {
 	// 检查组是否存在
@@ -838,6 +864,7 @@ func (cm *ConnectionManager) GetGroupUsers(groupID string) []string {
 // UpdateUserConnection 更新连接的用户映射
 // 功能: 更新指定连接的用户UUID映射（单一登录模式）
 // 参数:
+//
 //	connectionID: 连接ID
 //	oldUserUUID: 旧用户UUID
 //	newUserUUID: 新用户UUID
@@ -849,6 +876,7 @@ func (cm *ConnectionManager) UpdateUserConnection(connectionID string, oldUserUU
 // StartConnectionChecker 启动连接检查器
 // 功能: 定期检查不活跃的连接并自动清理
 // 参数:
+//
 //	timeout: 连接超时时间
 //	interval: 检查间隔
 func (cm *ConnectionManager) StartConnectionChecker(timeout time.Duration, interval time.Duration) {
@@ -868,6 +896,7 @@ func (cm *ConnectionManager) StartConnectionChecker(timeout time.Duration, inter
 // checkInactiveConnections 检查不活跃的连接
 // 功能: 检查所有连接，清理超过超时时间的不活跃连接
 // 参数:
+//
 //	timeout: 连接超时时间
 func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 	now := time.Now().UnixMilli()
@@ -926,9 +955,11 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 // GetConnectionInfo 获取连接信息
 // 功能: 获取指定连接的详细信息
 // 参数:
+//
 //	connectionID: 连接ID
 //
 // 返回值:
+//
 //	*Connection: Connection结构体，如果连接不存在则返回nil
 func (cm *ConnectionManager) GetConnectionInfo(connectionID string) *Connection {
 	return cm.GetConnection(connectionID)
@@ -937,11 +968,12 @@ func (cm *ConnectionManager) GetConnectionInfo(connectionID string) *Connection 
 // GetConnectionStats 获取连接统计信息
 // 功能: 获取连接管理器的统计信息
 // 返回值:
+//
 //	map[string]interface{}: 连接统计信息
 func (cm *ConnectionManager) GetConnectionStats() map[string]interface{} {
 	cm.statsMutex.Lock()
 	defer cm.statsMutex.Unlock()
-	
+
 	return map[string]interface{}{
 		"totalConnections":    cm.connectionStats.totalConnections,
 		"activeConnections":   cm.connectionStats.activeConnections,
@@ -966,7 +998,7 @@ func (cm *ConnectionManager) GetConnectionStats() map[string]interface{} {
 func (cm *ConnectionManager) ResetConnectionStats() {
 	cm.statsMutex.Lock()
 	defer cm.statsMutex.Unlock()
-	
+
 	// 重置连接统计信息
 	cm.connectionStats = struct {
 		totalConnections    int64 // 总连接数
@@ -979,7 +1011,7 @@ func (cm *ConnectionManager) ResetConnectionStats() {
 		minConnectionTime   int64 // 最小连接时间
 		totalConnectionTime int64 // 总连接时间
 	}{}
-	
+
 	// 重置连接质量监控
 	cm.connectionQuality = struct {
 		totalMessages       int64 // 总消息数
@@ -995,7 +1027,7 @@ func (cm *ConnectionManager) ResetConnectionStats() {
 // 功能: 输出连接管理器的统计信息到日志
 func (cm *ConnectionManager) LogConnectionStats() {
 	stats := cm.GetConnectionStats()
-	tlog.Info("连接统计信息", 
+	tlog.Info("连接统计信息",
 		"totalConnections", stats["totalConnections"],
 		"activeConnections", stats["activeConnections"],
 		"closedConnections", stats["closedConnections"],
