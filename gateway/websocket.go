@@ -14,7 +14,7 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/sgate/gateway/protobuf"
+	"github.com/streasure/sgate/protobuf"
 	"google.golang.org/protobuf/proto"
 	tlog "github.com/streasure/treasure-slog"
 )

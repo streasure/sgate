@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -14,9 +15,9 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
 	"github.com/spf13/cast"
-	"github.com/streasure/sgate/gateway/protobuf"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/metrics"
+	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/protobuf/proto"
 )
@@ -58,6 +59,7 @@ type GatewayGnet struct {
 	circuitBreakerManager  *CircuitBreakerManager     // 熔断器管理器
 	messageQueue           *MessageQueue              // 消息队列管理器
 	tracer                 *Tracer                    // 链路追踪器
+	logicClient            *LogicClient               // 逻辑服 gRPC 客户端
 	resourceCircuitBreaker *CircuitBreaker            // 资源熔断器
 	resourceCheckInterval  time.Duration              // 资源检查间隔
 	userRateLimitConfig    config.UserRateLimitConfig // 用户维度限流配置
@@ -204,6 +206,7 @@ func NewGatewayGnet() *GatewayGnet {
 		resourceCircuitBreaker: NewCircuitBreaker("resource", 1, 1, 30*time.Second), // 资源熔断器
 		resourceCheckInterval:  5 * time.Second,                                     // 每5秒检查一次资源使用情况
 		userRateLimitConfig:    cfg.RateLimiter.UserRateLimit,                       // 用户维度限流配置
+		logicClient:            NewLogicClient(GatewayInterface(nil)),               // 逻辑服 gRPC 客户端
 	}
 
 	// 使用atomic.Value存储配置
@@ -271,6 +274,31 @@ func NewGatewayGnet() *GatewayGnet {
 			}
 		}
 	}()
+
+	gw.logicClient.gateway = gw
+
+	go func() {
+		tlog.Info("starting gRPC server", "port", ":50051")
+		if err := StartGRPCServer(gw, ":50051"); err != nil {
+			tlog.Error("failed to start gRPC server", "error", err)
+		} else {
+			tlog.Info("gRPC server started", "port", ":50051")
+		}
+	}()
+
+	go func() {
+		tlog.Info("connecting to logic server...")
+		time.Sleep(2 * time.Second)
+		tlog.Info("attempting to connect to logic server: localhost:50052")
+		if err := gw.logicClient.Connect("localhost:50052"); err != nil {
+			tlog.Error("failed to connect to logic server", "error", err)
+		} else {
+			tlog.Info("successfully connected to logic server")
+		}
+	}()
+
+	gw.routeManager.RegisterLogicRoute("ping")
+	gw.routeManager.RegisterLogicRoute("test")
 
 	return gw
 }
@@ -541,21 +569,21 @@ func (g *GatewayGnet) messageWorker() {
 // registerDefaultRoutes 注册默认路由
 func (g *GatewayGnet) registerDefaultRoutes() {
 	// 注册ping路由
-	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("pong", map[string]string{
 			"timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
 		}))
 	})
 
 	// 注册getConnections路由
-	g.routeManager.RegisterRoute("getConnections", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("getConnections", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("connections", map[string]string{
 			"count": cast.ToString(g.connectionManager.GetConnectionCount()),
 		}))
 	})
 
 	// 注册broadcast路由
-	g.routeManager.RegisterRoute("broadcast", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("broadcast", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			if _, ok := payloadMap["message"]; ok {
 				g.Broadcast(payloadMap["message"])
@@ -577,7 +605,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册健康检查路由
-	g.routeManager.RegisterRoute("health", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("health", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("health", map[string]string{
 			"status":            "healthy",
 			"timestamp":         cast.ToString(time.Now().UnixMilli()),
@@ -590,7 +618,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册API文档路由
-	g.routeManager.RegisterRoute("api-docs", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("api-docs", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("api-docs", map[string]string{
 			"version": "1.0.0",
 			"routes":  "ping,getConnections,broadcast,health,api-docs,version",
@@ -603,7 +631,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	g.registerPingRoute()
 
 	// 注册默认的测试路由，减少路由不存在的情况
-	g.routeManager.RegisterRoute("test", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("test", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("testResult", map[string]string{
 			"success": "true",
 			"message": "Test route works",
@@ -611,7 +639,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册默认的错误处理路由
-	g.routeManager.RegisterRoute("error", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("error", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			if errorMsg, ok := payloadMap["message"]; ok {
 				callback(NewResponseMessage("error", map[string]string{
@@ -630,7 +658,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册默认的消息队列测试路由
-	g.routeManager.RegisterRoute("queueTest", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("queueTest", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			if message, ok := payloadMap["message"]; ok {
 				// 创建测试消息
@@ -670,7 +698,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册白名单管理路由
-	g.routeManager.RegisterRoute("addWhitelist", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("addWhitelist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			ip, ok := payloadMap["ip"]
 			if !ok {
@@ -702,7 +730,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 		}
 	})
 
-	g.routeManager.RegisterRoute("removeWhitelist", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("removeWhitelist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			ip, ok := payloadMap["ip"]
 			if !ok {
@@ -734,7 +762,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 		}
 	})
 
-	g.routeManager.RegisterRoute("getWhitelist", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("getWhitelist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		whitelist := g.whitelistBlacklist.GetWhitelist()
 		// 将切片转换为逗号分隔的字符串
 		whitelistStr := ""
@@ -750,7 +778,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册黑名单管理路由
-	g.routeManager.RegisterRoute("addBlacklist", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("addBlacklist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			ip, ok := payloadMap["ip"]
 			if !ok {
@@ -782,7 +810,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 		}
 	})
 
-	g.routeManager.RegisterRoute("removeBlacklist", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("removeBlacklist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			ip, ok := payloadMap["ip"]
 			if !ok {
@@ -814,7 +842,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 		}
 	})
 
-	g.routeManager.RegisterRoute("getBlacklist", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("getBlacklist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		blacklist := g.whitelistBlacklist.GetBlacklist()
 		// 将切片转换为逗号分隔的字符串
 		blacklistStr := ""
@@ -980,35 +1008,37 @@ func (g *GatewayGnet) OnTraffic(c gnet.Conn) (action gnet.Action) {
 
 // handleTCPRequest 处理TCP请求
 func (g *GatewayGnet) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
-	// 检查数据长度
 	if len(data) == 0 {
-		// 发送错误响应
 		errorMsg := NewErrorMessage("error", "Empty data", "", "")
 		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
 		c.Writev([][]byte{responseData})
 		return
 	}
 
-	// 解析消息
+	if len(data) > 4 {
+		frameLen := binary.BigEndian.Uint32(data[:4])
+		if int(frameLen) == len(data)-4 && frameLen > 0 {
+			data = data[4:]
+		}
+	}
+
 	message := &protobuf.Message{}
 	if err := proto.Unmarshal(data, message); err != nil {
-		// 发送错误响应
 		errorMsg := NewErrorMessage("error", "Invalid message format", err.Error(), string(data))
 		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
 		c.Writev([][]byte{responseData})
 		return
 	}
 
-	// 验证消息完整性
-	if err := g.messageIntegrity.ProcessMessage(message); err != nil {
-		// 发送错误响应
-		errorMsg := NewErrorMessage("error", "Message integrity error", err.Error(), "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
-		return
+	// 验证消息完整性（logic routes skip integrity check）
+	logicRoutesIntegrity := map[string]bool{"test": true, "ping": true}
+	if !logicRoutesIntegrity[message.Route] {
+		if err := g.messageIntegrity.ProcessMessage(message); err != nil {
+			errorMsg := NewErrorMessage("error", "Message integrity error", err.Error(), "")
+			responseData, _ := proto.Marshal(errorMsg)
+			c.Writev([][]byte{responseData})
+			return
+		}
 	}
 
 	// 处理消息
@@ -1036,14 +1066,18 @@ func (g *GatewayGnet) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Ac
 		return g.handleHandshake(c, connectionID, message)
 	}
 
-	// 检查协议版本协商
-	if _, exists := g.versionNegotiation.GetClientVersion(connectionID); !exists {
-		// 未完成握手，发送错误响应
-		errorMsg := NewErrorMessage("error", "Handshake required", "Protocol version negotiation is required", "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
-		return
+	// logic routes skip version negotiation
+	logicRoutes := map[string]bool{"test": true, "ping": true}
+	if !logicRoutes[message.Route] {
+		// 检查协议版本协商
+		if _, exists := g.versionNegotiation.GetClientVersion(connectionID); !exists {
+			// 未完成握手，发送错误响应
+			errorMsg := NewErrorMessage("error", "Handshake required", "Protocol version negotiation is required", "")
+			responseData, _ := proto.Marshal(errorMsg)
+			// 使用Writev方法发送响应，减少内存拷贝
+			c.Writev([][]byte{responseData})
+			return
+		}
 	}
 
 	// 获取用户UUID
@@ -1076,7 +1110,7 @@ func (g *GatewayGnet) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Ac
 	}
 
 	// 对于简单路由，直接处理跳过消息队列和限流
-	if route == "ping" {
+	if route == "ping" && !g.logicClient.IsConnected() {
 		response := NewResponseMessage("pong", map[string]string{
 			"timestamp": cast.ToString(time.Now().UnixMilli()),
 		})
@@ -1254,9 +1288,17 @@ func (g *GatewayGnet) handleMessage(msg *Message) {
 		msg.Payload = addUserInfoToPayloadMap(msg.Payload, claims.UserID, claims.Role)
 	}
 
-	// 路由处理
+	ctx := map[string]interface{}{
+		"connection_id": msg.ConnectionID,
+		"route":         msg.Route,
+		"gateway":       g,
+	}
+
 	g.routeManager.HandleRoute(msg.ConnectionID, msg.Route, msg.Payload, func(response interface{}) {
-		// 生成Protocol Buffers响应
+		if response == nil {
+			return
+		}
+
 		var responseData []byte
 		var err error
 
@@ -1280,9 +1322,8 @@ func (g *GatewayGnet) handleMessage(msg *Message) {
 			return
 		}
 
-		// 发送响应
 		msg.Conn.Writev([][]byte{responseData})
-	})
+	}, ctx)
 }
 
 // OnBoot 服务器启动时的回调
@@ -1306,9 +1347,17 @@ func (g *GatewayGnet) GetVersion() string {
 	return "1.0.0"
 }
 
+func (g *GatewayGnet) GetRouteManager() *RouteManager {
+	return g.routeManager
+}
+
+func (g *GatewayGnet) GetConnectionManager() *ConnectionManager {
+	return g.connectionManager
+}
+
 // registerVersionRoute 注册版本路由
 func (g *GatewayGnet) registerVersionRoute() {
-	g.routeManager.RegisterRoute("version", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("version", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("version", map[string]string{
 			"version":   g.GetVersion(),
 			"clusterID": g.clusterID,
@@ -1319,7 +1368,7 @@ func (g *GatewayGnet) registerVersionRoute() {
 
 // registerPingRoute 注册ping路由
 func (g *GatewayGnet) registerPingRoute() {
-	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{})) {
+	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("ping", map[string]interface{}{
 			"message":   "Pong",
 			"timestamp": time.Now().Unix(),

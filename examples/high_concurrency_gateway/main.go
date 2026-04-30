@@ -14,13 +14,25 @@ import (
 )
 
 func main() {
-	// 输出系统信息
-	tlog.Info("系统信息:", "CPU核心数", runtime.NumCPU(), "GOMAXPROCS", runtime.GOMAXPROCS(0))
+	defer func() {
+		if r := recover(); r != nil {
+			buf := make([]byte, 4096)
+			n := runtime.Stack(buf, false)
+			fmt.Fprintf(os.Stderr, "panic: %v\n%s\n", r, buf[:n])
+		}
+	}()
 
-	// 开始启动高并发网关服务
+	if _, err := tlog.New("config/tlog.yaml"); err != nil {
+		if _, err := tlog.New("../config/tlog.yaml"); err != nil {
+			if _, err := tlog.New("../../config/tlog.yaml"); err != nil {
+				fmt.Println("failed to initialize tlog:", err)
+			}
+		}
+	}
+
+	tlog.Info("系统信息:", "CPU核心数", runtime.NumCPU(), "GOMAXPROCS", runtime.GOMAXPROCS(0))
 	tlog.Info("开始启动高并发网关服务...")
 
-	// 加载配置
 	tlog.Info("加载服务配置...")
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -28,69 +40,48 @@ func main() {
 	}
 	tlog.Info("配置加载成功:", "port", cfg.Port, "logLevel", cfg.LogLevel)
 
-	// 输出支持的协议
 	tlog.Info("支持的协议:")
 	for _, proto := range cfg.Transports {
 		tlog.Info("协议配置:", "protocol", proto.Protocol, "port", proto.Port, "type", proto.Type)
 	}
 
-	// 创建网关实例
 	tlog.Info("创建网关实例...")
 	gw := gateway.NewGateway()
 	if gw == nil {
 		tlog.Error("创建网关实例失败")
+		tlog.Sync()
 		return
 	}
 	tlog.Info("网关实例创建成功")
 
-	// 启动服务器
 	for _, proto := range cfg.Transports {
 		addr := fmt.Sprintf("%s://:%d", proto.Protocol, proto.Port)
 		tlog.Info("启动服务器:", "addr", addr, "type", proto.Type)
 
-		// 设置传输类型
 		gw.SetTransportType(fmt.Sprintf("%d", proto.Port), proto.Type)
 
-		// 启动服务器
 		tlog.Info("网关服务已启动:", "addr", addr, "type", proto.Type)
 		tlog.Info("开始启动gnet服务器:", "addr", addr)
 
-		// 启动gnet服务器，使用性能优化选项
 		go func(addr string, protoType string) {
-			// 根据协议类型选择优化选项
 			var options []gnet.Option
 			if protoType == "websocket" || proto.Protocol == "tcp" {
-				// TCP 和 WebSocket 使用完整的性能优化
 				options = []gnet.Option{
-					// 启用多核模式，充分利用多核 CPU
 					gnet.WithMulticore(true),
-					// 启用端口复用，提高并发能力
 					gnet.WithReusePort(true),
-					// 禁用 Nagle 算法，降低延迟
 					gnet.WithTCPNoDelay(gnet.TCPNoDelay),
-					// 64KB 读取缓冲区，提高读取性能
 					gnet.WithReadBufferCap(65536),
-					// 64KB 写入缓冲区，提高写入性能
 					gnet.WithWriteBufferCap(65536),
-					// 256KB 系统接收缓冲区
 					gnet.WithSocketRecvBuffer(262144),
-					// 256KB 系统发送缓冲区
 					gnet.WithSocketSendBuffer(262144),
 				}
 			} else {
-				// UDP 使用无连接的优化
 				options = []gnet.Option{
-					// 启用多核模式
 					gnet.WithMulticore(true),
-					// 启用端口复用
 					gnet.WithReusePort(true),
-					// 64KB 读取缓冲区
 					gnet.WithReadBufferCap(65536),
-					// 64KB 写入缓冲区
 					gnet.WithWriteBufferCap(65536),
-					// 256KB 系统接收缓冲区
 					gnet.WithSocketRecvBuffer(262144),
-					// 256KB 系统发送缓冲区
 					gnet.WithSocketSendBuffer(262144),
 				}
 			}
@@ -105,13 +96,12 @@ func main() {
 		}(addr, proto.Type)
 	}
 
-	// 等待中断信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	sig := <-sigCh
 
-	// 关闭网关
-	tlog.Info("关闭网关服务...")
+	tlog.Info("收到退出信号，开始关闭...", "signal", sig.String())
 	gw.Close()
 	tlog.Info("网关服务已关闭")
+	tlog.Sync()
 }

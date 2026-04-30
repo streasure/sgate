@@ -6,7 +6,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/streasure/sgate/gateway/protobuf"
+	"github.com/streasure/sgate/protobuf"
 )
 
 // Compressor 压缩管理器

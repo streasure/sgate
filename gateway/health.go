@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/streasure/sgate/gateway/protobuf"
+	"github.com/streasure/sgate/protobuf"
 )
 
 // HealthStatus 健康状态

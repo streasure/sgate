@@ -3,7 +3,7 @@ package gateway
 import (
 	"sync"
 
-	"github.com/streasure/sgate/gateway/protobuf"
+	"github.com/streasure/sgate/protobuf"
 )
 
 // 消息对象池

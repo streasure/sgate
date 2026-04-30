@@ -5,30 +5,34 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/gateway/protobuf"
+	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 )
 
 // VersionNegotiation 版本协商管理器
 // 功能: 管理协议版本协商，处理握手消息，维护客户端版本映射
 // 字段:
-//   supportedVersions: 支持的协议版本列表
-//   clientVersions: 客户端版本映射
-//   mutex: 互斥锁
-//   handshakeTimeout: 握手超时时间
+//
+//	supportedVersions: 支持的协议版本列表
+//	clientVersions: 客户端版本映射
+//	mutex: 互斥锁
+//	handshakeTimeout: 握手超时时间
 type VersionNegotiation struct {
-	supportedVersions []string           // 支持的协议版本列表
-	clientVersions    map[string]string  // 客户端版本映射 (connectionID -> version)
-	mutex             sync.RWMutex       // 互斥锁
-	handshakeTimeout  time.Duration      // 握手超时时间
+	supportedVersions []string          // 支持的协议版本列表
+	clientVersions    map[string]string // 客户端版本映射 (connectionID -> version)
+	mutex             sync.RWMutex      // 互斥锁
+	handshakeTimeout  time.Duration     // 握手超时时间
 }
 
 // NewVersionNegotiation 创建版本协商管理器
 // 参数:
-//   supportedVersions: 支持的协议版本列表
-//   handshakeTimeout: 握手超时时间
+//
+//	supportedVersions: 支持的协议版本列表
+//	handshakeTimeout: 握手超时时间
+//
 // 返回值:
-//   *VersionNegotiation: 版本协商管理器实例
+//
+//	*VersionNegotiation: 版本协商管理器实例
 func NewVersionNegotiation(supportedVersions []string, handshakeTimeout time.Duration) *VersionNegotiation {
 	if len(supportedVersions) == 0 {
 		supportedVersions = []string{"1.0.0"} // 默认支持 1.0.0 版本
@@ -47,11 +51,14 @@ func NewVersionNegotiation(supportedVersions []string, handshakeTimeout time.Dur
 
 // ProcessHandshake 处理握手消息
 // 参数:
-//   connectionID: 连接ID
-//   handshake: 握手消息
+//
+//	connectionID: 连接ID
+//	handshake: 握手消息
+//
 // 返回值:
-//   string: 协商后的协议版本
-//   error: 错误信息
+//
+//	string: 协商后的协议版本
+//	error: 错误信息
 func (vn *VersionNegotiation) ProcessHandshake(connectionID string, handshake *protobuf.Handshake) (string, error) {
 	// 验证握手消息
 	if handshake == nil {
@@ -78,7 +85,7 @@ func (vn *VersionNegotiation) ProcessHandshake(connectionID string, handshake *p
 	vn.clientVersions[connectionID] = negotiatedVersion
 	vn.mutex.Unlock()
 
-	tlog.Info("Handshake successful", 
+	tlog.Info("Handshake successful",
 		"connectionID", connectionID,
 		"negotiatedVersion", negotiatedVersion,
 		"clientProtocolVersion", handshake.ProtocolVersion,
@@ -93,10 +100,13 @@ func (vn *VersionNegotiation) ProcessHandshake(connectionID string, handshake *p
 
 // GetClientVersion 获取客户端协议版本
 // 参数:
-//   connectionID: 连接ID
+//
+//	connectionID: 连接ID
+//
 // 返回值:
-//   string: 客户端协议版本
-//   bool: 是否存在
+//
+//	string: 客户端协议版本
+//	bool: 是否存在
 func (vn *VersionNegotiation) GetClientVersion(connectionID string) (string, bool) {
 	vn.mutex.RLock()
 	defer vn.mutex.RUnlock()
@@ -107,7 +117,8 @@ func (vn *VersionNegotiation) GetClientVersion(connectionID string) (string, boo
 
 // RemoveClientVersion 移除客户端版本映射
 // 参数:
-//   connectionID: 连接ID
+//
+//	connectionID: 连接ID
 func (vn *VersionNegotiation) RemoveClientVersion(connectionID string) {
 	vn.mutex.Lock()
 	defer vn.mutex.Unlock()
@@ -117,10 +128,13 @@ func (vn *VersionNegotiation) RemoveClientVersion(connectionID string) {
 
 // negotiateVersion 协商协议版本
 // 参数:
-//   clientVersions: 客户端支持的版本列表
-//   clientPreferredVersion: 客户端首选版本
+//
+//	clientVersions: 客户端支持的版本列表
+//	clientPreferredVersion: 客户端首选版本
+//
 // 返回值:
-//   string: 协商后的版本
+//
+//	string: 协商后的版本
 func (vn *VersionNegotiation) negotiateVersion(clientVersions []string, clientPreferredVersion string) string {
 	// 首先检查客户端首选版本是否被支持
 	if vn.isVersionSupported(clientPreferredVersion) {
@@ -144,9 +158,12 @@ func (vn *VersionNegotiation) negotiateVersion(clientVersions []string, clientPr
 
 // isVersionSupported 检查版本是否被支持
 // 参数:
-//   version: 版本字符串
+//
+//	version: 版本字符串
+//
 // 返回值:
-//   bool: 是否支持
+//
+//	bool: 是否支持
 func (vn *VersionNegotiation) isVersionSupported(version string) bool {
 	for _, supportedVersion := range vn.supportedVersions {
 		if supportedVersion == version {
@@ -158,14 +175,16 @@ func (vn *VersionNegotiation) isVersionSupported(version string) bool {
 
 // GetSupportedVersions 获取支持的版本列表
 // 返回值:
-//   []string: 支持的版本列表
+//
+//	[]string: 支持的版本列表
 func (vn *VersionNegotiation) GetSupportedVersions() []string {
 	return vn.supportedVersions
 }
 
 // SetSupportedVersions 设置支持的版本列表
 // 参数:
-//   versions: 版本列表
+//
+//	versions: 版本列表
 func (vn *VersionNegotiation) SetSupportedVersions(versions []string) {
 	vn.mutex.Lock()
 	defer vn.mutex.Unlock()
@@ -175,10 +194,13 @@ func (vn *VersionNegotiation) SetSupportedVersions(versions []string) {
 
 // GenerateHandshakeResponse 生成握手响应
 // 参数:
-//   negotiatedVersion: 协商后的版本
-//   supportedVersions: 支持的版本列表
+//
+//	negotiatedVersion: 协商后的版本
+//	supportedVersions: 支持的版本列表
+//
 // 返回值:
-//   *protobuf.Message: 握手响应消息
+//
+//	*protobuf.Message: 握手响应消息
 func (vn *VersionNegotiation) GenerateHandshakeResponse(negotiatedVersion string) *protobuf.Message {
 	payload := make(map[string]string)
 	payload["negotiated_version"] = negotiatedVersion

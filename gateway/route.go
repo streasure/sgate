@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 )
 
@@ -14,7 +16,7 @@ import (
 //	payload: 消息负载
 //	callback: 回调函数，用于返回响应
 
-type RouteHandler func(connectionID string, payload interface{}, callback func(interface{}))
+type RouteHandler func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{})
 
 // RouteManager 路由管理器
 // 字段:
@@ -38,19 +40,19 @@ func NewRouteManager() *RouteManager {
 	}
 
 	// 注册默认路由
-	rm.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{})) {
+	rm.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("pong", map[string]interface{}{
 			"timestamp": time.Now().UnixMilli(),
 		}))
 	})
 
-	rm.RegisterRoute("getConnections", func(connectionID string, payload interface{}, callback func(interface{})) {
+	rm.RegisterRoute("getConnections", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("connections", map[string]interface{}{
 			"count": 0,
 		}))
 	})
 
-	rm.RegisterRoute("broadcast", func(connectionID string, payload interface{}, callback func(interface{})) {
+	rm.RegisterRoute("broadcast", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]interface{}); ok {
 			if _, ok := payloadMap["message"]; ok {
 				callback(NewResponseMessage("broadcastResult", map[string]interface{}{
@@ -82,14 +84,17 @@ func (rm *RouteManager) updateFastPathRoutes() {
 	rm.fastPathMutex.Lock()
 	defer rm.fastPathMutex.Unlock()
 	
-	// 常用路由列表
 	commonRoutes := []string{"ping", "version", "getConnections", "broadcast", "health", "api-docs"}
 	
-	// 清空并重新填充快速路径缓存
 	rm.fastPathRoutes = make(map[string]RouteHandler)
 	for _, route := range commonRoutes {
 		if handler, exists := rm.routes.Load(route); exists {
-			rm.fastPathRoutes[route] = handler.(RouteHandler)
+			typedHandler, ok := handler.(RouteHandler)
+			if !ok {
+				tlog.Error("route handler type mismatch", "route", route, "type", fmt.Sprintf("%T", handler))
+				continue
+			}
+			rm.fastPathRoutes[route] = typedHandler
 		}
 	}
 }
@@ -101,9 +106,7 @@ func (rm *RouteManager) updateFastPathRoutes() {
 //	handler: 路由处理函数
 func (rm *RouteManager) RegisterRoute(route string, handler RouteHandler) {
 	rm.routes.Store(route, handler)
-	// 更新快速路径缓存
 	rm.updateFastPathRoutes()
-	// 输出调试日志
 	tlog.Debug("路由已注册", "route", route)
 }
 
@@ -128,34 +131,35 @@ func (rm *RouteManager) UnregisterRoute(route string) {
 //	route: 路由名称
 //	payload: 消息负载
 //	callback: 回调函数，用于返回响应
-func (rm *RouteManager) HandleRoute(connectionID string, route string, payload interface{}, callback func(interface{})) {
-	// 首先检查快速路径缓存
+func (rm *RouteManager) HandleRoute(connectionID string, route string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 	rm.fastPathMutex.RLock()
 	handler, exists := rm.fastPathRoutes[route]
 	rm.fastPathMutex.RUnlock()
 
 	if !exists {
-		// 从sync.Map中查找
 		handlerInterface, exists := rm.routes.Load(route)
 		if !exists {
-			// 输出警告日志
 			tlog.Warn("未找到路由", "route", route)
 			callback(NewErrorMessage("error", "Route not found", "", ""))
 			return
 		}
-		handler = handlerInterface.(RouteHandler)
+		typedHandler, ok := handlerInterface.(RouteHandler)
+		if !ok {
+			tlog.Error("route handler type mismatch in HandleRoute", "route", route, "type", fmt.Sprintf("%T", handlerInterface))
+			callback(NewErrorMessage("error", "Route handler type mismatch", "", ""))
+			return
+		}
+		handler = typedHandler
 	}
 
-	// 执行路由处理函数
 	defer func() {
 		if r := recover(); r != nil {
-			// 输出错误日志
 			tlog.Error("路由处理异常", "route", route, "error", r)
 			callback(NewErrorMessage("error", "Internal server error", "", ""))
 		}
 	}()
 
-	handler(connectionID, payload, callback)
+	handler(connectionID, payload, callback, ctx)
 }
 
 // GetRoutes 获取所有路由
@@ -182,4 +186,63 @@ func (rm *RouteManager) GetRoutes() []string {
 func (rm *RouteManager) HasRoute(route string) bool {
 	_, exists := rm.routes.Load(route)
 	return exists
+}
+
+type LogicClientProvider interface {
+	IsConnected() bool
+	SendMessage(msg *protobuf.Message) error
+}
+
+// RegisterLogicRoute registers a logic server route
+func (rm *RouteManager) RegisterLogicRoute(route string) {
+	var handler RouteHandler = func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+		var logicClient LogicClientProvider
+		if gw, ok := ctx["gateway"].(*Gateway); ok {
+			logicClient = gw.logicClient
+		} else if gw, ok := ctx["gateway"].(*GatewayGnet); ok {
+			logicClient = gw.logicClient
+		}
+		if logicClient == nil {
+			callback(NewErrorMessage("error", "Logic client not found", "", ""))
+			return
+		}
+
+		if !logicClient.IsConnected() {
+			callback(NewResponseMessage(route, map[string]string{
+				"status":  "success",
+				"message": "Logic server not connected, returning mock response",
+			}))
+			return
+		}
+
+		var payloadMap map[string]string
+		if pm, ok := payload.(map[string]string); ok {
+			payloadMap = pm
+		} else {
+			payloadMap = map[string]string{}
+		}
+
+		msg := &protobuf.Message{
+			ConnectionId: connectionID,
+			Route:        route,
+			Payload:      payloadMap,
+			Timestamp:    time.Now().UnixMilli(),
+		}
+
+		err := logicClient.SendMessage(msg)
+		if err != nil {
+			tlog.Error("failed to send message to logic server", "error", err, "route", route)
+			callback(NewErrorMessage("error", "Failed to send message to logic server", err.Error(), ""))
+			return
+		}
+
+		callback(nil)
+	}
+
+	rm.routes.Store(route, handler)
+	rm.fastPathMutex.Lock()
+	rm.fastPathRoutes[route] = handler
+	rm.fastPathMutex.Unlock()
+
+	tlog.Info("logic route registered", "route", route)
 }

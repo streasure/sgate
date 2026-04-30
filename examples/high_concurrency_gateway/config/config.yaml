@@ -18,10 +18,10 @@ transports:
 
 # 工作池配置
 workerPool:
-  minWorkers: 400
-  maxWorkers: 1600
-  queueSize: 16000000
-  queueSizeThreshold: 1000
+  minWorkers: 128
+  maxWorkers: 1000
+  queueSize: 500000
+  queueSizeThreshold: 10000
 
 # 速率限制配置
 rateLimiter:

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/gateway/protobuf"
+	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/protobuf/proto"
 )
