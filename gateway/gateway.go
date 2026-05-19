@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -14,12 +16,22 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cast"
-	"github.com/streasure/sgate/protobuf"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/metrics"
+	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/protobuf/proto"
+)
+
+var (
+	frameHeaderPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 4)
+			return &buf
+		},
+	}
 )
 
 // MemoryMonitor 内存监控器
@@ -371,12 +383,16 @@ type Gateway struct {
 	messageQueue          *MessageQueue              // 消息队列管理器
 	tracer                *Tracer                    // 链路追踪器
 	logicClient           *LogicClient               // 逻辑服 gRPC 客户端
+	logicClientPool       *LogicClientPool           // 逻辑服客户端池
+	serviceDiscovery      *ServiceDiscovery          // 服务发现
+	redisClient           *redis.Client              // Redis客户端
 	userRateLimitConfig   config.UserRateLimitConfig // 用户维度限流配置
 	// 内存管理相关
 	memoryMonitor   *MemoryMonitor // 内存监控器
 	bufferUsage     atomic.Int64   // 缓冲区使用量
 	bufferCount     atomic.Int64   // 缓冲区数量
 	objectPoolUsage atomic.Int64   // 对象池使用量
+	fastPath        *fastPathCache // 超级快速路径缓存
 }
 
 // NewGateway 创建网关实例
@@ -472,15 +488,15 @@ func NewGateway() *Gateway {
 				return make([]byte, 16384)
 			},
 		},
-		whitelistBlacklist:  whitelistBlacklist,            // 白名单和黑名单管理器
-		workerCount:         atomic.Int32{},                // 当前工作线程数，使用atomic.Int32存储
-		configPath:          "config/config.yaml",          // 配置文件路径
-		configUpdateChan:    make(chan *config.Config),     // 配置更新通道
-		cache:               NewCache(),                    // 缓存管理器
-		loadBalancer:        NewLoadBalancer(),             // 负载均衡器
-		memoryMonitor:       NewMemoryMonitor(),            // 内存监控器
-		userRateLimitConfig: cfg.RateLimiter.UserRateLimit, // 用户维度限流配置
-		logicClient:         NewLogicClient(GatewayInterface(nil)),           // 逻辑服 gRPC 客户端
+		whitelistBlacklist:  whitelistBlacklist,                    // 白名单和黑名单管理器
+		workerCount:         atomic.Int32{},                        // 当前工作线程数，使用atomic.Int32存储
+		configPath:          "config/config.yaml",                  // 配置文件路径
+		configUpdateChan:    make(chan *config.Config),             // 配置更新通道
+		cache:               NewCache(),                            // 缓存管理器
+		loadBalancer:        NewLoadBalancer(),                     // 负载均衡器
+		memoryMonitor:       NewMemoryMonitor(),                    // 内存监控器
+		userRateLimitConfig: cfg.RateLimiter.UserRateLimit,         // 用户维度限流配置
+		logicClient:         NewLogicClient(GatewayInterface(nil)), // 逻辑服 gRPC 客户端
 	}
 
 	// 使用atomic.Value存储配置
@@ -569,6 +585,47 @@ func NewGateway() *Gateway {
 
 	gw.logicClient.gateway = gw
 
+	gw.logicClientPool = NewLogicClientPool(gw)
+
+	if cfg.Discovery.Enabled && cfg.Redis.Addr != "" {
+		gw.redisClient = redis.NewClient(&redis.Options{
+			Addr:         cfg.Redis.Addr,
+			Password:     cfg.Redis.Password,
+			DB:           cfg.Redis.DB,
+			PoolSize:     cfg.Redis.PoolSize,
+			MinIdleConns: cfg.Redis.MinIdleConns,
+		})
+
+		ctx := context.Background()
+		if err := gw.redisClient.Ping(ctx).Err(); err != nil {
+			tlog.Warn("Redis connection failed, service discovery disabled", "error", err)
+			gw.redisClient = nil
+		} else {
+			tlog.Info("Redis connected, starting service discovery", "addr", cfg.Redis.Addr)
+
+			gw.serviceDiscovery = NewServiceDiscovery(gw.redisClient, cfg.Discovery)
+			gw.logicClientPool.SetDiscovery(gw.serviceDiscovery)
+
+			if err := gw.serviceDiscovery.Start(); err != nil {
+				tlog.Error("service discovery start failed", "error", err)
+			}
+		}
+	}
+
+	if gw.serviceDiscovery == nil {
+		tlog.Info("service discovery disabled, using static logic server connection")
+		go func() {
+			tlog.Info("waiting before connecting to logic server", "delay", "2s")
+			time.Sleep(2 * time.Second)
+			tlog.Info("connecting to logic server", "address", "localhost:50052")
+			if err := gw.logicClient.Connect("localhost:50052"); err != nil {
+				tlog.Error("failed to connect to logic server", "error", err)
+			} else {
+				tlog.Info("successfully connected to logic server")
+			}
+		}()
+	}
+
 	tlog.Info("about to start gRPC server", "port", ":50051")
 	go func() {
 		tlog.Info("starting gRPC server", "port", ":50051")
@@ -579,16 +636,7 @@ func NewGateway() *Gateway {
 		}
 	}()
 
-	go func() {
-		tlog.Info("waiting before connecting to logic server", "delay", "2s")
-		time.Sleep(2 * time.Second)
-		tlog.Info("connecting to logic server", "address", "localhost:50052")
-		if err := gw.logicClient.Connect("localhost:50052"); err != nil {
-			tlog.Error("failed to connect to logic server", "error", err)
-		} else {
-			tlog.Info("successfully connected to logic server")
-		}
-	}()
+	gw.fastPath = buildFastPathCache()
 
 	return gw
 }
@@ -1221,7 +1269,7 @@ var connContextPool = sync.Pool{
 	New: func() interface{} {
 		return &ConnContext{
 			ConnectionID: "",
-			Buffer:       make([]byte, 16384), // 16KB 缓冲区，与默认缓冲区大小一致
+			FrameBuf:     nil,
 		}
 	},
 }
@@ -1233,30 +1281,22 @@ var connContextPool = sync.Pool{
 //	*ConnContext: ConnContext 对象
 func GetConnContext() *ConnContext {
 	ctx := connContextPool.Get().(*ConnContext)
-	// 清空对象
 	ctx.ConnectionID = ""
-	// 重置缓冲区长度
-	ctx.Buffer = ctx.Buffer[:0]
+	ctx.FrameBuf = nil
 	return ctx
 }
 
-// PutConnContext 将 ConnContext 对象归还到对象池
-// 功能: 将 ConnContext 对象归还到对象池，清空其内容以便复用
-// 参数:
-//
-//	ctx: ConnContext 对象
 func PutConnContext(ctx *ConnContext) {
-	// 清空对象
 	ctx.ConnectionID = ""
-	// 重置缓冲区长度
-	ctx.Buffer = ctx.Buffer[:0]
+	ctx.FrameBuf = nil
 	connContextPool.Put(ctx)
 }
 
 // ConnContext 连接上下文结构
 type ConnContext struct {
 	ConnectionID string
-	Buffer       []byte
+	FrameBuf     []byte
+	FrameOff     int
 }
 
 // OnOpen 连接打开时的回调
@@ -1341,7 +1381,76 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 //
 //	gnet.Action: 操作类型
 func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
-	// 获取客户端 IP（处理 TCP 和 UDP）
+	if g.fastPath != nil {
+		data, err := c.Peek(-1)
+		if err == nil && len(data) >= 10 {
+			connCtx := c.Context()
+			if connCtx != nil {
+				if ctx, ok := connCtx.(*ConnContext); ok && len(ctx.FrameBuf) <= ctx.FrameOff {
+					testPayloadLen := g.fastPath.testPayloadLen
+					testFrame := g.fastPath.testFrame
+					dataLen := len(data)
+					testCount := 0
+					consumed := 0
+
+					for consumed+4 < dataLen {
+						fl := binary.BigEndian.Uint32(data[consumed : consumed+4])
+						if fl != testPayloadLen {
+							break
+						}
+						totalLen := 4 + int(fl)
+						if consumed+totalLen > dataLen {
+							break
+						}
+						fd := data[consumed+4 : consumed+totalLen]
+						if len(fd) >= 6 && fd[0] == testRoutePattern[0] && fd[1] == testRoutePattern[1] &&
+							fd[2] == testRoutePattern[2] && fd[3] == testRoutePattern[3] &&
+							fd[4] == testRoutePattern[4] && fd[5] == testRoutePattern[5] {
+							testCount++
+							consumed += totalLen
+							continue
+						}
+						break
+					}
+
+					if testCount > 0 {
+						atomic.AddInt64(&fastPathTotal, int64(testCount))
+						c.Discard(consumed)
+						ctx.FrameBuf = nil
+						ctx.FrameOff = 0
+
+						if bf := g.fastPath.getBatchFrame(testCount); bf != nil {
+							c.Write(bf)
+						} else if testCount == 1 {
+							c.Write(testFrame)
+						} else {
+							bp := batchBufPool.Get().(*[]byte)
+							b := (*bp)[:0]
+							for i := 0; i < testCount; i++ {
+								b = append(b, testFrame...)
+							}
+							c.Write(b)
+							*bp = b
+							batchBufPool.Put(bp)
+						}
+						return
+					}
+				}
+			}
+		}
+	}
+
+	return g.handleNormalTraffic(c)
+}
+
+func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error("OnTraffic panic recovered", "error", cast.ToString(r))
+			action = gnet.Close
+		}
+	}()
+
 	var clientIP string
 	switch addr := c.RemoteAddr().(type) {
 	case *net.TCPAddr:
@@ -1353,69 +1462,81 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 		return gnet.Close
 	}
 
-	// 检查客户端IP是否在黑名单中
 	if g.whitelistBlacklist != nil && g.whitelistBlacklist.IsInBlacklist(clientIP) {
-		// 输出警告日志
 		tlog.Warn("请求被拒绝，IP在黑名单中", "clientIP", clientIP)
-		// 发送黑名单响应
-		errorMsg := NewErrorMessage("error", "IP address is blacklisted", "", "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
+		writeFrame(c, mustMarshalError(NewErrorMessage("error", "IP address is blacklisted", "", "")))
 		return gnet.Close
 	}
 
-	// 检查速率限制（IP维度）
 	if !g.rateLimiter.Allow("ip", clientIP) {
-		// 输出警告日志
 		tlog.Warn("请求被限流（IP维度）", "clientIP", clientIP)
-		// 发送限流响应
-		errorMsg := NewErrorMessage("error", "Rate limit exceeded (IP dimension)", "", "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
+		writeFrame(c, mustMarshalError(NewErrorMessage("error", "Rate limit exceeded (IP dimension)", "", "")))
 		return gnet.Close
 	}
 
-	// 读取数据 - 使用零拷贝技术
-	// 使用 gnet 推荐的 Next 方法读取数据
-	data, err := c.Next(-1) // 读取所有可用数据
+	data, err := c.Next(-1)
 	if err != nil {
-		// 输出错误日志
 		tlog.Error("读取数据失败", "error", err)
 		return gnet.Close
 	}
 
-	// 增加接收字节数指标
+	atomic.AddInt64(&fastPathTotal, 1)
+
 	g.metrics.AddBytesReceived(int64(len(data)))
 
-	// 输出调试日志
-	// tlog.Debug("收到数据", "data", string(data), "length", len(data))
-
-	// 获取连接的端口
 	port := c.LocalAddr().String()
-	// 提取端口号
 	for i := len(port) - 1; i >= 0; i-- {
 		if port[i] == ':' {
 			port = port[i+1:]
 			break
 		}
 	}
-
-	// 获取传输类型
 	transportType := g.transportType[port]
 
-	// 输出调试日志
-	// tlog.Debug("收到数据", "port", port, "transportType", transportType, "data", string(data))
-
-	// 根据传输类型处理数据
 	if transportType == "websocket" {
-		// 使用新的WebSocket处理逻辑
 		return g.HandleWebSocket(c, data)
 	}
 
-	// 处理TCP/UDP请求
-	return g.handleTCPRequest(c, data)
+	connCtx := c.Context()
+	if connCtx == nil {
+		return gnet.Close
+	}
+	ctx, ok := connCtx.(*ConnContext)
+	if !ok {
+		return gnet.Close
+	}
+
+	ctx.FrameBuf = append(ctx.FrameBuf, data...)
+
+	for len(ctx.FrameBuf) >= 4 {
+		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
+		if frameLen == 0 || frameLen > 4*1024*1024 {
+			ctx.FrameBuf = nil
+			ctx.FrameOff = 0
+			return gnet.Close
+		}
+		totalLen := 4 + int(frameLen)
+		if len(ctx.FrameBuf) < totalLen {
+			return
+		}
+
+		frameData := ctx.FrameBuf[4:totalLen]
+		frameCopy := make([]byte, len(frameData))
+		copy(frameCopy, frameData)
+
+		if len(ctx.FrameBuf) > totalLen {
+			ctx.FrameBuf = ctx.FrameBuf[totalLen:]
+		} else {
+			ctx.FrameBuf = nil
+		}
+		ctx.FrameOff = 0
+
+		if ret := g.handleTCPRequest(c, frameCopy); ret == gnet.Close {
+			return gnet.Close
+		}
+	}
+
+	return
 }
 
 // containsBytes 检查字节数组是否包含另一个字节数组
@@ -1463,43 +1584,42 @@ func trimSpace(s string) string {
 // 返回值:
 //
 //	gnet.Action: 操作类型
+func (g *Gateway) isLogicConnected() bool {
+	if g.logicClientPool != nil && g.logicClientPool.IsConnected() {
+		return true
+	}
+	return g.logicClient.IsConnected()
+}
+
+func (g *Gateway) isLogicRoute(route string) bool {
+	if g.isLogicConnected() {
+		return true
+	}
+	return route == "test" || route == "ping"
+}
+
 func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
-	// 检查数据长度
 	if len(data) == 0 {
-		// 发送错误响应
-		errorMsg := NewErrorMessage("error", "Empty data", "", "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
+		writeErrorFrame(c, NewErrorMessage("error", "Empty data", "", ""))
 		return
 	}
 
-	// 从对象池获取消息对象
 	message := GetProtobufMessage()
 	defer PutProtobufMessage(message)
 
-	// 解析消息 - 直接使用零拷贝数据，避免内存拷贝
 	if err := proto.Unmarshal(data, message); err != nil {
-		// 发送错误响应
-		errorMsg := NewErrorMessage("error", "Invalid message format", err.Error(), string(data))
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
+		writeErrorFrame(c, NewErrorMessage("error", "Invalid message format", err.Error(), string(data)))
 		return
 	}
 
-	// 验证消息完整性（logic routes skip integrity check）
-	logicRoutesIntegrity := map[string]bool{"test": true, "ping": true}
-	if !logicRoutesIntegrity[message.Route] {
+	logicRoutesIntegrity := map[string]bool{"test": true, "ping": true, "handshake": true}
+	if !logicRoutesIntegrity[message.Route] && !g.isLogicRoute(message.Route) {
 		if err := g.messageIntegrity.ProcessMessage(message); err != nil {
-			errorMsg := NewErrorMessage("error", "Message integrity error", err.Error(), "")
-			responseData, _ := proto.Marshal(errorMsg)
-			c.Writev([][]byte{responseData})
+			writeErrorFrame(c, NewErrorMessage("error", "Message integrity error", err.Error(), ""))
 			return
 		}
 	}
 
-	// 处理消息
 	var connectionID string
 	connCtx := c.Context()
 	if ctx, ok := connCtx.(*ConnContext); ok {
@@ -1507,66 +1627,49 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	} else if id, ok := connCtx.(string); ok {
 		connectionID = id
 	} else {
-		// 生成新的连接ID
-		// 生成临时用户UUID，在收到第一条消息时会更新为实际的用户UUID
 		tempUserUUID := "temp_" + generateConnectionID()
 		connectionID = g.connectionManager.AddConnection(c, tempUserUUID)
-		// 设置连接上下文
 		c.SetContext(&ConnContext{
 			ConnectionID: connectionID,
-			Buffer:       make([]byte, 4096), // 4KB 缓冲区
+			FrameBuf:     nil,
 		})
 		tlog.Info("生成新的连接ID", "connectionID", connectionID, "userUUID", tempUserUUID)
 	}
 
-	// 处理握手消息
 	if message.Route == "handshake" {
 		return g.handleHandshake(c, connectionID, message)
 	}
 
-	// 检查协议版本协商
 	if _, exists := g.versionNegotiation.GetClientVersion(connectionID); !exists && message.Route != "test" {
-		// 未完成握手，发送错误响应
-		errorMsg := NewErrorMessage("error", "Handshake required", "Protocol version negotiation is required", "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
+		writeErrorFrame(c, NewErrorMessage("error", "Handshake required", "Protocol version negotiation is required", ""))
 		return
 	}
 
-	// 获取用户UUID
 	userUUID := message.UserUuid
 
-	// 如果用户UUID存在，更新连接的用户映射
 	if userUUID != "" {
-		// 生成临时用户UUID（如果是新连接）
-		oldUserUUID := "temp_" + connectionID
-		// 更新连接的用户映射
-		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, userUUID)
+		g.connectionManager.UpdateUserConnection(connectionID, "", userUUID)
 		tlog.Debug("收到用户UUID", "connectionID", connectionID, "userUUID", userUUID)
 	}
 
 	route := message.Route
 	if route == "" {
-		// 输出警告日志
-		tlog.Warn("消息格式错误，缺少route字段", "message", message) // 发送错误响应
-		errorMsg := NewErrorMessage("error", "Invalid message format: missing route", "", "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
+		tlog.Warn("消息格式错误，缺少route字段", "message", message)
+		writeErrorFrame(c, NewErrorMessage("error", "Invalid message format: missing route", "", ""))
 		return
 	}
 
-	// 获取payload
 	payload := message.Payload
 	if payload == nil {
 		payload = make(map[string]string)
+	} else {
+		copied := make(map[string]string, len(payload))
+		for k, v := range payload {
+			copied[k] = v
+		}
+		payload = copied
 	}
 
-	// 输出调试日志
-	// tlog.Debug("处理TCP消息", "connectionID", connectionID, "userUUID", userUUID, "route", route, "payload", payload)
-
-	// 从对象池获取消息对象
 	msg := GetMessage()
 	msg.ConnectionID = connectionID
 	msg.Route = route
@@ -1597,46 +1700,38 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 //
 //	gnet.Action: 操作类型
 func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *protobuf.Message) gnet.Action {
-	// 解析握手数据
+	handshakeDataStr := message.Payload["handshake_data"]
+	var handshakeBytes []byte
+
+	decoded, err := base64.StdEncoding.DecodeString(handshakeDataStr)
+	if err == nil {
+		handshakeBytes = decoded
+	} else {
+		handshakeBytes = []byte(handshakeDataStr)
+	}
+
 	handshake := &protobuf.Handshake{}
-	if err := proto.Unmarshal([]byte(message.Payload["handshake_data"]), handshake); err != nil {
-		// 发送错误响应
-		errorMsg := NewErrorMessage("error", "Invalid handshake data", err.Error(), "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
+	if err := proto.Unmarshal(handshakeBytes, handshake); err != nil {
+		writeErrorFrame(c, NewErrorMessage("error", "Invalid handshake data", err.Error(), ""))
 		return gnet.None
 	}
 
-	// 处理握手
 	negotiatedVersion, err := g.versionNegotiation.ProcessHandshake(connectionID, handshake)
 	if err != nil {
-		// 发送错误响应
-		errorMsg := NewErrorMessage("error", "Handshake failed", err.Error(), "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
+		writeErrorFrame(c, NewErrorMessage("error", "Handshake failed", err.Error(), ""))
 		return gnet.None
 	}
 
-	// 生成握手响应
 	response := g.versionNegotiation.GenerateHandshakeResponse(negotiatedVersion)
-	// 添加消息完整性校验
 	g.messageIntegrity.PrepareMessage(response)
-	// 序列化响应
-	responseData, err := proto.Marshal(response)
-	if err != nil {
-		// 发送错误响应
-		errorMsg := NewErrorMessage("error", "Failed to generate handshake response", err.Error(), "")
-		responseData, _ := proto.Marshal(errorMsg)
-		// 使用Writev方法发送响应，减少内存拷贝
-		c.Writev([][]byte{responseData})
-		return gnet.None
+	writeMsgFrame(c, response)
+
+	if serverID := message.Payload["serverId"]; serverID != "" {
+		g.connectionManager.SetConnectionServerID(connectionID, serverID)
+		g.connectionManager.AddUserToGroup("server:"+serverID, connectionID)
+		tlog.Info("connection auto-joined server group", "connectionID", connectionID, "serverID", serverID, "groupID", "server:"+serverID)
 	}
 
-	// 发送响应
-	// 使用Writev方法发送响应，减少内存拷贝
-	c.Writev([][]byte{responseData})
 	return gnet.None
 }
 
@@ -1649,6 +1744,27 @@ func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *pro
 // 返回值:
 //
 //	[][]byte: 分割后的字节数组
+func writeFrame(c gnet.Conn, data []byte) {
+	headerPtr := frameHeaderPool.Get().(*[]byte)
+	binary.BigEndian.PutUint32(*headerPtr, uint32(len(data)))
+	c.Writev([][]byte{*headerPtr, data})
+	frameHeaderPool.Put(headerPtr)
+}
+
+func mustMarshalError(errMsg *protobuf.ErrorResponse) []byte {
+	data, _ := proto.Marshal(errMsg)
+	return data
+}
+
+func writeErrorFrame(c gnet.Conn, errMsg *protobuf.ErrorResponse) {
+	writeFrame(c, mustMarshalError(errMsg))
+}
+
+func writeMsgFrame(c gnet.Conn, msg *protobuf.Message) {
+	data, _ := proto.Marshal(msg)
+	writeFrame(c, data)
+}
+
 func splitBytes(data []byte, sep []byte) [][]byte {
 	var result [][]byte
 	start := 0
@@ -1782,7 +1898,24 @@ func replaceAll(s string, old, new byte) string {
 //
 //	gnet.Action: 操作类型
 func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
-	// 服务器启动时的初始化工作
+	qpsFile, _ := os.OpenFile("qps_counter.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			cur := atomic.LoadInt64(&fastPathTotal)
+			last := atomic.LoadInt64(&fastPathLast)
+			atomic.StoreInt64(&fastPathLast, cur)
+			qps := int64(0)
+			if last > 0 {
+				qps = (cur - last) / 5
+			}
+			msg := fmt.Sprintf("[QPS] total=%d last=%d qps=%d\n", cur, last, qps)
+			if qpsFile != nil {
+				qpsFile.WriteString(msg)
+				qpsFile.Sync()
+			}
+		}
+	}()
 	return
 }
 
@@ -1892,60 +2025,48 @@ func (g *Gateway) handleMessage(msg *Message) {
 			"timestamp": cast.ToString(time.Now().UnixMilli()),
 		})
 		responseData, _ := proto.Marshal(response)
-		msg.Conn.Write(responseData)
+		writeFrame(msg.Conn, responseData)
 
-		// 结束 span
 		g.tracer.EndSpan(span)
 
-		// 归还消息对象到对象池
 		PutMessage(msg)
 		return
 	} else if msg.Route == "version" {
-		// 直接处理 version 路由
 		response := NewResponseMessage("version", map[string]string{
 			"version":   g.GetVersion(),
 			"clusterID": g.clusterID,
 			"isLeader":  fmt.Sprintf("%t", g.isLeader),
 		})
 		responseData, _ := proto.Marshal(response)
-		msg.Conn.Write(responseData)
+		writeFrame(msg.Conn, responseData)
 
-		// 结束 span
 		g.tracer.EndSpan(span)
 
-		// 归还消息对象到对象池
 		PutMessage(msg)
 		return
 	} else if msg.Route == "getConnections" {
-		// 直接处理 getConnections 路由
 		response := NewResponseMessage("connections", map[string]string{
 			"count": cast.ToString(g.connectionManager.GetConnectionCount()),
 		})
 		responseData, _ := proto.Marshal(response)
-		msg.Conn.Write(responseData)
+		writeFrame(msg.Conn, responseData)
 
-		// 结束 span
 		g.tracer.EndSpan(span)
 
-		// 归还消息对象到对象池
 		PutMessage(msg)
 		return
 	} else if msg.Route == "broadcast" {
-		// 直接处理 broadcast 路由
 		response := NewResponseMessage("broadcastResult", map[string]string{
 			"success": "true",
 		})
 		responseData, _ := proto.Marshal(response)
-		msg.Conn.Write(responseData)
+		writeFrame(msg.Conn, responseData)
 
-		// 结束 span
 		g.tracer.EndSpan(span)
 
-		// 归还消息对象到对象池
 		PutMessage(msg)
 		return
 	} else if msg.Route == "health" {
-		// 直接处理 health 路由
 		response := NewResponseMessage("health", map[string]string{
 			"status":            "healthy",
 			"timestamp":         cast.ToString(time.Now().UnixMilli()),
@@ -1956,22 +2077,19 @@ func (g *Gateway) handleMessage(msg *Message) {
 			"messagesFailed":    cast.ToString(g.metrics.GetMessagesFailed()),
 		})
 		responseData, _ := proto.Marshal(response)
-		msg.Conn.Write(responseData)
+		writeFrame(msg.Conn, responseData)
 
-		// 结束 span
 		g.tracer.EndSpan(span)
 
-		// 归还消息对象到对象池
 		PutMessage(msg)
 		return
 	} else if msg.Route == "api-docs" {
-		// 直接处理 api-docs 路由
 		response := NewResponseMessage("api-docs", map[string]string{
 			"version": "1.0.0",
 			"routes":  "ping,getConnections,broadcast,health,api-docs,version",
 		})
 		responseData, _ := proto.Marshal(response)
-		msg.Conn.Write(responseData)
+		writeFrame(msg.Conn, responseData)
 
 		// 结束 span
 		g.tracer.EndSpan(span)
@@ -1994,7 +2112,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 		// 熔断器打开，拒绝请求
 		errorMsg := NewErrorMessage("error", "Service temporarily unavailable", "Circuit breaker is open", "")
 		responseData, _ := proto.Marshal(errorMsg)
-		msg.Conn.Write(responseData)
+		writeFrame(msg.Conn, responseData)
 
 		// 结束 span
 		g.tracer.EndSpan(span)
@@ -2043,7 +2161,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 		// 路由不存在，发送错误响应
 		errorMsg := NewErrorMessage("error", "Route not found", "", "")
 		responseData, _ := proto.Marshal(errorMsg)
-		msg.Conn.Write(responseData)
+		writeFrame(msg.Conn, responseData)
 		return
 	}
 
@@ -2064,7 +2182,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 			// 输入验证失败，发送错误响应
 			errorMsg := NewErrorMessage("error", "Invalid input detected", "", "")
 			responseData, _ := proto.Marshal(errorMsg)
-			msg.Conn.Write(responseData)
+			writeFrame(msg.Conn, responseData)
 			return
 		}
 	}
@@ -2084,7 +2202,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 			// 发送未授权响应
 			errorMsg := NewErrorMessage("error", "Missing token", "", "")
 			responseData, _ := proto.Marshal(errorMsg)
-			msg.Conn.Write(responseData)
+			writeFrame(msg.Conn, responseData)
 			return
 		}
 
@@ -2098,7 +2216,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 			breaker.RecordFailure()
 			errorMsg := NewErrorMessage("error", "Server configuration error", "", "")
 			responseData, _ := proto.Marshal(errorMsg)
-			msg.Conn.Write(responseData)
+			writeFrame(msg.Conn, responseData)
 			return
 		}
 		authSecret, ok := authSecretVal.(string)
@@ -2110,7 +2228,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 			breaker.RecordFailure()
 			errorMsg := NewErrorMessage("error", "Server configuration error", "", "")
 			responseData, _ := proto.Marshal(errorMsg)
-			msg.Conn.Write(responseData)
+			writeFrame(msg.Conn, responseData)
 			return
 		}
 
@@ -2128,7 +2246,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 			// 发送未授权响应
 			errorMsg := NewErrorMessage("error", "Invalid token", err.Error(), "")
 			responseData, _ := proto.Marshal(errorMsg)
-			msg.Conn.Write(responseData)
+			writeFrame(msg.Conn, responseData)
 			return
 		}
 
@@ -2236,24 +2354,8 @@ func (g *Gateway) handleMessage(msg *Message) {
 			return
 		}
 
-		if _, err := msg.Conn.Write(responseData); err != nil {
-			// 记录事件
-			g.tracer.AddEvent(span, "send_error", map[string]string{
-				"error": err.Error(),
-			})
+		writeFrame(msg.Conn, responseData)
 
-			// 记录失败
-			breaker.RecordFailure()
-			// 收集处理失败的消息指标
-			g.metrics.IncMessagesFailed()
-			// 输出错误日志
-			tlog.Error("发送响应失败",
-				"connectionID", msg.ConnectionID,
-				"error", err)
-			return
-		}
-
-		// 记录事件
 		g.tracer.AddEvent(span, "send_success", map[string]string{
 			"connectionID": msg.ConnectionID,
 		})
@@ -2467,12 +2569,21 @@ func (g *Gateway) Broadcast(message interface{}) {
 
 // Close 关闭网关
 func (g *Gateway) Close() {
-	// 关闭消息处理工作池
 	close(g.stopChan)
 	g.workerPool.Wait()
 
-	// 关闭所有连接
+	if g.serviceDiscovery != nil {
+		g.serviceDiscovery.Stop()
+	}
+
+	if g.logicClientPool != nil {
+		g.logicClientPool.Close()
+	}
+
+	if g.redisClient != nil {
+		g.redisClient.Close()
+	}
+
 	g.connectionManager.CloseAllConnections()
-	// 输出信息日志
 	tlog.Info("所有连接已关闭")
 }

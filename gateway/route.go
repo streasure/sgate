@@ -24,11 +24,11 @@ type RouteHandler func(connectionID string, payload interface{}, callback func(i
 //   使用 sync.Map 实现并发安全
 //   fastPathRoutes: 快速路径路由缓存，存储常用路由的处理函数
 
- type RouteManager struct {
-	routes        sync.Map // 路由映射，使用 sync.Map 实现并发安全
+type RouteManager struct {
+	routes         sync.Map                // 路由映射，使用 sync.Map 实现并发安全
 	fastPathRoutes map[string]RouteHandler // 快速路径路由缓存，存储常用路由
-	fastPathMutex  sync.RWMutex // 快速路径缓存的互斥锁
- }
+	fastPathMutex  sync.RWMutex            // 快速路径缓存的互斥锁
+}
 
 // NewRouteManager 创建路由管理器实例
 // 返回值:
@@ -83,9 +83,9 @@ func NewRouteManager() *RouteManager {
 func (rm *RouteManager) updateFastPathRoutes() {
 	rm.fastPathMutex.Lock()
 	defer rm.fastPathMutex.Unlock()
-	
+
 	commonRoutes := []string{"ping", "version", "getConnections", "broadcast", "health", "api-docs"}
-	
+
 	rm.fastPathRoutes = make(map[string]RouteHandler)
 	for _, route := range commonRoutes {
 		if handler, exists := rm.routes.Load(route); exists {
@@ -198,9 +198,17 @@ func (rm *RouteManager) RegisterLogicRoute(route string) {
 	var handler RouteHandler = func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		var logicClient LogicClientProvider
 		if gw, ok := ctx["gateway"].(*Gateway); ok {
-			logicClient = gw.logicClient
+			if gw.logicClientPool != nil && gw.logicClientPool.IsConnected() {
+				logicClient = gw.logicClientPool
+			} else {
+				logicClient = gw.logicClient
+			}
 		} else if gw, ok := ctx["gateway"].(*GatewayGnet); ok {
-			logicClient = gw.logicClient
+			if gw.logicClientPool != nil && gw.logicClientPool.IsConnected() {
+				logicClient = gw.logicClientPool
+			} else {
+				logicClient = gw.logicClient
+			}
 		}
 		if logicClient == nil {
 			callback(NewErrorMessage("error", "Logic client not found", "", ""))

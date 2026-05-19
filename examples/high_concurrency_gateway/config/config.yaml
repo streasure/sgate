@@ -4,6 +4,24 @@ port: 8080
 # 日志级别
 logLevel: info
 
+# Redis配置
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 10
+  poolSize: 10
+  minIdleConns: 5
+  maxIdleConns: 10
+
+# 服务发现配置
+discovery:
+  enabled: true
+  serviceName: "logic"
+  heartbeatInterval: 3s
+  heartbeatTTL: 10s
+  deregisterDelay: 5s
+  scanInterval: 10s
+
 # 协议配置
 transports:
   - protocol: tcp

@@ -3,13 +3,16 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/streasure/sgate/discovery"
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
@@ -260,7 +263,17 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		go func(idx int) {
 			defer wg.Done()
 
-			stream, err := lc.client.StreamMessages(lc.streamCtx)
+			lc.mu.RLock()
+			client := lc.client
+			ctx := lc.streamCtx
+			lc.mu.RUnlock()
+
+			if client == nil || ctx == nil {
+				errOnce.Do(func() { firstErr = fmt.Errorf("client or context is nil") })
+				return
+			}
+
+			stream, err := client.StreamMessages(ctx)
 			if err != nil {
 				errOnce.Do(func() { firstErr = err })
 				tlog.Error("failed to establish stream shard", "shard", idx, "error", err)
@@ -270,7 +283,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			shard := lc.streamManager.shards[idx]
 			shard.mu.Lock()
 			shard.stream = stream
-			shard.ctx = lc.streamCtx
+			shard.ctx = ctx
 			shard.mu.Unlock()
 
 			tlog.Info("stream shard established", "shard", idx)
@@ -281,9 +294,11 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	if firstErr != nil {
 		tlog.Error("failed to establish all stream shards", "error", firstErr)
 		lc.mu.Lock()
-		lc.conn.Close()
-		lc.conn = nil
-		lc.client = nil
+		if lc.conn != nil {
+			lc.conn.Close()
+			lc.conn = nil
+			lc.client = nil
+		}
 		lc.mu.Unlock()
 		lc.setState(StateDisconnected)
 		return firstErr
@@ -379,19 +394,54 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		}
 
 		if lc.gateway != nil && msg.ConnectionId != "" {
-			conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
-			if conn != nil {
-				responseData, err := proto.Marshal(msg)
-				if err != nil {
-					tlog.Error("failed to marshal response", "error", err, "connectionID", msg.ConnectionId)
-				} else {
-					err = conn.Send(responseData)
-					if err != nil {
-						tlog.Error("failed to forward response to client", "error", err, "connectionID", msg.ConnectionId)
+			if msg.Route == "server.kick" {
+				reason := ""
+				if msg.Payload != nil {
+					reason = msg.Payload["reason"]
+				}
+				conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
+				if conn != nil {
+					responseData, _ := proto.Marshal(msg)
+					conn.Send(responseData)
+					tlog.Info("kicking connection by logic server", "connectionID", msg.ConnectionId, "reason", reason)
+					lc.gateway.GetConnectionManager().RemoveConnection(msg.ConnectionId)
+					if conn.Conn != nil {
+						conn.Conn.Close()
 					}
 				}
+			} else if msg.Route == "server.join_group" {
+				groupID := msg.Payload["groupID"]
+				connID := msg.ConnectionId
+				if groupID != "" && connID != "" {
+					lc.gateway.GetConnectionManager().AddUserToGroup(groupID, connID)
+					tlog.Debug("connection joined group by logic server", "connectionID", connID, "groupID", groupID)
+				}
+				conn := lc.gateway.GetConnectionManager().GetConnection(connID)
+				if conn != nil {
+					responseData, _ := proto.Marshal(msg)
+					conn.Send(responseData)
+				}
+			} else if msg.Route == "server.leave_group" {
+				groupID := msg.Payload["groupID"]
+				connID := msg.ConnectionId
+				if groupID != "" && connID != "" {
+					lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, connID)
+				}
 			} else {
-				tlog.Warn("client connection not found", "connectionID", msg.ConnectionId)
+				conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
+				if conn != nil {
+					responseData, err := proto.Marshal(msg)
+					if err != nil {
+						tlog.Error("failed to marshal response", "error", err, "connectionID", msg.ConnectionId)
+					} else {
+						err = conn.Send(responseData)
+						if err != nil {
+							tlog.Error("failed to forward response to client", "error", err, "connectionID", msg.ConnectionId)
+						}
+					}
+				} else {
+					tlog.Warn("client connection not found", "connectionID", msg.ConnectionId)
+				}
 			}
 		} else {
 			if msg.ConnectionId == "" {
@@ -733,7 +783,7 @@ func (s *GRPCServer) StreamMessages(stream protobuf.GatewayService_StreamMessage
 
 	ctx := map[string]interface{}{
 		"connection_id": connectionID,
-		"stream":       stream,
+		"stream":        stream,
 	}
 
 	for {
@@ -821,4 +871,256 @@ func StartGRPCServer(gateway GatewayInterface, port string) error {
 
 	tlog.Info("gRPC server started", "port", port)
 	return nil
+}
+
+type LogicClientPool struct {
+	clients   map[string]*LogicClient
+	mu        sync.RWMutex
+	gateway   GatewayInterface
+	discovery *ServiceDiscovery
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
+}
+
+func NewLogicClientPool(gateway GatewayInterface) *LogicClientPool {
+	return &LogicClientPool{
+		clients: make(map[string]*LogicClient),
+		gateway: gateway,
+		stopCh:  make(chan struct{}),
+	}
+}
+
+func (pool *LogicClientPool) SetDiscovery(discovery *ServiceDiscovery) {
+	pool.discovery = discovery
+	discovery.OnServiceChange(pool.handleServiceChange)
+}
+
+func (pool *LogicClientPool) handleServiceChange(event discovery.ServiceEvent) {
+	switch event.Type {
+	case discovery.EventRegister:
+		pool.handleServiceRegister(event)
+	case discovery.EventDeregister:
+		pool.handleServiceDeregister(event)
+	}
+}
+
+func (pool *LogicClientPool) handleServiceRegister(event discovery.ServiceEvent) {
+	pool.mu.RLock()
+	_, exists := pool.clients[event.Service.ServiceID]
+	pool.mu.RUnlock()
+
+	if exists {
+		return
+	}
+
+	if routesStr, ok := event.Service.Metadata["routes"]; ok && routesStr != "" {
+		for _, route := range splitRoutes(routesStr) {
+			pool.gateway.GetRouteManager().RegisterLogicRoute(route)
+			tlog.Info("logic route registered from discovery", "route", route, "serviceID", event.Service.ServiceID)
+		}
+	}
+
+	client := NewLogicClient(pool.gateway)
+	client.shardCount = runtime.NumCPU()
+
+	go func() {
+		tlog.Info("connecting to discovered logic service",
+			"serviceID", event.Service.ServiceID,
+			"address", event.Service.Address,
+		)
+		if err := client.Connect(event.Service.Address); err != nil {
+			tlog.Error("failed to connect to discovered logic service",
+				"serviceID", event.Service.ServiceID,
+				"address", event.Service.Address,
+				"error", err,
+			)
+			return
+		}
+		tlog.Info("connected to discovered logic service",
+			"serviceID", event.Service.ServiceID,
+			"address", event.Service.Address,
+		)
+	}()
+
+	pool.mu.Lock()
+	pool.clients[event.Service.ServiceID] = client
+	pool.mu.Unlock()
+
+	tlog.Info("logic client added to pool",
+		"serviceID", event.Service.ServiceID,
+		"address", event.Service.Address,
+		"totalClients", pool.ClientCount(),
+	)
+}
+
+func (pool *LogicClientPool) handleServiceDeregister(event discovery.ServiceEvent) {
+	pool.mu.Lock()
+	client, exists := pool.clients[event.Service.ServiceID]
+	if exists {
+		delete(pool.clients, event.Service.ServiceID)
+	}
+	pool.mu.Unlock()
+
+	if exists && client != nil {
+		tlog.Warn("logic service offline, closing connection immediately",
+			"serviceID", event.Service.ServiceID,
+			"address", event.Service.Address,
+		)
+		go client.Close()
+	}
+
+	tlog.Warn("logic client removed from pool",
+		"serviceID", event.Service.ServiceID,
+		"address", event.Service.Address,
+		"totalClients", pool.ClientCount(),
+	)
+}
+
+func (pool *LogicClientPool) SendMessage(msg *protobuf.Message) error {
+	return pool.RoundRobinSendMessage(msg)
+}
+
+func (pool *LogicClientPool) SendMessageByServiceID(serviceID string, msg *protobuf.Message) error {
+	pool.mu.RLock()
+	client, ok := pool.clients[serviceID]
+	pool.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("service %s not found in pool", serviceID)
+	}
+	return client.SendMessage(msg)
+}
+
+func (pool *LogicClientPool) RoundRobinSendMessage(msg *protobuf.Message) error {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	if len(pool.clients) == 0 {
+		return ErrNotConnected
+	}
+
+	connected := make([]*LogicClient, 0, len(pool.clients))
+	for _, client := range pool.clients {
+		if client.IsConnected() {
+			connected = append(connected, client)
+		}
+	}
+
+	if len(connected) == 0 {
+		return ErrNotConnected
+	}
+
+	h := fnv.New32a()
+	h.Write([]byte(msg.ConnectionId))
+	idx := h.Sum32() % uint32(len(connected))
+	return connected[idx].SendMessage(msg)
+}
+
+func (pool *LogicClientPool) Close() {
+	close(pool.stopCh)
+	pool.wg.Wait()
+
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	for id, client := range pool.clients {
+		client.Close()
+		delete(pool.clients, id)
+	}
+}
+
+func (pool *LogicClientPool) ClientCount() int {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	return len(pool.clients)
+}
+
+func (pool *LogicClientPool) ConnectedCount() int {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	count := 0
+	for _, client := range pool.clients {
+		if client.IsConnected() {
+			count++
+		}
+	}
+	return count
+}
+
+func (pool *LogicClientPool) GetClientStatus() []map[string]interface{} {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	status := make([]map[string]interface{}, 0, len(pool.clients))
+	for id, client := range pool.clients {
+		status = append(status, map[string]interface{}{
+			"serviceID": id,
+			"address":   client.address,
+			"state":     client.getState().String(),
+			"connected": client.IsConnected(),
+		})
+	}
+	return status
+}
+
+func (pool *LogicClientPool) RemoveService(serviceID string) {
+	pool.mu.Lock()
+	client, exists := pool.clients[serviceID]
+	if exists {
+		delete(pool.clients, serviceID)
+	}
+	pool.mu.Unlock()
+
+	if exists && client != nil {
+		go client.Close()
+	}
+}
+
+func (pool *LogicClientPool) AddStaticService(address string) {
+	serviceID := "static_" + address
+	pool.mu.RLock()
+	_, exists := pool.clients[serviceID]
+	pool.mu.RUnlock()
+
+	if exists {
+		return
+	}
+
+	client := NewLogicClient(pool.gateway)
+	client.shardCount = runtime.NumCPU()
+
+	pool.mu.Lock()
+	pool.clients[serviceID] = client
+	pool.mu.Unlock()
+
+	go func() {
+		tlog.Info("connecting to static logic service", "address", address)
+		if err := client.Connect(address); err != nil {
+			tlog.Error("failed to connect to static logic service", "address", address, "error", err)
+		}
+	}()
+}
+
+func (pool *LogicClientPool) IsConnected() bool {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	for _, client := range pool.clients {
+		if client.IsConnected() {
+			return true
+		}
+	}
+	return false
+}
+
+func splitRoutes(s string) []string {
+	var result []string
+	for _, r := range strings.Split(s, ",") {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			result = append(result, r)
+		}
+	}
+	return result
 }

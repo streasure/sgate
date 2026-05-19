@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"math/big"
 	"sync"
@@ -26,13 +27,15 @@ import (
 //   Status: 连接状态 (0=active, 1=closing, 2=closed)
 
 type Connection struct {
-	id         string    // 连接唯一标识 (约50字节)
-	UserUUID   string    // 用户UUID (约50字节)
-	Conn       gnet.Conn // 底层网络连接 (8字节指针)
-	RemoteAddr string    // 远程地址 (约30字节)
-	CreatedAt  int64     // 创建时间戳
-	LastActive int64     // 最后活跃时间
-	Status     int8      // 连接状态
+	id         string              // 连接唯一标识 (约50字节)
+	UserUUID   string              // 用户UUID (约50字节)
+	ServerID   string              // 服务器ID
+	Conn       gnet.Conn           // 底层网络连接 (8字节指针)
+	RemoteAddr string              // 远程地址 (约30字节)
+	CreatedAt  int64               // 创建时间戳
+	LastActive int64               // 最后活跃时间
+	Status     int8                // 连接状态
+	Groups     map[string]struct{} // 所属推送组
 }
 
 func (c *Connection) ID() string {
@@ -40,11 +43,19 @@ func (c *Connection) ID() string {
 }
 
 func (c *Connection) Send(data []byte) error {
-	_, err := c.Conn.Write(data)
+	if c.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(data)))
+	_, err := c.Conn.Writev([][]byte{header, data})
 	return err
 }
 
 func (c *Connection) Sendv(datas [][]byte) error {
+	if c.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
 	_, err := c.Conn.Writev(datas)
 	return err
 }
@@ -67,10 +78,11 @@ func (c *Connection) RemoteAddrStr() string {
 //   connectionStats: 连接统计信息，使用原子操作进行更新
 
 type ConnectionManager struct {
-	connections     sync.Map // 本地连接映射，使用 sync.Map 实现并发安全
-	userConnections sync.Map // 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
-	groups          sync.Map // 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
-	count           int32    // 连接数量，使用原子操作进行更新
+	connections     sync.Map     // 本地连接映射，使用 sync.Map 实现并发安全
+	userConnections sync.Map     // 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
+	groups          sync.Map     // 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
+	groupMutex      sync.RWMutex // 推送组操作互斥锁，保护 groupUsers map 的并发访问
+	count           int32        // 连接数量，使用原子操作进行更新
 	// 连接统计信息
 	connectionStats struct {
 		totalConnections    int64 // 总连接数
@@ -138,6 +150,8 @@ func putConnection(c *Connection) {
 	c.CreatedAt = 0
 	c.Status = 0
 	c.LastActive = 0
+	c.Groups = nil
+	c.ServerID = ""
 	connectionPool.Put(c)
 }
 
@@ -229,9 +243,8 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 	responseData, err := proto.Marshal(kickMessage)
 	if err != nil {
 		tlog.Error("序列化踢人消息失败", "error", err)
-	} else if conn.Conn != nil {
-		// 发送下线通知（不检查错误，因为连接可能已关闭）
-		conn.Conn.Write(responseData)
+	} else {
+		conn.Send(responseData)
 	}
 
 	// 关闭连接
@@ -255,11 +268,22 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	if exists {
 		atomic.AddInt32(&cm.count, -1)
 
-		// 获取Connection中的userUUID
 		connection := conn.(*Connection)
 		userUUID := connection.UserUUID
 
-		// 计算连接时间
+		if connection.Groups != nil {
+			cm.groupMutex.Lock()
+			for groupID := range connection.Groups {
+				if groupUsers, ok := cm.groups.Load(groupID); ok {
+					delete(groupUsers.(map[string]struct{}), connectionID)
+					if len(groupUsers.(map[string]struct{})) == 0 {
+						cm.groups.Delete(groupID)
+					}
+				}
+			}
+			cm.groupMutex.Unlock()
+		}
+
 		connectionTime := time.Now().UnixMilli() - connection.CreatedAt
 
 		// 更新连接统计信息
@@ -313,6 +337,13 @@ func (cm *ConnectionManager) GetConnection(connectionID string) *Connection {
 		return conn.(*Connection)
 	}
 	return nil
+}
+
+func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string) {
+	if conn, ok := cm.connections.Load(connectionID); ok {
+		c := conn.(*Connection)
+		c.ServerID = serverID
+	}
 }
 
 // GetGnetConnection 获取底层gnet连接
@@ -488,7 +519,7 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 	}
 
 	// 使用Writev方法发送响应，减少内存拷贝
-	if _, err := conn.Conn.Writev([][]byte{responseData}); err != nil {
+	if err := conn.Send(responseData); err != nil {
 		// 输出错误日志
 		tlog.Error("发送消息失败", "connectionID", connectionID, "error", err)
 		// 连接可能已关闭，从连接管理器中移除
@@ -701,15 +732,15 @@ func randomString(length int) string {
 //	groupID: 组ID
 //	groupName: 组名称
 func (cm *ConnectionManager) CreateGroup(groupID string, groupName string) {
-	// 检查组是否已存在
+	cm.groupMutex.Lock()
+	defer cm.groupMutex.Unlock()
+
 	if _, ok := cm.groups.Load(groupID); ok {
 		tlog.Warn("组已存在", "groupID", groupID)
 		return
 	}
 
-	// 创建新组
 	cm.groups.Store(groupID, map[string]struct{}{})
-	// 输出调试日志
 	tlog.Debug("推送组已创建", "groupID", groupID, "groupName", groupName)
 }
 
@@ -719,15 +750,15 @@ func (cm *ConnectionManager) CreateGroup(groupID string, groupName string) {
 //
 //	groupID: 组ID
 func (cm *ConnectionManager) DeleteGroup(groupID string) {
-	// 检查组是否存在
+	cm.groupMutex.Lock()
+	defer cm.groupMutex.Unlock()
+
 	if _, ok := cm.groups.Load(groupID); !ok {
 		tlog.Warn("组不存在", "groupID", groupID)
 		return
 	}
 
-	// 删除组
 	cm.groups.Delete(groupID)
-	// 输出调试日志
 	tlog.Debug("推送组已删除", "groupID", groupID)
 }
 
@@ -738,15 +769,24 @@ func (cm *ConnectionManager) DeleteGroup(groupID string) {
 //	groupID: 组ID
 //	userUUID: 用户UUID
 func (cm *ConnectionManager) AddUserToGroup(groupID string, userUUID string) {
-	// 检查组是否存在
+	cm.groupMutex.Lock()
+	defer cm.groupMutex.Unlock()
+
 	if groupUsers, ok := cm.groups.Load(groupID); ok {
-		// 添加用户到组
 		groupUsers.(map[string]struct{})[userUUID] = struct{}{}
-		// 输出调试日志
-		tlog.Debug("用户已添加到推送组", "groupID", groupID, "userUUID", userUUID)
 	} else {
-		tlog.Warn("组不存在", "groupID", groupID)
+		newGroup := make(map[string]struct{})
+		newGroup[userUUID] = struct{}{}
+		cm.groups.Store(groupID, newGroup)
 	}
+	if conn, ok := cm.connections.Load(userUUID); ok {
+		c := conn.(*Connection)
+		if c.Groups == nil {
+			c.Groups = make(map[string]struct{})
+		}
+		c.Groups[groupID] = struct{}{}
+	}
+	tlog.Debug("用户已添加到推送组", "groupID", groupID, "userUUID", userUUID)
 }
 
 // RemoveUserFromGroup 从推送组中移除用户
@@ -756,15 +796,22 @@ func (cm *ConnectionManager) AddUserToGroup(groupID string, userUUID string) {
 //	groupID: 组ID
 //	userUUID: 用户UUID
 func (cm *ConnectionManager) RemoveUserFromGroup(groupID string, userUUID string) {
-	// 检查组是否存在
+	cm.groupMutex.Lock()
+	defer cm.groupMutex.Unlock()
+
 	if groupUsers, ok := cm.groups.Load(groupID); ok {
-		// 从组中移除用户
 		delete(groupUsers.(map[string]struct{}), userUUID)
-		// 输出调试日志
-		tlog.Debug("用户已从推送组中移除", "groupID", groupID, "userUUID", userUUID)
-	} else {
-		tlog.Warn("组不存在", "groupID", groupID)
+		if len(groupUsers.(map[string]struct{})) == 0 {
+			cm.groups.Delete(groupID)
+		}
 	}
+	if conn, ok := cm.connections.Load(userUUID); ok {
+		c := conn.(*Connection)
+		if c.Groups != nil {
+			delete(c.Groups, groupID)
+		}
+	}
+	tlog.Debug("用户已从推送组中移除", "groupID", groupID, "userUUID", userUUID)
 }
 
 // SendToUser 发送消息到指定用户
@@ -800,16 +847,22 @@ func (cm *ConnectionManager) SendToUser(userUUID string, message interface{}) bo
 //
 //	bool: 是否发送成功
 func (cm *ConnectionManager) SendToGroup(groupID string, message interface{}) bool {
-	// 检查组是否存在
+	cm.groupMutex.RLock()
 	groupUsers, ok := cm.groups.Load(groupID)
 	if !ok {
+		cm.groupMutex.RUnlock()
 		tlog.Warn("组不存在", "groupID", groupID)
 		return false
 	}
 
-	// 向组中的所有用户发送消息
-	success := false
+	userUUIDs := make([]string, 0)
 	for userUUID := range groupUsers.(map[string]struct{}) {
+		userUUIDs = append(userUUIDs, userUUID)
+	}
+	cm.groupMutex.RUnlock()
+
+	success := false
+	for _, userUUID := range userUUIDs {
 		if cm.SendToUser(userUUID, message) {
 			success = true
 		}
@@ -845,13 +898,14 @@ func (cm *ConnectionManager) GetUserConnections(userUUID string) []string {
 //
 //	[]string: 用户UUID列表
 func (cm *ConnectionManager) GetGroupUsers(groupID string) []string {
-	// 检查组是否存在
+	cm.groupMutex.RLock()
+	defer cm.groupMutex.RUnlock()
+
 	groupUsers, ok := cm.groups.Load(groupID)
 	if !ok {
 		return []string{}
 	}
 
-	// 提取用户UUID列表
 	userMap := groupUsers.(map[string]struct{})
 	userUUIDs := make([]string, 0, len(userMap))
 	for userUUID := range userMap {
@@ -869,7 +923,6 @@ func (cm *ConnectionManager) GetGroupUsers(groupID string) []string {
 //	oldUserUUID: 旧用户UUID
 //	newUserUUID: 新用户UUID
 func (cm *ConnectionManager) UpdateUserConnection(connectionID string, oldUserUUID string, newUserUUID string) {
-	// 使用新的UpdateConnectionUserUUID方法
 	cm.UpdateConnectionUserUUID(connectionID, newUserUUID)
 }
 

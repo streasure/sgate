@@ -13,7 +13,29 @@ import (
 	tlog "github.com/streasure/treasure-slog"
 )
 
+var (
+	modkernel32            = syscall.NewLazyDLL("kernel32.dll")
+	procSetPriorityClass   = modkernel32.NewProc("SetPriorityClass")
+	procSetProcessAffinity = modkernel32.NewProc("SetProcessAffinityMask")
+)
+
+func setProcessPriorityHigh() {
+	handle, _ := syscall.GetCurrentProcess()
+	procSetPriorityClass.Call(uintptr(handle), 0x00000080) // HIGH_PRIORITY_CLASS
+	_ = handle
+}
+
+func setProcessAffinity(mask uintptr) {
+	handle, _ := syscall.GetCurrentProcess()
+	procSetProcessAffinity.Call(uintptr(handle), mask)
+	_ = handle
+}
+
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	setProcessPriorityHigh()
+
 	defer func() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)

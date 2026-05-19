@@ -21,16 +21,17 @@ import (
 //   Security: 安全配置
 
 type Config struct {
-	Port        int            `yaml:"port"`        // 服务端口
-	LogLevel    string         `yaml:"logLevel"`    // 日志级别
-	Redis       RedisConfig    `yaml:"redis"`       // Redis配置
-	Transports  []Transport    `yaml:"transports"`  // 支持的协议列表
-	Network     NetworkConfig  `yaml:"network"`     // 网络配置
-	WorkerPool  WorkerPoolConfig `yaml:"workerPool"` // 工作池配置
+	Port        int               `yaml:"port"`        // 服务端口
+	LogLevel    string            `yaml:"logLevel"`    // 日志级别
+	Redis       RedisConfig       `yaml:"redis"`       // Redis配置
+	Discovery   DiscoveryConfig   `yaml:"discovery"`   // 服务发现配置
+	Transports  []Transport       `yaml:"transports"`  // 支持的协议列表
+	Network     NetworkConfig     `yaml:"network"`     // 网络配置
+	WorkerPool  WorkerPoolConfig  `yaml:"workerPool"`  // 工作池配置
 	RateLimiter RateLimiterConfig `yaml:"rateLimiter"` // 速率限制配置
-	Alerts      AlertConfig    `yaml:"alerts"`      // 告警配置
-	Security    SecurityConfig `yaml:"security"`    // 安全配置
-	Resources   ResourceConfig `yaml:"resources"`   // 系统资源配置
+	Alerts      AlertConfig       `yaml:"alerts"`      // 告警配置
+	Security    SecurityConfig    `yaml:"security"`    // 安全配置
+	Resources   ResourceConfig    `yaml:"resources"`   // 系统资源配置
 }
 
 // RedisConfig Redis配置结构
@@ -51,6 +52,16 @@ type RedisConfig struct {
 	MaxIdleConns int    `yaml:"maxIdleConns"` // 最大空闲连接数
 }
 
+// DiscoveryConfig 服务发现配置结构
+type DiscoveryConfig struct {
+	Enabled           bool          `yaml:"enabled"`           // 是否启用服务发现
+	ServiceName       string        `yaml:"serviceName"`       // 服务名称
+	HeartbeatInterval time.Duration `yaml:"heartbeatInterval"` // 心跳间隔
+	HeartbeatTTL      time.Duration `yaml:"heartbeatTTL"`      // 心跳过期时间
+	DeregisterDelay   time.Duration `yaml:"deregisterDelay"`   // 掉线后延迟注销时间
+	ScanInterval      time.Duration `yaml:"scanInterval"`      // 扫描间隔
+}
+
 // NetworkConfig 网络配置结构
 // 字段:
 //   EventLoopCount: 事件循环数量
@@ -59,10 +70,10 @@ type RedisConfig struct {
 //   TCPKeepAlive: TCP保活时间
 
 type NetworkConfig struct {
-	EventLoopCount   int           `yaml:"eventLoopCount"`   // 事件循环数量
-	ReadBufferSize   int           `yaml:"readBufferSize"`   // 读取缓冲区大小
-	WriteBufferSize  int           `yaml:"writeBufferSize"`  // 写入缓冲区大小
-	TCPKeepAlive     time.Duration `yaml:"tcpKeepAlive"`     // TCP保活时间
+	EventLoopCount  int           `yaml:"eventLoopCount"`  // 事件循环数量
+	ReadBufferSize  int           `yaml:"readBufferSize"`  // 读取缓冲区大小
+	WriteBufferSize int           `yaml:"writeBufferSize"` // 写入缓冲区大小
+	TCPKeepAlive    time.Duration `yaml:"tcpKeepAlive"`    // TCP保活时间
 }
 
 // WorkerPoolConfig 工作池配置结构
@@ -87,9 +98,9 @@ type WorkerPoolConfig struct {
 //   UserRateLimit: 用户维度限流配置
 
 type RateLimiterConfig struct {
-	Rate         int           `yaml:"rate"`         // 速率限制（每秒请求数）
-	Burst        int           `yaml:"burst"`        // 突发限制
-	Window       time.Duration `yaml:"window"`       // 时间窗口
+	Rate          int                 `yaml:"rate"`          // 速率限制（每秒请求数）
+	Burst         int                 `yaml:"burst"`         // 突发限制
+	Window        time.Duration       `yaml:"window"`        // 时间窗口
 	UserRateLimit UserRateLimitConfig `yaml:"userRateLimit"` // 用户维度限流配置
 }
 
@@ -104,7 +115,7 @@ type UserRateLimitConfig struct {
 	Enabled bool   `yaml:"enabled"` // 是否启用用户维度限流
 	Rate    int    `yaml:"rate"`    // 每秒允许的请求数
 	Burst   int    `yaml:"burst"`   // 突发请求数
-	Action  string `yaml:"action"`   // 触发限流时的动作：close=踢掉连接，reject=拒绝请求
+	Action  string `yaml:"action"`  // 触发限流时的动作：close=踢掉连接，reject=拒绝请求
 }
 
 // AlertConfig 告警配置结构
@@ -236,43 +247,51 @@ func loadDefaultConfig() *Config {
 			MinIdleConns: redisMinIdleConns,
 			MaxIdleConns: redisMaxIdleConns,
 		},
+		Discovery: DiscoveryConfig{
+			Enabled:           true,
+			ServiceName:       "logic",
+			HeartbeatInterval: 3 * time.Second,
+			HeartbeatTTL:      10 * time.Second,
+			DeregisterDelay:   5 * time.Second,
+			ScanInterval:      10 * time.Second,
+		},
 		Transports: defaultTransports,
 		Network: NetworkConfig{
-			EventLoopCount:   0, // 0表示使用CPU核心数
-			ReadBufferSize:   4096,
-			WriteBufferSize:  4096,
-			TCPKeepAlive:     30 * time.Second,
+			EventLoopCount:  0, // 0表示使用CPU核心数
+			ReadBufferSize:  4096,
+			WriteBufferSize: 4096,
+			TCPKeepAlive:    30 * time.Second,
 		},
 		WorkerPool: WorkerPoolConfig{
-			MinWorkers:         16, // 默认最小工作线程数
-			MaxWorkers:         128, // 默认最大工作线程数
+			MinWorkers:         16,      // 默认最小工作线程数
+			MaxWorkers:         128,     // 默认最大工作线程数
 			QueueSize:          1000000, // 默认队列大小
-			QueueSizeThreshold: 1000, // 默认队列大小阈值
+			QueueSizeThreshold: 1000,    // 默认队列大小阈值
 		},
 		RateLimiter: RateLimiterConfig{
-			Rate:   1000, // 默认速率限制
-			Burst:  2000, // 默认突发限制
+			Rate:   1000,            // 默认速率限制
+			Burst:  2000,            // 默认突发限制
 			Window: 1 * time.Second, // 默认时间窗口
 			UserRateLimit: UserRateLimitConfig{
-				Enabled: false, // 默认不启用用户维度限流
-				Rate:    20,    // 默认每秒20次
-				Burst:   30,    // 默认突发30次
+				Enabled: false,   // 默认不启用用户维度限流
+				Rate:    20,      // 默认每秒20次
+				Burst:   30,      // 默认突发30次
 				Action:  "close", // 默认踢掉连接
 			},
 		},
 		Alerts: AlertConfig{
-			ActiveConnectionsThreshold: 1000, // 活跃连接数阈值
-			FailedMessagesThreshold:    100,  // 失败消息数阈值
-			ProcessingTimeThreshold:    100,  // 处理时间阈值
-			RedisErrorsThreshold:       10,   // Redis错误数阈值
+			ActiveConnectionsThreshold: 1000,  // 活跃连接数阈值
+			FailedMessagesThreshold:    100,   // 失败消息数阈值
+			ProcessingTimeThreshold:    100,   // 处理时间阈值
+			RedisErrorsThreshold:       10,    // Redis错误数阈值
 			QueueLengthThreshold:       10000, // 消息队列长度阈值
 		},
 		Security: SecurityConfig{
-			AuthSecret:        "default_secret", // 默认认证密钥
-			EnableIPWhitelist: false, // 默认不启用IP白名单
-			EnableIPBlacklist: true,  // 默认启用IP黑名单
-			DefaultWhitelist:  []string{"127.0.0.1", "::1"}, // 默认白名单
-			DefaultBlacklist:  []string{}, // 默认黑名单
+			AuthSecret:        "default_secret",                                        // 默认认证密钥
+			EnableIPWhitelist: false,                                                   // 默认不启用IP白名单
+			EnableIPBlacklist: true,                                                    // 默认启用IP黑名单
+			DefaultWhitelist:  []string{"127.0.0.1", "::1"},                            // 默认白名单
+			DefaultBlacklist:  []string{},                                              // 默认黑名单
 			AuthRoutes:        []string{"getConnections", "broadcast", "ws.broadcast"}, // 默认需要认证的路由
 		},
 		Resources: ResourceConfig{
