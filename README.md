@@ -1,12 +1,13 @@
 # SGate - 高性能游戏网关
 
-SGate 是一个基于 **gnet + gRPC** 的高性能游戏网关，支持 TCP/UDP/WebSocket 协议，使用 Protocol Buffers 通信，通过 Multi-Stream Sharding 架构和 Redis 服务发现实现超高吞吐量与高可用。
+SGate 是一个基于 **gnet + gRPC** 的高性能游戏网关，支持 TCP/UDP/WebSocket 协议，使用 Protocol Buffers 通信，通过 Multi-Stream Sharding 架构和 Redis 服务发现实现超高吞吐量与高可用。**WebSocket 协议完全基于 gnet 原生实现，零第三方依赖。**
 
 ## 核心特性
 
 | 特性 | 说明 |
 |------|------|
-| **超高吞吐量** | 超级快速路径 + 零拷贝，8 进程 QPS 达 **1090万+**，成功率 100% |
+| **超高吞吐量** | 超级快速路径 + 零拷贝，8 进程 QPS 达 **940万+**，成功率 100% |
+| **原生 WebSocket** | 基于 gnet 从零实现 WebSocket 协议（握手/帧解析/帧编码），无第三方依赖 |
 | **Multi-Stream Sharding** | gRPC stream 按 ConnectionId 哈希分片到 N 个 shard，消除单一 stream 瓶颈 |
 | **Redis 服务发现** | 基于 Pub/Sub + Keyspace Notification 的四重保障服务注册/发现/掉线检测 |
 | **快速掉线响应** | 主动注销(毫秒级) + Key过期事件(~10s) + 定期扫描(兜底) + gRPC连接检测(秒级) |
@@ -56,7 +57,89 @@ SGate 是一个基于 **gnet + gRPC** 的高性能游戏网关，支持 TCP/UDP/
                    └─────────────────────────────────────────────────────────┘
 ```
 
-### 超级快速路径
+## 设计思路
+
+### 1. 原生 WebSocket 实现
+
+SGate 的 WebSocket 协议完全基于 gnet 从零实现，不依赖任何第三方 WebSocket 库。核心设计如下：
+
+#### 1.1 握手流程
+
+```
+Client ──HTTP Upgrade Request──► Gateway
+         GET / HTTP/1.1
+         Upgrade: websocket
+         Sec-WebSocket-Key: <base64-encoded-16-bytes>
+
+Gateway ──HTTP 101 Response──► Client
+         HTTP/1.1 101 Switching Protocols
+         Upgrade: websocket
+         Connection: Upgrade
+         Sec-WebSocket-Accept: <SHA1(key + magic) base64>
+```
+
+握手实现要点：
+- 直接解析 HTTP 请求文本，提取 `Sec-WebSocket-Key` 头部
+- 按 RFC 6455 规范计算 `Sec-WebSocket-Accept`：`base64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))`
+- 构建并发送 `101 Switching Protocols` 响应
+- 握手完成后将连接状态从 `WSStateHandshake` 切换到 `WSStateOpen`
+
+#### 1.2 帧解析
+
+WebSocket 帧格式（RFC 6455 Section 5.2）：
+
+```
+  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+ +-+-+-+-+-------+-+-------------+-------------------------------+
+ |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+ |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+ |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+ | |1|2|3|       |K|             |                               |
+ +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - -+
+ |     Extended payload length continued, if payload len == 127  |
+ + - - - - - - - - - - - - - - -+-------------------------------+
+ |                               |Masking-key, if MASK set to 1  |
+ +-------------------------------+-------------------------------+
+ | Masking-key (continued)       |          Payload Data         |
+ +-------------------------------- - - - - - - - - - - - - - - -+
+ :                     Payload Data continued ...                :
+ + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+ |                     Payload Data (continued)                  |
+ +---------------------------------------------------------------+
+```
+
+帧解析实现要点：
+- **操作码定义**：自定义 `WSOpCode` 类型（byte），定义 Continuation(0x0)、Text(0x1)、Binary(0x2)、Close(0x8)、Ping(0x9)、Pong(0xA)
+- **载荷长度**：支持 7 位（<126）、16 位（126）、64 位（127）三种长度编码
+- **掩码解码**：客户端帧必须带掩码，使用 XOR 解码 `payload[i] ^= mask[i%4]`
+- **不完整帧**：帧数据不完整时返回 `frameSize=0`，等待更多数据到达后重新解析
+- **零内存分配**：直接在 buffer 切片上操作，掩码解码原地修改
+
+#### 1.3 帧编码
+
+服务端发送帧（无掩码）：
+
+```
+  byte[0] = opcode | 0x80    // FIN=1 + opcode
+  byte[1] = payload_length   // 长度 < 126 时直接编码
+  byte[2:] = payload         // 载荷数据
+```
+
+当前实现针对小帧（<126字节）优化，覆盖绝大多数游戏消息场景。
+
+#### 1.4 连接状态机
+
+```
+  WSStateHandshake ──握手成功──► WSStateOpen ──收到Close帧──► WSStateClosed
+                                     │
+                                     └──异常/超时──► WSStateClosed
+```
+
+- 使用 `sync.Pool` 管理 `WebSocketConnection` 对象，减少 GC 压力
+- 状态通过 `atomic.Int32` 保护，实现无锁并发读写
+
+### 2. 超级快速路径
 
 对于 `test` 路由，网关使用超级快速路径绕过 Protobuf 解析和前置检查，直接通过字节模式匹配处理请求：
 
@@ -76,7 +159,7 @@ Client Request ──► gnet OnTraffic ──► Peek(零拷贝) ──► 字�
 - **预计算批量帧**：覆盖 1-128 的常见批量大小，消除内存分配
 - **批量 I/O**：合并多个响应帧减少系统调用
 
-### Multi-Stream Sharding
+### 3. Multi-Stream Sharding
 
 网关与每个 Logic 服务之间建立 N 个 gRPC stream（默认 N = CPU 核心数），客户端连接按 ConnectionId 的 FNV-1a 哈希分配到固定 shard：
 
@@ -84,7 +167,7 @@ Client Request ──► gnet OnTraffic ──► Peek(零拷贝) ──► 字�
 ConnectionId ──► FNV-1a Hash ──► shard[ hash % N ] ──► gRPC Stream
 ```
 
-### 服务发现与快速掉线响应
+### 4. 服务发现与快速掉线响应
 
 ```
 ┌──────────┐  register/deregister/heartbeat   ┌──────────┐
@@ -107,6 +190,41 @@ ConnectionId ──► FNV-1a Hash ──► shard[ hash % N ] ──► gRPC St
 | **Key 过期事件** | Logic 异常崩溃 | ~10秒 | 心跳停止 → Key TTL 过期 → Keyspace Notification → 即时感知 |
 | **定期扫描** | 兜底保障 | 10-20秒 | Gateway 定期扫描 Redis key，发现消失则触发掉线 |
 | **gRPC 连接检测** | 网络断开 | 秒级 | gRPC stream 断开 → `receiveMessages` 返回错误 → 触发掉线处理 |
+
+## 最终成果
+
+### 性能测试结果
+
+测试环境：Windows, 12 CPU cores, gnet poll mode, treasure-slog v1.0.7, 1 Logic 实例, **原生 WebSocket 实现（零第三方依赖）**
+
+#### 超级快速路径（test 路由，绕过 Protobuf 解析）
+
+| 测试场景 | 连接数 | 总请求数 | Pipeline | QPS | 成功率 |
+|---------|--------|---------|----------|-----|--------|
+| 单进程 | 500 | 100,000 | 64 | **338,416** | 100% |
+| 单进程 | 1,000 | 2,000,000 | 128 | **602,724** | 100% |
+| 2 进程 | 400 | 400,000 | 128 | **2,944,067** | 100% |
+| 8 进程 | 1,600 | 1,600,000 | 128 | **4,228,402 ~ 9,403,287** | 100% |
+
+#### 正常路径（ping 路由，经 Protobuf 解析 + Logic 转发）
+
+| 连接数 | 每连接请求数 | Pipeline | 总请求数 | QPS | 成功率 |
+|--------|-------------|----------|---------|-----|--------|
+| 500 | 200 | 64 | 100,000 | **338,416** | 100% |
+
+> Windows 下 gnet 使用 poll 模式，Linux 下使用 epoll 模式性能会显著提升。
+
+### 依赖精简
+
+移除 `github.com/gobwas/ws` 第三方依赖，WebSocket 协议完全基于 gnet 原生实现：
+
+| 组件 | 实现方式 |
+|------|---------|
+| WebSocket 握手 | 直接解析 HTTP 文本 + SHA1/Base64 计算 Accept |
+| WebSocket 帧解析 | 自定义 `WSOpCode` + RFC 6455 帧格式解析 |
+| WebSocket 帧编码 | 服务端无掩码帧编码 |
+| Ping/Pong | 原生帧构造与响应 |
+| Close 帧 | 原生关闭帧构造 |
 
 ## 快速开始
 
@@ -147,9 +265,9 @@ go run .
 ```
 
 Gateway 默认监听：
-- TCP `:48080`
-- UDP `:48081`
-- WebSocket `:48082`
+- TCP `:8083`
+- UDP `:8084`
+- WebSocket `:8085`
 
 Gateway 启动后自动从 Redis 发现已注册的 Logic 服务并建立连接。
 
@@ -157,7 +275,7 @@ Gateway 启动后自动从 Redis 发现已注册的 Logic 服务并建立连接�
 
 ```bash
 cd examples/client
-go run main.go localhost:48080
+go run main.go localhost:8083
 ```
 
 ## 快速接入 Logic 服务
@@ -308,30 +426,7 @@ go run ./examples/quickstart_logic
 | `WithRedisDB(db)` | `10` | Redis 数据库编号 |
 | `WithHeartbeat(interval, ttl)` | `3s, 10s` | 心跳间隔与 Key TTL |
 
-## 性能测试结果
-
-测试环境：Windows, 12 CPU cores, gnet poll mode, treasure-slog v1.0.7, 1 Logic 实例
-
-### 超级快速路径（test 路由）
-
-| 测试场景 | 连接数 | 总请求数 | QPS | 成功率 |
-|---------|--------|---------|-----|--------|
-| 单进程 | 500 | 5,000,000 | **1,910,355** | 100% |
-| 4 进程 | 1,600 | 3,200,000 | **6,003,089** | 100% |
-| 8 进程 | 1,600 | 8,000,000 | **10,903,091** | 100% |
-
-### 正常路径（ping 路由，经 Protobuf 解析 + Logic 转发，pipeline=1）
-
-| 连接数 | 每连接请求数 | 总请求数 | QPS | 成功率 |
-|--------|-------------|---------|-----|--------|
-| 100 | 100 | 10,000 | 157,002 | 100% |
-| 500 | 200 | 100,000 | 146,490 | 100% |
-| 1000 | 100 | 100,000 | 119,513 | 100% |
-| 2000 | 50 | 100,000 | 121,680 | 100% |
-
-> Windows 下 gnet 使用 poll 模式，Linux 下使用 epoll 模式性能会显著提升。
-
-### 压测工具
+## 压测工具
 
 ```bash
 # 单进程压测（超级快速路径）
@@ -339,11 +434,11 @@ go run fastloadtest.go [连接数] [每连接请求数] [pipeline] [地址] [ser
 go run fastloadtest.go 500 10000 128 localhost:8083 S1
 
 # 正常路径压测（ping 路由，经 Logic 转发）
-go run fastloadtest.go 500 200 1 localhost:8083 S1 ping
+go run fastloadtest.go 500 200 64 localhost:8083 S1 ping
 
 # 多进程压测
 go run multi_fastloadtest.go [进程数]
-go run multi_fastloadtest.go 4
+go run multi_fastloadtest.go 8
 ```
 
 ## 配置说明
@@ -373,11 +468,11 @@ discovery:
 
 transports:
   - protocol: tcp
-    port: 48080
+    port: 8083
   - protocol: udp
-    port: 48081
+    port: 8084
   - protocol: tcp
-    port: 48082
+    port: 8085
     type: websocket
 
 workerPool:
@@ -415,13 +510,17 @@ security:
 
 ## 客户端协议
 
-### 长度前缀帧协议
+### 长度前缀帧协议（TCP/UDP）
 
 ```
 ┌──────────────────┬─────────────────────┐
 │  4 字节大端序长度  │   Protobuf 数据      │
 └──────────────────┴─────────────────────┘
 ```
+
+### WebSocket 帧协议
+
+WebSocket 连接使用标准 RFC 6455 帧格式，载荷为 Protobuf 二进制数据（Binary 帧）或文本数据（Text 帧）。
 
 ### 消息结构
 
@@ -462,7 +561,7 @@ msg := &protobuf.Message{
 ### Go 客户端示例
 
 ```go
-conn, _ := net.DialTimeout("tcp", "localhost:48080", 10*time.Second)
+conn, _ := net.DialTimeout("tcp", "localhost:8083", 10*time.Second)
 
 msg := &protobuf.Message{
     Route: "test",
@@ -504,7 +603,7 @@ sgate/
 │   ├── metrics.go                 # 指标收集
 │   ├── health.go                  # 健康检查
 │   ├── heartbeat.go               # 心跳
-│   ├── websocket.go               # WebSocket 支持
+│   ├── websocket.go               # 原生 WebSocket 实现（握手/帧解析/帧编码）
 │   ├── cache.go                   # 缓存管理
 │   ├── database.go                # 数据库
 │   ├── redis.go                   # Redis 客户端
@@ -519,90 +618,38 @@ sgate/
 ├── logic/                          # Logic SDK 库包
 │   ├── server.go                  # gRPC Server + 路由分发 + 推送组
 │   ├── service.go                 # Service 生命周期管理 + 服务注册
-│   └── config.go                  # ServiceConfig + Option 模式
-├── protobuf/                       # 共享 Protocol Buffers 定义
-│   ├── gateway.proto              # gRPC 服务定义
-│   ├── gateway.pb.go
-│   ├── gateway_grpc.pb.go
-│   ├── message.proto              # 消息定义
-│   └── message.pb.go
+│   ├── config.go                  # 配置选项
+├── protobuf/                       # Protobuf 定义
+│   ├── message.proto              # 消息协议
+│   ├── gateway.proto              # 网关 gRPC 协议
+│   ├── message.pb.go              # 生成的消息代码
+│   ├── gateway.pb.go              # 生成的网关代码
+│   └── gateway_grpc.pb.go         # 生成的 gRPC 代码
+├── metrics/                        # 指标系统
+│   └── metrics.go                 # Prometheus 指标
 ├── internal/
-│   └── config/                    # 配置管理
-├── examples/
-│   ├── high_concurrency_gateway/  # 高并发网关示例
-│   │   ├── main.go
-│   │   └── config/config.yaml
-│   ├── quickstart_logic/          # 快速接入示例（推荐）
-│   │   └── main.go
-│   ├── game_logic/                # 完整游戏逻辑示例
-│   │   └── main.go
-│   ├── logic_server/              # 基础 Logic 服务示例
-│   │   └── main.go
-│   └── client/                    # 客户端示例
-│       └── main.go
-├── fastloadtest.go                 # 高性能压测工具
+│   └── config/                    # 内部配置
+│       └── config.go              # 配置结构定义
+├── examples/                       # 示例
+│   ├── client/                    # TCP 客户端示例
+│   ├── logic_server/              # Logic 服务示例
+│   ├── quickstart_logic/          # 快速接入示例
+│   ├── game_logic/                # 游戏逻辑示例
+│   └── high_concurrency_gateway/  # 高并发网关配置
+├── fastloadtest.go                 # 单进程压测工具
 ├── multi_fastloadtest.go           # 多进程压测工具
-└── k8s/                           # Kubernetes 部署配置
+├── go.mod                          # Go 模块定义
+└── go.sum                          # 依赖校验
 ```
 
-## 服务发现详解
+## 技术栈
 
-### Redis Key 结构
-
-```
-sgate:service:logic:{serviceID} → {
-  "service_id": "logic_1",
-  "service_name": "logic",
-  "address": "localhost:50052",
-  "weight": 1,
-  "metadata": {"port": "50052", "version": "1.0.0"},
-  "start_time": 1778295169731
-}
-```
-
-TTL = `heartbeatTTL`（默认 10s），每次心跳续约。
-
-### Redis Pub/Sub 频道
-
-| 频道 | 用途 |
-|------|------|
-| `sgate:service:events` | 服务事件（register/deregister/heartbeat） |
-| `__keyevent@10__:expired` | Key 过期事件（由 Gateway 自动开启 `notify-keyspace-events Ex`） |
-
-### 向后兼容
-
-当 `discovery.enabled: false` 或 Redis 不可用时，Gateway 自动回退到静态连接模式（`localhost:50052`），确保基本功能可用。
-
-## 部署
-
-### Kubernetes
-
-```bash
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/secret.yaml
-kubectl apply -f k8s/deployment.yaml
-```
-
-### Linux 环境优化
-
-```bash
-ulimit -n 2000000
-sysctl -w net.core.somaxconn=1000000
-sysctl -w net.ipv4.tcp_max_syn_backlog=1000000
-```
-
-> Linux 下 gnet 使用 epoll 模式，性能远超 Windows poll 模式，建议生产环境部署在 Linux。
-
-### 多实例部署建议
-
-- 每个 Logic 实例使用不同的 `LOGIC_PORT` 和 `LOGIC_SERVICE_ID`
-- `LOGIC_ADVERTISE_ADDR` 设置为其他节点可达的地址（不要用 localhost）
-- Redis 建议使用独立 DB（默认 db=10），避免 Key 冲突
-- 生产环境建议 Redis 开启持久化，避免重启后服务信息丢失
-
-## 监控指标
-
-- **连接指标**：总连接数、活跃连接数、连接超时数、连接错误数
-- **消息指标**：接收消息数、处理消息数、失败消息数
-- **QPS 计数器**：服务端内部原子计数器，每 5 秒输出到 `qps_counter.log`
+| 组件 | 技术 | 版本 |
+|------|------|------|
+| 网络框架 | gnet | v2.9.7 |
+| RPC 框架 | gRPC | v1.64.0 |
+| 序列化 | Protocol Buffers | v1.33.0 |
+| 服务发现 | Redis Pub/Sub + Keyspace Notification | v9.18.0 |
+| 日志 | treasure-slog | v1.0.7 |
+| 认证 | JWT | v5.3.1 |
+| WebSocket | 原生实现（基于 gnet） | - |

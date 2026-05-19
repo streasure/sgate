@@ -1619,16 +1619,6 @@ func (g *GatewayGnet) OnBoot(engine gnet.Engine) (action gnet.Action) {
 	return
 }
 
-// SetTLSConfig 设置TLS配置
-func (g *GatewayGnet) SetTLSConfig(config *tls.Config) {
-	g.tlsConfig = config
-}
-
-// GetTLSConfig 获取TLS配置
-func (g *GatewayGnet) GetTLSConfig() *tls.Config {
-	return g.tlsConfig
-}
-
 // GetVersion 获取网关版本
 func (g *GatewayGnet) GetVersion() string {
 	return "1.0.0"

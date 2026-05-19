@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cast"
@@ -1539,42 +1538,6 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	return
 }
 
-// containsBytes 检查字节数组是否包含另一个字节数组
-// 参数:
-//
-//	data: 数据
-//	sub: 子字节数组
-//
-// 返回值:
-//
-//	bool: 是否包含
-func containsBytes(data, sub []byte) bool {
-	for i := 0; i <= len(data)-len(sub); i++ {
-		if equal(data[i:i+len(sub)], sub) {
-			return true
-		}
-	}
-	return false
-}
-
-// trimSpace 去除字符串前后空白
-// 参数:
-//
-//	s: 字符串
-//
-// 返回值:
-//
-//	string: 处理后的字符串
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r' || s[0] == '\n') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\r' || s[len(s)-1] == '\n') {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
 // handleTCPRequest 处理TCP请求
 // 参数:
 //
@@ -1765,130 +1728,6 @@ func writeMsgFrame(c gnet.Conn, msg *protobuf.Message) {
 	writeFrame(c, data)
 }
 
-func splitBytes(data []byte, sep []byte) [][]byte {
-	var result [][]byte
-	start := 0
-	for i := 0; i <= len(data)-len(sep); i++ {
-		if equal(data[i:i+len(sep)], sep) {
-			result = append(result, data[start:i])
-			start = i + len(sep)
-			i += len(sep) - 1
-		}
-	}
-	if start < len(data) {
-		result = append(result, data[start:])
-	}
-	return result
-}
-
-// equal 比较两个字节数组是否相等
-// 参数:
-//
-//	a: 字节数组a
-//	b: 字节数组b
-//
-// 返回值:
-//
-//	bool: 是否相等
-func equal(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// indexOf 查找字符在字符串中的位置
-// 参数:
-//
-//	s: 字符串
-//	c: 字符
-//
-// 返回值:
-//
-//	int: 位置
-func indexOf(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
-}
-
-// indexOfBytes 查找字节数组在另一个字节数组中的位置
-// 参数:
-//
-//	data: 数据
-//	sep: 分隔符
-//
-// 返回值:
-//
-//	int: 位置
-func indexOfBytes(data, sep []byte) int {
-	for i := 0; i <= len(data)-len(sep); i++ {
-		if equal(data[i:i+len(sep)], sep) {
-			return i
-		}
-	}
-	return -1
-}
-
-// trimPrefix 移除字符串开头的指定字符
-// 参数:
-//
-//	s: 字符串
-//	c: 字符
-//
-// 返回值:
-//
-//	string: 处理后的字符串
-func trimPrefix(s string, c byte) string {
-	for len(s) > 0 && s[0] == c {
-		s = s[1:]
-	}
-	return s
-}
-
-// replaceAll 替换字符串中的所有指定字符
-// 参数:
-//
-//	s: 字符串
-//	old: 旧字符
-//	new: 新字符
-//
-// 返回值:
-//
-//	string: 处理后的字符串
-func replaceAll(s string, old, new byte) string {
-	// 首先检查是否需要替换
-	needReplace := false
-	for i := 0; i < len(s); i++ {
-		if s[i] == old {
-			needReplace = true
-			break
-		}
-	}
-	if !needReplace {
-		return s
-	}
-
-	// 需要替换时再分配内存
-	result := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == old {
-			result[i] = new
-		} else {
-			result[i] = s[i]
-		}
-	}
-	return string(result)
-}
-
 // OnBoot 服务器启动时的回调
 // 参数:
 //
@@ -1917,22 +1756,6 @@ func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
 		}
 	}()
 	return
-}
-
-// SetTLSConfig 设置TLS配置
-// 参数:
-//
-//	config: TLS配置
-func (g *Gateway) SetTLSConfig(config *tls.Config) {
-	g.tlsConfig = config
-}
-
-// GetTLSConfig 获取TLS配置
-// 返回值:
-//
-//	*tls.Config: TLS配置
-func (g *Gateway) GetTLSConfig() *tls.Config {
-	return g.tlsConfig
 }
 
 // GetVersion 获取网关版本
@@ -2321,7 +2144,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 		if isWebSocket {
 			// 封装为WebSocket消息
 			wsConn := msg.Conn.Context().(*WebSocketConnection)
-			if err := g.sendWebSocketMessage(wsConn, ws.OpText, responseData); err != nil {
+			if err := g.sendWebSocketMessage(wsConn, WSOpText, responseData); err != nil {
 				// 记录事件
 				g.tracer.AddEvent(span, "websocket_send_error", map[string]string{
 					"error": err.Error(),
@@ -2409,45 +2232,6 @@ func sanitizeString(s string) string {
 	return s
 }
 
-// sanitizeMap 清理 map 中的字符串值，防止 XSS 攻击
-func sanitizeMap(m map[string]interface{}) map[string]interface{} {
-	for k, v := range m {
-		switch val := v.(type) {
-		case string:
-			m[k] = sanitizeString(val)
-		case map[string]interface{}:
-			m[k] = sanitizeMap(val)
-		case []interface{}:
-			for i, item := range val {
-				if str, ok := item.(string); ok {
-					val[i] = sanitizeString(str)
-				} else if subMap, ok := item.(map[string]interface{}); ok {
-					val[i] = sanitizeMap(subMap)
-				}
-			}
-			m[k] = val
-		}
-	}
-	return m
-}
-
-// sanitizePayload 清理 payload 中的字符串值，防止 XSS 攻击
-func sanitizePayload(payload interface{}) interface{} {
-	switch val := payload.(type) {
-	case map[string]interface{}:
-		return sanitizeMap(val)
-	case string:
-		return sanitizeString(val)
-	case []interface{}:
-		for i, item := range val {
-			val[i] = sanitizePayload(item)
-		}
-		return val
-	default:
-		return val
-	}
-}
-
 // validateInput 验证输入，防止 SQL 注入和其他攻击
 func validateInput(input string) bool {
 	// 检查 SQL 注入攻击
@@ -2484,49 +2268,6 @@ func validateInput(input string) bool {
 	}
 
 	return true
-}
-
-// validatePayload 验证 payload 中的输入，防止 SQL 注入和其他攻击
-func validatePayload(payload interface{}) bool {
-	switch val := payload.(type) {
-	case map[string]interface{}:
-		for _, v := range val {
-			if !validatePayload(v) {
-				return false
-			}
-		}
-	case string:
-		if !validateInput(val) {
-			return false
-		}
-	case []interface{}:
-		for _, item := range val {
-			if !validatePayload(item) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// getTokenFromPayload 从 payload 中获取 token
-func getTokenFromPayload(payload interface{}) (string, bool) {
-	if payloadMap, ok := payload.(map[string]interface{}); ok {
-		if token, ok := payloadMap["token"].(string); ok {
-			return token, true
-		}
-	}
-	return "", false
-}
-
-// addUserInfoToPayload 将用户信息添加到 payload 中
-func addUserInfoToPayload(payload interface{}, userID string, role string) interface{} {
-	if payloadMap, ok := payload.(map[string]interface{}); ok {
-		payloadMap["user_id"] = userID
-		payloadMap["role"] = role
-		return payloadMap
-	}
-	return payload
 }
 
 // sanitizePayloadMap 清理 payload 中的字符串值，防止 XSS 攻击

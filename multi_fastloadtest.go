@@ -22,7 +22,7 @@ func main() {
 	connsPerClient := 200
 	reqsPerConn := 1000
 	pipeline := 128
-	addr := "localhost:48080"
+	addr := "localhost:8083"
 	serverID := "S1"
 
 	var totalQPS int64
@@ -37,7 +37,7 @@ func main() {
 		go func(idx int) {
 			defer wg.Done()
 			args := []string{
-				".\\fastloadtest.exe",
+				"e:\\sgate\\fastloadtest.exe",
 				fmt.Sprintf("%d", connsPerClient),
 				fmt.Sprintf("%d", reqsPerConn),
 				fmt.Sprintf("%d", pipeline),
@@ -47,7 +47,7 @@ func main() {
 			cmd := exec.Command(args[0], args[1:]...)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
-				results[idx] = fmt.Sprintf("Client %d error: %v", idx, err)
+				results[idx] = fmt.Sprintf("Client %d error: %v output: %s", idx, err, string(output))
 				return
 			}
 
