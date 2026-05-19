@@ -77,13 +77,20 @@ func (c *Connection) RemoteAddrStr() string {
 //   count: 连接数量，使用原子操作进行更新，确保并发安全
 //   connectionStats: 连接统计信息，使用原子操作进行更新
 
+type serverUserKey struct {
+	serverID string
+	userUUID string
+}
+
 type ConnectionManager struct {
-	connections     sync.Map      // 本地连接映射，使用 sync.Map 实现并发安全
-	userConnections sync.Map      // 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
-	groups          sync.Map      // 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
-	groupMutex      sync.RWMutex  // 推送组操作互斥锁，保护 groupUsers map 的并发访问
-	count           int32         // 连接数量，使用原子操作进行更新
-	stopCh          chan struct{} // 连接检查器停止通道
+	connections           sync.Map      // 本地连接映射，使用 sync.Map 实现并发安全
+	userConnections       sync.Map      // 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
+	serverUserConnections sync.Map      // 服务+用户复合索引，key为serverUserKey，value为*Connection（1跳直达）
+	serverConnections     sync.Map      // 服务索引，key为serverID，value为*sync.Map(userUUID→*Connection)
+	groups                sync.Map      // 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
+	groupMutex            sync.RWMutex  // 推送组操作互斥锁，保护 groupUsers map 的并发访问
+	count                 int32         // 连接数量，使用原子操作进行更新
+	stopCh                chan struct{} // 连接检查器停止通道
 	// 连接统计信息
 	connectionStats struct {
 		totalConnections    int64 // 总连接数
@@ -304,7 +311,10 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 		}
 		cm.statsMutex.Unlock()
 
-		// 归还Connection到对象池
+		serverID := connection.ServerID
+
+		cm.removeFromServerIndex(serverID, userUUID)
+
 		putConnection(connection)
 
 		// 从用户连接映射中移除该连接ID（单一登录模式）
@@ -343,7 +353,14 @@ func (cm *ConnectionManager) GetConnection(connectionID string) *Connection {
 func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string) {
 	if conn, ok := cm.connections.Load(connectionID); ok {
 		c := conn.(*Connection)
+		oldServerID := c.ServerID
+		userUUID := c.UserUUID
+
+		cm.removeFromServerIndex(oldServerID, userUUID)
+
 		c.ServerID = serverID
+
+		cm.addToServerIndex(c)
 	}
 }
 
@@ -394,12 +411,14 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUs
 
 	oldUserUUID := conn.UserUUID
 
-	// 如果新旧用户相同，不需要处理
 	if oldUserUUID == newUserUUID {
 		return
 	}
 
-	// 从旧用户的连接映射中移除
+	serverID := conn.ServerID
+
+	cm.removeFromServerIndex(serverID, oldUserUUID)
+
 	if oldUserUUID != "" {
 		if currentConnID, ok := cm.userConnections.Load(oldUserUUID); ok {
 			if currentConnID.(string) == connectionID {
@@ -424,7 +443,8 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUs
 	// 更新Connection的UserUUID
 	conn.UserUUID = newUserUUID
 
-	// 输出调试日志
+	cm.addToServerIndex(conn)
+
 	tlog.Debug("连接用户UUID已更新", "connectionID", connectionID, "oldUserUUID", oldUserUUID, "newUserUUID", newUserUUID)
 }
 
@@ -442,6 +462,108 @@ func (cm *ConnectionManager) UpdateConnectionStatus(connectionID string, status 
 
 	conn.Status = status
 	conn.LastActive = time.Now().UnixMilli()
+}
+
+func (cm *ConnectionManager) addToServerIndex(conn *Connection) {
+	serverID := conn.ServerID
+	userUUID := conn.UserUUID
+	if serverID == "" || userUUID == "" {
+		return
+	}
+
+	key := serverUserKey{serverID: serverID, userUUID: userUUID}
+	cm.serverUserConnections.Store(key, conn)
+
+	for {
+		val, loaded := cm.serverConnections.LoadOrStore(serverID, &sync.Map{})
+		userMap := val.(*sync.Map)
+		userMap.Store(userUUID, conn)
+		if loaded {
+			return
+		}
+		return
+	}
+}
+
+func (cm *ConnectionManager) removeFromServerIndex(serverID, userUUID string) {
+	if serverID == "" || userUUID == "" {
+		return
+	}
+
+	key := serverUserKey{serverID: serverID, userUUID: userUUID}
+	cm.serverUserConnections.Delete(key)
+
+	if val, ok := cm.serverConnections.Load(serverID); ok {
+		userMap := val.(*sync.Map)
+		userMap.Delete(userUUID)
+		empty := true
+		userMap.Range(func(_, _ interface{}) bool {
+			empty = false
+			return false
+		})
+		if empty {
+			cm.serverConnections.Delete(serverID)
+		}
+	}
+}
+
+func (cm *ConnectionManager) GetConnectionByServerUser(serverID, userUUID string) *Connection {
+	key := serverUserKey{serverID: serverID, userUUID: userUUID}
+	if conn, ok := cm.serverUserConnections.Load(key); ok {
+		return conn.(*Connection)
+	}
+	return nil
+}
+
+func (cm *ConnectionManager) GetConnectionsByServerID(serverID string) []*Connection {
+	val, ok := cm.serverConnections.Load(serverID)
+	if !ok {
+		return nil
+	}
+	userMap := val.(*sync.Map)
+	var conns []*Connection
+	userMap.Range(func(_, v interface{}) bool {
+		if c, ok := v.(*Connection); ok && c != nil {
+			conns = append(conns, c)
+		}
+		return true
+	})
+	return conns
+}
+
+func (cm *ConnectionManager) GetConnectionCountByServerID(serverID string) int {
+	val, ok := cm.serverConnections.Load(serverID)
+	if !ok {
+		return 0
+	}
+	count := 0
+	val.(*sync.Map).Range(func(_, _ interface{}) bool {
+		count++
+		return true
+	})
+	return count
+}
+
+func (cm *ConnectionManager) SendToServerUser(serverID, userUUID string, message interface{}) bool {
+	conn := cm.GetConnectionByServerUser(serverID, userUUID)
+	if conn == nil {
+		return false
+	}
+	return cm.SendToConnection(conn.id, message)
+}
+
+func (cm *ConnectionManager) SendToServer(serverID string, message interface{}) int {
+	conns := cm.GetConnectionsByServerID(serverID)
+	if len(conns) == 0 {
+		return 0
+	}
+	success := 0
+	for _, conn := range conns {
+		if cm.SendToConnection(conn.id, message) {
+			success++
+		}
+	}
+	return success
 }
 
 // SendToConnection 发送消息到指定连接
@@ -671,20 +793,20 @@ func (cm *ConnectionManager) GetConnectionCount() int {
 // CloseAllConnections 关闭所有连接
 // 功能: 关闭所有连接并清空连接管理器
 func (cm *ConnectionManager) CloseAllConnections() {
-	// 遍历所有连接并关闭
 	cm.connections.Range(func(key, value interface{}) bool {
 		connectionID := key.(string)
 		conn := value.(*Connection)
 		if err := conn.Conn.Close(); err != nil {
 			tlog.Error("关闭连接失败", "connectionID", connectionID, "error", err)
 		}
-		// 归还Connection到对象池
 		putConnection(conn)
 		cm.connections.Delete(key)
 		return true
 	})
 
-	// 重置连接数
+	cm.serverUserConnections = sync.Map{}
+	cm.serverConnections = sync.Map{}
+
 	atomic.StoreInt32(&cm.count, 0)
 
 	tlog.Info("所有连接已关闭")
