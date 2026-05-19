@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/streasure/sgate/metrics"
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -348,6 +350,7 @@ type Gateway struct {
 	workerPool            sync.WaitGroup             // 工作池
 	stopChan              chan struct{}              // 停止信号通道
 	workerStopChan        chan struct{}              // 工作线程停止信号通道
+	closeOnce             sync.Once                  // 确保 Close 只执行一次
 	metrics               *metrics.Metrics           // 指标收集器
 	transportType         map[string]string          // 端口到传输类型的映射
 	rateLimiter           *RateLimiter               // 速率限制器
@@ -392,6 +395,9 @@ type Gateway struct {
 	bufferCount     atomic.Int64   // 缓冲区数量
 	objectPoolUsage atomic.Int64   // 对象池使用量
 	fastPath        *fastPathCache // 超级快速路径缓存
+	grpcServer      *grpc.Server   // gRPC 服务器引用
+	qpsFile         *os.File       // QPS 日志文件
+	promServer      *http.Server   // Prometheus HTTP 服务器
 }
 
 // NewGateway 创建网关实例
@@ -614,13 +620,16 @@ func NewGateway() *Gateway {
 	if gw.serviceDiscovery == nil {
 		tlog.Info("service discovery disabled, using static logic server connection")
 		go func() {
-			tlog.Info("waiting before connecting to logic server", "delay", "2s")
-			time.Sleep(2 * time.Second)
-			tlog.Info("connecting to logic server", "address", "localhost:50052")
-			if err := gw.logicClient.Connect("localhost:50052"); err != nil {
-				tlog.Error("failed to connect to logic server", "error", err)
-			} else {
-				tlog.Info("successfully connected to logic server")
+			select {
+			case <-time.After(2 * time.Second):
+				tlog.Info("connecting to logic server", "address", "localhost:50052")
+				if err := gw.logicClient.Connect("localhost:50052"); err != nil {
+					tlog.Error("failed to connect to logic server", "error", err)
+				} else {
+					tlog.Info("successfully connected to logic server")
+				}
+			case <-gw.stopChan:
+				return
 			}
 		}()
 	}
@@ -628,9 +637,10 @@ func NewGateway() *Gateway {
 	tlog.Info("about to start gRPC server", "port", ":50051")
 	go func() {
 		tlog.Info("starting gRPC server", "port", ":50051")
-		if err := StartGRPCServer(gw, ":50051"); err != nil {
+		if server, err := StartGRPCServer(gw, ":50051"); err != nil {
 			tlog.Error("failed to start gRPC server", "error", err)
 		} else {
+			gw.grpcServer = server
 			tlog.Info("gRPC server started", "port", ":50051")
 		}
 	}()
@@ -1380,6 +1390,13 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 //
 //	gnet.Action: 操作类型
 func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error("OnTraffic panic recovered", "error", fmt.Sprintf("%v", r))
+			action = gnet.Close
+		}
+	}()
+
 	if g.fastPath != nil {
 		data, err := c.Peek(-1)
 		if err == nil && len(data) >= 10 {
@@ -1737,21 +1754,27 @@ func writeMsgFrame(c gnet.Conn, msg *protobuf.Message) {
 //
 //	gnet.Action: 操作类型
 func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
-	qpsFile, _ := os.OpenFile("qps_counter.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	g.qpsFile, _ = os.OpenFile("qps_counter.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 		for {
-			time.Sleep(5 * time.Second)
-			cur := atomic.LoadInt64(&fastPathTotal)
-			last := atomic.LoadInt64(&fastPathLast)
-			atomic.StoreInt64(&fastPathLast, cur)
-			qps := int64(0)
-			if last > 0 {
-				qps = (cur - last) / 5
-			}
-			msg := fmt.Sprintf("[QPS] total=%d last=%d qps=%d\n", cur, last, qps)
-			if qpsFile != nil {
-				qpsFile.WriteString(msg)
-				qpsFile.Sync()
+			select {
+			case <-g.stopChan:
+				return
+			case <-ticker.C:
+				cur := atomic.LoadInt64(&fastPathTotal)
+				last := atomic.LoadInt64(&fastPathLast)
+				atomic.StoreInt64(&fastPathLast, cur)
+				qps := int64(0)
+				if last > 0 {
+					qps = (cur - last) / 5
+				}
+				msg := fmt.Sprintf("[QPS] total=%d last=%d qps=%d\n", cur, last, qps)
+				if g.qpsFile != nil {
+					g.qpsFile.WriteString(msg)
+					g.qpsFile.Sync()
+				}
 			}
 		}
 	}()
@@ -1824,7 +1847,10 @@ func (g *Gateway) OnShutdown(engine gnet.Engine) {
 //
 //	msg: 消息
 func (g *Gateway) handleMessage(msg *Message) {
-	// 收集消息指标
+	if msg == nil || msg.Conn == nil {
+		return
+	}
+
 	g.metrics.IncMessagesReceived()
 
 	// 记录处理开始时间
@@ -2114,10 +2140,12 @@ func (g *Gateway) handleMessage(msg *Message) {
 			responseData, err = proto.Marshal(protoMsg)
 		} else if errorMsg, ok := response.(*protobuf.ErrorResponse); ok {
 			responseData, err = proto.Marshal(errorMsg)
-		} else {
-			// 转换为Protocol Buffers消息
-			protoMsg := NewResponseMessage("response", response.(map[string]string))
+		} else if payloadMap, ok := response.(map[string]string); ok {
+			protoMsg := NewResponseMessage("response", payloadMap)
 			responseData, err = proto.Marshal(protoMsg)
+		} else {
+			tlog.Error("未知的响应类型", "type", fmt.Sprintf("%T", response))
+			return
 		}
 		if err != nil {
 			// 记录事件
@@ -2310,21 +2338,52 @@ func (g *Gateway) Broadcast(message interface{}) {
 
 // Close 关闭网关
 func (g *Gateway) Close() {
-	close(g.stopChan)
-	g.workerPool.Wait()
+	g.closeOnce.Do(func() {
+		close(g.stopChan)
+		g.workerPool.Wait()
 
-	if g.serviceDiscovery != nil {
-		g.serviceDiscovery.Stop()
-	}
+		if g.messageACK != nil {
+			g.messageACK.Stop()
+		}
 
-	if g.logicClientPool != nil {
-		g.logicClientPool.Close()
-	}
+		if g.database != nil {
+			g.database.Close()
+		}
 
-	if g.redisClient != nil {
-		g.redisClient.Close()
-	}
+		if g.serviceDiscovery != nil {
+			g.serviceDiscovery.Stop()
+		}
 
-	g.connectionManager.CloseAllConnections()
-	tlog.Info("所有连接已关闭")
+		if g.logicClientPool != nil {
+			g.logicClientPool.Close()
+		}
+
+		if g.grpcServer != nil {
+			stopped := make(chan struct{})
+			go func() {
+				g.grpcServer.GracefulStop()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-time.After(5 * time.Second):
+				g.grpcServer.Stop()
+			}
+		}
+
+		if g.redisClient != nil {
+			g.redisClient.Close()
+		}
+
+		g.connectionManager.StopConnectionChecker()
+		g.connectionManager.CloseAllConnections()
+
+		g.StopPrometheusMetrics()
+
+		if g.qpsFile != nil {
+			g.qpsFile.Close()
+		}
+
+		tlog.Info("网关已关闭")
+	})
 }

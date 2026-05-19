@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -32,11 +33,11 @@ type PrometheusMetrics struct {
 	processingTime99th    float64
 
 	// 工作池指标
-	workerCount    int32
-	workerMin      int32
-	workerMax      int32
-	queueSize      int32
-	queueCapacity  int32
+	workerCount   int32
+	workerMin     int32
+	workerMax     int32
+	queueSize     int32
+	queueCapacity int32
 
 	// 速率限制指标
 	rateLimitHits    uint64
@@ -44,11 +45,11 @@ type PrometheusMetrics struct {
 	rateLimitBlocked uint64
 
 	// 系统指标
-	goroutines    int
-	memoryAlloc   uint64
-	memorySys     uint64
-	gcCount       uint32
-	cpuUsage      float64
+	goroutines  int
+	memoryAlloc uint64
+	memorySys   uint64
+	gcCount     uint32
+	cpuUsage    float64
 
 	// 时间窗口数据（用于计算每秒消息数）
 	messageHistory []messageSnapshot
@@ -337,18 +338,26 @@ func (pm *PrometheusMetrics) ServeMetricsHTTP(w http.ResponseWriter, r *http.Req
 
 // RegisterPrometheusMetrics 注册Prometheus指标到Gateway
 func (g *Gateway) RegisterPrometheusMetrics() {
-	// 创建Prometheus指标收集器
 	promMetrics := NewPrometheusMetrics()
 
-	// 注册路由
-	http.HandleFunc("/metrics", promMetrics.ServeMetricsHTTP)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", promMetrics.ServeMetricsHTTP)
 
-	// 启动HTTP服务器提供指标端点
+	srv := &http.Server{Addr: ":9090", Handler: mux}
+	g.promServer = srv
+
 	go func() {
-		addr := ":9090" // Prometheus指标端口
-		tlog.Info("启动Prometheus指标服务器", "addr", addr)
-		if err := http.ListenAndServe(addr, nil); err != nil {
+		tlog.Info("启动Prometheus指标服务器", "addr", ":9090")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			tlog.Error("Prometheus指标服务器启动失败", "error", err)
 		}
 	}()
+}
+
+func (g *Gateway) StopPrometheusMetrics() {
+	if g.promServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		g.promServer.Shutdown(ctx)
+	}
 }

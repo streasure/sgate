@@ -21,6 +21,7 @@ import (
 	"github.com/streasure/sgate/metrics"
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -193,6 +194,7 @@ type GatewayGnet struct {
 	workerPool             sync.WaitGroup             // 工作池
 	stopChan               chan struct{}              // 停止信号通道
 	workerStopChan         chan struct{}              // 工作线程停止信号通道
+	closeOnce              sync.Once                  // 确保 Close 只执行一次
 	metrics                *metrics.Metrics           // 指标收集器
 	transportType          map[string]string          // 端口到传输类型的映射
 	rateLimiter            *RateLimiter               // 速率限制器
@@ -230,6 +232,7 @@ type GatewayGnet struct {
 	resourceCheckInterval  time.Duration              // 资源检查间隔
 	userRateLimitConfig    config.UserRateLimitConfig // 用户维度限流配置
 	fastPath               *fastPathCache             // 快速路径缓存
+	grpcServer             *grpc.Server               // gRPC 服务器引用
 }
 
 // monitorResources 监控系统资源使用情况
@@ -476,22 +479,26 @@ func NewGatewayGnet() *GatewayGnet {
 	if gw.serviceDiscovery == nil {
 		tlog.Info("service discovery disabled, using static logic server connection")
 		go func() {
-			tlog.Info("connecting to logic server...")
-			time.Sleep(2 * time.Second)
-			tlog.Info("attempting to connect to logic server: localhost:50052")
-			if err := gw.logicClient.Connect("localhost:50052"); err != nil {
-				tlog.Error("failed to connect to logic server", "error", err)
-			} else {
-				tlog.Info("successfully connected to logic server")
+			select {
+			case <-time.After(2 * time.Second):
+				tlog.Info("attempting to connect to logic server: localhost:50052")
+				if err := gw.logicClient.Connect("localhost:50052"); err != nil {
+					tlog.Error("failed to connect to logic server", "error", err)
+				} else {
+					tlog.Info("successfully connected to logic server")
+				}
+			case <-gw.stopChan:
+				return
 			}
 		}()
 	}
 
 	go func() {
 		tlog.Info("starting gRPC server", "port", ":50051")
-		if err := StartGRPCServer(gw, ":50051"); err != nil {
+		if server, err := StartGRPCServer(gw, ":50051"); err != nil {
 			tlog.Error("failed to start gRPC server", "error", err)
 		} else {
+			gw.grpcServer = server
 			tlog.Info("gRPC server started", "port", ":50051")
 		}
 	}()
@@ -1129,6 +1136,13 @@ func (g *GatewayGnet) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 
 // OnTraffic 收到数据时的回调
 func (g *GatewayGnet) OnTraffic(c gnet.Conn) (action gnet.Action) {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error("OnTraffic panic recovered", "error", fmt.Sprintf("%v", r))
+			action = gnet.Close
+		}
+	}()
+
 	if g.fastPath != nil {
 		data, err := c.Peek(-1)
 		if err == nil && len(data) >= 10 {
@@ -1523,6 +1537,10 @@ func (g *GatewayGnet) handleHandshake(c gnet.Conn, connectionID string, message 
 
 // handleMessage 处理消息
 func (g *GatewayGnet) handleMessage(msg *Message) {
+	if msg == nil || msg.Conn == nil {
+		return
+	}
+
 	if !g.resourceCircuitBreaker.Allow() {
 		writeErrorFrame(msg.Conn, NewErrorMessage("error", "Service temporarily unavailable", "Resource circuit breaker is open", ""))
 		PutMessage(msg)
@@ -1716,27 +1734,45 @@ func (g *GatewayGnet) OnShutdown(engine gnet.Engine) {
 
 // Close 关闭网关
 func (g *GatewayGnet) Close() {
-	close(g.stopChan)
+	g.closeOnce.Do(func() {
+		close(g.stopChan)
 
-	g.workerPool.Wait()
+		g.workerPool.Wait()
 
-	if g.serviceDiscovery != nil {
-		g.serviceDiscovery.Stop()
-	}
+		if g.messageACK != nil {
+			g.messageACK.Stop()
+		}
 
-	if g.logicClientPool != nil {
-		g.logicClientPool.Close()
-	}
+		if g.serviceDiscovery != nil {
+			g.serviceDiscovery.Stop()
+		}
 
-	if g.redisClient != nil {
-		g.redisClient.Close()
-	}
+		if g.logicClientPool != nil {
+			g.logicClientPool.Close()
+		}
 
-	if g.messageACK != nil {
-		g.messageACK.Stop()
-	}
+		if g.grpcServer != nil {
+			stopped := make(chan struct{})
+			go func() {
+				g.grpcServer.GracefulStop()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-time.After(5 * time.Second):
+				g.grpcServer.Stop()
+			}
+		}
 
-	tlog.Info("网关已关闭")
+		if g.redisClient != nil {
+			g.redisClient.Close()
+		}
+
+		g.connectionManager.StopConnectionChecker()
+		g.connectionManager.CloseAllConnections()
+
+		tlog.Info("网关已关闭")
+	})
 }
 
 // Broadcast 广播消息

@@ -78,11 +78,12 @@ func (c *Connection) RemoteAddrStr() string {
 //   connectionStats: 连接统计信息，使用原子操作进行更新
 
 type ConnectionManager struct {
-	connections     sync.Map     // 本地连接映射，使用 sync.Map 实现并发安全
-	userConnections sync.Map     // 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
-	groups          sync.Map     // 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
-	groupMutex      sync.RWMutex // 推送组操作互斥锁，保护 groupUsers map 的并发访问
-	count           int32        // 连接数量，使用原子操作进行更新
+	connections     sync.Map      // 本地连接映射，使用 sync.Map 实现并发安全
+	userConnections sync.Map      // 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
+	groups          sync.Map      // 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
+	groupMutex      sync.RWMutex  // 推送组操作互斥锁，保护 groupUsers map 的并发访问
+	count           int32         // 连接数量，使用原子操作进行更新
+	stopCh          chan struct{} // 连接检查器停止通道
 	// 连接统计信息
 	connectionStats struct {
 		totalConnections    int64 // 总连接数
@@ -933,17 +934,30 @@ func (cm *ConnectionManager) UpdateUserConnection(connectionID string, oldUserUU
 //	timeout: 连接超时时间
 //	interval: 检查间隔
 func (cm *ConnectionManager) StartConnectionChecker(timeout time.Duration, interval time.Duration) {
+	cm.stopCh = make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for {
 			select {
+			case <-cm.stopCh:
+				return
 			case <-ticker.C:
 				cm.checkInactiveConnections(timeout)
 			}
 		}
 	}()
+}
+
+func (cm *ConnectionManager) StopConnectionChecker() {
+	if cm.stopCh != nil {
+		select {
+		case <-cm.stopCh:
+		default:
+			close(cm.stopCh)
+		}
+	}
 }
 
 // checkInactiveConnections 检查不活跃的连接

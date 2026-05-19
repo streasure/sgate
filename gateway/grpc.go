@@ -850,7 +850,7 @@ func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protobuf.Messag
 	s.gateway.GetRouteManager().HandleRoute(connectionID, msg.Route, msg.Payload, callback, ctx)
 }
 
-func StartGRPCServer(gateway GatewayInterface, port string) error {
+func StartGRPCServer(gateway GatewayInterface, port string) (*grpc.Server, error) {
 	tlog.Info("creating gRPC server")
 	server := grpc.NewServer()
 	tlog.Info("registering GatewayService")
@@ -860,7 +860,7 @@ func StartGRPCServer(gateway GatewayInterface, port string) error {
 	listener, err := net.Listen("tcp", port)
 	if err != nil {
 		tlog.Error("failed to listen on port", "error", err, "port", port)
-		return err
+		return nil, err
 	}
 
 	go func() {
@@ -870,7 +870,7 @@ func StartGRPCServer(gateway GatewayInterface, port string) error {
 	}()
 
 	tlog.Info("gRPC server started", "port", port)
-	return nil
+	return server, nil
 }
 
 type LogicClientPool struct {
