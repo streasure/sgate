@@ -52,20 +52,8 @@ func (c *Connection) Send(data []byte) error {
 	return err
 }
 
-func (c *Connection) Sendv(datas [][]byte) error {
-	if c.Conn == nil {
-		return fmt.Errorf("connection is nil")
-	}
-	_, err := c.Conn.Writev(datas)
-	return err
-}
-
 func (c *Connection) Close() error {
 	return c.Conn.Close()
-}
-
-func (c *Connection) RemoteAddrStr() string {
-	return c.RemoteAddr
 }
 
 // ConnectionManager 连接管理器
@@ -80,6 +68,11 @@ func (c *Connection) RemoteAddrStr() string {
 type serverUserKey struct {
 	serverID string
 	userUUID string
+}
+
+type GroupInfo struct {
+	Name    string
+	Members map[serverUserKey]struct{}
 }
 
 type ConnectionManager struct {
@@ -240,7 +233,7 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 
 	// 发送下线通知
 	kickMessage := &protobuf.Message{
-		Route: "kick",
+		Route: protobuf.RouteKick,
 		Payload: map[string]string{
 			"reason":  reason,
 			"message": message,
@@ -278,13 +271,16 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 
 		connection := conn.(*Connection)
 		userUUID := connection.UserUUID
+		serverID := connection.ServerID
 
 		if connection.Groups != nil {
 			cm.groupMutex.Lock()
+			key := serverUserKey{serverID: serverID, userUUID: userUUID}
 			for groupID := range connection.Groups {
-				if groupUsers, ok := cm.groups.Load(groupID); ok {
-					delete(groupUsers.(map[string]struct{}), connectionID)
-					if len(groupUsers.(map[string]struct{})) == 0 {
+				if groupInfo, ok := cm.groups.Load(groupID); ok {
+					info := groupInfo.(*GroupInfo)
+					delete(info.Members, key)
+					if len(info.Members) == 0 {
 						cm.groups.Delete(groupID)
 					}
 				}
@@ -310,8 +306,6 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 			cm.connectionStats.avgConnectionTime = cm.connectionStats.totalConnectionTime / cm.connectionStats.closedConnections
 		}
 		cm.statsMutex.Unlock()
-
-		serverID := connection.ServerID
 
 		cm.removeFromServerIndex(serverID, userUUID)
 
@@ -356,28 +350,21 @@ func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string
 		oldServerID := c.ServerID
 		userUUID := c.UserUUID
 
+		if oldServerID != "" && userUUID != "" {
+			cm.RemoveUserFromGroup("server:"+oldServerID, oldServerID, userUUID)
+		}
+
 		cm.removeFromServerIndex(oldServerID, userUUID)
 
 		c.ServerID = serverID
 
 		cm.addToServerIndex(c)
-	}
-}
 
-// GetGnetConnection 获取底层gnet连接
-// 功能: 根据连接ID获取对应的gnet.Conn
-// 参数:
-//
-//	connectionID: 连接ID
-//
-// 返回值:
-//
-//	gnet.Conn: 网络连接，如果连接不存在则返回nil
-func (cm *ConnectionManager) GetGnetConnection(connectionID string) gnet.Conn {
-	if conn := cm.GetConnection(connectionID); conn != nil {
-		return conn.Conn
+		if serverID != "" && userUUID != "" {
+			cm.AddUserToGroup("server:"+serverID, serverID, userUUID)
+			tlog.Info("connection auto-joined server group", "connectionID", connectionID, "serverID", serverID)
+		}
 	}
-	return nil
 }
 
 // GetConnectionByUserUUID 根据用户UUID获取连接
@@ -446,22 +433,6 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUs
 	cm.addToServerIndex(conn)
 
 	tlog.Debug("连接用户UUID已更新", "connectionID", connectionID, "oldUserUUID", oldUserUUID, "newUserUUID", newUserUUID)
-}
-
-// UpdateConnectionStatus 更新连接状态
-// 功能: 更新指定连接的状态
-// 参数:
-//
-//	connectionID: 连接ID
-//	status: 新的状态 (0=active, 1=closing, 2=closed)
-func (cm *ConnectionManager) UpdateConnectionStatus(connectionID string, status int8) {
-	conn := cm.GetConnection(connectionID)
-	if conn == nil {
-		return
-	}
-
-	conn.Status = status
-	conn.LastActive = time.Now().UnixMilli()
 }
 
 func (cm *ConnectionManager) addToServerIndex(conn *Connection) {
@@ -615,7 +586,7 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 	case map[string]string:
 		// 转换为Protocol Buffers消息
 		protoMsg := &protobuf.Message{
-			Route:   "message",
+			Route:   protobuf.RouteMessage,
 			Payload: msg,
 		}
 		responseData, err = proto.Marshal(protoMsg)
@@ -701,14 +672,13 @@ func (cm *ConnectionManager) Broadcast(message interface{}) {
 	case map[string]string:
 		// 如果是map[string]string，直接创建Protocol Buffers消息
 		protoMsg := &protobuf.Message{
-			Route:   "broadcast",
+			Route:   protobuf.RouteBroadcast,
 			Payload: msg,
 		}
 		responseData, marshalErr = proto.Marshal(protoMsg)
 	case string:
-		// 如果是字符串，包装成Protocol Buffers消息
 		protoMsg := &protobuf.Message{
-			Route: "broadcast",
+			Route: protobuf.RouteBroadcast,
 			Payload: map[string]string{
 				"data": msg,
 			},
@@ -806,6 +776,7 @@ func (cm *ConnectionManager) CloseAllConnections() {
 
 	cm.serverUserConnections = sync.Map{}
 	cm.serverConnections = sync.Map{}
+	cm.groups = sync.Map{}
 
 	atomic.StoreInt32(&cm.count, 0)
 
@@ -863,7 +834,10 @@ func (cm *ConnectionManager) CreateGroup(groupID string, groupName string) {
 		return
 	}
 
-	cm.groups.Store(groupID, map[string]struct{}{})
+	cm.groups.Store(groupID, &GroupInfo{
+		Name:    groupName,
+		Members: make(map[serverUserKey]struct{}),
+	})
 	tlog.Debug("推送组已创建", "groupID", groupID, "groupName", groupName)
 }
 
@@ -876,9 +850,18 @@ func (cm *ConnectionManager) DeleteGroup(groupID string) {
 	cm.groupMutex.Lock()
 	defer cm.groupMutex.Unlock()
 
-	if _, ok := cm.groups.Load(groupID); !ok {
+	groupInfo, ok := cm.groups.Load(groupID)
+	if !ok {
 		tlog.Warn("组不存在", "groupID", groupID)
 		return
+	}
+
+	info := groupInfo.(*GroupInfo)
+	for key := range info.Members {
+		conn := cm.GetConnectionByServerUser(key.serverID, key.userUUID)
+		if conn != nil && conn.Groups != nil {
+			delete(conn.Groups, groupID)
+		}
 	}
 
 	cm.groups.Delete(groupID)
@@ -891,25 +874,31 @@ func (cm *ConnectionManager) DeleteGroup(groupID string) {
 //
 //	groupID: 组ID
 //	userUUID: 用户UUID
-func (cm *ConnectionManager) AddUserToGroup(groupID string, userUUID string) {
+func (cm *ConnectionManager) AddUserToGroup(groupID string, serverID string, userUUID string) {
 	cm.groupMutex.Lock()
 	defer cm.groupMutex.Unlock()
 
-	if groupUsers, ok := cm.groups.Load(groupID); ok {
-		groupUsers.(map[string]struct{})[userUUID] = struct{}{}
+	key := serverUserKey{serverID: serverID, userUUID: userUUID}
+
+	if groupInfo, ok := cm.groups.Load(groupID); ok {
+		groupInfo.(*GroupInfo).Members[key] = struct{}{}
 	} else {
-		newGroup := make(map[string]struct{})
-		newGroup[userUUID] = struct{}{}
-		cm.groups.Store(groupID, newGroup)
-	}
-	if conn, ok := cm.connections.Load(userUUID); ok {
-		c := conn.(*Connection)
-		if c.Groups == nil {
-			c.Groups = make(map[string]struct{})
+		info := &GroupInfo{
+			Name:    groupID,
+			Members: make(map[serverUserKey]struct{}),
 		}
-		c.Groups[groupID] = struct{}{}
+		info.Members[key] = struct{}{}
+		cm.groups.Store(groupID, info)
 	}
-	tlog.Debug("用户已添加到推送组", "groupID", groupID, "userUUID", userUUID)
+
+	conn := cm.GetConnectionByServerUser(serverID, userUUID)
+	if conn != nil {
+		if conn.Groups == nil {
+			conn.Groups = make(map[string]struct{})
+		}
+		conn.Groups[groupID] = struct{}{}
+	}
+	tlog.Debug("用户已添加到推送组", "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
 }
 
 // RemoveUserFromGroup 从推送组中移除用户
@@ -918,23 +907,27 @@ func (cm *ConnectionManager) AddUserToGroup(groupID string, userUUID string) {
 //
 //	groupID: 组ID
 //	userUUID: 用户UUID
-func (cm *ConnectionManager) RemoveUserFromGroup(groupID string, userUUID string) {
+func (cm *ConnectionManager) RemoveUserFromGroup(groupID string, serverID string, userUUID string) {
 	cm.groupMutex.Lock()
 	defer cm.groupMutex.Unlock()
 
-	if groupUsers, ok := cm.groups.Load(groupID); ok {
-		delete(groupUsers.(map[string]struct{}), userUUID)
-		if len(groupUsers.(map[string]struct{})) == 0 {
+	key := serverUserKey{serverID: serverID, userUUID: userUUID}
+
+	if groupInfo, ok := cm.groups.Load(groupID); ok {
+		info := groupInfo.(*GroupInfo)
+		delete(info.Members, key)
+		if len(info.Members) == 0 {
 			cm.groups.Delete(groupID)
 		}
 	}
-	if conn, ok := cm.connections.Load(userUUID); ok {
-		c := conn.(*Connection)
-		if c.Groups != nil {
-			delete(c.Groups, groupID)
+
+	conn := cm.GetConnectionByServerUser(serverID, userUUID)
+	if conn != nil {
+		if conn.Groups != nil {
+			delete(conn.Groups, groupID)
 		}
 	}
-	tlog.Debug("用户已从推送组中移除", "groupID", groupID, "userUUID", userUUID)
+	tlog.Debug("用户已从推送组中移除", "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
 }
 
 // SendToUser 发送消息到指定用户
@@ -971,44 +964,30 @@ func (cm *ConnectionManager) SendToUser(userUUID string, message interface{}) bo
 //	bool: 是否发送成功
 func (cm *ConnectionManager) SendToGroup(groupID string, message interface{}) bool {
 	cm.groupMutex.RLock()
-	groupUsers, ok := cm.groups.Load(groupID)
+	groupInfo, ok := cm.groups.Load(groupID)
 	if !ok {
 		cm.groupMutex.RUnlock()
 		tlog.Warn("组不存在", "groupID", groupID)
 		return false
 	}
 
-	userUUIDs := make([]string, 0)
-	for userUUID := range groupUsers.(map[string]struct{}) {
-		userUUIDs = append(userUUIDs, userUUID)
+	keys := make([]serverUserKey, 0, len(groupInfo.(*GroupInfo).Members))
+	for key := range groupInfo.(*GroupInfo).Members {
+		keys = append(keys, key)
 	}
 	cm.groupMutex.RUnlock()
 
 	success := false
-	for _, userUUID := range userUUIDs {
-		if cm.SendToUser(userUUID, message) {
-			success = true
+	for _, key := range keys {
+		conn := cm.GetConnectionByServerUser(key.serverID, key.userUUID)
+		if conn != nil {
+			if cm.SendToConnection(conn.id, message) {
+				success = true
+			}
 		}
 	}
 
 	return success
-}
-
-// GetUserConnections 获取用户的连接（单一登录模式）
-// 功能: 获取指定用户的连接ID（单一登录模式下最多返回一个）
-// 参数:
-//
-//	userUUID: 用户UUID
-//
-// 返回值:
-//
-//	[]string: 连接ID列表（单一登录模式下最多一个）
-func (cm *ConnectionManager) GetUserConnections(userUUID string) []string {
-	// 获取用户的连接（单一登录模式）
-	if connectionID, ok := cm.userConnections.Load(userUUID); ok {
-		return []string{connectionID.(string)}
-	}
-	return []string{}
 }
 
 // GetGroupUsers 获取推送组的所有用户
@@ -1024,18 +1003,58 @@ func (cm *ConnectionManager) GetGroupUsers(groupID string) []string {
 	cm.groupMutex.RLock()
 	defer cm.groupMutex.RUnlock()
 
-	groupUsers, ok := cm.groups.Load(groupID)
+	groupInfo, ok := cm.groups.Load(groupID)
 	if !ok {
 		return []string{}
 	}
 
-	userMap := groupUsers.(map[string]struct{})
-	userUUIDs := make([]string, 0, len(userMap))
-	for userUUID := range userMap {
-		userUUIDs = append(userUUIDs, userUUID)
+	info := groupInfo.(*GroupInfo)
+	userUUIDs := make([]string, 0, len(info.Members))
+	for key := range info.Members {
+		userUUIDs = append(userUUIDs, key.userUUID)
 	}
 
 	return userUUIDs
+}
+
+func (cm *ConnectionManager) GetGroupUsersByServer(groupID, serverID string) []string {
+	cm.groupMutex.RLock()
+	defer cm.groupMutex.RUnlock()
+
+	groupInfo, ok := cm.groups.Load(groupID)
+	if !ok {
+		return []string{}
+	}
+
+	info := groupInfo.(*GroupInfo)
+	userUUIDs := make([]string, 0)
+	for key := range info.Members {
+		if key.serverID == serverID {
+			userUUIDs = append(userUUIDs, key.userUUID)
+		}
+	}
+
+	return userUUIDs
+}
+
+func (cm *ConnectionManager) GetGroupName(groupID string) string {
+	cm.groupMutex.RLock()
+	defer cm.groupMutex.RUnlock()
+
+	if groupInfo, ok := cm.groups.Load(groupID); ok {
+		return groupInfo.(*GroupInfo).Name
+	}
+	return ""
+}
+
+func (cm *ConnectionManager) GetGroupMemberCount(groupID string) int {
+	cm.groupMutex.RLock()
+	defer cm.groupMutex.RUnlock()
+
+	if groupInfo, ok := cm.groups.Load(groupID); ok {
+		return len(groupInfo.(*GroupInfo).Members)
+	}
+	return 0
 }
 
 // UpdateUserConnection 更新连接的用户映射
@@ -1111,7 +1130,7 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 		if conn != nil {
 			// 发送超时通知
 			timeoutMessage := &protobuf.Message{
-				Route: "timeout",
+				Route: protobuf.RouteTimeout,
 				Payload: map[string]string{
 					"reason":  "inactive",
 					"message": "Connection timeout due to inactivity",
@@ -1147,13 +1166,6 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 //
 //	connectionID: 连接ID
 //
-// 返回值:
-//
-//	*Connection: Connection结构体，如果连接不存在则返回nil
-func (cm *ConnectionManager) GetConnectionInfo(connectionID string) *Connection {
-	return cm.GetConnection(connectionID)
-}
-
 // GetConnectionStats 获取连接统计信息
 // 功能: 获取连接管理器的统计信息
 // 返回值:
@@ -1180,55 +1192,4 @@ func (cm *ConnectionManager) GetConnectionStats() map[string]interface{} {
 		"minMessageLatency":   cm.connectionQuality.minMessageLatency,
 		"totalMessageLatency": cm.connectionQuality.totalMessageLatency,
 	}
-}
-
-// ResetConnectionStats 重置连接统计信息
-// 功能: 重置连接管理器的统计信息
-func (cm *ConnectionManager) ResetConnectionStats() {
-	cm.statsMutex.Lock()
-	defer cm.statsMutex.Unlock()
-
-	// 重置连接统计信息
-	cm.connectionStats = struct {
-		totalConnections    int64 // 总连接数
-		activeConnections   int64 // 活跃连接数
-		closedConnections   int64 // 关闭的连接数
-		connectionTimeouts  int64 // 超时的连接数
-		connectionErrors    int64 // 出错的连接数
-		avgConnectionTime   int64 // 平均连接时间
-		maxConnectionTime   int64 // 最大连接时间
-		minConnectionTime   int64 // 最小连接时间
-		totalConnectionTime int64 // 总连接时间
-	}{}
-
-	// 重置连接质量监控
-	cm.connectionQuality = struct {
-		totalMessages       int64 // 总消息数
-		failedMessages      int64 // 失败的消息数
-		avgMessageLatency   int64 // 平均消息延迟
-		maxMessageLatency   int64 // 最大消息延迟
-		minMessageLatency   int64 // 最小消息延迟
-		totalMessageLatency int64 // 总消息延迟
-	}{}
-}
-
-// LogConnectionStats 记录连接统计信息
-// 功能: 输出连接管理器的统计信息到日志
-func (cm *ConnectionManager) LogConnectionStats() {
-	stats := cm.GetConnectionStats()
-	tlog.Info("连接统计信息",
-		"totalConnections", stats["totalConnections"],
-		"activeConnections", stats["activeConnections"],
-		"closedConnections", stats["closedConnections"],
-		"connectionTimeouts", stats["connectionTimeouts"],
-		"connectionErrors", stats["connectionErrors"],
-		"avgConnectionTime", fmt.Sprintf("%dms", stats["avgConnectionTime"]),
-		"maxConnectionTime", fmt.Sprintf("%dms", stats["maxConnectionTime"]),
-		"minConnectionTime", fmt.Sprintf("%dms", stats["minConnectionTime"]),
-		"totalMessages", stats["totalMessages"],
-		"failedMessages", stats["failedMessages"],
-		"avgMessageLatency", fmt.Sprintf("%dms", stats["avgMessageLatency"]),
-		"maxMessageLatency", fmt.Sprintf("%dms", stats["maxMessageLatency"]),
-		"minMessageLatency", fmt.Sprintf("%dms", stats["minMessageLatency"]),
-	)
 }

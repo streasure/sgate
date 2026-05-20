@@ -41,7 +41,6 @@ type PrometheusMetrics struct {
 
 	// 速率限制指标
 	rateLimitHits    uint64
-	rateLimitMisses  uint64
 	rateLimitBlocked uint64
 
 	// 系统指标
@@ -187,44 +186,6 @@ func (pm *PrometheusMetrics) AddProcessingTime(duration time.Duration) {
 	if pm.messagesProcessed > 0 {
 		pm.processingTimeAverage = float64(pm.processingTimeTotal) / float64(pm.messagesProcessed)
 	}
-	pm.mu.Unlock()
-}
-
-// SetWorkerMetrics 设置工作池指标
-func (pm *PrometheusMetrics) SetWorkerMetrics(count, min, max int32) {
-	pm.mu.Lock()
-	pm.workerCount = count
-	pm.workerMin = min
-	pm.workerMax = max
-	pm.mu.Unlock()
-}
-
-// SetQueueMetrics 设置队列指标
-func (pm *PrometheusMetrics) SetQueueMetrics(size, capacity int32) {
-	pm.mu.Lock()
-	pm.queueSize = size
-	pm.queueCapacity = capacity
-	pm.mu.Unlock()
-}
-
-// IncRateLimitHit 增加速率限制命中数
-func (pm *PrometheusMetrics) IncRateLimitHit() {
-	pm.mu.Lock()
-	pm.rateLimitHits++
-	pm.mu.Unlock()
-}
-
-// IncRateLimitMiss 增加速率限制未命中数
-func (pm *PrometheusMetrics) IncRateLimitMiss() {
-	pm.mu.Lock()
-	pm.rateLimitMisses++
-	pm.mu.Unlock()
-}
-
-// IncRateLimitBlocked 增加速率限制阻止数
-func (pm *PrometheusMetrics) IncRateLimitBlocked() {
-	pm.mu.Lock()
-	pm.rateLimitBlocked++
 	pm.mu.Unlock()
 }
 

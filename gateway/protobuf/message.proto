@@ -143,3 +143,99 @@ message FlowControl {
   int64 timestamp = 4;             // 时间戳
   string checksum = 5;             // 校验和
 }
+
+// ServiceInfo 服务信息
+message ServiceInfo {
+  string game = 1;                 // 游戏名称
+  string zone = 2;                 // 区域
+  string service = 3;              // 服务类型
+  string service_id = 4;           // 服务ID
+  string stream_no = 5;            // 流编号
+}
+
+// StreamData 流数据
+message StreamData {
+  string session_id = 1;           // 会话ID
+  string user_key = 2;             // 用户键
+  int32 cmd = 3;                   // 命令
+  int64 seq_id = 4;                // 序列号
+  bytes data = 5;                  // 数据
+  string client_ip = 6;            // 客户端IP地址
+  ServiceInfo from = 7;            // 从哪个服务来的消息
+}
+
+// Route 路由常量
+enum Route {
+  ROUTE_UNSPECIFIED = 0;
+
+  // 客户端路由
+  ROUTE_HANDSHAKE = 1;
+  ROUTE_LOGIN = 2;
+  ROUTE_PING = 3;
+  ROUTE_PONG = 4;
+  ROUTE_TEST = 5;
+  ROUTE_TEST_RESULT = 6;
+  ROUTE_VERSION = 7;
+  ROUTE_GET_CONNECTIONS = 8;
+  ROUTE_BROADCAST = 9;
+  ROUTE_HEALTH = 10;
+  ROUTE_API_DOCS = 11;
+  ROUTE_ERROR = 12;
+  ROUTE_ECHO = 13;
+  ROUTE_MESSAGE = 14;
+  ROUTE_KICK = 15;
+  ROUTE_TIMEOUT = 16;
+  ROUTE_HANDSHAKE_RESPONSE = 17;
+  ROUTE_QUEUE_TEST = 18;
+  ROUTE_ADD_WHITELIST = 19;
+  ROUTE_REMOVE_WHITELIST = 20;
+  ROUTE_GET_WHITELIST = 21;
+  ROUTE_ADD_BLACKLIST = 22;
+  ROUTE_REMOVE_BLACKLIST = 23;
+  ROUTE_GET_BLACKLIST = 24;
+
+  // 服务端路由
+  ROUTE_SERVER_KICK = 50;
+  ROUTE_SERVER_JOIN_GROUP = 51;
+  ROUTE_SERVER_LEAVE_GROUP = 52;
+  ROUTE_SERVER_JOIN_GROUP_BY_USER = 53;
+  ROUTE_SERVER_LEAVE_GROUP_BY_USER = 54;
+  ROUTE_SERVER_CREATE_GROUP = 55;
+  ROUTE_SERVER_DELETE_GROUP = 56;
+  ROUTE_SERVER_SEND_TO_GROUP = 57;
+  ROUTE_SERVER_GET_GROUP_INFO = 58;
+  ROUTE_SERVER_PLAYER_ONLINE = 59;
+  ROUTE_SERVER_PLAYER_OFFLINE = 60;
+  ROUTE_SERVER_PLAYER_MOVED = 61;
+  ROUTE_SERVER_CHAT = 62;
+  ROUTE_SERVER_PUSH = 63;
+  ROUTE_SERVER_ANNOUNCEMENT = 64;
+  ROUTE_SERVER_ANNOUNCE = 65;
+  ROUTE_SERVER_ROOM_PLAYER_JOINED = 66;
+  ROUTE_SERVER_ROOM_PLAYER_LEFT = 67;
+  ROUTE_SERVER_TEAM_MEMBER_JOINED = 68;
+  ROUTE_SERVER_TEAM_MEMBER_LEFT = 69;
+  ROUTE_SERVER_DAMAGE_NOTIFY = 70;
+  ROUTE_SERVER_ATTACK_BROADCAST = 71;
+
+  // 玩家路由
+  ROUTE_PLAYER_LOGIN = 100;
+  ROUTE_PLAYER_HEARTBEAT = 101;
+  ROUTE_PLAYER_MOVE = 102;
+  ROUTE_PLAYER_CHAT = 103;
+  ROUTE_PLAYER_ATTACK = 104;
+  ROUTE_PLAYER_USE_ITEM = 105;
+  ROUTE_PLAYER_QUERY_STATUS = 106;
+  ROUTE_PLAYER_QUERY_ONLINE = 107;
+
+  // 房间路由
+  ROUTE_ROOM_JOIN = 120;
+  ROUTE_ROOM_LEAVE = 121;
+  ROUTE_ROOM_INFO = 122;
+
+  // 团队路由
+  ROUTE_TEAM_CREATE = 130;
+  ROUTE_TEAM_JOIN = 131;
+  ROUTE_TEAM_LEAVE = 132;
+  ROUTE_TEAM_INFO = 133;
+}

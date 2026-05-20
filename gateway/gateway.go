@@ -1616,7 +1616,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		tlog.Info("生成新的连接ID", "connectionID", connectionID, "userUUID", tempUserUUID)
 	}
 
-	if message.Route == "handshake" {
+	if message.Route == protobuf.RouteHandshake {
 		return g.handleHandshake(c, connectionID, message)
 	}
 
@@ -1708,8 +1708,6 @@ func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *pro
 
 	if serverID := message.Payload["serverId"]; serverID != "" {
 		g.connectionManager.SetConnectionServerID(connectionID, serverID)
-		g.connectionManager.AddUserToGroup("server:"+serverID, connectionID)
-		tlog.Info("connection auto-joined server group", "connectionID", connectionID, "serverID", serverID, "groupID", "server:"+serverID)
 	}
 
 	return gnet.None
@@ -1868,7 +1866,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 	g.tracer.AddAttribute(span, "route", msg.Route)
 
 	// 快速路径：处理 ping 等简单路由
-	if msg.Route == "ping" && !g.logicClient.IsConnected() {
+	if msg.Route == protobuf.RoutePing && !g.logicClient.IsConnected() {
 		// 直接处理 ping 路由，避免复杂的处理流程
 		response := NewResponseMessage("pong", map[string]string{
 			"timestamp": cast.ToString(time.Now().UnixMilli()),
@@ -1880,7 +1878,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 
 		PutMessage(msg)
 		return
-	} else if msg.Route == "version" {
+	} else if msg.Route == protobuf.RouteVersion {
 		response := NewResponseMessage("version", map[string]string{
 			"version":   g.GetVersion(),
 			"clusterID": g.clusterID,
@@ -1893,7 +1891,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 
 		PutMessage(msg)
 		return
-	} else if msg.Route == "getConnections" {
+	} else if msg.Route == protobuf.RouteGetConnections {
 		response := NewResponseMessage("connections", map[string]string{
 			"count": cast.ToString(g.connectionManager.GetConnectionCount()),
 		})
@@ -1904,7 +1902,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 
 		PutMessage(msg)
 		return
-	} else if msg.Route == "broadcast" {
+	} else if msg.Route == protobuf.RouteBroadcast {
 		response := NewResponseMessage("broadcastResult", map[string]string{
 			"success": "true",
 		})
@@ -1915,7 +1913,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 
 		PutMessage(msg)
 		return
-	} else if msg.Route == "health" {
+	} else if msg.Route == protobuf.RouteHealth {
 		response := NewResponseMessage("health", map[string]string{
 			"status":            "healthy",
 			"timestamp":         cast.ToString(time.Now().UnixMilli()),
@@ -1932,7 +1930,7 @@ func (g *Gateway) handleMessage(msg *Message) {
 
 		PutMessage(msg)
 		return
-	} else if msg.Route == "api-docs" {
+	} else if msg.Route == protobuf.RouteAPIDocs {
 		response := NewResponseMessage("api-docs", map[string]string{
 			"version": "1.0.0",
 			"routes":  "ping,getConnections,broadcast,health,api-docs,version",

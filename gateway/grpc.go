@@ -101,10 +101,6 @@ func NewStreamManager(shardCount int) *StreamManager {
 	return sm
 }
 
-func (sm *StreamManager) ShardCount() int {
-	return len(sm.shards)
-}
-
 func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
 	h := fnv.New32a()
 	h.Write([]byte(connectionID))
@@ -394,7 +390,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		}
 
 		if lc.gateway != nil && msg.ConnectionId != "" {
-			if msg.Route == "server.kick" {
+			if msg.Route == protobuf.RouteServerKick {
 				reason := ""
 				if msg.Payload != nil {
 					reason = msg.Payload["reason"]
@@ -409,23 +405,76 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 						conn.Conn.Close()
 					}
 				}
-			} else if msg.Route == "server.join_group" {
+			} else if msg.Route == protobuf.RouteServerJoinGroup {
 				groupID := msg.Payload["groupID"]
 				connID := msg.ConnectionId
 				if groupID != "" && connID != "" {
-					lc.gateway.GetConnectionManager().AddUserToGroup(groupID, connID)
-					tlog.Debug("connection joined group by logic server", "connectionID", connID, "groupID", groupID)
+					conn := lc.gateway.GetConnectionManager().GetConnection(connID)
+					if conn != nil {
+						serverID := conn.ServerID
+						userUUID := conn.UserUUID
+						lc.gateway.GetConnectionManager().AddUserToGroup(groupID, serverID, userUUID)
+						tlog.Debug("connection joined group by logic server", "connectionID", connID, "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
+					}
 				}
 				conn := lc.gateway.GetConnectionManager().GetConnection(connID)
 				if conn != nil {
 					responseData, _ := proto.Marshal(msg)
 					conn.Send(responseData)
 				}
-			} else if msg.Route == "server.leave_group" {
+			} else if msg.Route == protobuf.RouteServerLeaveGroup {
 				groupID := msg.Payload["groupID"]
 				connID := msg.ConnectionId
 				if groupID != "" && connID != "" {
-					lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, connID)
+					conn := lc.gateway.GetConnectionManager().GetConnection(connID)
+					if conn != nil {
+						serverID := conn.ServerID
+						userUUID := conn.UserUUID
+						lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, serverID, userUUID)
+					}
+				}
+			} else if msg.Route == protobuf.RouteServerJoinGroupByUser {
+				groupID := msg.Payload["groupID"]
+				serverID := msg.Payload["serverID"]
+				userUUID := msg.Payload["userUUID"]
+				if groupID != "" && serverID != "" && userUUID != "" {
+					lc.gateway.GetConnectionManager().AddUserToGroup(groupID, serverID, userUUID)
+					tlog.Debug("user joined group by user key", "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
+				}
+			} else if msg.Route == protobuf.RouteServerLeaveGroupByUser {
+				groupID := msg.Payload["groupID"]
+				serverID := msg.Payload["serverID"]
+				userUUID := msg.Payload["userUUID"]
+				if groupID != "" && serverID != "" && userUUID != "" {
+					lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, serverID, userUUID)
+					tlog.Debug("user left group by user key", "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
+				}
+			} else if msg.Route == protobuf.RouteServerCreateGroup {
+				groupID := msg.Payload["groupID"]
+				groupName := msg.Payload["groupName"]
+				if groupID != "" {
+					lc.gateway.GetConnectionManager().CreateGroup(groupID, groupName)
+					tlog.Debug("group created by logic server", "groupID", groupID, "groupName", groupName)
+				}
+			} else if msg.Route == protobuf.RouteServerDeleteGroup {
+				groupID := msg.Payload["groupID"]
+				if groupID != "" {
+					lc.gateway.GetConnectionManager().DeleteGroup(groupID)
+					tlog.Debug("group deleted by logic server", "groupID", groupID)
+				}
+			} else if msg.Route == protobuf.RouteServerSendToGroup {
+				groupID := msg.Payload["groupID"]
+				if groupID != "" {
+					lc.gateway.GetConnectionManager().SendToGroup(groupID, msg)
+					tlog.Debug("message sent to group", "groupID", groupID)
+				}
+			} else if msg.Route == protobuf.RouteServerGetGroupInfo {
+				groupID := msg.Payload["groupID"]
+				if groupID != "" {
+					memberCount := lc.gateway.GetConnectionManager().GetGroupMemberCount(groupID)
+					groupName := lc.gateway.GetConnectionManager().GetGroupName(groupID)
+					users := lc.gateway.GetConnectionManager().GetGroupUsers(groupID)
+					tlog.Debug("group info requested", "groupID", groupID, "groupName", groupName, "memberCount", memberCount, "users", users)
 				}
 			} else {
 				conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
@@ -592,7 +641,7 @@ func (hc *HealthChecker) doCheck() {
 	}
 
 	pingMsg := &protobuf.Message{
-		Route:   "ping",
+		Route:   protobuf.RoutePing,
 		Payload: map[string]string{"type": "health_check"},
 	}
 
@@ -797,7 +846,7 @@ func (s *GRPCServer) StreamMessages(stream protobuf.GatewayService_StreamMessage
 				stream.Send(protoMsg)
 			} else if errorMsg, ok := response.(*protobuf.ErrorResponse); ok {
 				responseMsg := &protobuf.Message{
-					Route: "error",
+					Route: protobuf.RouteError,
 					Payload: map[string]string{
 						"message": errorMsg.Error.Message,
 						"code":    errorMsg.Error.Code,
@@ -828,7 +877,7 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protobuf.Message) (*p
 			response = protoMsg
 		} else if errorMsg, ok := resp.(*protobuf.ErrorResponse); ok {
 			response = &protobuf.Message{
-				Route: "error",
+				Route: protobuf.RouteError,
 				Payload: map[string]string{
 					"message": errorMsg.Error.Message,
 					"code":    errorMsg.Error.Code,

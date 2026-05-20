@@ -62,7 +62,7 @@ func (pm *PlayerManager) OnDisconnect(connectionID string) {
 
 	if player.ServerID != "" {
 		pm.server.PushToGroup("server:"+player.ServerID, &protobuf.Message{
-			Route:   "server.playerOffline",
+			Route:   protobuf.RouteServerPlayerOffline,
 			Payload: map[string]string{"userID": userID, "name": player.Name},
 		}, connectionID)
 	}
@@ -75,7 +75,7 @@ func (pm *PlayerManager) Login(connectionID, userID, name, serverID string) *Pla
 	if existing, ok := pm.players[userID]; ok {
 		if existing.ConnectionID != connectionID {
 			pm.server.PushToConnection(existing.ConnectionID, &protobuf.Message{
-				Route:   "server.kick",
+				Route:   protobuf.RouteServerKick,
 				Payload: map[string]string{"reason": "duplicate_login"},
 			})
 			delete(pm.connToPlayer, existing.ConnectionID)
@@ -111,7 +111,7 @@ func (pm *PlayerManager) Login(connectionID, userID, name, serverID string) *Pla
 
 	if serverID != "" {
 		pm.server.PushToGroup("server:"+serverID, &protobuf.Message{
-			Route:   "server.playerOnline",
+			Route:   protobuf.RouteServerPlayerOnline,
 			Payload: map[string]string{"userID": userID, "name": name, "level": fmt.Sprintf("%d", player.Level)},
 		}, connectionID)
 	}
@@ -168,7 +168,7 @@ func main() {
 
 	pm := NewPlayerManager(svc.Server())
 
-	svc.RegisterRoute("player.login", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(protobuf.RoutePlayerLogin, func(msg *protobuf.Message) *protobuf.Message {
 		userID := msg.GetPayload()["userID"]
 		name := msg.GetPayload()["name"]
 		serverID := msg.GetPayload()["serverID"]
@@ -176,7 +176,7 @@ func main() {
 		if userID == "" || name == "" {
 			return &protobuf.Message{
 				ConnectionId: msg.ConnectionId,
-				Route:        "player.login",
+				Route:        protobuf.RoutePlayerLogin,
 				Payload:      map[string]string{"code": "400", "message": "userID and name required"},
 				Timestamp:    time.Now().UnixMilli(),
 			}
@@ -186,7 +186,7 @@ func main() {
 
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.login",
+			Route:        protobuf.RoutePlayerLogin,
 			Payload: map[string]string{
 				"code":     "200",
 				"level":    fmt.Sprintf("%d", player.Level),
@@ -197,19 +197,19 @@ func main() {
 		}
 	})
 
-	svc.RegisterRoute("player.heartbeat", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(protobuf.RoutePlayerHeartbeat, func(msg *protobuf.Message) *protobuf.Message {
 		ok := pm.UpdateHeartbeat(msg.ConnectionId)
 		if !ok {
 			return &protobuf.Message{
 				ConnectionId: msg.ConnectionId,
-				Route:        "player.heartbeat",
+				Route:        protobuf.RoutePlayerHeartbeat,
 				Payload:      map[string]string{"code": "401", "message": "not logged in"},
 				Timestamp:    time.Now().UnixMilli(),
 			}
 		}
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.heartbeat",
+			Route:        protobuf.RoutePlayerHeartbeat,
 			Payload: map[string]string{
 				"code":        "200",
 				"serverTime":  fmt.Sprintf("%d", time.Now().UnixMilli()),
@@ -219,12 +219,12 @@ func main() {
 		}
 	})
 
-	svc.RegisterRoute("player.move", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(protobuf.RoutePlayerMove, func(msg *protobuf.Message) *protobuf.Message {
 		player := pm.GetByConnection(msg.ConnectionId)
 		if player == nil {
 			return &protobuf.Message{
 				ConnectionId: msg.ConnectionId,
-				Route:        "player.move",
+				Route:        protobuf.RoutePlayerMove,
 				Payload:      map[string]string{"code": "401", "message": "not logged in"},
 				Timestamp:    time.Now().UnixMilli(),
 			}
@@ -242,7 +242,7 @@ func main() {
 
 		if serverID != "" {
 			svc.Server().PushToGroup("server:"+serverID, &protobuf.Message{
-				Route: "server.playerMoved",
+				Route: protobuf.RouteServerPlayerMoved,
 				Payload: map[string]string{
 					"userID": player.UserID,
 					"posX":   fmt.Sprintf("%.1f", posX),
@@ -253,18 +253,18 @@ func main() {
 
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.move",
+			Route:        protobuf.RoutePlayerMove,
 			Payload:      map[string]string{"code": "200"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
 	})
 
-	svc.RegisterRoute("player.chat", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(protobuf.RoutePlayerChat, func(msg *protobuf.Message) *protobuf.Message {
 		player := pm.GetByConnection(msg.ConnectionId)
 		if player == nil {
 			return &protobuf.Message{
 				ConnectionId: msg.ConnectionId,
-				Route:        "player.chat",
+				Route:        protobuf.RoutePlayerChat,
 				Payload:      map[string]string{"code": "401", "message": "not logged in"},
 				Timestamp:    time.Now().UnixMilli(),
 			}
@@ -274,7 +274,7 @@ func main() {
 
 		if player.ServerID != "" {
 			svc.Server().PushToGroup("server:"+player.ServerID, &protobuf.Message{
-				Route: "server.chat",
+				Route: protobuf.RouteServerChat,
 				Payload: map[string]string{
 					"userID":   player.UserID,
 					"userName": player.Name,
@@ -285,51 +285,51 @@ func main() {
 
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.chat",
+			Route:        protobuf.RoutePlayerChat,
 			Payload:      map[string]string{"code": "200"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
 	})
 
-	svc.RegisterRoute("server.push", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(protobuf.RouteServerPush, func(msg *protobuf.Message) *protobuf.Message {
 		serverID := msg.GetPayload()["serverID"]
 		message := msg.GetPayload()["message"]
 
 		if serverID == "" {
 			return &protobuf.Message{
 				ConnectionId: msg.ConnectionId,
-				Route:        "server.push",
+				Route:        protobuf.RouteServerPush,
 				Payload:      map[string]string{"code": "400", "message": "serverID required"},
 				Timestamp:    time.Now().UnixMilli(),
 			}
 		}
 
 		sent := svc.Server().PushToGroup("server:"+serverID, &protobuf.Message{
-			Route:   "server.announcement",
+			Route:   protobuf.RouteServerAnnouncement,
 			Payload: map[string]string{"message": message, "from": "system"},
 		})
 
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "server.push",
+			Route:        protobuf.RouteServerPush,
 			Payload:      map[string]string{"code": "200", "sent": fmt.Sprintf("%d", sent)},
 			Timestamp:    time.Now().UnixMilli(),
 		}
 	})
 
-	svc.RegisterRoute("ping", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(protobuf.RoutePing, func(msg *protobuf.Message) *protobuf.Message {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "ping",
+			Route:        protobuf.RoutePing,
 			Payload:      map[string]string{"message": "pong", "timestamp": fmt.Sprintf("%d", time.Now().UnixMilli())},
 			Timestamp:    time.Now().UnixMilli(),
 		}
 	})
 
-	svc.RegisterRoute("test", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(protobuf.RouteTest, func(msg *protobuf.Message) *protobuf.Message {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "test",
+			Route:        protobuf.RouteTest,
 			Payload:      map[string]string{"message": "ok", "timestamp": fmt.Sprintf("%d", time.Now().UnixMilli())},
 			Timestamp:    time.Now().UnixMilli(),
 		}

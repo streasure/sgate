@@ -45,7 +45,7 @@ func buildFastPathCache() *fastPathCache {
 	cache := &fastPathCache{}
 
 	testMsg := &protobuf.Message{
-		Route:           "testResult",
+		Route:           protobuf.RouteTestResult,
 		Payload:         map[string]string{"success": "true", "message": "Test route works"},
 		Timestamp:       0,
 		ProtocolVersion: "1.0.0",
@@ -57,7 +57,7 @@ func buildFastPathCache() *fastPathCache {
 	copy(cache.testFrame[4:], testData)
 
 	pongMsg := &protobuf.Message{
-		Route:           "pong",
+		Route:           protobuf.RoutePong,
 		Payload:         map[string]string{"timestamp": "0"},
 		Timestamp:       0,
 		ProtocolVersion: "1.0.0",
@@ -71,7 +71,7 @@ func buildFastPathCache() *fastPathCache {
 	cache.testFrameLen = uint32(len(cache.testFrame))
 
 	testReqMsg := &protobuf.Message{
-		Route:   "test",
+		Route:   protobuf.RouteTest,
 		Payload: map[string]string{"data": "1"},
 	}
 	testReqData, _ := proto.Marshal(testReqMsg)
@@ -775,21 +775,21 @@ func (g *GatewayGnet) messageWorker() {
 // registerDefaultRoutes 注册默认路由
 func (g *GatewayGnet) registerDefaultRoutes() {
 	// 注册ping路由
-	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RoutePing, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("pong", map[string]string{
 			"timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
 		}))
 	})
 
 	// 注册getConnections路由
-	g.routeManager.RegisterRoute("getConnections", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteGetConnections, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("connections", map[string]string{
 			"count": cast.ToString(g.connectionManager.GetConnectionCount()),
 		}))
 	})
 
 	// 注册broadcast路由
-	g.routeManager.RegisterRoute("broadcast", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteBroadcast, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			if _, ok := payloadMap["message"]; ok {
 				g.Broadcast(payloadMap["message"])
@@ -811,7 +811,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册健康检查路由
-	g.routeManager.RegisterRoute("health", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteHealth, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("health", map[string]string{
 			"status":            "healthy",
 			"timestamp":         cast.ToString(time.Now().UnixMilli()),
@@ -824,7 +824,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册API文档路由
-	g.routeManager.RegisterRoute("api-docs", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteAPIDocs, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("api-docs", map[string]string{
 			"version": "1.0.0",
 			"routes":  "ping,getConnections,broadcast,health,api-docs,version",
@@ -837,7 +837,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	g.registerPingRoute()
 
 	// 注册默认的测试路由，减少路由不存在的情况
-	g.routeManager.RegisterRoute("test", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteTest, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("testResult", map[string]string{
 			"success": "true",
 			"message": "Test route works",
@@ -845,7 +845,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册默认的错误处理路由
-	g.routeManager.RegisterRoute("error", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteError, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			if errorMsg, ok := payloadMap["message"]; ok {
 				callback(NewResponseMessage("error", map[string]string{
@@ -864,14 +864,14 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册默认的消息队列测试路由
-	g.routeManager.RegisterRoute("queueTest", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteQueueTest, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			if message, ok := payloadMap["message"]; ok {
 				// 创建测试消息
 				protoMsg := &protobuf.Message{
 					ConnectionId: connectionID,
 					UserUuid:     "test_user",
-					Route:        "test",
+					Route:        protobuf.RouteTest,
 					Payload:      map[string]string{"data": message},
 					Sequence:     1,
 				}
@@ -904,7 +904,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册白名单管理路由
-	g.routeManager.RegisterRoute("addWhitelist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteAddWhitelist, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			ip, ok := payloadMap["ip"]
 			if !ok {
@@ -936,7 +936,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 		}
 	})
 
-	g.routeManager.RegisterRoute("removeWhitelist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteRemoveWhitelist, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			ip, ok := payloadMap["ip"]
 			if !ok {
@@ -968,7 +968,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 		}
 	})
 
-	g.routeManager.RegisterRoute("getWhitelist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteGetWhitelist, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		whitelist := g.whitelistBlacklist.GetWhitelist()
 		// 将切片转换为逗号分隔的字符串
 		whitelistStr := ""
@@ -984,7 +984,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 	})
 
 	// 注册黑名单管理路由
-	g.routeManager.RegisterRoute("addBlacklist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteAddBlacklist, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			ip, ok := payloadMap["ip"]
 			if !ok {
@@ -1016,7 +1016,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 		}
 	})
 
-	g.routeManager.RegisterRoute("removeBlacklist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteRemoveBlacklist, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		if payloadMap, ok := payload.(map[string]string); ok {
 			ip, ok := payloadMap["ip"]
 			if !ok {
@@ -1048,7 +1048,7 @@ func (g *GatewayGnet) registerDefaultRoutes() {
 		}
 	})
 
-	g.routeManager.RegisterRoute("getBlacklist", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteGetBlacklist, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		blacklist := g.whitelistBlacklist.GetBlacklist()
 		// 将切片转换为逗号分隔的字符串
 		blacklistStr := ""
@@ -1418,7 +1418,7 @@ func (g *GatewayGnet) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Ac
 		tlog.Info("生成新的连接ID", "connectionID", connectionID, "userUUID", tempUserUUID)
 	}
 
-	if message.Route == "handshake" {
+	if message.Route == protobuf.RouteHandshake {
 		return g.handleHandshake(c, connectionID, message)
 	}
 
@@ -1528,8 +1528,6 @@ func (g *GatewayGnet) handleHandshake(c gnet.Conn, connectionID string, message 
 
 	if serverID := message.Payload["serverId"]; serverID != "" {
 		g.connectionManager.SetConnectionServerID(connectionID, serverID)
-		g.connectionManager.AddUserToGroup("server:"+serverID, connectionID)
-		tlog.Info("connection auto-joined server group", "connectionID", connectionID, "serverID", serverID, "groupID", "server:"+serverID)
 	}
 
 	return gnet.None
@@ -1609,7 +1607,7 @@ func (g *GatewayGnet) handleMessage(msg *Message) {
 			return
 		}
 
-		skipIntegrity := msg.Route == "test" || msg.Route == "ping"
+		skipIntegrity := msg.Route == protobuf.RouteTest || msg.Route == protobuf.RoutePing
 
 		if responseMsg, ok := response.(*protobuf.Message); ok {
 			if !skipIntegrity {
@@ -1696,7 +1694,7 @@ func (g *GatewayGnet) forwardToLogic(msg *Message) {
 
 // registerVersionRoute 注册版本路由
 func (g *GatewayGnet) registerVersionRoute() {
-	g.routeManager.RegisterRoute("version", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RouteVersion, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("version", map[string]string{
 			"version":   g.GetVersion(),
 			"clusterID": g.clusterID,
@@ -1707,7 +1705,7 @@ func (g *GatewayGnet) registerVersionRoute() {
 
 // registerPingRoute 注册ping路由
 func (g *GatewayGnet) registerPingRoute() {
-	g.routeManager.RegisterRoute("ping", func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
+	g.routeManager.RegisterRoute(protobuf.RoutePing, func(connectionID string, payload interface{}, callback func(interface{}), ctx map[string]interface{}) {
 		callback(NewResponseMessage("ping", map[string]interface{}{
 			"message":   "Pong",
 			"timestamp": time.Now().Unix(),

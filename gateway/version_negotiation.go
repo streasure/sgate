@@ -181,17 +181,6 @@ func (vn *VersionNegotiation) GetSupportedVersions() []string {
 	return vn.supportedVersions
 }
 
-// SetSupportedVersions 设置支持的版本列表
-// 参数:
-//
-//	versions: 版本列表
-func (vn *VersionNegotiation) SetSupportedVersions(versions []string) {
-	vn.mutex.Lock()
-	defer vn.mutex.Unlock()
-
-	vn.supportedVersions = versions
-}
-
 // GenerateHandshakeResponse 生成握手响应
 // 参数:
 //
@@ -207,7 +196,7 @@ func (vn *VersionNegotiation) GenerateHandshakeResponse(negotiatedVersion string
 	payload["supported_versions"] = fmt.Sprintf("%v", vn.supportedVersions)
 
 	return &protobuf.Message{
-		Route:           "handshake_response",
+		Route:           protobuf.RouteHandshakeResponse,
 		Payload:         payload,
 		ProtocolVersion: negotiatedVersion,
 		Timestamp:       time.Now().UnixMilli(),

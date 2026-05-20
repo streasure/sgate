@@ -79,7 +79,7 @@ func (pm *PlayerManager) onPlayerDisconnect(connectionID string) {
 
 	if serverID != "" {
 		pm.server.PushToGroup("server:"+serverID, &protobuf.Message{
-			Route: "server.playerOffline",
+			Route: protobuf.RouteServerPlayerOffline,
 			Payload: map[string]string{
 				"userID":   userID,
 				"name":     player.Name,
@@ -90,7 +90,7 @@ func (pm *PlayerManager) onPlayerDisconnect(connectionID string) {
 
 	if roomID != "" {
 		pm.server.PushToGroup(roomID, &protobuf.Message{
-			Route: "server.room.playerLeft",
+			Route: protobuf.RouteServerRoomPlayerLeft,
 			Payload: map[string]string{
 				"userID": userID,
 				"name":   player.Name,
@@ -101,7 +101,7 @@ func (pm *PlayerManager) onPlayerDisconnect(connectionID string) {
 
 	if teamID != "" {
 		pm.server.PushToGroup(teamID, &protobuf.Message{
-			Route: "server.team.memberLeft",
+			Route: protobuf.RouteServerTeamMemberLeft,
 			Payload: map[string]string{
 				"userID": userID,
 				"name":   player.Name,
@@ -119,7 +119,7 @@ func (pm *PlayerManager) Login(connectionID, userID, name, serverID string) *Pla
 		oldConnID := existing.ConnectionID
 		if oldConnID != connectionID {
 			pm.server.PushToConnection(oldConnID, &protobuf.Message{
-				Route:   "server.kick",
+				Route:   protobuf.RouteServerKick,
 				Payload: map[string]string{"reason": "duplicate_login", "serverID": serverID},
 			})
 			delete(pm.connToPlayer, oldConnID)
@@ -169,7 +169,7 @@ func (pm *PlayerManager) Login(connectionID, userID, name, serverID string) *Pla
 
 	if serverID != "" {
 		pm.server.PushToGroup("server:"+serverID, &protobuf.Message{
-			Route: "server.playerOnline",
+			Route: protobuf.RouteServerPlayerOnline,
 			Payload: map[string]string{
 				"userID":   userID,
 				"name":     name,
@@ -179,7 +179,7 @@ func (pm *PlayerManager) Login(connectionID, userID, name, serverID string) *Pla
 		}, connectionID)
 
 		pm.server.PushToGroup("room:world", &protobuf.Message{
-			Route: "server.room.playerJoined",
+			Route: protobuf.RouteServerRoomPlayerJoined,
 			Payload: map[string]string{
 				"userID": userID,
 				"name":   name,
@@ -271,21 +271,21 @@ func NewGameLogic(server *logic.Server) *GameLogic {
 }
 
 func (gl *GameLogic) registerRoutes() {
-	gl.server.RegisterRoute("player.login", gl.handleLogin)
-	gl.server.RegisterRoute("player.heartbeat", gl.handleHeartbeat)
-	gl.server.RegisterRoute("player.move", gl.handleMove)
-	gl.server.RegisterRoute("player.attack", gl.handleAttack)
-	gl.server.RegisterRoute("player.useItem", gl.handleUseItem)
-	gl.server.RegisterRoute("player.chat", gl.handleChat)
-	gl.server.RegisterRoute("player.queryStatus", gl.handleQueryStatus)
-	gl.server.RegisterRoute("player.queryOnline", gl.handleQueryOnline)
-	gl.server.RegisterRoute("room.join", gl.handleRoomJoin)
-	gl.server.RegisterRoute("room.leave", gl.handleRoomLeave)
-	gl.server.RegisterRoute("room.info", gl.handleRoomInfo)
-	gl.server.RegisterRoute("team.create", gl.handleTeamCreate)
-	gl.server.RegisterRoute("team.join", gl.handleTeamJoin)
-	gl.server.RegisterRoute("team.leave", gl.handleTeamLeave)
-	gl.server.RegisterRoute("team.info", gl.handleTeamInfo)
+	gl.server.RegisterRoute(protobuf.RoutePlayerLogin, gl.handleLogin)
+	gl.server.RegisterRoute(protobuf.RoutePlayerHeartbeat, gl.handleHeartbeat)
+	gl.server.RegisterRoute(protobuf.RoutePlayerMove, gl.handleMove)
+	gl.server.RegisterRoute(protobuf.RoutePlayerAttack, gl.handleAttack)
+	gl.server.RegisterRoute(protobuf.RoutePlayerUseItem, gl.handleUseItem)
+	gl.server.RegisterRoute(protobuf.RoutePlayerChat, gl.handleChat)
+	gl.server.RegisterRoute(protobuf.RoutePlayerQueryStatus, gl.handleQueryStatus)
+	gl.server.RegisterRoute(protobuf.RoutePlayerQueryOnline, gl.handleQueryOnline)
+	gl.server.RegisterRoute(protobuf.RouteRoomJoin, gl.handleRoomJoin)
+	gl.server.RegisterRoute(protobuf.RouteRoomLeave, gl.handleRoomLeave)
+	gl.server.RegisterRoute(protobuf.RouteRoomInfo, gl.handleRoomInfo)
+	gl.server.RegisterRoute(protobuf.RouteTeamCreate, gl.handleTeamCreate)
+	gl.server.RegisterRoute(protobuf.RouteTeamJoin, gl.handleTeamJoin)
+	gl.server.RegisterRoute(protobuf.RouteTeamLeave, gl.handleTeamLeave)
+	gl.server.RegisterRoute(protobuf.RouteTeamInfo, gl.handleTeamInfo)
 }
 
 func (gl *GameLogic) handleLogin(msg *protobuf.Message) *protobuf.Message {
@@ -296,7 +296,7 @@ func (gl *GameLogic) handleLogin(msg *protobuf.Message) *protobuf.Message {
 	if userID == "" || name == "" {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.login",
+			Route:        protobuf.RoutePlayerLogin,
 			Payload:      map[string]string{"code": "400", "message": "userID and name required"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -305,7 +305,7 @@ func (gl *GameLogic) handleLogin(msg *protobuf.Message) *protobuf.Message {
 	if serverID == "" {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.login",
+			Route:        protobuf.RoutePlayerLogin,
 			Payload:      map[string]string{"code": "403", "message": "serverID required"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -315,7 +315,7 @@ func (gl *GameLogic) handleLogin(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "player.login",
+		Route:        protobuf.RoutePlayerLogin,
 		Payload: map[string]string{
 			"code":     "200",
 			"level":    fmt.Sprintf("%d", player.Level),
@@ -335,7 +335,7 @@ func (gl *GameLogic) handleHeartbeat(msg *protobuf.Message) *protobuf.Message {
 	if !ok {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.heartbeat",
+			Route:        protobuf.RoutePlayerHeartbeat,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -343,7 +343,7 @@ func (gl *GameLogic) handleHeartbeat(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "player.heartbeat",
+		Route:        protobuf.RoutePlayerHeartbeat,
 		Payload: map[string]string{
 			"code":        "200",
 			"serverTime":  fmt.Sprintf("%d", time.Now().UnixMilli()),
@@ -358,7 +358,7 @@ func (gl *GameLogic) handleMove(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.move",
+			Route:        protobuf.RoutePlayerMove,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -375,7 +375,7 @@ func (gl *GameLogic) handleMove(msg *protobuf.Message) *protobuf.Message {
 
 	if roomID != "" {
 		gl.server.PushToGroup(roomID, &protobuf.Message{
-			Route: "server.playerMoved",
+			Route: protobuf.RouteServerPlayerMoved,
 			Payload: map[string]string{
 				"userID": player.UserID,
 				"name":   player.Name,
@@ -387,7 +387,7 @@ func (gl *GameLogic) handleMove(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "player.move",
+		Route:        protobuf.RoutePlayerMove,
 		Payload:      map[string]string{"code": "200"},
 		Timestamp:    time.Now().UnixMilli(),
 	}
@@ -398,7 +398,7 @@ func (gl *GameLogic) handleAttack(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.attack",
+			Route:        protobuf.RoutePlayerAttack,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -414,7 +414,7 @@ func (gl *GameLogic) handleAttack(msg *protobuf.Message) *protobuf.Message {
 	if !exists {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.attack",
+			Route:        protobuf.RoutePlayerAttack,
 			Payload:      map[string]string{"code": "404", "message": "target not found"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -432,7 +432,7 @@ func (gl *GameLogic) handleAttack(msg *protobuf.Message) *protobuf.Message {
 	gl.pm.mu.Unlock()
 
 	gl.server.PushToConnection(targetConnID, &protobuf.Message{
-		Route: "server.damageNotify",
+		Route: protobuf.RouteServerDamageNotify,
 		Payload: map[string]string{
 			"attackerID":  player.UserID,
 			"attacker":    player.Name,
@@ -444,7 +444,7 @@ func (gl *GameLogic) handleAttack(msg *protobuf.Message) *protobuf.Message {
 
 	if roomID != "" {
 		gl.server.PushToGroup(roomID, &protobuf.Message{
-			Route: "server.attackBroadcast",
+			Route: protobuf.RouteServerAttackBroadcast,
 			Payload: map[string]string{
 				"attackerID":  player.UserID,
 				"attacker":    player.Name,
@@ -459,7 +459,7 @@ func (gl *GameLogic) handleAttack(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "player.attack",
+		Route:        protobuf.RoutePlayerAttack,
 		Payload: map[string]string{
 			"code":        "200",
 			"damage":      fmt.Sprintf("%d", damage),
@@ -474,7 +474,7 @@ func (gl *GameLogic) handleUseItem(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.useItem",
+			Route:        protobuf.RoutePlayerUseItem,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -501,7 +501,7 @@ func (gl *GameLogic) handleUseItem(msg *protobuf.Message) *protobuf.Message {
 		gl.pm.mu.Unlock()
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.useItem",
+			Route:        protobuf.RoutePlayerUseItem,
 			Payload:      map[string]string{"code": "400", "message": "unknown item"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -510,7 +510,7 @@ func (gl *GameLogic) handleUseItem(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "player.useItem",
+		Route:        protobuf.RoutePlayerUseItem,
 		Payload: map[string]string{
 			"code":   "200",
 			"itemID": itemID,
@@ -525,7 +525,7 @@ func (gl *GameLogic) handleChat(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.chat",
+			Route:        protobuf.RoutePlayerChat,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -548,7 +548,7 @@ func (gl *GameLogic) handleChat(msg *protobuf.Message) *protobuf.Message {
 	case "world":
 		if player.ServerID != "" {
 			gl.server.PushToGroup("server:"+player.ServerID, &protobuf.Message{
-				Route: "server.chat", Payload: chatPayload,
+				Route: protobuf.RouteServerChat, Payload: chatPayload,
 			})
 		}
 	case "room":
@@ -558,13 +558,13 @@ func (gl *GameLogic) handleChat(msg *protobuf.Message) *protobuf.Message {
 		if roomID == "" {
 			return &protobuf.Message{
 				ConnectionId: msg.ConnectionId,
-				Route:        "player.chat",
+				Route:        protobuf.RoutePlayerChat,
 				Payload:      map[string]string{"code": "403", "message": "not in a room"},
 				Timestamp:    time.Now().UnixMilli(),
 			}
 		}
 		gl.server.PushToGroup(roomID, &protobuf.Message{
-			Route: "server.chat", Payload: chatPayload,
+			Route: protobuf.RouteServerChat, Payload: chatPayload,
 		}, msg.ConnectionId)
 	case "team":
 		gl.pm.mu.RLock()
@@ -573,13 +573,13 @@ func (gl *GameLogic) handleChat(msg *protobuf.Message) *protobuf.Message {
 		if teamID == "" {
 			return &protobuf.Message{
 				ConnectionId: msg.ConnectionId,
-				Route:        "player.chat",
+				Route:        protobuf.RoutePlayerChat,
 				Payload:      map[string]string{"code": "403", "message": "not in a team"},
 				Timestamp:    time.Now().UnixMilli(),
 			}
 		}
 		gl.server.PushToGroup(teamID, &protobuf.Message{
-			Route: "server.chat", Payload: chatPayload,
+			Route: protobuf.RouteServerChat, Payload: chatPayload,
 		}, msg.ConnectionId)
 	case "private":
 		targetID := msg.GetPayload()["targetID"]
@@ -589,19 +589,19 @@ func (gl *GameLogic) handleChat(msg *protobuf.Message) *protobuf.Message {
 		if !exists {
 			return &protobuf.Message{
 				ConnectionId: msg.ConnectionId,
-				Route:        "player.chat",
+				Route:        protobuf.RoutePlayerChat,
 				Payload:      map[string]string{"code": "404", "message": "target not online"},
 				Timestamp:    time.Now().UnixMilli(),
 			}
 		}
 		gl.server.PushToConnection(target.ConnectionID, &protobuf.Message{
-			Route: "server.chat", Payload: chatPayload,
+			Route: protobuf.RouteServerChat, Payload: chatPayload,
 		})
 	}
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "player.chat",
+		Route:        protobuf.RoutePlayerChat,
 		Payload:      map[string]string{"code": "200"},
 		Timestamp:    time.Now().UnixMilli(),
 	}
@@ -612,7 +612,7 @@ func (gl *GameLogic) handleQueryStatus(msg *protobuf.Message) *protobuf.Message 
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "player.queryStatus",
+			Route:        protobuf.RoutePlayerQueryStatus,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -623,7 +623,7 @@ func (gl *GameLogic) handleQueryStatus(msg *protobuf.Message) *protobuf.Message 
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "player.queryStatus",
+		Route:        protobuf.RoutePlayerQueryStatus,
 		Payload: map[string]string{
 			"code":     "200",
 			"level":    fmt.Sprintf("%d", player.Level),
@@ -644,7 +644,7 @@ func (gl *GameLogic) handleQueryStatus(msg *protobuf.Message) *protobuf.Message 
 func (gl *GameLogic) handleQueryOnline(msg *protobuf.Message) *protobuf.Message {
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "player.queryOnline",
+		Route:        protobuf.RoutePlayerQueryOnline,
 		Payload: map[string]string{
 			"code":        "200",
 			"onlineCount": fmt.Sprintf("%d", gl.pm.GetOnlineCount()),
@@ -658,7 +658,7 @@ func (gl *GameLogic) handleRoomJoin(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "room.join",
+			Route:        protobuf.RouteRoomJoin,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -667,7 +667,7 @@ func (gl *GameLogic) handleRoomJoin(msg *protobuf.Message) *protobuf.Message {
 	if player.ServerID == "" {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "room.join",
+			Route:        protobuf.RouteRoomJoin,
 			Payload:      map[string]string{"code": "403", "message": "serverID not bound"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -677,7 +677,7 @@ func (gl *GameLogic) handleRoomJoin(msg *protobuf.Message) *protobuf.Message {
 	if roomID == "" {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "room.join",
+			Route:        protobuf.RouteRoomJoin,
 			Payload:      map[string]string{"code": "400", "message": "roomID required"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -690,7 +690,7 @@ func (gl *GameLogic) handleRoomJoin(msg *protobuf.Message) *protobuf.Message {
 
 	gl.server.LeaveGroup(oldRoomID, msg.ConnectionId)
 	gl.server.PushToGroup(oldRoomID, &protobuf.Message{
-		Route: "server.room.playerLeft",
+		Route: protobuf.RouteServerRoomPlayerLeft,
 		Payload: map[string]string{
 			"userID": player.UserID,
 			"name":   player.Name,
@@ -700,7 +700,7 @@ func (gl *GameLogic) handleRoomJoin(msg *protobuf.Message) *protobuf.Message {
 
 	memberCount := gl.server.JoinGroup(roomID, msg.ConnectionId)
 	gl.server.PushToGroup(roomID, &protobuf.Message{
-		Route: "server.room.playerJoined",
+		Route: protobuf.RouteServerRoomPlayerJoined,
 		Payload: map[string]string{
 			"userID": player.UserID,
 			"name":   player.Name,
@@ -710,7 +710,7 @@ func (gl *GameLogic) handleRoomJoin(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "room.join",
+		Route:        protobuf.RouteRoomJoin,
 		Payload: map[string]string{
 			"code":        "200",
 			"roomID":      roomID,
@@ -725,7 +725,7 @@ func (gl *GameLogic) handleRoomLeave(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "room.leave",
+			Route:        protobuf.RouteRoomLeave,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -734,7 +734,7 @@ func (gl *GameLogic) handleRoomLeave(msg *protobuf.Message) *protobuf.Message {
 	if player.ServerID == "" {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "room.leave",
+			Route:        protobuf.RouteRoomLeave,
 			Payload:      map[string]string{"code": "403", "message": "serverID not bound"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -747,7 +747,7 @@ func (gl *GameLogic) handleRoomLeave(msg *protobuf.Message) *protobuf.Message {
 
 	gl.server.LeaveGroup(oldRoomID, msg.ConnectionId)
 	gl.server.PushToGroup(oldRoomID, &protobuf.Message{
-		Route: "server.room.playerLeft",
+		Route: protobuf.RouteServerRoomPlayerLeft,
 		Payload: map[string]string{
 			"userID": player.UserID,
 			"name":   player.Name,
@@ -759,7 +759,7 @@ func (gl *GameLogic) handleRoomLeave(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "room.leave",
+		Route:        protobuf.RouteRoomLeave,
 		Payload: map[string]string{
 			"code":   "200",
 			"roomID": "room:world",
@@ -782,7 +782,7 @@ func (gl *GameLogic) handleRoomInfo(msg *protobuf.Message) *protobuf.Message {
 	if roomID == "" {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "room.info",
+			Route:        protobuf.RouteRoomInfo,
 			Payload:      map[string]string{"code": "400", "message": "roomID required"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -793,7 +793,7 @@ func (gl *GameLogic) handleRoomInfo(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "room.info",
+		Route:        protobuf.RouteRoomInfo,
 		Payload: map[string]string{
 			"code":        "200",
 			"roomID":      roomID,
@@ -809,7 +809,7 @@ func (gl *GameLogic) handleTeamCreate(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.create",
+			Route:        protobuf.RouteTeamCreate,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -821,7 +821,7 @@ func (gl *GameLogic) handleTeamCreate(msg *protobuf.Message) *protobuf.Message {
 		gl.pm.mu.Unlock()
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.create",
+			Route:        protobuf.RouteTeamCreate,
 			Payload:      map[string]string{"code": "403", "message": "already in team", "teamID": oldTeamID},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -837,7 +837,7 @@ func (gl *GameLogic) handleTeamCreate(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "team.create",
+		Route:        protobuf.RouteTeamCreate,
 		Payload: map[string]string{
 			"code":   "200",
 			"teamID": teamID,
@@ -851,7 +851,7 @@ func (gl *GameLogic) handleTeamJoin(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.join",
+			Route:        protobuf.RouteTeamJoin,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -861,7 +861,7 @@ func (gl *GameLogic) handleTeamJoin(msg *protobuf.Message) *protobuf.Message {
 	if teamID == "" {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.join",
+			Route:        protobuf.RouteTeamJoin,
 			Payload:      map[string]string{"code": "400", "message": "teamID required"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -873,7 +873,7 @@ func (gl *GameLogic) handleTeamJoin(msg *protobuf.Message) *protobuf.Message {
 		gl.pm.mu.Unlock()
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.join",
+			Route:        protobuf.RouteTeamJoin,
 			Payload:      map[string]string{"code": "403", "message": "already in team", "teamID": oldTeamID},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -884,7 +884,7 @@ func (gl *GameLogic) handleTeamJoin(msg *protobuf.Message) *protobuf.Message {
 		gl.pm.mu.Unlock()
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.join",
+			Route:        protobuf.RouteTeamJoin,
 			Payload:      map[string]string{"code": "404", "message": "team not found"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -896,7 +896,7 @@ func (gl *GameLogic) handleTeamJoin(msg *protobuf.Message) *protobuf.Message {
 	memberCount = gl.server.JoinGroup(teamID, msg.ConnectionId)
 
 	gl.server.PushToGroup(teamID, &protobuf.Message{
-		Route: "server.team.memberJoined",
+		Route: protobuf.RouteServerTeamMemberJoined,
 		Payload: map[string]string{
 			"userID": player.UserID,
 			"name":   player.Name,
@@ -908,7 +908,7 @@ func (gl *GameLogic) handleTeamJoin(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "team.join",
+		Route:        protobuf.RouteTeamJoin,
 		Payload: map[string]string{
 			"code":        "200",
 			"teamID":      teamID,
@@ -923,7 +923,7 @@ func (gl *GameLogic) handleTeamLeave(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.leave",
+			Route:        protobuf.RouteTeamLeave,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -935,7 +935,7 @@ func (gl *GameLogic) handleTeamLeave(msg *protobuf.Message) *protobuf.Message {
 		gl.pm.mu.Unlock()
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.leave",
+			Route:        protobuf.RouteTeamLeave,
 			Payload:      map[string]string{"code": "403", "message": "not in a team"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -946,7 +946,7 @@ func (gl *GameLogic) handleTeamLeave(msg *protobuf.Message) *protobuf.Message {
 	remainingCount := gl.server.LeaveGroup(teamID, msg.ConnectionId)
 
 	gl.server.PushToGroup(teamID, &protobuf.Message{
-		Route: "server.team.memberLeft",
+		Route: protobuf.RouteServerTeamMemberLeft,
 		Payload: map[string]string{
 			"userID": player.UserID,
 			"name":   player.Name,
@@ -958,7 +958,7 @@ func (gl *GameLogic) handleTeamLeave(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "team.leave",
+		Route:        protobuf.RouteTeamLeave,
 		Payload: map[string]string{
 			"code":           "200",
 			"teamID":         teamID,
@@ -973,7 +973,7 @@ func (gl *GameLogic) handleTeamInfo(msg *protobuf.Message) *protobuf.Message {
 	if player == nil {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.info",
+			Route:        protobuf.RouteTeamInfo,
 			Payload:      map[string]string{"code": "401", "message": "not logged in"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -989,7 +989,7 @@ func (gl *GameLogic) handleTeamInfo(msg *protobuf.Message) *protobuf.Message {
 	if teamID == "" {
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "team.info",
+			Route:        protobuf.RouteTeamInfo,
 			Payload:      map[string]string{"code": "403", "message": "not in a team"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -1000,7 +1000,7 @@ func (gl *GameLogic) handleTeamInfo(msg *protobuf.Message) *protobuf.Message {
 
 	return &protobuf.Message{
 		ConnectionId: msg.ConnectionId,
-		Route:        "team.info",
+		Route:        protobuf.RouteTeamInfo,
 		Payload: map[string]string{
 			"code":        "200",
 			"teamID":      teamID,
@@ -1046,7 +1046,7 @@ func (gl *GameLogic) serverNotifyLoop() {
 		select {
 		case <-ticker.C:
 			gl.server.PushToServer(&protobuf.Message{
-				Route: "server.announce",
+				Route: protobuf.RouteServerAnnounce,
 				Payload: map[string]string{
 					"onlineCount": fmt.Sprintf("%d", gl.pm.GetOnlineCount()),
 					"serverTime":  fmt.Sprintf("%d", time.Now().UnixMilli()),

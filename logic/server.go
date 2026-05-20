@@ -139,7 +139,7 @@ func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.
 	if msg.Route == "" {
 		callback(&protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "error",
+			Route:        protobuf.RouteError,
 			Payload:      map[string]string{"message": "Missing route", "code": "400"},
 			Timestamp:    time.Now().UnixMilli(),
 		})
@@ -150,7 +150,7 @@ func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.
 	if !ok {
 		callback(&protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        "error",
+			Route:        protobuf.RouteError,
 			Payload:      map[string]string{"message": "Route not found", "code": "404", "details": msg.Route},
 			Timestamp:    time.Now().UnixMilli(),
 		})
@@ -394,4 +394,69 @@ func (s *Server) GetConnectionCount() int {
 		return true
 	})
 	return count
+}
+
+func (s *Server) JoinGroupByUser(groupID, serverID, userUUID string) {
+	s.PushToServer(&protobuf.Message{
+		Route: protobuf.RouteServerJoinGroupByUser,
+		Payload: map[string]string{
+			"groupID":  groupID,
+			"serverID": serverID,
+			"userUUID": userUUID,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (s *Server) LeaveGroupByUser(groupID, serverID, userUUID string) {
+	s.PushToServer(&protobuf.Message{
+		Route: protobuf.RouteServerLeaveGroupByUser,
+		Payload: map[string]string{
+			"groupID":  groupID,
+			"serverID": serverID,
+			"userUUID": userUUID,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (s *Server) CreateGroup(groupID, groupName string) {
+	s.PushToServer(&protobuf.Message{
+		Route: protobuf.RouteServerCreateGroup,
+		Payload: map[string]string{
+			"groupID":   groupID,
+			"groupName": groupName,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (s *Server) DeleteGroup(groupID string) {
+	s.PushToServer(&protobuf.Message{
+		Route: protobuf.RouteServerDeleteGroup,
+		Payload: map[string]string{
+			"groupID": groupID,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
+}
+
+func (s *Server) SendToGroup(groupID string, msg *protobuf.Message) {
+	if msg.Payload == nil {
+		msg.Payload = make(map[string]string)
+	}
+	msg.Payload["groupID"] = groupID
+	msg.Route = protobuf.RouteServerSendToGroup
+	msg.Timestamp = time.Now().UnixMilli()
+	s.PushToServer(msg)
+}
+
+func (s *Server) GetGroupInfo(groupID string) {
+	s.PushToServer(&protobuf.Message{
+		Route: protobuf.RouteServerGetGroupInfo,
+		Payload: map[string]string{
+			"groupID": groupID,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	})
 }

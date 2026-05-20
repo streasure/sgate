@@ -33,14 +33,14 @@ func main() {
 		{
 			name: "ping",
 			msg: &protobuf.Message{
-				Route:   "ping",
+				Route: protobuf.RoutePing,
 				Payload: map[string]string{},
 			},
 		},
 		{
 			name: "echo",
 			msg: &protobuf.Message{
-				Route: "echo",
+				Route: protobuf.RouteEcho,
 				Payload: map[string]string{
 					"message": "hello from client",
 				},
@@ -49,7 +49,7 @@ func main() {
 		{
 			name: "test",
 			msg: &protobuf.Message{
-				Route: "test",
+				Route: protobuf.RouteTest,
 				Payload: map[string]string{
 					"data": "test payload",
 				},
@@ -58,7 +58,7 @@ func main() {
 		{
 			name: "getConnections",
 			msg: &protobuf.Message{
-				Route:   "getConnections",
+				Route: protobuf.RouteGetConnections,
 				Payload: map[string]string{},
 			},
 		},

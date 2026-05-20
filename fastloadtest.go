@@ -185,7 +185,7 @@ func main() {
 
 func buildHandshakeFrame(serverID string) []byte {
 	msg := &protobuf.Message{
-		Route: "handshake",
+		Route: protobuf.RouteHandshake,
 		Payload: map[string]string{
 			"version":   "2.0.0",
 			"timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
@@ -202,7 +202,7 @@ func buildHandshakeFrame(serverID string) []byte {
 
 func buildLoginFrame() []byte {
 	msg := &protobuf.Message{
-		Route: "login",
+		Route: protobuf.RouteLogin,
 		Payload: map[string]string{
 			"userId":   "loadtest",
 			"token":    "test-token",

@@ -9,7 +9,7 @@ import "message.proto";
 // GatewayService 网关服务
 service GatewayService {
   // StreamMessages 流式消息处理
-  rpc StreamMessages (stream StreamData) returns (stream StreamData);
+  rpc StreamMessages (stream Message) returns (stream Message);
   // SendMessage 发送单条消息
-  rpc SendMessage (StreamData) returns (StreamData);
+  rpc SendMessage (Message) returns (Message);
 }

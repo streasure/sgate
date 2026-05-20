@@ -8,7 +8,7 @@ require (
 	github.com/panjf2000/gnet/v2 v2.9.7
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/spf13/cast v1.10.0
-	github.com/streasure/treasure-slog v1.0.7
+	github.com/streasure/treasure-slog v1.0.8
 	google.golang.org/grpc v1.64.0
 	google.golang.org/protobuf v1.33.0
 	gopkg.in/yaml.v3 v3.0.1
