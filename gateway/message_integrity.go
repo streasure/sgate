@@ -4,6 +4,8 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,27 +55,86 @@ func (mi *MessageIntegrity) cleanupCache() {
 
 // GenerateChecksum 生成消息校验和
 func (mi *MessageIntegrity) GenerateChecksum(msg proto.Message) string {
-	// 序列化消息
-	data, err := proto.Marshal(msg)
-	if err != nil {
-		tlog.Error("生成校验和失败", "error", err)
-		return ""
+	switch m := msg.(type) {
+	case *protobuf.Message:
+		return mi.generateMessageChecksum(m)
+	default:
+		data, err := proto.Marshal(msg)
+		if err != nil {
+			tlog.Error("生成校验和失败", "error", err)
+			return ""
+		}
+		hash := md5.Sum(data)
+		return hex.EncodeToString(hash[:])
+	}
+}
+
+func (mi *MessageIntegrity) generateMessageChecksum(msg *protobuf.Message) string {
+	var buf strings.Builder
+	buf.WriteString(msg.ConnectionId)
+	buf.WriteString("|")
+	buf.WriteString(msg.UserUuid)
+	buf.WriteString("|")
+	buf.WriteString(msg.Route)
+	buf.WriteString("|")
+
+	keys := make([]string, 0, len(msg.Payload))
+	for k := range msg.Payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		buf.WriteString(k)
+		buf.WriteString("=")
+		buf.WriteString(msg.Payload[k])
+		buf.WriteString("|")
 	}
 
-	// 计算MD5校验和
-	hash := md5.Sum(data)
+	buf.WriteString(fmt.Sprintf("%d", msg.Timestamp))
+	buf.WriteString("|")
+	buf.WriteString(fmt.Sprintf("%d", msg.Sequence))
+	buf.WriteString("|")
+	buf.WriteString(msg.ProtocolVersion)
+
+	hash := md5.Sum([]byte(buf.String()))
 	return hex.EncodeToString(hash[:])
 }
 
 // ValidateChecksum 验证消息校验和
 func (mi *MessageIntegrity) ValidateChecksum(msg proto.Message, expectedChecksum string) bool {
-	// 生成校验和
+	var savedChecksum string
+	switch m := msg.(type) {
+	case *protobuf.Message:
+		savedChecksum = m.Checksum
+		m.Checksum = ""
+	case *protobuf.ErrorResponse:
+		savedChecksum = m.Checksum
+		m.Checksum = ""
+	case *protobuf.Acknowledgement:
+		savedChecksum = m.Checksum
+		m.Checksum = ""
+	case *protobuf.Handshake:
+		savedChecksum = m.Checksum
+		m.Checksum = ""
+	}
+
 	actualChecksum := mi.GenerateChecksum(msg)
+
+	switch m := msg.(type) {
+	case *protobuf.Message:
+		m.Checksum = savedChecksum
+	case *protobuf.ErrorResponse:
+		m.Checksum = savedChecksum
+	case *protobuf.Acknowledgement:
+		m.Checksum = savedChecksum
+	case *protobuf.Handshake:
+		m.Checksum = savedChecksum
+	}
+
 	if actualChecksum == "" {
 		return false
 	}
 
-	// 比较校验和
 	return actualChecksum == expectedChecksum
 }
 

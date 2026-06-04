@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package sgate.protobuf;
+
+option csharp_namespace = "SgateClient.Protobuf";
+
+message Message {
+  string connection_id = 1;
+  string user_uuid = 2;
+  string route = 3;
+  map<string, string> payload = 4;
+  int64 timestamp = 5;
+  string checksum = 6;
+  bytes signature = 7;
+  int64 sequence = 8;
+  bool require_ack = 9;
+  CompressionType compression = 10;
+  int32 original_size = 11;
+  int32 compressed_size = 12;
+  string protocol_version = 13;
+}
+
+enum CompressionType {
+  COMPRESSION_TYPE_NONE = 0;
+  COMPRESSION_TYPE_GZIP = 1;
+  COMPRESSION_TYPE_ZSTD = 2;
+  COMPRESSION_TYPE_LZ4 = 3;
+}
+
+message ErrorResponse {
+  string route = 1;
+  ErrorData error = 2;
+  int64 timestamp = 3;
+  string checksum = 4;
+  string protocol_version = 5;
+}
+
+message ErrorData {
+  string message = 1;
+  string code = 2;
+  string details = 3;
+}
+
+message ConnectionInfo {
+  string connection_id = 1;
+  string user_uuid = 2;
+  string remote_addr = 3;
+  string local_addr = 4;
+  int64 created_at = 5;
+  string status = 6;
+  int64 last_active = 7;
+  int64 timestamp = 8;
+  string checksum = 9;
+}
+
+message BroadcastData {
+  string route = 1;
+  map<string, string> data = 2;
+  string sender = 3;
+  int64 timestamp = 4;
+  string checksum = 5;
+  string protocol_version = 6;
+}
+
+message GroupInfo {
+  string group_id = 1;
+  string group_name = 2;
+  int32 user_count = 3;
+  int64 created_at = 4;
+  int64 timestamp = 5;
+  string checksum = 6;
+}
+
+message GroupRequest {
+  string action = 1;
+  string group_id = 2;
+  string group_name = 3;
+  string user_uuid = 4;
+  int64 timestamp = 5;
+  string checksum = 6;
+  string protocol_version = 7;
+}
+
+message GroupResponse {
+  string status = 1;
+  string message = 2;
+  GroupInfo group_info = 3;
+  int64 timestamp = 4;
+  string checksum = 5;
+  string protocol_version = 6;
+}
+
+message Acknowledgement {
+  int64 sequence = 1;
+  string status = 2;
+  string error = 3;
+  int64 received_at = 4;
+  int64 timestamp = 5;
+  string checksum = 6;
+  string protocol_version = 7;
+}
+
+message Handshake {
+  string protocol_version = 1;
+  repeated string supported_versions = 2;
+  string client_type = 3;
+  string client_version = 4;
+  string device_id = 5;
+  int64 timestamp = 6;
+  string checksum = 7;
+}
+
+message FlowControl {
+  int32 window_size = 1;
+  int32 available_tokens = 2;
+  int64 reset_time = 3;
+  int64 timestamp = 4;
+  string checksum = 5;
+}
+
+message ServiceInfo {
+  string game = 1;
+  string zone = 2;
+  string service = 3;
+  string service_id = 4;
+  string stream_no = 5;
+}
+
+message StreamData {
+  string session_id = 1;
+  string user_key = 2;
+  int32 cmd = 3;
+  int64 seq_id = 4;
+  bytes data = 5;
+  string client_ip = 6;
+  ServiceInfo from = 7;
+}
