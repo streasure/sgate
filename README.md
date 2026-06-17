@@ -1,526 +1,114 @@
-# SGate - 高性能游戏网关
+# sgate - 高性能游戏网关
 
-SGate 是一个基于 **gnet + gRPC** 的高性能游戏网关，支持 TCP/UDP/WebSocket 协议，使用 Protocol Buffers 通信，通过 Multi-Stream Sharding 架构和 Redis 服务发现实现超高吞吐量与高可用。**WebSocket 协议完全基于 gnet 原生实现，零第三方依赖。**
+sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/WebSocket 多协议接入，通过 gRPC 与逻辑服通信，具备百万级 QPS 处理能力。
+
+## 架构概览
+
+```
+客户端 (TCP/UDP/WS) ──→ sgate Gateway ──(gRPC)──→ Logic Server
+                              │
+                         Redis (服务发现)
+```
 
 ## 核心特性
 
-| 特性 | 说明 |
-|------|------|
-| **超高吞吐量** | 超级快速路径 + 零拷贝，8 进程 QPS 达 **940万+**，成功率 100% |
-| **原生 WebSocket** | 基于 gnet 从零实现 WebSocket 协议（握手/帧解析/帧编码），无第三方依赖 |
-| **Multi-Stream Sharding** | gRPC stream 按 ConnectionId 哈希分片到 N 个 shard，消除单一 stream 瓶颈 |
-| **Redis 服务发现** | 基于 Pub/Sub + Keyspace Notification 的四重保障服务注册/发现/掉线检测 |
-| **快速掉线响应** | 主动注销(毫秒级) + Key过期事件(~10s) + 定期扫描(兜底) + gRPC连接检测(秒级) |
-| **推送组** | 基于 serverId 的自动分组推送，支持全服推送、组推送、定向推送 |
-| **单一登录** | 同一用户重复登录自动踢掉旧连接并通知客户端 |
-| **多协议支持** | TCP、UDP、WebSocket |
-| **Logic SDK** | 引入 `logic` 包即可快速接入，3 行代码启动一个逻辑服务 |
-| **多维度限流** | IP / 用户 / 路由 / 全局限流 |
-| **熔断器** | 原子操作实现零锁竞争 |
-| **链路追踪** | 基于采样的分布式追踪 |
-| **panic recovery** | 关键路径保护 |
-
-## 架构
-
-```
-                          ┌──────────────────────────────────────────────────┐
-                          │                  SGate Gateway                   │
-                          │                                                  │
-  Clients ──TCP/UDP/WS──► │  gnet ──► Fast Path ──► Direct Response         │
-                          │         │                                        │
-                          │         └──► Normal Path ──► Worker Pool         │
-                          │                                │                 │
-                          │                   ┌────────────▼──────────┐      │
-                          │                   │   LogicClientPool     │      │
-                          │                   │  ┌────────────────┐   │      │
-                          │                   │  │ logic_1 (N shards)│  │      │
-                          │                   │  │ logic_2 (N shards)│  │      │
-                          │                   │  │ logic_N (N shards)│  │      │
-                          │                   │  └────────────────┘   │      │
-                          │                   │   RoundRobin 路由     │      │
-                          │                   └───────────┬───────────┘      │
-                          │                               │                  │
-                          │  ServiceDiscovery             │                  │
-                          │  ┌──────────────────┐         │                  │
-                          │  │  Redis Pub/Sub   │         │                  │
-                          │  │  Keyspace Notify │         │                  │
-                          │  │  Periodic Scan   │         │                  │
-                          │  └──────────────────┘         │                  │
-                          └───────────────────────────────┼──────────────────┘
-                                                          │ gRPC
-                   ┌──────────────────────────────────────┼──────────────────┐
-                   │              Logic Services           │                  │
-                   │  ┌──────────┐  ┌──────────┐  ┌──────▼──────┐          │
-                   │  │ logic_1  │  │ logic_2  │  │  logic_3   │  ...     │
-                   │  │ :50052   │  │ :50053   │  │  :50054    │          │
-                   │  └──────────┘  └──────────┘  └─────────────┘          │
-                   └─────────────────────────────────────────────────────────┘
-```
-
-## 设计思路
-
-### 1. 原生 WebSocket 实现
-
-SGate 的 WebSocket 协议完全基于 gnet 从零实现，不依赖任何第三方 WebSocket 库。核心设计如下：
-
-#### 1.1 握手流程
-
-```
-Client ──HTTP Upgrade Request──► Gateway
-         GET / HTTP/1.1
-         Upgrade: websocket
-         Sec-WebSocket-Key: <base64-encoded-16-bytes>
-
-Gateway ──HTTP 101 Response──► Client
-         HTTP/1.1 101 Switching Protocols
-         Upgrade: websocket
-         Connection: Upgrade
-         Sec-WebSocket-Accept: <SHA1(key + magic) base64>
-```
-
-握手实现要点：
-- 直接解析 HTTP 请求文本，提取 `Sec-WebSocket-Key` 头部
-- 按 RFC 6455 规范计算 `Sec-WebSocket-Accept`：`base64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))`
-- 构建并发送 `101 Switching Protocols` 响应
-- 握手完成后将连接状态从 `WSStateHandshake` 切换到 `WSStateOpen`
-
-#### 1.2 帧解析
-
-WebSocket 帧格式（RFC 6455 Section 5.2）：
-
-```
-  0                   1                   2                   3
-  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
- +-+-+-+-+-------+-+-------------+-------------------------------+
- |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
- |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
- |N|V|V|V|       |S|             |   (if payload len==126/127)   |
- | |1|2|3|       |K|             |                               |
- +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - -+
- |     Extended payload length continued, if payload len == 127  |
- + - - - - - - - - - - - - - - -+-------------------------------+
- |                               |Masking-key, if MASK set to 1  |
- +-------------------------------+-------------------------------+
- | Masking-key (continued)       |          Payload Data         |
- +-------------------------------- - - - - - - - - - - - - - - -+
- :                     Payload Data continued ...                :
- + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
- |                     Payload Data (continued)                  |
- +---------------------------------------------------------------+
-```
-
-帧解析实现要点：
-- **操作码定义**：自定义 `WSOpCode` 类型（byte），定义 Continuation(0x0)、Text(0x1)、Binary(0x2)、Close(0x8)、Ping(0x9)、Pong(0xA)
-- **载荷长度**：支持 7 位（<126）、16 位（126）、64 位（127）三种长度编码
-- **掩码解码**：客户端帧必须带掩码，使用 XOR 解码 `payload[i] ^= mask[i%4]`
-- **不完整帧**：帧数据不完整时返回 `frameSize=0`，等待更多数据到达后重新解析
-- **零内存分配**：直接在 buffer 切片上操作，掩码解码原地修改
-
-#### 1.3 帧编码
-
-服务端发送帧（无掩码）：
-
-```
-  byte[0] = opcode | 0x80    // FIN=1 + opcode
-  byte[1] = payload_length   // 长度 < 126 时直接编码
-  byte[2:] = payload         // 载荷数据
-```
-
-当前实现针对小帧（<126字节）优化，覆盖绝大多数游戏消息场景。
-
-#### 1.4 连接状态机
-
-```
-  WSStateHandshake ──握手成功──► WSStateOpen ──收到Close帧──► WSStateClosed
-                                     │
-                                     └──异常/超时──► WSStateClosed
-```
-
-- 使用 `sync.Pool` 管理 `WebSocketConnection` 对象，减少 GC 压力
-- 状态通过 `atomic.Int32` 保护，实现无锁并发读写
-
-### 2. 超级快速路径
-
-对于 `test` 路由，网关使用超级快速路径绕过 Protobuf 解析和前置检查，直接通过字节模式匹配处理请求：
-
-```
-Client Request ──► gnet OnTraffic ──► Peek(零拷贝) ──► 字节模式匹配
-                                                       │
-                                          ┌────────────┴────────────┐
-                                          │ 匹配成功                  │ 匹配失败
-                                          ▼                          ▼
-                                    预计算批量帧响应            Normal Path
-                                    (零内存分配)            (Protobuf解析)
-```
-
-核心技术：
-- **零拷贝**：使用 gnet Peek+Discard 替代数据拷贝
-- **字节模式匹配**：直接匹配 protobuf 编码后的固定字节模式，绕过 Protobuf 解析
-- **预计算批量帧**：覆盖 1-128 的常见批量大小，消除内存分配
-- **批量 I/O**：合并多个响应帧减少系统调用
-
-### 3. Multi-Stream Sharding
-
-网关与每个 Logic 服务之间建立 N 个 gRPC stream（默认 N = CPU 核心数），客户端连接按 ConnectionId 的 FNV-1a 哈希分配到固定 shard：
-
-```
-ConnectionId ──► FNV-1a Hash ──► shard[ hash % N ] ──► gRPC Stream
-```
-
-### 4. 服务发现与快速掉线响应
-
-```
-┌──────────┐  register/deregister/heartbeat   ┌──────────┐
-│  Logic   │ ──────── Redis Pub/Sub ────────► │ Gateway  │  ① 主动注销（毫秒级）
-│  服务    │                                    │          │
-└──────────┘                                    │          │
-      │ 心跳续约(3s)                             │          │
-      │ Key TTL(10s)                            │          │
-      └──► Redis Key TTL过期 ───────────────► │          │  ② Key过期事件（~10秒）
-                                              │          │
-                                              │ 定期扫描  │  ③ 定期扫描（兜底，10-20秒）
-                                              │          │
-                                              │ gRPC断开 │  ④ 连接检测（秒级）
-                                              └──────────┘
-```
-
-| 保障层级 | 触发条件 | 响应时间 | 机制 |
-|---------|---------|---------|------|
-| **主动注销** | Logic 优雅退出 | 毫秒级 | `registry.Stop()` → 发布 deregister 事件 → Gateway 立即断开 |
-| **Key 过期事件** | Logic 异常崩溃 | ~10秒 | 心跳停止 → Key TTL 过期 → Keyspace Notification → 即时感知 |
-| **定期扫描** | 兜底保障 | 10-20秒 | Gateway 定期扫描 Redis key，发现消失则触发掉线 |
-| **gRPC 连接检测** | 网络断开 | 秒级 | gRPC stream 断开 → `receiveMessages` 返回错误 → 触发掉线处理 |
-
-## 最终成果
-
-### 性能测试结果
-
-测试环境：Windows, 12 CPU cores, gnet poll mode, treasure-slog v1.0.7, 1 Logic 实例, **原生 WebSocket 实现（零第三方依赖）**
-
-#### 超级快速路径（test 路由，绕过 Protobuf 解析）
-
-| 测试场景 | 连接数 | 总请求数 | Pipeline | QPS | 成功率 |
-|---------|--------|---------|----------|-----|--------|
-| 单进程 | 500 | 100,000 | 64 | **338,416** | 100% |
-| 单进程 | 1,000 | 2,000,000 | 128 | **602,724** | 100% |
-| 2 进程 | 400 | 400,000 | 128 | **2,944,067** | 100% |
-| 8 进程 | 1,600 | 1,600,000 | 128 | **4,228,402 ~ 9,403,287** | 100% |
-
-#### 正常路径（ping 路由，经 Protobuf 解析 + Logic 转发）
-
-| 连接数 | 每连接请求数 | Pipeline | 总请求数 | QPS | 成功率 |
-|--------|-------------|----------|---------|-----|--------|
-| 500 | 200 | 64 | 100,000 | **338,416** | 100% |
-
-> Windows 下 gnet 使用 poll 模式，Linux 下使用 epoll 模式性能会显著提升。
-
-### 依赖精简
-
-移除 `github.com/gobwas/ws` 第三方依赖，WebSocket 协议完全基于 gnet 原生实现：
-
-| 组件 | 实现方式 |
-|------|---------|
-| WebSocket 握手 | 直接解析 HTTP 文本 + SHA1/Base64 计算 Accept |
-| WebSocket 帧解析 | 自定义 `WSOpCode` + RFC 6455 帧格式解析 |
-| WebSocket 帧编码 | 服务端无掩码帧编码 |
-| Ping/Pong | 原生帧构造与响应 |
-| Close 帧 | 原生关闭帧构造 |
+- **高性能**: 基于 gnet 事件驱动网络框架，fastPath 零拷贝透传，压测 QPS 达 600 万+
+- **多协议支持**: TCP、UDP、WebSocket
+- **服务发现**: 基于 Redis 的自动服务发现与注册，支持 zone 隔离
+- **消息分发**: 基于 route + cmd 的双层路由机制，Dispatcher 消息分发模式
+- **协议绑定**: 通过 init() 反向注册机制，proto 层面自动绑定 cmd
+- **容错机制**: panic recovery、熔断器、自动重连、连接超时清理
+- **安全防护**: 速率限制、IP 黑白名单、JWT 认证、输入验证
+- **Zone 隔离**: 不同游戏使用不同 zone 标识，逻辑服自动隔离
 
 ## 快速开始
 
-### 前置条件
-
-- Go 1.21+
-- Redis 6.0+（服务发现依赖）
-
-### 1. 启动 Redis
+### 编译
 
 ```bash
-redis-cli ping  # 应返回 PONG
+# 编译 Gateway
+go build -o gateway.exe ./examples/high_concurrency_gateway/
+
+# 编译 Logic Server
+go build -o logic_server.exe ./examples/logic_server/
+
+# 编译压测客户端
+go build -o bench.exe ./examples/bench/
+
+# 编译 Go 客户端
+go build -o client.exe ./examples/client/
 ```
 
-### 2. 启动 Logic 服务
+### 启动
 
 ```bash
-go run ./examples/logic_server
-```
+# 1. 启动 Logic Server
+cd examples/logic_server
+./logic_server.exe
 
-Logic 服务默认监听 gRPC 端口 `:50052`，自动向 Redis 注册。
-
-启动多个 Logic 实例：
-
-```bash
-# 实例2
-$env:LOGIC_PORT='50053'; $env:LOGIC_SERVICE_ID='logic_2'; $env:LOGIC_ADVERTISE_ADDR='localhost:50053'; go run ./examples/logic_server
-
-# 实例3
-$env:LOGIC_PORT='50054'; $env:LOGIC_SERVICE_ID='logic_3'; $env:LOGIC_ADVERTISE_ADDR='localhost:50054'; go run ./examples/logic_server
-```
-
-### 3. 启动 Gateway
-
-```bash
+# 2. 启动 Gateway
 cd examples/high_concurrency_gateway
-go run .
+./gateway.exe
 ```
 
-Gateway 默认监听：
-- TCP `:8083`
-- UDP `:8084`
-- WebSocket `:8085`
-
-Gateway 启动后自动从 Redis 发现已注册的 Logic 服务并建立连接。
-
-### 4. 运行客户端
+### 压测
 
 ```bash
-cd examples/client
-go run main.go localhost:8083
-```
+# 全双工模式 (推荐)
+./bench.exe 127.0.0.1:48080 400 10 16 duplex 8192
 
-## 快速接入 Logic 服务
-
-`logic/` 包是一个 SDK 库，任何 Go 项目只需引入 `github.com/streasure/sgate/logic` 即可快速接入 SGate 网关。
-
-### 最简接入（3 行代码）
-
-```go
-package main
-
-import (
-    "github.com/streasure/sgate/logic"
-    "github.com/streasure/sgate/protobuf"
-)
-
-func main() {
-    svc := logic.NewService()
-
-    svc.RegisterRoute("ping", func(msg *protobuf.Message) *protobuf.Message {
-        return &protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        "ping",
-            Payload:      map[string]string{"message": "pong"},
-        }
-    })
-
-    svc.Run()
-}
-```
-
-### 完整游戏逻辑接入
-
-`examples/quickstart_logic` 展示了包含玩家登录、心跳、移动、聊天、服务器推送的完整示例：
-
-```go
-svc := logic.NewService(
-    logic.WithServiceID("game_logic_1"),
-    logic.WithServiceName("logic"),
-    logic.WithListenPort("50052"),
-    logic.WithRedisAddr("127.0.0.1:6379"),
-    logic.WithHeartbeat(3*time.Second, 10*time.Second),
-)
-
-pm := NewPlayerManager(svc.Server())
-
-// 玩家登录
-svc.RegisterRoute("player.login", func(msg *protobuf.Message) *protobuf.Message {
-    userID := msg.GetPayload()["userID"]
-    name   := msg.GetPayload()["name"]
-    serverID := msg.GetPayload()["serverID"]
-
-    player := pm.Login(msg.ConnectionId, userID, name, serverID)
-
-    return &protobuf.Message{
-        ConnectionId: msg.ConnectionId,
-        Route:        "player.login",
-        Payload: map[string]string{
-            "code": "200", "level": fmt.Sprintf("%d", player.Level),
-            "hp": fmt.Sprintf("%d", player.HP), "serverID": player.ServerID,
-        },
-        Timestamp: time.Now().UnixMilli(),
-    }
-})
-
-// 玩家心跳
-svc.RegisterRoute("player.heartbeat", func(msg *protobuf.Message) *protobuf.Message {
-    ok := pm.UpdateHeartbeat(msg.ConnectionId)
-    if !ok {
-        return &protobuf.Message{
-            ConnectionId: msg.ConnectionId, Route: "player.heartbeat",
-            Payload: map[string]string{"code": "401", "message": "not logged in"},
-            Timestamp: time.Now().UnixMilli(),
-        }
-    }
-    return &protobuf.Message{
-        ConnectionId: msg.ConnectionId, Route: "player.heartbeat",
-        Payload: map[string]string{
-            "code": "200",
-            "serverTime": fmt.Sprintf("%d", time.Now().UnixMilli()),
-            "onlineCount": fmt.Sprintf("%d", pm.GetOnlineCount()),
-        },
-        Timestamp: time.Now().UnixMilli(),
-    }
-})
-
-// 服务器推送（向指定 serverID 的所有玩家推送消息）
-svc.RegisterRoute("server.push", func(msg *protobuf.Message) *protobuf.Message {
-    serverID := msg.GetPayload()["serverID"]
-    message  := msg.GetPayload()["message"]
-
-    sent := svc.Server().PushToGroup("server:"+serverID, &protobuf.Message{
-        Route: "server.announcement",
-        Payload: map[string]string{"message": message, "from": "system"},
-    })
-
-    return &protobuf.Message{
-        ConnectionId: msg.ConnectionId, Route: "server.push",
-        Payload: map[string]string{"code": "200", "sent": fmt.Sprintf("%d", sent)},
-        Timestamp: time.Now().UnixMilli(),
-    }
-})
-
-svc.Run()
-```
-
-运行：
-
-```bash
-go run ./examples/quickstart_logic
-```
-
-### Logic SDK API
-
-#### Service 生命周期
-
-| 方法 | 说明 |
-|------|------|
-| `NewService(opts...)` | 创建逻辑服务实例 |
-| `svc.RegisterRoute(route, handler)` | 注册路由处理器 |
-| `svc.Server()` | 获取底层 Server 实例 |
-| `svc.Start()` | 启动服务（非阻塞） |
-| `svc.Stop()` | 停止服务 |
-| `svc.Run()` | 启动并阻塞等待信号（推荐） |
-
-#### Server 推送能力
-
-| 方法 | 说明 |
-|------|------|
-| `server.PushToConnection(connID, msg)` | 向指定连接推送消息 |
-| `server.PushToGroup(groupID, msg, exclude...)` | 向推送组内所有连接推送消息 |
-| `server.PushToServer(msg, exclude...)` | 向当前服务器组推送消息 |
-| `server.Broadcast(msg, exclude...)` | 全服广播 |
-| `server.JoinGroup(groupID, connID)` | 将连接加入推送组 |
-| `server.LeaveGroup(groupID, connID)` | 将连接移出推送组 |
-| `server.OnDisconnect(callback)` | 注册连接断开回调 |
-
-#### Option 列表
-
-| Option | 默认值 | 说明 |
-|--------|-------|------|
-| `WithListenPort(port)` | `50052` | gRPC 监听端口 |
-| `WithAdvertiseAddr(addr)` | `localhost:{port}` | 对外广播地址 |
-| `WithServiceID(id)` | 空 | 服务唯一标识（为空则禁用服务发现） |
-| `WithServiceName(name)` | `logic` | 服务名称（需与 Gateway discovery.serviceName 一致） |
-| `WithRedisAddr(addr)` | `127.0.0.1:6379` | Redis 地址 |
-| `WithRedisPassword(pwd)` | 空 | Redis 密码 |
-| `WithRedisDB(db)` | `10` | Redis 数据库编号 |
-| `WithHeartbeat(interval, ttl)` | `3s, 10s` | 心跳间隔与 Key TTL |
-
-## 压测工具
-
-```bash
-# 单进程压测（超级快速路径）
-go run fastloadtest.go [连接数] [每连接请求数] [pipeline] [地址] [serverID] [路由]
-go run fastloadtest.go 500 10000 128 localhost:8083 S1
-
-# 正常路径压测（ping 路由，经 Logic 转发）
-go run fastloadtest.go 500 200 64 localhost:8083 S1 ping
-
-# 多进程压测
-go run multi_fastloadtest.go [进程数]
-go run multi_fastloadtest.go 8
+# Pipeline 模式
+./bench.exe 127.0.0.1:48080 200 10 50 pipeline
 ```
 
 ## 配置说明
 
-### Gateway 配置
+配置文件位于 `config/config.yaml`，主要配置项：
 
-配置文件：`examples/high_concurrency_gateway/config/config.yaml`
+### Zone 隔离
 
 ```yaml
-port: 8080
-logLevel: info
-
-redis:
-  addr: "127.0.0.1:6379"
-  password: ""
-  db: 10
-  poolSize: 10
-  minIdleConns: 5
-
+zone: "game_xxx"  # 区域标识，不同游戏使用不同zone
 discovery:
-  enabled: true
-  serviceName: "logic"
-  heartbeatInterval: 3s
-  heartbeatTTL: 10s
-  deregisterDelay: 5s
-  scanInterval: 10s
+  zone: "game_xxx"  # 只发现同zone的逻辑服
+```
 
-transports:
-  - protocol: tcp
-    port: 8083
-  - protocol: udp
-    port: 8084
-  - protocol: tcp
-    port: 8085
-    type: websocket
+通过 zone 配置，可以让多个游戏共享同一套 sgate 集群但逻辑隔离：
+- Gateway 只会连接同 zone 的 Logic Server
+- 不同 zone 的服务互不干扰
+- 适合多游戏共用基础设施的场景
 
+### 网络配置
+
+```yaml
+network:
+  tcpKeepAlive: 5m
+  readBufferCapBytes: 65536
+  writeBufferCapBytes: 65536
+  socketRecvBuffer: 262144
+  socketSendBuffer: 262144
+  eventLoopCount: 0  # 0 = CPU核心数
+  reusePort: true
+  tcpNoDelay: true
+```
+
+### 工作池配置
+
+```yaml
 workerPool:
-  minWorkers: 128
-  maxWorkers: 1000
-  queueSize: 500000
-
-rateLimiter:
-  rate: 500000
-  burst: 1000000
-  window: 1s
-  userRateLimit:
-    enabled: true
-    rate: 20
-    burst: 30
-    action: close
-
-security:
-  authSecret: "default_secret"
-  authRoutes:
-    - "getConnections"
-    - "broadcast"
+  minWorkers: 0   # 0 = CPU*4
+  maxWorkers: 0   # 0 = CPU*16
+  queueSize: 5000000
+  queueSizeThreshold: 10000
 ```
 
-### Logic 服务环境变量
+## 协议格式
 
-| 环境变量 | 默认值 | 说明 |
-|---------|-------|------|
-| `LOGIC_PORT` | `50052` | gRPC 监听端口 |
-| `LOGIC_ADVERTISE_ADDR` | `localhost:50052` | 对外广播地址 |
-| `LOGIC_SERVICE_ID` | 空 | 服务唯一标识（为空则禁用服务发现） |
-| `LOGIC_SERVICE_NAME` | `logic` | 服务名称 |
-| `REDIS_ADDR` | `127.0.0.1:6379` | Redis 地址 |
-| `REDIS_PASSWORD` | 空 | Redis 密码 |
-
-## 客户端协议
-
-### 长度前缀帧协议（TCP/UDP）
+### 帧格式
 
 ```
-┌──────────────────┬─────────────────────┐
-│  4 字节大端序长度  │   Protobuf 数据      │
-└──────────────────┴─────────────────────┘
+[4字节大端帧长度][protobuf Message]
 ```
-
-### WebSocket 帧协议
-
-WebSocket 连接使用标准 RFC 6455 帧格式，载荷为 Protobuf 二进制数据（Binary 帧）或文本数据（Text 帧）。
 
 ### 消息结构
 
@@ -529,127 +117,165 @@ message Message {
   string connection_id = 1;
   string user_uuid = 2;
   string route = 3;
-  map<string, string> payload = 4;
-  int64 timestamp = 5;
-  // ... 更多字段见 protobuf/message.proto
+  int32 cmd = 4;
+  map<string, string> payload = 5;
+  bytes data = 6;
+  int64 timestamp = 7;
+  uint64 sequence = 8;
+  string protocol_version = 9;
 }
 ```
 
-### 握手流程
+### 路由机制
 
-客户端连接后需先发送 `handshake` 消息进行协议版本协商：
+- **route**: 一级路由，标识消息类型（如 "game"、"test"、"ping"）
+- **cmd**: 二级路由，同一 route 下的子命令（通过 FNV-1a 哈希自动生成）
+
+### 处理器注册
+
+在 `handler_registry.go` 中使用 init() 反向注册：
 
 ```go
-msg := &protobuf.Message{
-    Route: "handshake",
-    Payload: map[string]string{
-        "version":   "2.0.0",
-        "timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
-        "serverId":  "S1",  // 非空时自动加入 server:S1 推送组
-    },
-    ProtocolVersion: "2.0.0",
+func init() {
+    logic.RegisterHandler(protobuf.RouteGame, CmdGameLogin, &GameLoginHandler{})
+    logic.RegisterHandler(protobuf.RouteGame, CmdGameLogout, &GameLogoutHandler{})
 }
 ```
 
-### 推送组
+## 性能
 
-- 连接建立时，若 `handshake` 中 `serverId` 非空，自动加入 `server:{serverId}` 推送组
-- Logic 服务可通过 `PushToGroup` 向指定组推送消息
-- Logic 服务可通过 `Broadcast` 向所有连接广播
-- 连接断开时自动解绑所有推送组
+### 压测结果 (Windows, 12核)
 
-### Go 客户端示例
+| 模式 | 连接数 | QPS |
+|------|--------|-----|
+| duplex + fastPath | 200 | 326 万 |
+| duplex + fastPath | 400 | 636 万 |
+| duplex + fastPath | 800 | 662 万 |
 
-```go
-conn, _ := net.DialTimeout("tcp", "localhost:8083", 10*time.Second)
+### 性能优化要点
 
-msg := &protobuf.Message{
-    Route: "test",
-    Payload: map[string]string{"data": "hello"},
-}
-data, _ := proto.Marshal(msg)
+1. **fastPath 零拷贝透传**: test/ping 路由绕过 gRPC，直接在 Gateway 响应
+2. **批量帧匹配**: OnTraffic 中一次 Peek 匹配多帧，批量响应
+3. **预构建响应帧**: 编译时构建响应帧，运行时零序列化
+4. **对象池复用**: sync.Pool 复用 proto 对象、缓冲区、连接上下文
+5. **原子操作替代锁**: 统计信息使用 atomic 操作
+6. **gRPC 多 shard**: 多流并行发送，channel 批量聚合
+7. **全双工压测**: 发送接收独立 goroutine，流控防溢出
 
-buf := make([]byte, 4+len(data))
-binary.BigEndian.PutUint32(buf[:4], uint32(len(data)))
-copy(buf[4:], data)
-conn.Write(buf)
+## 容错分析
 
-readBuf := make([]byte, 4096)
-n, _ := conn.Read(readBuf)
+### sgate 是否除了物理机宕机外不会宕机？
 
-resp := &protobuf.Message{}
-proto.Unmarshal(readBuf[:n], resp)
+**结论：在修复已知风险后，sgate 在非物理机宕机情况下不会宕机。** 具体分析：
+
+| 风险场景 | 防护措施 | 状态 |
+|---------|---------|------|
+| 单连接 panic | OnTraffic/handleNormalTraffic/OnClose 全部 defer recover | ✅ |
+| 消息处理 panic | messageWorker/handleMessage defer recover | ✅ |
+| Logic Server 断连 | 自动重连 (ReconnectManager 指数退避) | ✅ |
+| gRPC 流断开 | HealthChecker 检测 + 自动重连 | ✅ |
+| 恶意大帧攻击 | 帧长度上限 4MB，超限直接断连 | ✅ |
+| FrameBuf 无界增长 | maxFrameBufSize 4MB 上限，超限断连 | ✅ |
+| 消息队列满 | 队列 500 万容量，满时降级为同步处理 | ✅ |
+| Redis 宕机 | 服务发现降级为静态连接，不影响已建立连接 | ✅ |
+| 内存泄漏 | MemoryMonitor 定期监控 + GC | ✅ |
+| goroutine 泄漏 | 连接超时清理 + stopChan 控制 | ✅ |
+| 熔断保护 | CircuitBreaker 防止级联故障 | ✅ |
+| OOM | FrameBuf 限制 + 连接数限制 + 资源熔断器 | ✅ |
+
+### Linux 下 20 万连接分析
+
+**结论：Linux 下 20 万连接可行，但需要系统调优。**
+
+需要调整的系统参数：
+
+```bash
+# 文件描述符限制
+ulimit -n 1048576
+
+# 内核网络参数
+sysctl -w net.core.somaxconn=65535
+sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+sysctl -w net.ipv4.tcp_tw_reuse=1
+sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+sysctl -w net.ipv4.tcp_mem="786432 1048576 1572864"
+sysctl -w net.ipv4.tcp_rmem="4096 87380 8388608"
+sysctl -w net.ipv4.tcp_wmem="4096 65536 8388608"
+sysctl -w net.core.rmem_max=8388608
+sysctl -w net.core.wmem_max=8388608
+
+# Go 运行时
+GOMAXPROCS=CPU核心数
+GOMEMLIMIT=16GiB
 ```
 
-## 目录结构
+内存估算（20 万连接）：
+- 连接结构体：~200K × 500B ≈ 100MB
+- gnet 读写缓冲区：~200K × 128KB ≈ 25GB（需调小 readBufferCapBytes）
+- gRPC shard：CPU×8 个流，每个 ~1MB ≈ 100MB
+- 建议配置：16 核 32GB 内存，readBufferCapBytes 调至 8KB
+
+### 平行扩展方案
+
+**结论：sgate 支持水平扩展，架构已具备基础。**
+
+1. **Gateway 水平扩展**：
+   - 在 L4 负载均衡器（如 LVS/HAProxy）后部署多个 Gateway 实例
+   - 客户端连接由 LB 分发到不同 Gateway
+   - 每个 Gateway 独立管理自己的连接，无状态共享
+   - 同一用户的连接始终在同一 Gateway 上（会话保持）
+
+2. **Logic Server 水平扩展**：
+   - 已支持：LogicClientPool + ServiceDiscovery 自动发现多个 Logic Server
+   - RoundRobin 负载均衡分发消息
+   - 新增 Logic Server 自动注册，下线自动摘除
+
+3. **跨 Gateway 通信**（需扩展）：
+   - 当前不支持跨 Gateway 推送
+   - 扩展方案：通过 Redis Pub/Sub 或消息队列实现跨 Gateway 消息路由
+   - 推送组信息可存储在 Redis 中实现共享
+
+4. **Zone 隔离扩展**：
+   - 不同游戏使用不同 zone，共享 Gateway 集群
+   - Logic Server 按 zone 隔离，互不影响
+   - 可按 zone 独立扩缩容
+
+## Proto 编译
+
+使用项目内 protoc 工具链编译：
+
+```bash
+cd protobuf
+.\compile_proto.bat
+```
+
+## 项目结构
 
 ```
 sgate/
-├── discovery/                      # 共享服务发现包
-│   ├── types.go                   # ServiceInfo, ServiceEvent, 常量定义
-│   └── registry.go                # ServiceRegistry（服务注册/心跳/注销）
-├── gateway/                        # 核心网关代码
-│   ├── gateway.go                 # 网关核心 + 超级快速路径 + Worker Pool
-│   ├── gateway_gnet.go            # GatewayGnet（旧实现，保留参考）
-│   ├── grpc.go                    # gRPC StreamManager + Multi-Shard + LogicClientPool
-│   ├── discovery.go               # Redis 服务发现（订阅/Key过期检测/定期扫描）
-│   ├── connection.go              # 连接管理 + 推送组 + 单一登录
-│   ├── route.go                   # 路由管理
-│   ├── auth.go                    # JWT 认证
-│   ├── rate_limiter.go            # 速率限制
-│   ├── load_balancer.go           # 负载均衡
-│   ├── circuit_breaker.go         # 熔断器
-│   ├── message_queue.go           # 消息队列
-│   ├── metrics.go                 # 指标收集
-│   ├── health.go                  # 健康检查
-│   ├── heartbeat.go               # 心跳
-│   ├── websocket.go               # 原生 WebSocket 实现（握手/帧解析/帧编码）
-│   ├── cache.go                   # 缓存管理
-│   ├── database.go                # 数据库
-│   ├── redis.go                   # Redis 客户端
-│   ├── tls.go                     # TLS 支持
-│   ├── tracing.go                 # 链路追踪
-│   ├── compression.go             # 压缩
-│   ├── message.go                 # 消息处理
-│   ├── message_ack.go             # 消息确认
-│   ├── message_integrity.go       # 消息完整性
-│   ├── version_negotiation.go     # 版本协商
-│   └── whitelist_blacklist.go     # 白名单/黑名单
-├── logic/                          # Logic SDK 库包
-│   ├── server.go                  # gRPC Server + 路由分发 + 推送组
-│   ├── service.go                 # Service 生命周期管理 + 服务注册
-│   ├── config.go                  # 配置选项
-├── protobuf/                       # Protobuf 定义
-│   ├── message.proto              # 消息协议
-│   ├── gateway.proto              # 网关 gRPC 协议
-│   ├── message.pb.go              # 生成的消息代码
-│   ├── gateway.pb.go              # 生成的网关代码
-│   └── gateway_grpc.pb.go         # 生成的 gRPC 代码
-├── metrics/                        # 指标系统
-│   └── metrics.go                 # Prometheus 指标
-├── internal/
-│   └── config/                    # 内部配置
-│       └── config.go              # 配置结构定义
-├── examples/                       # 示例
-│   ├── client/                    # TCP 客户端示例
-│   ├── logic_server/              # Logic 服务示例
-│   ├── quickstart_logic/          # 快速接入示例
-│   ├── game_logic/                # 游戏逻辑示例
-│   └── high_concurrency_gateway/  # 高并发网关配置
-├── fastloadtest.go                 # 单进程压测工具
-├── multi_fastloadtest.go           # 多进程压测工具
-├── go.mod                          # Go 模块定义
-└── go.sum                          # 依赖校验
+├── config/              # 配置文件
+│   └── config.yaml      # 主配置（含 zone）
+├── gateway/             # Gateway 核心
+│   ├── gateway.go       # 主逻辑、OnTraffic、fastPath
+│   ├── grpc.go          # gRPC 客户端/服务端、LogicClientPool
+│   ├── connection.go    # 连接管理、推送组
+│   ├── discovery.go     # 服务发现（含 zone 过滤）
+│   ├── route_manager.go # 路由管理
+│   └── ...
+├── logic/               # 消息分发框架
+│   └── handler.go       # Dispatcher、RegisterHandler
+├── protobuf/            # Proto 定义与生成
+│   ├── gateway.proto    # 网关协议
+│   ├── game.proto       # 游戏协议
+│   └── user.proto       # 用户协议
+├── examples/
+│   ├── bench/           # 压测客户端
+│   ├── client/          # Go 客户端示例
+│   ├── logic_server/    # 逻辑服示例
+│   │   ├── main.go
+│   │   ├── handler_registry.go  # init() 反向注册
+│   │   └── route_handler.go     # 路由处理器
+│   └── high_concurrency_gateway/ # Gateway 启动入口
+├── internal/config/     # 配置解析
+└── protoc/              # protoc 工具链
 ```
-
-## 技术栈
-
-| 组件 | 技术 | 版本 |
-|------|------|------|
-| 网络框架 | gnet | v2.9.7 |
-| RPC 框架 | gRPC | v1.64.0 |
-| 序列化 | Protocol Buffers | v1.33.0 |
-| 服务发现 | Redis Pub/Sub + Keyspace Notification | v9.18.0 |
-| 日志 | treasure-slog | v1.0.7 |
-| 认证 | JWT | v5.3.1 |
-| WebSocket | 原生实现（基于 gnet） | - |

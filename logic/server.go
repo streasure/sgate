@@ -3,6 +3,7 @@ package logic
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -11,19 +12,65 @@ import (
 	"google.golang.org/grpc"
 )
 
-type RouteHandler func(msg *protobuf.Message) *protobuf.Message
-
 type DisconnectCallback func(connectionID string)
 
 type streamConn struct {
 	stream protobuf.GatewayService_StreamMessagesServer
-	mu     sync.Mutex
+	sendCh chan *protobuf.Message
+	done   chan struct{}
+}
+
+func newStreamConn(stream protobuf.GatewayService_StreamMessagesServer) *streamConn {
+	sc := &streamConn{
+		stream: stream,
+		sendCh: make(chan *protobuf.Message, 131072),
+		done:   make(chan struct{}),
+	}
+	go sc.flushLoop()
+	return sc
 }
 
 func (sc *streamConn) Send(msg *protobuf.Message) error {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	return sc.stream.Send(msg)
+	select {
+	case sc.sendCh <- msg:
+		return nil
+	default:
+		return fmt.Errorf("send channel full")
+	}
+}
+
+func (sc *streamConn) flushLoop() {
+	defer close(sc.done)
+	batch := make([]*protobuf.Message, 0, 256)
+	for {
+		msg, ok := <-sc.sendCh
+		if !ok {
+			return
+		}
+		batch = batch[:0]
+		batch = append(batch, msg)
+		drained := true
+		for drained {
+			select {
+			case m, ok := <-sc.sendCh:
+				if !ok {
+					drained = false
+					break
+				}
+				batch = append(batch, m)
+				if len(batch) >= cap(batch) {
+					drained = false
+				}
+			default:
+				drained = false
+			}
+		}
+		for _, m := range batch {
+			if err := sc.stream.Send(m); err != nil {
+				return
+			}
+		}
+	}
 }
 
 type pushGroup struct {
@@ -40,17 +87,51 @@ type Server struct {
 	groupMu    sync.RWMutex
 	groups     map[string]*pushGroup
 	connGroups map[string]map[string]struct{}
+
+	dispatchCh chan dispatchItem
+}
+
+type dispatchItem struct {
+	msg  *protobuf.Message
+	conn *streamConn
 }
 
 func NewServer(opts ...ServerOption) *Server {
 	s := &Server{
 		groups:     make(map[string]*pushGroup),
 		connGroups: make(map[string]map[string]struct{}),
+		dispatchCh: make(chan dispatchItem, runtime.NumCPU()*8192),
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+
+	workerCount := runtime.NumCPU() * 128
+	for i := 0; i < workerCount; i++ {
+		go s.dispatchWorker()
+	}
+
 	return s
+}
+
+func (s *Server) dispatchWorker() {
+	for item := range s.dispatchCh {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					tlog.Error("dispatchWorker panic recovered", "error", r, "connectionID", item.msg.ConnectionId, "route", item.msg.Route, "cmd", item.msg.Cmd)
+				}
+			}()
+			s.dispatchMessage(item.msg, func(response *protobuf.Message) {
+				if response != nil {
+					if response.ConnectionId == "" {
+						response.ConnectionId = item.msg.ConnectionId
+					}
+					item.conn.Send(response)
+				}
+			})
+		}()
+	}
 }
 
 type ServerOption func(*Server)
@@ -67,20 +148,6 @@ func (s *Server) serverGroupID() string {
 	return "server:" + s.serverID
 }
 
-func (s *Server) RegisterRoute(route string, handler RouteHandler) {
-	s.routes.Store(route, handler)
-	tlog.Info("route registered", "route", route)
-}
-
-func (s *Server) GetRoutes() []string {
-	var routes []string
-	s.routes.Range(func(key, value interface{}) bool {
-		routes = append(routes, key.(string))
-		return true
-	})
-	return routes
-}
-
 func (s *Server) OnDisconnect(cb DisconnectCallback) {
 	s.onDisconnect = append(s.onDisconnect, cb)
 }
@@ -88,7 +155,7 @@ func (s *Server) OnDisconnect(cb DisconnectCallback) {
 func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesServer) error {
 	connectionID := fmt.Sprintf("conn_%d", time.Now().UnixNano())
 
-	conn := &streamConn{stream: stream}
+	conn := newStreamConn(stream)
 	s.connections.Store(connectionID, conn)
 
 	if s.serverID != "" {
@@ -100,24 +167,18 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			if s.connections.CompareAndDelete(connectionID, conn) {
-				s.leaveAllGroups(connectionID)
-				tlog.Info("stream connection closed", "connectionID", connectionID, "serverID", s.serverID)
-				for _, cb := range s.onDisconnect {
-					go cb(connectionID)
-				}
+			close(conn.sendCh)
+			<-conn.done
+			s.connections.CompareAndDelete(connectionID, conn)
+			s.leaveAllGroups(connectionID)
+			tlog.Info("stream connection closed", "connectionID", connectionID, "serverID", s.serverID)
+			for _, cb := range s.onDisconnect {
+				go cb(connectionID)
 			}
 			return err
 		}
 
-		s.dispatchMessage(msg, func(response *protobuf.Message) {
-			if response != nil {
-				if response.ConnectionId == "" {
-					response.ConnectionId = msg.ConnectionId
-				}
-				conn.Send(response)
-			}
-		})
+		s.dispatchCh <- dispatchItem{msg: msg, conn: conn}
 	}
 }
 
@@ -126,39 +187,21 @@ func (s *Server) SendMessage(ctx context.Context, msg *protobuf.Message) (*proto
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	s.dispatchMessage(msg, func(resp *protobuf.Message) {
-		defer wg.Done()
-		response = resp
-	})
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error("SendMessage dispatchMessage panic recovered", "error", r, "route", msg.Route, "cmd", msg.Cmd)
+				wg.Done()
+			}
+		}()
+		s.dispatchMessage(msg, func(resp *protobuf.Message) {
+			defer wg.Done()
+			response = resp
+		})
+	}()
 
 	wg.Wait()
 	return response, nil
-}
-
-func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.Message)) {
-	if msg.Route == "" {
-		callback(&protobuf.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteError,
-			Payload:      map[string]string{"message": "Missing route", "code": "400"},
-			Timestamp:    time.Now().UnixMilli(),
-		})
-		return
-	}
-
-	handler, ok := s.routes.Load(msg.Route)
-	if !ok {
-		callback(&protobuf.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteError,
-			Payload:      map[string]string{"message": "Route not found", "code": "404", "details": msg.Route},
-			Timestamp:    time.Now().UnixMilli(),
-		})
-		return
-	}
-
-	response := handler.(RouteHandler)(msg)
-	callback(response)
 }
 
 func (s *Server) PushToConnection(connectionID string, msg *protobuf.Message) error {

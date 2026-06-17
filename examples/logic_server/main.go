@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/logic"
-	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 )
 
@@ -36,56 +35,8 @@ func main() {
 		logic.WithHeartbeat(3*time.Second, 10*time.Second),
 	)
 
-	svc.RegisterRoute(protobuf.RoutePing, func(msg *protobuf.Message) *protobuf.Message {
-		return &protobuf.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RoutePing,
-			Payload: map[string]string{
-				"timestamp":       fmt.Sprintf("%d", time.Now().UnixMilli()),
-				"message":         "Pong from logic server",
-				"connectionCount": fmt.Sprintf("%d", svc.Server().GetConnectionCount()),
-			},
-			Timestamp: time.Now().UnixMilli(),
-		}
-	})
-
-	svc.RegisterRoute(protobuf.RouteTest, func(msg *protobuf.Message) *protobuf.Message {
-		return &protobuf.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteTest,
-			Payload: map[string]string{
-				"timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
-				"message":   "Test response from logic server",
-				"data":      msg.GetPayload()["data"],
-			},
-			Timestamp: time.Now().UnixMilli(),
-		}
-	})
-
-	svc.RegisterRoute(protobuf.RouteEcho, func(msg *protobuf.Message) *protobuf.Message {
-		return &protobuf.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteEcho,
-			Payload: map[string]string{
-				"timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
-				"message":   "Echo from logic server",
-				protobuf.RouteEcho:      msg.GetPayload()["message"],
-			},
-			Timestamp: time.Now().UnixMilli(),
-		}
-	})
-
-	svc.RegisterRoute(protobuf.RouteGetConnections, func(msg *protobuf.Message) *protobuf.Message {
-		return &protobuf.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteGetConnections,
-			Payload: map[string]string{
-				"timestamp": fmt.Sprintf("%d", time.Now().UnixMilli()),
-				"count":     fmt.Sprintf("%d", svc.Server().GetConnectionCount()),
-			},
-			Timestamp: time.Now().UnixMilli(),
-		}
-	})
+	ApplyAllHandlers(svc)
+	prebuildResponses()
 
 	if err := svc.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "logic service failed: %v\n", err)

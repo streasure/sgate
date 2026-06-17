@@ -15,6 +15,8 @@ type RateLimiter struct {
 	burstTokens       int
 	cleanupInterval   time.Duration
 	dimensionConfigs  map[string]DimensionConfig
+	maxBucketsPerDim  int
+	stopCh            chan struct{}
 }
 
 type DimensionConfig struct {
@@ -51,6 +53,8 @@ func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 		burstTokens:      maxTokens * 2,
 		cleanupInterval:  5 * time.Minute,
 		dimensionConfigs: make(map[string]DimensionConfig),
+		maxBucketsPerDim: 100000,
+		stopCh:           make(chan struct{}),
 	}
 
 	rl.globalBucket = &TokenBucket{
@@ -82,6 +86,36 @@ func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 	return rl
 }
 
+func (rl *RateLimiter) UpdateRate(maxTokens int, tokenRefresh time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.tokenRefresh = tokenRefresh
+	rl.maxTokens = maxTokens
+	rl.burstTokens = maxTokens * 2
+	rl.globalBucket = &TokenBucket{
+		maxTokens:    int64(maxTokens * 10),
+		burstTokens:  int64(maxTokens * 20),
+		tokenRefresh: tokenRefresh,
+	}
+	rl.globalBucket.tokens.Store(int64(maxTokens * 10))
+	rl.globalBucket.lastUpdate.Store(time.Now().UnixNano())
+	rl.dimensionConfigs["ip"] = DimensionConfig{
+		MaxTokens:    maxTokens,
+		BurstTokens:  maxTokens * 2,
+		TokenRefresh: tokenRefresh,
+	}
+	rl.dimensionConfigs["user"] = DimensionConfig{
+		MaxTokens:    maxTokens / 2,
+		BurstTokens:  maxTokens,
+		TokenRefresh: tokenRefresh,
+	}
+	rl.dimensionConfigs["route"] = DimensionConfig{
+		MaxTokens:    maxTokens * 4,
+		BurstTokens:  maxTokens * 8,
+		TokenRefresh: tokenRefresh,
+	}
+}
+
 func (rl *RateLimiter) Allow(dimension, key string) bool {
 	if !rl.globalBucket.tryConsume() {
 		return false
@@ -97,6 +131,10 @@ func (rl *RateLimiter) Allow(dimension, key string) bool {
 			rl.tokensByDimension[dimension] = make(map[string]*TokenBucket)
 		}
 		if bucket, exists = rl.tokensByDimension[dimension][key]; !exists {
+			if len(rl.tokensByDimension[dimension]) >= rl.maxBucketsPerDim {
+				rl.mu.Unlock()
+				return false
+			}
 			config := rl.dimensionConfigs[dimension]
 			if config.MaxTokens == 0 {
 				config.MaxTokens = rl.maxTokens
@@ -195,22 +233,32 @@ func (rl *RateLimiter) ClearDimension(dimension string) {
 }
 
 func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(rl.cleanupInterval)
+	defer ticker.Stop()
 	for {
-		time.Sleep(rl.cleanupInterval)
-		rl.mu.Lock()
-		now := time.Now()
-		for dimension, buckets := range rl.tokensByDimension {
-			for key, bucket := range buckets {
-				if now.UnixNano()-bucket.lastUpdate.Load() > 30*60*1e9 {
-					delete(buckets, key)
+		select {
+		case <-rl.stopCh:
+			return
+		case <-ticker.C:
+			rl.mu.Lock()
+			now := time.Now()
+			for dimension, buckets := range rl.tokensByDimension {
+				for key, bucket := range buckets {
+					if now.UnixNano()-bucket.lastUpdate.Load() > 30*60*1e9 {
+						delete(buckets, key)
+					}
+				}
+				if len(buckets) == 0 {
+					delete(rl.tokensByDimension, dimension)
 				}
 			}
-			if len(buckets) == 0 {
-				delete(rl.tokensByDimension, dimension)
-			}
+			rl.mu.Unlock()
 		}
-		rl.mu.Unlock()
 	}
+}
+
+func (rl *RateLimiter) Stop() {
+	close(rl.stopCh)
 }
 
 func (rl *RateLimiter) GetStats() map[string]int {

@@ -203,12 +203,6 @@ func (rm *RouteManager) RegisterLogicRoute(route string) {
 			} else {
 				logicClient = gw.logicClient
 			}
-		} else if gw, ok := ctx["gateway"].(*GatewayGnet); ok {
-			if gw.logicClientPool != nil && gw.logicClientPool.IsConnected() {
-				logicClient = gw.logicClientPool
-			} else {
-				logicClient = gw.logicClient
-			}
 		}
 		if logicClient == nil {
 			callback(NewErrorMessage("error", "Logic client not found", "", ""))
@@ -224,20 +218,29 @@ func (rm *RouteManager) RegisterLogicRoute(route string) {
 		}
 
 		var payloadMap map[string]string
-		if pm, ok := payload.(map[string]string); ok {
+		var cmd int32
+		var data []byte
+
+		if msg, ok := payload.(*Message); ok {
+			payloadMap = msg.Payload
+			cmd = msg.Cmd
+			data = msg.Data
+		} else if pm, ok := payload.(map[string]string); ok {
 			payloadMap = pm
 		} else {
 			payloadMap = map[string]string{}
 		}
 
-		msg := &protobuf.Message{
+		protoMsg := &protobuf.Message{
 			ConnectionId: connectionID,
 			Route:        route,
+			Cmd:          cmd,
+			Data:         data,
 			Payload:      payloadMap,
 			Timestamp:    time.Now().UnixMilli(),
 		}
 
-		err := logicClient.SendMessage(msg)
+		err := logicClient.SendMessage(protoMsg)
 		if err != nil {
 			tlog.Error("failed to send message to logic server", "error", err, "route", route)
 			callback(NewErrorMessage("error", "Failed to send message to logic server", err.Error(), ""))

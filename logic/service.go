@@ -15,6 +15,7 @@ import (
 	"github.com/streasure/sgate/discovery"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 type Service struct {
@@ -56,6 +57,23 @@ func (s *Service) RegisterRoute(route string, handler RouteHandler) {
 	s.server.RegisterRoute(route, handler)
 }
 
+func (s *Service) RegisterProto(route string, cmd int32, reqProto proto.Message, respCmd int32, handler ProtoHandler) {
+	s.server.RegisterProto(route, cmd, reqProto, respCmd, handler)
+}
+
+func (s *Service) RegisterDispatcher(d *Dispatcher) {
+	s.server.RegisterDispatcher(d)
+}
+
+func (s *Service) GetRoutes() []string {
+	var routes []string
+	s.Server().routes.Range(func(key, value interface{}) bool {
+		routes = append(routes, key.(string))
+		return true
+	})
+	return routes
+}
+
 func (s *Service) Start() error {
 	listenAddr := s.cfg.ListenAddr + ":" + s.cfg.ListenPort
 	listener, err := net.Listen("tcp", listenAddr)
@@ -64,7 +82,12 @@ func (s *Service) Start() error {
 	}
 	s.listener = listener
 
-	s.grpcServer = grpc.NewServer()
+	s.grpcServer = grpc.NewServer(
+		grpc.MaxRecvMsgSize(4*1024*1024),
+		grpc.MaxSendMsgSize(4*1024*1024),
+		grpc.InitialWindowSize(524288),
+		grpc.InitialConnWindowSize(524288),
+	)
 	s.server.RegisterGatewayServiceServer(s.grpcServer)
 
 	go func() {
@@ -114,7 +137,7 @@ func (s *Service) initRegistry() {
 		Metadata: map[string]string{
 			"version": "1.0.0",
 			"port":    s.cfg.ListenPort,
-			"routes":  strings.Join(s.server.GetRoutes(), ","),
+			"routes":  strings.Join(s.GetRoutes(), ","),
 		},
 		StartTime: time.Now().UnixMilli(),
 	}

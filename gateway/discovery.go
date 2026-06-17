@@ -119,43 +119,101 @@ func (sd *ServiceDiscovery) GetServiceByAddress(address string) *discovery.Servi
 
 func (sd *ServiceDiscovery) subscribeLoop() {
 	defer sd.wg.Done()
-	ch := sd.sub.Channel()
 
 	for {
-		select {
-		case <-sd.stopCh:
-			return
-		case msg, ok := <-ch:
-			if !ok {
+		ch := sd.sub.Channel()
+
+		for {
+			select {
+			case <-sd.stopCh:
 				return
+			case msg, ok := <-ch:
+				if !ok {
+					tlog.Warn("subscribe channel closed, attempting reconnect...")
+					if sd.reconnectSubscription() {
+						ch = sd.sub.Channel()
+						continue
+					}
+					return
+				}
+				sd.handleMessage(msg)
 			}
-			sd.handleMessage(msg)
 		}
 	}
 }
 
 func (sd *ServiceDiscovery) keyEventLoop() {
 	defer sd.wg.Done()
-	ch := sd.keyEventSub.Channel()
-
 	prefix := fmt.Sprintf("%s%s:", discovery.ServiceKeyPrefix, sd.cfg.ServiceName)
 
 	for {
-		select {
-		case <-sd.stopCh:
-			return
-		case msg, ok := <-ch:
-			if !ok {
+		ch := sd.keyEventSub.Channel()
+
+		for {
+			select {
+			case <-sd.stopCh:
 				return
-			}
-			if msg.Channel != "" {
-				key := msg.Payload
-				if len(key) > len(prefix) && key[:len(prefix)] == prefix {
-					sd.handleKeyExpired(key)
+			case msg, ok := <-ch:
+				if !ok {
+					tlog.Warn("keyEvent channel closed, attempting reconnect...")
+					if sd.reconnectKeyEvent() {
+						ch = sd.keyEventSub.Channel()
+						continue
+					}
+					return
+				}
+				if msg.Channel != "" {
+					key := msg.Payload
+					if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+						sd.handleKeyExpired(key)
+					}
 				}
 			}
 		}
 	}
+}
+
+func (sd *ServiceDiscovery) reconnectSubscription() bool {
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		select {
+		case <-sd.stopCh:
+			return false
+		default:
+		}
+		time.Sleep(time.Duration(i+1) * 2 * time.Second)
+		sd.sub = sd.rdb.Subscribe(ctx, discovery.ServiceChannel)
+		if err := sd.sub.Ping(ctx); err != nil {
+			tlog.Warn("subscription reconnect failed", "attempt", i+1, "error", err)
+			continue
+		}
+		tlog.Info("subscription reconnected")
+		return true
+	}
+	tlog.Error("subscription reconnect exhausted")
+	return false
+}
+
+func (sd *ServiceDiscovery) reconnectKeyEvent() bool {
+	ctx := context.Background()
+	keyEventChannel := fmt.Sprintf("__keyevent@%d__:expired", sd.rdb.Options().DB)
+	for i := 0; i < 5; i++ {
+		select {
+		case <-sd.stopCh:
+			return false
+		default:
+		}
+		time.Sleep(time.Duration(i+1) * 2 * time.Second)
+		sd.keyEventSub = sd.rdb.Subscribe(ctx, keyEventChannel)
+		if err := sd.keyEventSub.Ping(ctx); err != nil {
+			tlog.Warn("keyEvent reconnect failed", "attempt", i+1, "error", err)
+			continue
+		}
+		tlog.Info("keyEvent reconnected")
+		return true
+	}
+	tlog.Error("keyEvent reconnect exhausted")
+	return false
 }
 
 func (sd *ServiceDiscovery) handleKeyExpired(key string) {
@@ -201,6 +259,17 @@ func (sd *ServiceDiscovery) handleMessage(msg *redis.Message) {
 }
 
 func (sd *ServiceDiscovery) handleRegister(event discovery.ServiceEvent) {
+	if sd.cfg.Zone != "" {
+		if svcZone, ok := event.Service.Metadata["zone"]; ok && svcZone != sd.cfg.Zone {
+			tlog.Debug("skipping service from different zone",
+				"serviceID", event.Service.ServiceID,
+				"serviceZone", svcZone,
+				"localZone", sd.cfg.Zone,
+			)
+			return
+		}
+	}
+
 	sd.mu.Lock()
 	_, existed := sd.services[event.Service.ServiceID]
 	sd.services[event.Service.ServiceID] = &event.Service
@@ -234,6 +303,12 @@ func (sd *ServiceDiscovery) handleDeregister(event discovery.ServiceEvent) {
 }
 
 func (sd *ServiceDiscovery) handleHeartbeat(event discovery.ServiceEvent) {
+	if sd.cfg.Zone != "" {
+		if svcZone, ok := event.Service.Metadata["zone"]; ok && svcZone != sd.cfg.Zone {
+			return
+		}
+	}
+
 	sd.mu.Lock()
 	_, existed := sd.services[event.Service.ServiceID]
 	sd.services[event.Service.ServiceID] = &event.Service
@@ -295,6 +370,13 @@ func (sd *ServiceDiscovery) scanServices(ctx context.Context) error {
 			tlog.Warn("unmarshal service info failed", "key", key, "error", err)
 			continue
 		}
+
+		if sd.cfg.Zone != "" {
+			if svcZone, ok := svc.Metadata["zone"]; ok && svcZone != sd.cfg.Zone {
+				continue
+			}
+		}
+
 		activeServices[svc.ServiceID] = &svc
 	}
 
@@ -353,6 +435,13 @@ func (sd *ServiceDiscovery) notifyCallbacks(event discovery.ServiceEvent) {
 	sd.mu.RUnlock()
 
 	for _, cb := range callbacks {
-		go cb(event)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					tlog.Error("notifyCallback panic recovered", "error", r)
+				}
+			}()
+			cb(event)
+		}()
 	}
 }

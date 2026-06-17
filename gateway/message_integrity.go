@@ -77,6 +77,8 @@ func (mi *MessageIntegrity) generateMessageChecksum(msg *protobuf.Message) strin
 	buf.WriteString("|")
 	buf.WriteString(msg.Route)
 	buf.WriteString("|")
+	buf.WriteString(fmt.Sprintf("%d", msg.Cmd))
+	buf.WriteString("|")
 
 	keys := make([]string, 0, len(msg.Payload))
 	for k := range msg.Payload {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"net"
 	"runtime"
 	"strings"
@@ -80,6 +79,7 @@ var DefaultHealthCheckConfig = HealthCheckConfig{
 type StreamShard struct {
 	stream protobuf.GatewayService_StreamMessagesClient
 	mu     sync.Mutex
+	sendCh chan *protobuf.Message
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -90,31 +90,72 @@ type StreamManager struct {
 
 func NewStreamManager(shardCount int) *StreamManager {
 	if shardCount <= 0 {
-		shardCount = runtime.NumCPU()
+		shardCount = runtime.NumCPU() * 4
 	}
 	sm := &StreamManager{
 		shards: make([]*StreamShard, shardCount),
 	}
 	for i := range sm.shards {
-		sm.shards[i] = &StreamShard{}
+		sm.shards[i] = &StreamShard{
+			sendCh: make(chan *protobuf.Message, 65536),
+		}
 	}
 	return sm
 }
 
 func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
-	h := fnv.New32a()
-	h.Write([]byte(connectionID))
-	idx := h.Sum32() % uint32(len(sm.shards))
-	return sm.shards[idx]
+	h := uint32(2166136261)
+	for i := 0; i < len(connectionID); i++ {
+		h ^= uint32(connectionID[i])
+		h *= 16777619
+	}
+	return sm.shards[h%uint32(len(sm.shards))]
+}
+
+func (s *StreamShard) startSendLoop() {
+	batch := make([]*protobuf.Message, 0, 64)
+	stream := s.stream
+	for {
+		msg, ok := <-s.sendCh
+		if !ok {
+			return
+		}
+		batch = batch[:0]
+		batch = append(batch, msg)
+		drained := true
+		for drained {
+			select {
+			case m, ok := <-s.sendCh:
+				if !ok {
+					drained = false
+					break
+				}
+				batch = append(batch, m)
+				if len(batch) >= cap(batch) {
+					drained = false
+				}
+			default:
+				drained = false
+			}
+		}
+		if stream == nil {
+			continue
+		}
+		for _, m := range batch {
+			if err := stream.Send(m); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *StreamShard) SendMessage(msg *protobuf.Message) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stream == nil {
+	select {
+	case s.sendCh <- msg:
+		return nil
+	default:
 		return ErrNotConnected
 	}
-	return s.stream.Send(msg)
 }
 
 type LogicClient struct {
@@ -147,7 +188,7 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 		gateway:           gateway,
 		closing:           false,
 		closed:            make(chan struct{}),
-		shardCount:        runtime.NumCPU(),
+		shardCount:        runtime.NumCPU() * 8,
 	}
 }
 
@@ -160,7 +201,7 @@ func NewLogicClientWithConfig(gateway GatewayInterface, reconnectConfig Reconnec
 		gateway:           gateway,
 		closing:           false,
 		closed:            make(chan struct{}),
-		shardCount:        runtime.NumCPU(),
+		shardCount:        runtime.NumCPU() * 8,
 	}
 }
 
@@ -189,7 +230,14 @@ func (lc *LogicClient) notifyStateChange(oldState, newState LogicConnectionState
 	copy(callbacks, lc.stateCallbacks)
 	lc.mu.RUnlock()
 	for _, callback := range callbacks {
-		go callback(oldState, newState)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					tlog.Error("notifyStateChange callback panic recovered", "error", r)
+				}
+			}()
+			callback(oldState, newState)
+		}()
 	}
 }
 
@@ -231,7 +279,15 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	tlog.Info("connecting to logic server", "address", lc.address, "reconnect", isReconnect)
 
-	conn, err := grpc.Dial(lc.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(lc.address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithInitialWindowSize(524288),
+		grpc.WithInitialConnWindowSize(524288),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(4*1024*1024),
+			grpc.MaxCallSendMsgSize(4*1024*1024),
+		),
+	)
 	if err != nil {
 		tlog.Error("grpc.Dial failed", "error", err, "address", lc.address)
 		lc.setState(StateDisconnected)
@@ -289,6 +345,15 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	if firstErr != nil {
 		tlog.Error("failed to establish all stream shards", "error", firstErr)
+		for i := 0; i < shardCount; i++ {
+			shard := lc.streamManager.shards[i]
+			shard.mu.Lock()
+			if shard.stream != nil {
+				shard.stream.CloseSend()
+				shard.stream = nil
+			}
+			shard.mu.Unlock()
+		}
 		lc.mu.Lock()
 		if lc.conn != nil {
 			lc.conn.Close()
@@ -305,6 +370,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	lc.setState(StateConnected)
 
 	for i := 0; i < shardCount; i++ {
+		go lc.streamManager.shards[i].startSendLoop()
 		go lc.streamManager.shards[i].receiveMessages(lc, i)
 	}
 
@@ -312,6 +378,8 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		lc.reconnectManager = NewReconnectManager(lc, lc.reconnectConfig)
 		go lc.reconnectManager.Run()
 	}
+
+	lc.startHealthChecker()
 
 	tlog.Info("successfully connected to logic server", "address", lc.address, "shards", shardCount, "isReconnect", isReconnect)
 
@@ -355,6 +423,14 @@ func (lc *LogicClient) Close() {
 }
 
 func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
+	s.mu.Lock()
+	stream := s.stream
+	s.mu.Unlock()
+
+	if stream == nil {
+		return
+	}
+
 	for {
 		select {
 		case <-lc.closed:
@@ -362,15 +438,6 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		case <-s.ctx.Done():
 			return
 		default:
-		}
-
-		s.mu.Lock()
-		stream := s.stream
-		s.mu.Unlock()
-
-		if stream == nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
 		}
 
 		msg, err := stream.Recv()
@@ -390,20 +457,24 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		}
 
 		if lc.gateway != nil && msg.ConnectionId != "" {
-			if msg.Route == protobuf.RouteServerKick {
+			conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
+			if conn == nil {
+				continue
+			}
+
+			if len(msg.Data) > 0 {
+				conn.Send(msg.Data)
+			} else if msg.Route == protobuf.RouteServerKick {
 				reason := ""
 				if msg.Payload != nil {
 					reason = msg.Payload["reason"]
 				}
-				conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
-				if conn != nil {
-					responseData, _ := proto.Marshal(msg)
-					conn.Send(responseData)
-					tlog.Info("kicking connection by logic server", "connectionID", msg.ConnectionId, "reason", reason)
-					lc.gateway.GetConnectionManager().RemoveConnection(msg.ConnectionId)
-					if conn.Conn != nil {
-						conn.Conn.Close()
-					}
+				responseData, _ := proto.Marshal(msg)
+				conn.Send(responseData)
+				tlog.Info("kicking connection by logic server", "connectionID", msg.ConnectionId, "reason", reason)
+				lc.gateway.GetConnectionManager().RemoveConnection(msg.ConnectionId)
+				if conn.Conn != nil {
+					conn.Conn.Close()
 				}
 			} else if msg.Route == protobuf.RouteServerJoinGroup {
 				groupID := msg.Payload["groupID"]
@@ -477,19 +548,11 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 					tlog.Debug("group info requested", "groupID", groupID, "groupName", groupName, "memberCount", memberCount, "users", users)
 				}
 			} else {
-				conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
-				if conn != nil {
-					responseData, err := proto.Marshal(msg)
-					if err != nil {
-						tlog.Error("failed to marshal response", "error", err, "connectionID", msg.ConnectionId)
-					} else {
-						err = conn.Send(responseData)
-						if err != nil {
-							tlog.Error("failed to forward response to client", "error", err, "connectionID", msg.ConnectionId)
-						}
-					}
+				responseData, err := proto.Marshal(msg)
+				if err != nil {
+					tlog.Error("failed to marshal response", "error", err, "connectionID", msg.ConnectionId)
 				} else {
-					tlog.Warn("client connection not found", "connectionID", msg.ConnectionId)
+					conn.Send(responseData)
 				}
 			}
 		} else {
@@ -516,18 +579,20 @@ func (lc *LogicClient) handleDisconnection() {
 
 	lc.setState(StateDisconnected)
 
-	tlog.Info("logic server disconnected, attempting reconnect in 5s...")
-	time.Sleep(5 * time.Second)
-
-	if lc.closing {
-		return
-	}
-
-	err := lc.doConnect(true)
-	if err != nil {
-		tlog.Error("reconnect failed", "error", err)
+	if lc.reconnectManager != nil {
+		lc.reconnectManager.NotifyDisconnection()
 	} else {
-		tlog.Info("reconnect succeeded")
+		tlog.Info("logic server disconnected, attempting reconnect in 5s...")
+		time.Sleep(5 * time.Second)
+		if lc.closing {
+			return
+		}
+		err := lc.doConnect(true)
+		if err != nil {
+			tlog.Error("reconnect failed", "error", err)
+		} else {
+			tlog.Info("reconnect succeeded")
+		}
 	}
 }
 
@@ -749,14 +814,16 @@ func (rm *ReconnectManager) doReconnect() {
 }
 
 type StreamMessageQueue struct {
-	queue []*protobuf.Message
-	mu    sync.Mutex
-	cond  *sync.Cond
+	queue    []*protobuf.Message
+	mu       sync.Mutex
+	cond     *sync.Cond
+	maxSize  int
 }
 
 func NewStreamMessageQueue() *StreamMessageQueue {
 	mq := &StreamMessageQueue{
-		queue: make([]*protobuf.Message, 0),
+		queue:   make([]*protobuf.Message, 0),
+		maxSize: 100000,
 	}
 	mq.cond = sync.NewCond(&mq.mu)
 	return mq
@@ -764,6 +831,9 @@ func NewStreamMessageQueue() *StreamMessageQueue {
 
 func (mq *StreamMessageQueue) Enqueue(msg *protobuf.Message) {
 	mq.mu.Lock()
+	if len(mq.queue) >= mq.maxSize {
+		mq.queue = mq.queue[1:]
+	}
 	mq.queue = append(mq.queue, msg)
 	mq.cond.Signal()
 	mq.mu.Unlock()
@@ -782,7 +852,8 @@ func (mq *StreamMessageQueue) Dequeue() (*protobuf.Message, bool) {
 }
 
 func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
-	for {
+	maxRetries := 100
+	for i := 0; i < maxRetries; i++ {
 		msg, ok := mq.Dequeue()
 		if !ok {
 			return
@@ -901,7 +972,12 @@ func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protobuf.Messag
 
 func StartGRPCServer(gateway GatewayInterface, port string) (*grpc.Server, error) {
 	tlog.Info("creating gRPC server")
-	server := grpc.NewServer()
+	server := grpc.NewServer(
+		grpc.MaxRecvMsgSize(4*1024*1024),
+		grpc.MaxSendMsgSize(4*1024*1024),
+		grpc.InitialWindowSize(524288),
+		grpc.InitialConnWindowSize(524288),
+	)
 	tlog.Info("registering GatewayService")
 	protobuf.RegisterGatewayServiceServer(server, NewGRPCServer(gateway))
 
@@ -929,6 +1005,7 @@ type LogicClientPool struct {
 	discovery *ServiceDiscovery
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
+	rrIndex   uint64
 }
 
 func NewLogicClientPool(gateway GatewayInterface) *LogicClientPool {
@@ -970,7 +1047,7 @@ func (pool *LogicClientPool) handleServiceRegister(event discovery.ServiceEvent)
 	}
 
 	client := NewLogicClient(pool.gateway)
-	client.shardCount = runtime.NumCPU()
+	client.shardCount = runtime.NumCPU() * 8
 
 	go func() {
 		tlog.Info("connecting to discovered logic service",
@@ -1042,27 +1119,28 @@ func (pool *LogicClientPool) SendMessageByServiceID(serviceID string, msg *proto
 
 func (pool *LogicClientPool) RoundRobinSendMessage(msg *protobuf.Message) error {
 	pool.mu.RLock()
-	defer pool.mu.RUnlock()
-
-	if len(pool.clients) == 0 {
+	n := len(pool.clients)
+	if n == 0 {
+		pool.mu.RUnlock()
 		return ErrNotConnected
 	}
 
-	connected := make([]*LogicClient, 0, len(pool.clients))
-	for _, client := range pool.clients {
-		if client.IsConnected() {
-			connected = append(connected, client)
+	idx := atomic.AddUint64(&pool.rrIndex, 1) % uint64(n)
+	i := uint64(0)
+	var client *LogicClient
+	for _, c := range pool.clients {
+		if i == idx {
+			client = c
+			break
 		}
+		i++
 	}
+	pool.mu.RUnlock()
 
-	if len(connected) == 0 {
+	if client == nil || !client.IsConnected() {
 		return ErrNotConnected
 	}
-
-	h := fnv.New32a()
-	h.Write([]byte(msg.ConnectionId))
-	idx := h.Sum32() % uint32(len(connected))
-	return connected[idx].SendMessage(msg)
+	return client.SendMessage(msg)
 }
 
 func (pool *LogicClientPool) Close() {

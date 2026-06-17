@@ -15,7 +15,7 @@ redis:
 
 # 服务发现配置
 discovery:
-  enabled: true
+  enabled: false
   serviceName: "logic"
   heartbeatInterval: 3s
   heartbeatTTL: 10s
@@ -25,14 +25,8 @@ discovery:
 # 协议配置
 transports:
   - protocol: tcp
-    port: 8083
+    port: 48080
     type: ""
-  - protocol: udp
-    port: 8084
-    type: ""
-  - protocol: tcp
-    port: 8085
-    type: websocket
 
 # 工作池配置
 workerPool:

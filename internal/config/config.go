@@ -23,6 +23,7 @@ import (
 type Config struct {
 	Port        int               `yaml:"port"`        // 服务端口
 	LogLevel    string            `yaml:"logLevel"`    // 日志级别
+	Zone        string            `yaml:"zone"`        // 区域标识，用于区分不同游戏
 	Redis       RedisConfig       `yaml:"redis"`       // Redis配置
 	Discovery   DiscoveryConfig   `yaml:"discovery"`   // 服务发现配置
 	Transports  []Transport       `yaml:"transports"`  // 支持的协议列表
@@ -56,6 +57,7 @@ type RedisConfig struct {
 type DiscoveryConfig struct {
 	Enabled           bool          `yaml:"enabled"`           // 是否启用服务发现
 	ServiceName       string        `yaml:"serviceName"`       // 服务名称
+	Zone              string        `yaml:"zone"`              // 区域过滤，只发现同zone的服务
 	HeartbeatInterval time.Duration `yaml:"heartbeatInterval"` // 心跳间隔
 	HeartbeatTTL      time.Duration `yaml:"heartbeatTTL"`      // 心跳过期时间
 	DeregisterDelay   time.Duration `yaml:"deregisterDelay"`   // 掉线后延迟注销时间

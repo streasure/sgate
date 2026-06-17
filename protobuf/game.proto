@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package sgate.protobuf;
+
+option go_package = "./protobuf";
+
+import "user.proto";
+
+message LoginReq {
+    string userId       = 1;
+    string loginKey     = 2;
+    int32  serverIndex  = 3;
+    int32  channel      = 4;
+    string clientIp     = 5;
+    bool   isReconnect  = 6;
+    string deviceNumber = 7;
+    int32  extraFlag    = 8;
+    int32  areaId       = 9;
+    string packageId    = 10;
+}
+
+message LoginAck {
+    UserInfo       user           = 1;
+    int64          serverTime     = 2;
+    string         version        = 3;
+    int64          openServerTime = 4;
+    int32          serverStage    = 5;
+    BanInfo        banInfo        = 6;
+    int64          offlineTime    = 7;
+    repeated int32 funcDisabled   = 8;
+}
+
+message LogoutReq {
+    string userId       = 1;
+    int32  areaId       = 2;
+}
+
+message LogoutAck {
+    string userId       = 1;
+    int32  code         = 2;
+    string message      = 3;
+}
+
+message BanInfo {
+    bool   isBanned     = 1;
+    int64  banEndTime   = 2;
+    string banReason    = 3;
+}

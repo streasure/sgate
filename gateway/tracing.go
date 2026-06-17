@@ -30,10 +30,12 @@ type TraceEvent struct {
 
 // Tracer 追踪器
 type Tracer struct {
-	traces         map[string][]*TraceSpan // 追踪映射
-	mutex          sync.RWMutex            // 互斥锁
+	traces          map[string][]*TraceSpan // 追踪映射
+	mutex           sync.RWMutex            // 互斥锁
 	cleanupInterval time.Duration           // 清理间隔
-	sampleRate     float64                 // 采样率
+	sampleRate      float64                 // 采样率
+	stopCh          chan struct{}            // 停止信号
+	maxTraceAge     time.Duration           // 追踪最大保留时间
 }
 
 // NewTracer 创建追踪器
@@ -43,16 +45,17 @@ type Tracer struct {
 //   *Tracer: 追踪器实例
 func NewTracer(cleanupInterval time.Duration) *Tracer {
 	if cleanupInterval == 0 {
-		cleanupInterval = 5 * time.Minute // 默认清理间隔
+		cleanupInterval = 5 * time.Minute
 	}
 
 	tracer := &Tracer{
 		traces:          make(map[string][]*TraceSpan),
 		cleanupInterval: cleanupInterval,
-		sampleRate:      0.1, // 10%采样率，平衡性能和追踪完整性
+		sampleRate:      0.1,
+		stopCh:          make(chan struct{}),
+		maxTraceAge:     30 * time.Minute,
 	}
 
-	// 启动清理任务
 	go tracer.cleanup()
 
 	return tracer
@@ -166,9 +169,17 @@ func (t *Tracer) cleanup() {
 	defer ticker.Stop()
 
 	for {
-		<-ticker.C
-		t.cleanupExpiredTraces()
+		select {
+		case <-t.stopCh:
+			return
+		case <-ticker.C:
+			t.cleanupExpiredTraces()
+		}
 	}
+}
+
+func (t *Tracer) Stop() {
+	close(t.stopCh)
 }
 
 // cleanupExpiredTraces 清理过期追踪
@@ -178,14 +189,12 @@ func (t *Tracer) cleanupExpiredTraces() {
 
 	now := time.Now()
 	for traceID, spans := range t.traces {
-		// 检查是否所有 span 都已结束且超过1小时
 		allEnded := true
 		oldestSpan := now
 
 		for _, span := range spans {
 			if span.EndTime.IsZero() {
 				allEnded = false
-				break
 			}
 			if span.StartTime.Before(oldestSpan) {
 				oldestSpan = span.StartTime
@@ -194,7 +203,12 @@ func (t *Tracer) cleanupExpiredTraces() {
 
 		if allEnded && now.Sub(oldestSpan) > 1*time.Hour {
 			delete(t.traces, traceID)
-			tlog.Debug("清理过期追踪", "traceID", traceID)
+			continue
+		}
+
+		if !allEnded && now.Sub(oldestSpan) > t.maxTraceAge {
+			tlog.Warn("force cleaning stale trace with unfinished spans", "traceID", traceID, "age", now.Sub(oldestSpan))
+			delete(t.traces, traceID)
 		}
 	}
 }
