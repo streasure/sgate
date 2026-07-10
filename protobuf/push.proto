@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package sgate.protobuf;
+
+option go_package = "./protobuf";
+
+enum PushType {
+    PUSH_TYPE_UNSPECIFIED = 0;
+    PUSH_TYPE_NOTIFY = 1;
+    PUSH_TYPE_ANNOUNCEMENT = 2;
+    PUSH_TYPE_CHAT = 3;
+    PUSH_TYPE_KICK = 4;
+}
+
+message PushNotify {
+    string title = 1;
+    string content = 2;
+    PushType push_type = 3;
+    map<string, string> extra = 4;
+}
+
+message Announcement {
+    string announcement_id = 1;
+    string title = 2;
+    string content = 3;
+    int32 priority = 4;
+    int64 expire_time = 5;
+    string sender = 6;
+}
+
+message ChatMsg {
+    string from_user_id = 1;
+    string from_user_name = 2;
+    string content = 3;
+    int32 chat_type = 4;
+    string target_id = 5;
+    int64 timestamp = 6;
+}
+
+message KickNotify {
+    string reason = 1;
+    int32 code = 2;
+    string message = 3;
+}

@@ -32,14 +32,6 @@ type PrometheusMetrics struct {
 	processingTimeAverage float64
 	processingTime99th    float64
 
-	// 工作池指标
-	workerCount   int32
-	workerMin     int32
-	workerMax     int32
-	queueSize     int32
-	queueCapacity int32
-
-	// 速率限制指标
 	rateLimitHits    uint64
 	rateLimitBlocked uint64
 
@@ -252,26 +244,6 @@ func (pm *PrometheusMetrics) ServeMetricsHTTP(w http.ResponseWriter, r *http.Req
 	fmt.Fprintf(w, "# TYPE sgate_processing_time_average gauge\n")
 	fmt.Fprintf(w, "sgate_processing_time_average %.2f\n\n", pm.processingTimeAverage/1000)
 
-	fmt.Fprintf(w, "# HELP sgate_workers Number of workers\n")
-	fmt.Fprintf(w, "# TYPE sgate_workers gauge\n")
-	fmt.Fprintf(w, "sgate_workers %d\n\n", pm.workerCount)
-
-	fmt.Fprintf(w, "# HELP sgate_workers_min Minimum number of workers\n")
-	fmt.Fprintf(w, "# TYPE sgate_workers_min gauge\n")
-	fmt.Fprintf(w, "sgate_workers_min %d\n\n", pm.workerMin)
-
-	fmt.Fprintf(w, "# HELP sgate_workers_max Maximum number of workers\n")
-	fmt.Fprintf(w, "# TYPE sgate_workers_max gauge\n")
-	fmt.Fprintf(w, "sgate_workers_max %d\n\n", pm.workerMax)
-
-	fmt.Fprintf(w, "# HELP sgate_queue_size Current queue size\n")
-	fmt.Fprintf(w, "# TYPE sgate_queue_size gauge\n")
-	fmt.Fprintf(w, "sgate_queue_size %d\n\n", pm.queueSize)
-
-	fmt.Fprintf(w, "# HELP sgate_queue_capacity Queue capacity\n")
-	fmt.Fprintf(w, "# TYPE sgate_queue_capacity gauge\n")
-	fmt.Fprintf(w, "sgate_queue_capacity %d\n\n", pm.queueCapacity)
-
 	fmt.Fprintf(w, "# HELP sgate_rate_limit_hits_total Total number of rate limit hits\n")
 	fmt.Fprintf(w, "# TYPE sgate_rate_limit_hits_total counter\n")
 	fmt.Fprintf(w, "sgate_rate_limit_hits_total %d\n\n", pm.rateLimitHits)
@@ -320,5 +292,43 @@ func (g *Gateway) StopPrometheusMetrics() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		g.promServer.Shutdown(ctx)
+	}
+}
+
+// StartStatsServer 启动轻量级统计 HTTP 服务，供压测工具查询转发计数
+func (g *Gateway) StartStatsServer(addr string) {
+	if addr == "" {
+		addr = ":9091"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		cpuPct, memPct, overloaded, dropped := g.overloadProtector.Stats()
+		forwarded := g.messagesForwarded.Load()
+		recv := g.messagesReceived.Load()
+		dropOverload := g.messagesDroppedOverload.Load()
+		dropFull := g.messagesDroppedFull.Load()
+		dropNoLogic := g.messagesDroppedNoLogic.Load()
+		dropNoLogicNotConn := g.messagesDroppedNoLogicNotConnected.Load()
+		pushedToClient := g.messagesPushedToClient.Load()
+		pushDroppedNoConn := g.messagesPushDroppedNoConn.Load()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"received":%d,"forwarded":%d,"droppedOverload":%d,"droppedFull":%d,"droppedNoLogic":%d,"droppedNoLogicNotConnected":%d,"droppedTotal":%d,"pushedToClient":%d,"pushDroppedNoConn":%d,"overloaded":%t,"cpuPercent":%.2f,"memPercent":%.2f,"overloadDropped":%d,"activeConnections":%d}`,
+			recv, forwarded, dropOverload, dropFull, dropNoLogic, dropNoLogicNotConn, dropOverload+dropFull+dropNoLogic+dropNoLogicNotConn, pushedToClient, pushDroppedNoConn, overloaded, cpuPct, memPct, dropped, g.metrics.GetConnectionsActive())
+	})
+	srv := &http.Server{Addr: addr, Handler: mux}
+	g.statsServer = srv
+	go func() {
+		tlog.Info("启动统计服务器", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			tlog.Error("统计服务器启动失败", "error", err)
+		}
+	}()
+}
+
+func (g *Gateway) StopStatsServer() {
+	if g.statsServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		g.statsServer.Shutdown(ctx)
 	}
 }

@@ -3,30 +3,40 @@ package logic
 import "time"
 
 type ServiceConfig struct {
-	ListenAddr        string
-	ListenPort        string
-	AdvertiseAddr     string
-	ServiceID         string
-	ServiceName       string
-	RedisAddr         string
-	RedisPassword     string
-	RedisDB           int
-	HeartbeatInterval time.Duration
-	HeartbeatTTL      time.Duration
+	ListenAddr         string
+	ListenPort         string
+	AdvertiseAddr      string
+	ServiceID          string
+	ServiceName        string
+	RedisAddr          string
+	RedisPassword      string
+	RedisDB            int
+	HeartbeatInterval  time.Duration
+	HeartbeatTTL       time.Duration
+	GRPCWindowSize     int
+	GRPCMaxMessageSize int
+	DispatchWorkers    int
+	DispatchChSize     int
+	StreamSendChSize   int
 }
 
 func defaultConfig() ServiceConfig {
 	return ServiceConfig{
-		ListenAddr:        "0.0.0.0",
-		ListenPort:        "50052",
-		AdvertiseAddr:     "",
-		ServiceID:         "",
-		ServiceName:       "logic",
-		RedisAddr:         "127.0.0.1:6379",
-		RedisPassword:     "",
-		RedisDB:           10,
-		HeartbeatInterval: 3 * time.Second,
-		HeartbeatTTL:      10 * time.Second,
+		ListenAddr:         "0.0.0.0",
+		ListenPort:         "50052",
+		AdvertiseAddr:      "",
+		ServiceID:          "",
+		ServiceName:        "logic",
+		RedisAddr:          "127.0.0.1:6379",
+		RedisPassword:      "",
+		RedisDB:            10,
+		HeartbeatInterval:  3 * time.Second,
+		HeartbeatTTL:       10 * time.Second,
+		GRPCWindowSize:     524288,
+		GRPCMaxMessageSize: 4 * 1024 * 1024,
+		DispatchWorkers:    0,
+		DispatchChSize:     0,
+		StreamSendChSize:   0,
 	}
 }
 
@@ -65,4 +75,16 @@ func WithHeartbeat(interval, ttl time.Duration) ServiceOption {
 		c.HeartbeatInterval = interval
 		c.HeartbeatTTL = ttl
 	}
+}
+
+func WithGRPCWindowSize(size int) ServiceOption {
+	return func(c *ServiceConfig) { c.GRPCWindowSize = size }
+}
+
+func WithGRPCMaxMessageSize(size int) ServiceOption {
+	return func(c *ServiceConfig) { c.GRPCMaxMessageSize = size }
+}
+
+func WithStreamSendChSize(n int) ServiceOption {
+	return func(c *ServiceConfig) { c.StreamSendChSize = n }
 }

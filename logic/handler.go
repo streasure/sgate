@@ -1,6 +1,7 @@
 package logic
 
 import (
+	"encoding/binary"
 	"fmt"
 	"reflect"
 	"sync"
@@ -21,6 +22,10 @@ type Context struct {
 type ProtoHandler func(ctx *Context, req proto.Message) proto.Message
 
 type RouteHandler func(msg *protobuf.Message) *protobuf.Message
+
+// BurstRouteHandler 允许单次触发推送多条响应消息，用于压测反向链路吞吐量。
+// push 回调可被调用任意次数，每次调用发送一条消息回客户端。
+type BurstRouteHandler func(msg *protobuf.Message, push func(*protobuf.Message))
 
 type cmdEntry struct {
 	reqType  reflect.Type
@@ -122,6 +127,11 @@ func (s *Server) RegisterRoute(route string, handler RouteHandler) {
 	tlog.Info("route registered", "route", route)
 }
 
+func (s *Server) RegisterBurstRoute(route string, handler BurstRouteHandler) {
+	s.routes.Store(route, handler)
+	tlog.Info("burst route registered", "route", route)
+}
+
 func routeKey(route string, cmd int32) string {
 	if cmd == 0 {
 		return route
@@ -189,6 +199,54 @@ func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.
 
 	case RouteHandler:
 		callback(entry(msg))
+	case BurstRouteHandler:
+		// 预序列化并打包所有响应为单个 _batch Message
+		// 优化：所有 burst 响应共享同一 ConnectionId（继承自 msg），
+		// 将 connID 放到外层 Message.ConnectionId，batch Data 仅含 [4字节 payloadLen][payload] 重复
+		// sgate 侧只需一次 GetConnection 查找即可发送整批消息
+		var buf []byte
+		count := 0
+		var lastData []byte
+		var lastRoute string
+		var lastTs int64
+		entry(msg, func(response *protobuf.Message) {
+			if response == nil {
+				return
+			}
+			if response.ConnectionId == "" {
+				response.ConnectionId = msg.ConnectionId
+			}
+			if response.ConnectionId == "" {
+				return
+			}
+			// 相同 Route+Timestamp 的响应复用已序列化的 bytes，避免重复 Marshal
+			var data []byte
+			if count > 0 && response.Route == lastRoute && response.Timestamp == lastTs && response.ConnectionId == msg.ConnectionId {
+				data = lastData
+			} else {
+				var err error
+				data, err = proto.Marshal(response)
+				if err != nil {
+					return
+				}
+				lastData = data
+				lastRoute = response.Route
+				lastTs = response.Timestamp
+			}
+			var lenBuf [4]byte
+			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
+			buf = append(buf, lenBuf[:]...)
+			buf = append(buf, data...)
+			count++
+		})
+		if count > 0 {
+			callback(&protobuf.Message{
+				Route:        protobuf.RouteBatch,
+				ConnectionId: msg.ConnectionId,
+				Data:         buf,
+				Cmd:          int32(count),
+			})
+		}
 	}
 }
 

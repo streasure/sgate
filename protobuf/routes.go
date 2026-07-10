@@ -33,29 +33,9 @@ func CmdFromProto(route string, msg proto.Message) (cmd int32, respCmd int32) {
 
 const (
 	RouteHandshake         = "handshake"
-	RouteLogin             = "login"
-	RoutePing              = "ping"
-	RoutePong              = "pong"
-	RouteTest              = "test"
-	RouteTestResult        = "testResult"
-	RouteVersion           = "version"
-	RouteGetConnections    = "getConnections"
-	RouteBroadcast         = "broadcast"
-	RouteHealth            = "health"
-	RouteAPIDocs           = "api-docs"
-	RouteError             = "error"
-	RouteEcho              = "echo"
-	RouteMessage           = "message"
-	RouteKick              = "kick"
-	RouteTimeout           = "timeout"
 	RouteHandshakeResponse = "handshake_response"
-	RouteQueueTest         = "queueTest"
-	RouteAddWhitelist      = "addWhitelist"
-	RouteRemoveWhitelist   = "removeWhitelist"
-	RouteGetWhitelist      = "getWhitelist"
-	RouteAddBlacklist      = "addBlacklist"
-	RouteRemoveBlacklist   = "removeBlacklist"
-	RouteGetBlacklist      = "getBlacklist"
+	RouteLogin             = "login"
+	RouteError             = "error"
 
 	RouteServerKick             = "server.kick"
 	RouteServerJoinGroup        = "server.join_group"
@@ -66,37 +46,28 @@ const (
 	RouteServerDeleteGroup      = "server.delete_group"
 	RouteServerSendToGroup      = "server.send_to_group"
 	RouteServerGetGroupInfo     = "server.get_group_info"
-	RouteServerPlayerOnline     = "server.playerOnline"
-	RouteServerPlayerOffline    = "server.playerOffline"
-	RouteServerPlayerMoved      = "server.playerMoved"
-	RouteServerChat             = "server.chat"
-	RouteServerPush             = "server.push"
-	RouteServerAnnouncement     = "server.announcement"
-	RouteServerAnnounce         = "server.announce"
-	RouteServerRoomPlayerJoined = "server.room.playerJoined"
-	RouteServerRoomPlayerLeft   = "server.room.playerLeft"
-	RouteServerTeamMemberJoined = "server.team.memberJoined"
-	RouteServerTeamMemberLeft   = "server.team.memberLeft"
-	RouteServerDamageNotify     = "server.damageNotify"
-	RouteServerAttackBroadcast  = "server.attackBroadcast"
 
-	RoutePlayerLogin       = "player.login"
-	RoutePlayerHeartbeat   = "player.heartbeat"
-	RoutePlayerMove        = "player.move"
-	RoutePlayerChat        = "player.chat"
-	RoutePlayerAttack      = "player.attack"
-	RoutePlayerUseItem     = "player.useItem"
-	RoutePlayerQueryStatus = "player.queryStatus"
-	RoutePlayerQueryOnline = "player.queryOnline"
+	RoutePing               = "ping"
+	RoutePong               = "pong"
+	RouteTest               = "test"
+	RouteTestResult         = "testResult"
+	RouteEcho               = "echo"
+	RouteGetConnections     = "getConnections"
+	RouteGame               = "game"
+	RouteServerPush         = "server.push"
+	RouteServerAnnouncement = "server.announcement"
+	RouteServerAnnounce     = "server.announce"
+	RouteServerChat         = "server.chat"
 
-	RouteRoomJoin  = "room.join"
-	RouteRoomLeave = "room.leave"
-	RouteRoomInfo  = "room.info"
+	// RouteBatch 是反向链路（logic->sgate）批量消息的伪路由。
+	// logic 将多条已序列化的 Message 以长度前缀方式打包进一个 Message.Data，
+	// 通过单次 stream.Send 发送，sgate 收到后解包逐条分发，降低 gRPC 调用开销。
+	RouteBatch = "_batch"
+)
 
-	RouteTeamCreate = "team.create"
-	RouteTeamJoin   = "team.join"
-	RouteTeamLeave  = "team.leave"
-	RouteTeamInfo   = "team.info"
-
-	RouteGame = "game"
+const (
+	CmdPushNotify   int32 = int32(Cmd_CMD_PUSH_NOTIFY)
+	CmdAnnouncement int32 = int32(Cmd_CMD_ANNOUNCEMENT)
+	CmdChatMsg      int32 = int32(Cmd_CMD_CHAT_MSG)
+	CmdKickNotify   int32 = int32(Cmd_CMD_KICK_NOTIFY)
 )

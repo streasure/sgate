@@ -25,29 +25,75 @@ import (
 //   Status: 连接状态 (0=active, 1=closing, 2=closed)
 
 type Connection struct {
-	id         string              // 连接唯一标识 (约50字节)
-	UserUUID   string              // 用户UUID (约50字节)
-	ServerID   string              // 服务器ID
-	Conn       gnet.Conn           // 底层网络连接 (8字节指针)
-	RemoteAddr string              // 远程地址 (约30字节)
-	CreatedAt  int64               // 创建时间戳
-	LastActive int64               // 最后活跃时间
-	Status     int8                // 连接状态
-	Groups     map[string]struct{} // 所属推送组
+	id         string
+	UserUUID   string
+	ServerID   string
+	Conn       gnet.Conn
+	RemoteAddr string
+	CreatedAt  int64
+	LastActive int64
+	Status     int8
+	Groups     map[string]struct{}
+	IsWS       bool
 }
 
 func (c *Connection) ID() string {
 	return c.id
 }
 
+// noopAsyncCallback 空回调，用于 AsyncWrite/AsyncWritev
+// 注意: gnet 的 Write/Writev 不是并发安全的，只能用于 event-loop 内
+// 从 goroutine（如 receiveMessages）调用必须使用 AsyncWrite/AsyncWritev
+func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
+
 func (c *Connection) Send(data []byte) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
-	var header [4]byte
-	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
-	_, err := c.Conn.Writev([][]byte{header[:], data})
-	return err
+	if c.IsWS {
+		return c.sendWSFrame(data)
+	}
+	// AsyncWritev 异步发送，buf 所有权转移给 event-loop，必须为独立分配
+	// data 来自 proto.Marshal 是独立分配；header 需独立分配（不能用栈数组）
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(data)))
+	return c.Conn.AsyncWritev([][]byte{header, data}, noopAsyncCallback)
+}
+
+// SendMulti 在单次 AsyncWrite 中发送多条已组帧的消息，大幅减少 event-loop 入队次数和内存分配。
+// combined 必须包含 [4字节长度][payload] 重复格式，且必须是独立分配（所有权转移给 event-loop）。
+func (c *Connection) SendMulti(combined []byte) error {
+	if c.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	if c.IsWS {
+		// WebSocket 不支持批量，逐帧发送
+		// 注：此路径在 burst 压测中不会触发（客户端为 TCP 连接）
+		return c.Conn.AsyncWrite(combined, noopAsyncCallback)
+	}
+	return c.Conn.AsyncWrite(combined, noopAsyncCallback)
+}
+
+func (c *Connection) sendWSFrame(data []byte) error {
+	payloadLen := len(data)
+	var frame []byte
+	if payloadLen < 126 {
+		frame = make([]byte, 0, 2+payloadLen)
+		frame = append(frame, 0x82, byte(payloadLen))
+	} else if payloadLen <= 65535 {
+		frame = make([]byte, 0, 4+payloadLen)
+		frame = append(frame, 0x82, 126)
+		frame = append(frame, byte(payloadLen>>8), byte(payloadLen))
+	} else {
+		frame = make([]byte, 0, 10+payloadLen)
+		frame = append(frame, 0x82, 127)
+		for i := 7; i >= 0; i-- {
+			frame = append(frame, byte(uint64(payloadLen)>>(uint(i)*8)))
+		}
+	}
+	frame = append(frame, data...)
+	// frame 是独立分配，可直接用于 AsyncWrite
+	return c.Conn.AsyncWrite(frame, noopAsyncCallback)
 }
 
 func (c *Connection) Close() error {
@@ -137,6 +183,7 @@ func putConnection(c *Connection) {
 	c.LastActive = 0
 	c.Groups = nil
 	c.ServerID = ""
+	c.IsWS = false
 	connectionPool.Put(c)
 }
 
@@ -214,7 +261,7 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 
 	// 发送下线通知
 	kickMessage := &protobuf.Message{
-		Route: protobuf.RouteKick,
+		Route: protobuf.RouteServerKick,
 		Payload: map[string]string{
 			"reason":  reason,
 			"message": message,
@@ -542,7 +589,7 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 		responseData, err = proto.Marshal(msg)
 	case map[string]string:
 		protoMsg := &protobuf.Message{
-			Route:   protobuf.RouteMessage,
+			Route:   "message",
 			Payload: msg,
 		}
 		responseData, err = proto.Marshal(protoMsg)
@@ -592,13 +639,13 @@ func (cm *ConnectionManager) Broadcast(message interface{}) {
 	case map[string]string:
 		// 如果是map[string]string，直接创建Protocol Buffers消息
 		protoMsg := &protobuf.Message{
-			Route:   protobuf.RouteBroadcast,
+			Route:   "broadcast",
 			Payload: msg,
 		}
 		responseData, marshalErr = proto.Marshal(protoMsg)
 	case string:
 		protoMsg := &protobuf.Message{
-			Route: protobuf.RouteBroadcast,
+			Route: "broadcast",
 			Payload: map[string]string{
 				"data": msg,
 			},
@@ -1028,7 +1075,7 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 		if conn != nil {
 			// 发送超时通知
 			timeoutMessage := &protobuf.Message{
-				Route: protobuf.RouteTimeout,
+				Route: "timeout",
 				Payload: map[string]string{
 					"reason":  "inactive",
 					"message": "Connection timeout due to inactivity",

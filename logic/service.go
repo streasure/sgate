@@ -15,6 +15,7 @@ import (
 	"github.com/streasure/sgate/discovery"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -42,8 +43,19 @@ func NewService(opts ...ServiceOption) *Service {
 		cfg.AdvertiseAddr = "localhost:" + cfg.ListenPort
 	}
 
+	serverOpts := []ServerOption{WithServerID(cfg.ServiceID)}
+	if cfg.DispatchWorkers > 0 {
+		serverOpts = append(serverOpts, WithDispatchWorkers(cfg.DispatchWorkers))
+	}
+	if cfg.DispatchChSize > 0 {
+		serverOpts = append(serverOpts, WithDispatchChSize(cfg.DispatchChSize))
+	}
+	if cfg.StreamSendChSize > 0 {
+		serverOpts = append(serverOpts, WithStreamChSize(cfg.StreamSendChSize))
+	}
+
 	return &Service{
-		server: NewServer(WithServerID(cfg.ServiceID)),
+		server: NewServer(serverOpts...),
 		cfg:    cfg,
 		stopCh: make(chan struct{}),
 	}
@@ -55,6 +67,10 @@ func (s *Service) Server() *Server {
 
 func (s *Service) RegisterRoute(route string, handler RouteHandler) {
 	s.server.RegisterRoute(route, handler)
+}
+
+func (s *Service) RegisterBurstRoute(route string, handler BurstRouteHandler) {
+	s.server.RegisterBurstRoute(route, handler)
 }
 
 func (s *Service) RegisterProto(route string, cmd int32, reqProto proto.Message, respCmd int32, handler ProtoHandler) {
@@ -82,11 +98,24 @@ func (s *Service) Start() error {
 	}
 	s.listener = listener
 
+	windowSize := s.cfg.GRPCWindowSize
+	if windowSize <= 0 {
+		windowSize = 524288
+	}
+	maxMsgSize := s.cfg.GRPCMaxMessageSize
+	if maxMsgSize <= 0 {
+		maxMsgSize = 4 * 1024 * 1024
+	}
+
 	s.grpcServer = grpc.NewServer(
-		grpc.MaxRecvMsgSize(4*1024*1024),
-		grpc.MaxSendMsgSize(4*1024*1024),
-		grpc.InitialWindowSize(524288),
-		grpc.InitialConnWindowSize(524288),
+		grpc.MaxRecvMsgSize(maxMsgSize),
+		grpc.MaxSendMsgSize(maxMsgSize),
+		grpc.InitialWindowSize(int32(windowSize)),
+		grpc.InitialConnWindowSize(int32(windowSize)),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	)
 	s.server.RegisterGatewayServiceServer(s.grpcServer)
 

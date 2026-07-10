@@ -2,16 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
+	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"os"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -90,7 +86,7 @@ func (c *SgateClient) Handshake() error {
 		return fmt.Errorf("marshal handshake: %w", err)
 	}
 
-	handshakeBase64 := encodeBase64(handshakeData)
+	handshakeBase64 := base64.StdEncoding.EncodeToString(handshakeData)
 
 	msg := &protobuf.Message{
 		Route:           protobuf.RouteHandshake,
@@ -98,7 +94,7 @@ func (c *SgateClient) Handshake() error {
 		Payload: map[string]string{
 			"handshake_data": handshakeBase64,
 			"version":        c.protocolVersion,
-			"timestamp":      strconv.FormatInt(time.Now().UnixMilli(), 10),
+			"timestamp":      fmt.Sprintf("%d", time.Now().UnixMilli()),
 			"serverId":       c.serverID,
 		},
 	}
@@ -124,7 +120,7 @@ func (c *SgateClient) Login() error {
 		},
 	}
 
-	resp, err := c.sendAndWait(msg, protobuf.RoutePlayerLogin, 0, 10*time.Second)
+	resp, err := c.sendAndWait(msg, protobuf.RouteLogin, 0, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
@@ -199,11 +195,17 @@ func (c *SgateClient) Close() {
 }
 
 var responseRouteMap = map[string]string{
-	protobuf.RoutePing: protobuf.RoutePong,
+	protobuf.RoutePing:  protobuf.RoutePong,
+	protobuf.RouteTest:  protobuf.RouteTestResult,
+	protobuf.RouteLogin: protobuf.RouteLogin,
+	protobuf.RouteEcho:  protobuf.RouteEcho,
 }
 
 func (c *SgateClient) sendAndWait(msg *protobuf.Message, expectedRoute string, expectedCmd int32, timeout time.Duration) (*protobuf.Message, error) {
-	prepareMessage(msg)
+	msg.Timestamp = time.Now().UnixMilli()
+	if msg.ProtocolVersion == "" {
+		msg.ProtocolVersion = "2.0.0"
+	}
 
 	ch := make(chan *protobuf.Message, 1)
 	var key string
@@ -325,68 +327,6 @@ func (c *SgateClient) dispatchMessage(msg *protobuf.Message) {
 	}
 }
 
-func prepareMessage(msg *protobuf.Message) {
-	msg.Timestamp = time.Now().UnixMilli()
-	if msg.ProtocolVersion == "" {
-		msg.ProtocolVersion = "2.0.0"
-	}
-	msg.Checksum = generateChecksum(msg)
-}
-
-func generateChecksum(msg *protobuf.Message) string {
-	var buf strings.Builder
-	buf.WriteString(msg.ConnectionId)
-	buf.WriteString("|")
-	buf.WriteString(msg.UserUuid)
-	buf.WriteString("|")
-	buf.WriteString(msg.Route)
-	buf.WriteString("|")
-	buf.WriteString(strconv.FormatInt(int64(msg.Cmd), 10))
-	buf.WriteString("|")
-
-	keys := make([]string, 0, len(msg.Payload))
-	for k := range msg.Payload {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		buf.WriteString(k)
-		buf.WriteString("=")
-		buf.WriteString(msg.Payload[k])
-		buf.WriteString("|")
-	}
-
-	buf.WriteString(strconv.FormatInt(msg.Timestamp, 10))
-	buf.WriteString("|")
-	buf.WriteString(strconv.FormatInt(msg.Sequence, 10))
-	buf.WriteString("|")
-	buf.WriteString(msg.ProtocolVersion)
-
-	hash := md5.Sum([]byte(buf.String()))
-	return hex.EncodeToString(hash[:])
-}
-
-func encodeBase64(data []byte) string {
-	const base64Table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-
-	var result []byte
-	for i := 0; i < len(data); i += 3 {
-		var n uint32
-		remaining := len(data) - i
-		if remaining >= 3 {
-			n = uint32(data[i])<<16 | uint32(data[i+1])<<8 | uint32(data[i+2])
-			result = append(result, base64Table[n>>18&0x3F], base64Table[n>>12&0x3F], base64Table[n>>6&0x3F], base64Table[n&0x3F])
-		} else if remaining == 2 {
-			n = uint32(data[i])<<16 | uint32(data[i+1])<<8
-			result = append(result, base64Table[n>>18&0x3F], base64Table[n>>12&0x3F], base64Table[n>>6&0x3F], '=')
-		} else {
-			n = uint32(data[i]) << 16
-			result = append(result, base64Table[n>>18&0x3F], base64Table[n>>12&0x3F], '=', '=')
-		}
-	}
-	return string(result)
-}
-
 func formatPayload(msg *protobuf.Message) string {
 	parts := make([]string, 0, len(msg.Payload))
 	for k, v := range msg.Payload {
@@ -395,7 +335,7 @@ func formatPayload(msg *protobuf.Message) string {
 	if len(msg.Data) > 0 {
 		parts = append(parts, fmt.Sprintf("data=%dbytes", len(msg.Data)))
 	}
-	return fmt.Sprintf("route=%s cmd=%d [%s]", msg.Route, msg.Cmd, strings.Join(parts, ", "))
+	return fmt.Sprintf("route=%s cmd=%d [%s]", msg.Route, msg.Cmd, parts)
 }
 
 func main() {
@@ -421,15 +361,54 @@ func main() {
 	})
 
 	client.On(protobuf.RouteServerKick, func(msg *protobuf.Message) {
+		if len(msg.Data) > 0 {
+			kick := &protobuf.KickNotify{}
+			if err := proto.Unmarshal(msg.Data, kick); err == nil {
+				fmt.Printf("[KICKED] reason=%s code=%d message=%s\n", kick.Reason, kick.Code, kick.Message)
+				return
+			}
+		}
 		fmt.Printf("[KICKED] %v\n", msg.Payload)
 	})
 
 	client.On(protobuf.RouteServerAnnounce, func(msg *protobuf.Message) {
+		fmt.Printf("[ANNOUNCE] %v\n", msg.Payload)
+	})
+
+	client.On(protobuf.RouteServerAnnouncement, func(msg *protobuf.Message) {
+		if len(msg.Data) > 0 {
+			ann := &protobuf.Announcement{}
+			if err := proto.Unmarshal(msg.Data, ann); err == nil {
+				fmt.Printf("[ANNOUNCEMENT] id=%s title=%s content=%s priority=%d sender=%s expire=%d\n",
+					ann.AnnouncementId, ann.Title, ann.Content, ann.Priority, ann.Sender, ann.ExpireTime)
+				return
+			}
+		}
 		fmt.Printf("[ANNOUNCEMENT] %v\n", msg.Payload)
 	})
 
 	client.On(protobuf.RouteServerChat, func(msg *protobuf.Message) {
+		if len(msg.Data) > 0 {
+			chat := &protobuf.ChatMsg{}
+			if err := proto.Unmarshal(msg.Data, chat); err == nil {
+				fmt.Printf("[CHAT] from=%s(%s) content=%s type=%d target=%s\n",
+					chat.FromUserId, chat.FromUserName, chat.Content, chat.ChatType, chat.TargetId)
+				return
+			}
+		}
 		fmt.Printf("[CHAT] %v\n", msg.Payload)
+	})
+
+	client.On(protobuf.RouteServerPush, func(msg *protobuf.Message) {
+		if len(msg.Data) > 0 {
+			notify := &protobuf.PushNotify{}
+			if err := proto.Unmarshal(msg.Data, notify); err == nil {
+				fmt.Printf("[PUSH] title=%s content=%s type=%s extra=%v\n",
+					notify.Title, notify.Content, notify.PushType.String(), notify.Extra)
+				return
+			}
+		}
+		fmt.Printf("[PUSH] %v\n", msg.Payload)
 	})
 
 	defer client.Close()
@@ -498,7 +477,23 @@ func main() {
 		}
 	}
 
-	fmt.Println("\n--- Test 4: Game Logout (struct payload) ---")
+	fmt.Println("\n--- Waiting for welcome push (2s) ---")
+	time.Sleep(2 * time.Second)
+
+	fmt.Println("\n--- Test 4: Request Push Notify ---")
+	start = time.Now()
+	resp, err = client.Send(protobuf.RouteServerPush, map[string]string{
+		"push_type": "notify",
+		"title":     "Test Push",
+		"content":   "This is a test push notification",
+	})
+	if err != nil {
+		fmt.Printf("Push Notify request failed: %v\n", err)
+	} else {
+		fmt.Printf("Push Notify request OK: %s latency=%v\n", formatPayload(resp), time.Since(start))
+	}
+
+	fmt.Println("\n--- Test 5: Game Logout ---")
 	start = time.Now()
 	logoutResp, err := client.SendProto(protobuf.RouteGame, &protobuf.LogoutReq{
 		UserId: userID,

@@ -1,64 +1,99 @@
 # sgate - 高性能游戏网关
 
-sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/WebSocket 多协议接入，通过 gRPC 与逻辑服通信，具备百万级 QPS 处理能力。
+sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/WebSocket 多协议接入，通过 gRPC 与逻辑服通信，具备**千万级 QPS** 双向转发能力。
 
 ## 架构概览
 
 ```
 客户端 (TCP/UDP/WS) ──→ sgate Gateway ──(gRPC)──→ Logic Server
-                              │
-                         Redis (服务发现)
+         ↑                    │
+         └──(gRPC 反向推送)───┘     Redis (服务发现)
 ```
 
 ## 核心特性
 
-- **高性能**: 基于 gnet 事件驱动网络框架，fastPath 零拷贝透传，压测 QPS 达 600 万+
+- **高性能**: 基于 gnet 事件驱动网络框架，双向千万级 QPS 转发
+  - 正向（client→sgate→logic）: 峰值 **18.5M QPS**
+  - 反向（logic→sgate→client）: 持续 **11M QPS**（0 丢弃）
 - **多协议支持**: TCP、UDP、WebSocket
 - **服务发现**: 基于 Redis 的自动服务发现与注册，支持 zone 隔离
 - **消息分发**: 基于 route + cmd 的双层路由机制，Dispatcher 消息分发模式
+- **批量消息**: 单次 gRPC 调用传输多条消息，降低 gRPC 开销
 - **协议绑定**: 通过 init() 反向注册机制，proto 层面自动绑定 cmd
-- **容错机制**: panic recovery、熔断器、自动重连、连接超时清理
+- **容错机制**: panic recovery、资源熔断器、自动重连、连接超时清理
 - **安全防护**: 速率限制、IP 黑白名单、JWT 认证、输入验证
 - **Zone 隔离**: 不同游戏使用不同 zone 标识，逻辑服自动隔离
 
 ## 快速开始
 
+### 环境要求
+
+- Go 1.21+
+- Redis 6.0+
+- CGO 禁用（跨平台编译兼容）
+
 ### 编译
 
 ```bash
-# 编译 Gateway
-go build -o gateway.exe ./examples/high_concurrency_gateway/
-
-# 编译 Logic Server
+# Windows (禁用 CGO)
+$env:CGO_ENABLED=0
+go build -o sgate.exe ./examples/high_concurrency_gateway/
 go build -o logic_server.exe ./examples/logic_server/
-
-# 编译压测客户端
 go build -o bench.exe ./examples/bench/
+```
 
-# 编译 Go 客户端
-go build -o client.exe ./examples/client/
+```bash
+# Linux/Mac
+CGO_ENABLED=0 go build -o sgate ./examples/high_concurrency_gateway/
+CGO_ENABLED=0 go build -o logic_server ./examples/logic_server/
+CGO_ENABLED=0 go build -o bench ./examples/bench/
 ```
 
 ### 启动
 
 ```bash
-# 1. 启动 Logic Server
-cd examples/logic_server
+# 1. 启动 Redis
+redis-server
+
+# 2. 启动 Logic Server（默认端口 50052）
+#    环境变量配置：
+#    - BURST_COUNT: 反向突发消息数（默认 1000，设为 0 关闭）
+#    - LOGIC_STREAM_CH_SIZE: gRPC 流发送通道大小（建议 262144）
+#    - GRPC_WINDOW_SIZE: gRPC 窗口大小（建议 64MB）
+$env:BURST_COUNT="1000"
+$env:LOGIC_STREAM_CH_SIZE="262144"
 ./logic_server.exe
 
-# 2. 启动 Gateway
-cd examples/high_concurrency_gateway
-./gateway.exe
+# 3. 启动 Gateway（默认端口 48080 TCP / 48081 UDP / 48082 WS）
+./sgate.exe
 ```
 
 ### 压测
 
 ```bash
-# 全双工模式 (推荐)
-./bench.exe 127.0.0.1:48080 400 10 16 duplex 8192
+# 正向压测（client → sgate → logic）
+# 参数: 地址 连接数 时长(s) 批大小 模式 inflight 统计地址 速率/连接(0=无限)
+./bench.exe 127.0.0.1:48080 100 10 64 forward 4096 127.0.0.1:9091 0
 
-# Pipeline 模式
-./bench.exe 127.0.0.1:48080 200 10 50 pipeline
+# 反向压测（logic → sgate → client，需 BURST_COUNT=1000）
+# ratePerConn=110 控制正向触发频率，反向流量被放大 1000 倍
+./bench.exe 127.0.0.1:48080 100 10 1 forward 4096 127.0.0.1:9091 110
+```
+
+### 查看统计
+
+```bash
+# 实时查看 sgate 转发统计
+curl http://127.0.0.1:9091/stats
+
+# 输出示例:
+# {
+#   "forwarded": 110108,          # 正向转发数
+#   "pushedToClient": 109951000,  # 反向推送数
+#   "dropOverload": 0,            # 过载丢弃
+#   "dropFull": 0,                # 通道满丢弃
+#   "pushDroppedNoConn": 0        # 无连接丢弃
+# }
 ```
 
 ## 配置说明
@@ -130,6 +165,31 @@ message Message {
 
 - **route**: 一级路由，标识消息类型（如 "game"、"test"、"ping"）
 - **cmd**: 二级路由，同一 route 下的子命令（通过 FNV-1a 哈希自动生成）
+- **`_batch`**: 伪路由，标记批量消息（`RouteBatch`），用于反向链路高性能转发
+
+### 批量消息协议
+
+反向链路（logic→sgate）使用批量消息降低 gRPC 调用开销：
+
+**Single-conn 格式**（同一连接的多条消息）:
+```
+Message {
+  Route: "_batch"
+  ConnectionId: "conn123"        // 共享的目标连接
+  Cmd: 1000                      // 消息数量
+  Data: [4字节 len][payload] 重复  // 仅 payload，无 connID
+}
+```
+
+**Multi-conn 格式**（不同连接的消息）:
+```
+Message {
+  Route: "_batch"
+  ConnectionId: ""               // 空，每条消息自带 connID
+  Cmd: 256                       // 消息数量
+  Data: [2字节 connIDLen][connID][4字节 len][payload] 重复
+}
+```
 
 ### 处理器注册
 
@@ -140,27 +200,139 @@ func init() {
     logic.RegisterHandler(protobuf.RouteGame, CmdGameLogin, &GameLoginHandler{})
     logic.RegisterHandler(protobuf.RouteGame, CmdGameLogout, &GameLogoutHandler{})
 }
+
+// BurstRouteHandler: 单次请求触发 N 条反向推送
+svc.RegisterBurstRoute(protobuf.RouteTest, func(msg, push) {
+    for i := 0; i < burstCount; i++ {
+        push(&protobuf.Message{Route: protobuf.RouteTestResult})
+    }
+})
 ```
 
 ## 性能
 
 ### 压测结果 (Windows, 12核)
 
-| 模式 | 连接数 | QPS |
-|------|--------|-----|
-| duplex + fastPath | 200 | 326 万 |
-| duplex + fastPath | 400 | 636 万 |
-| duplex + fastPath | 800 | 662 万 |
+| 方向 | 模式 | 连接数 | QPS | 丢弃 |
+|------|------|--------|-----|------|
+| 正向 (client→sgate→logic) | forward, batchSize=64 | 100 | **18.5M 峰值** | 有（超 gRPC 容量） |
+| 反向 (logic→sgate→client) | burst×1000, ratePerConn=110 | 100 | **11.0M 持续** | **0** |
+| 反向 (logic→sgate→client) | burst×1000, ratePerConn=110 | 200 | **10.8M 持续** | **0** |
 
-### 性能优化要点
+### 双向千万级 QPS 优化要点
 
-1. **fastPath 零拷贝透传**: test/ping 路由绕过 gRPC，直接在 Gateway 响应
-2. **批量帧匹配**: OnTraffic 中一次 Peek 匹配多帧，批量响应
-3. **预构建响应帧**: 编译时构建响应帧，运行时零序列化
-4. **对象池复用**: sync.Pool 复用 proto 对象、缓冲区、连接上下文
-5. **原子操作替代锁**: 统计信息使用 atomic 操作
-6. **gRPC 多 shard**: 多流并行发送，channel 批量聚合
-7. **全双工压测**: 发送接收独立 goroutine，流控防溢出
+1. **正向链路优化（client→sgate→logic）**
+   - 合并 protobuf 解析函数（`extractRouteAndCmd`），消除冗余 RLock，CPU 从 87% 降至 50-60%
+   - gRPC 多 shard（16 流），每流独立通道，降低锁竞争
+   - 大窗口配置（windowSize=64MB，sendChannelSize=262144）
+   - batchSize=64 时吞吐量最高，单次 TCP 读取批量处理多帧
+
+2. **反向链路优化（logic→sgate→client）**
+   - **BurstRouteHandler**: 单次请求触发 N 条反向响应，放大反向流量测试纯反向路径容量
+   - **Marshal 缓存**: 相同 Route+Timestamp 的响应复用序列化 bytes，1000 次 Marshal 降为 1 次
+   - **Single-conn 批量格式**: 同一连接的 N 条消息共享 connID（放外层），sgate 仅需 1 次 `GetConnection`
+   - **SendMulti 单次写入**: N 条消息合并为连续 buffer，单次 `AsyncWrite` 发送，event-loop 入队从 N 次降为 1 次
+   - **零拷贝传递**: sgate 收到 batch 后直接将 `msg.Data` 传给 `AsyncWrite`，无需逐条解析
+
+3. **批量消息协议**
+   - `RouteBatch` 伪路由标记批量消息
+   - Single-conn 格式: `msg.ConnectionId` 非空，`Data = [4字节 len][payload] 重复`
+   - Multi-conn 格式: `msg.ConnectionId` 为空，`Data = [2字节 connIDLen][connID][4字节 len][payload] 重复`
+   - 单批最大 256 条消息，避免 gRPC 消息过大
+
+4. **资源熔断器**
+   - CPU/内存阈值监控（默认 92%）
+   - 超阈值时丢弃新消息，保护已有连接
+   - HTTP `/stats` 端点实时暴露统计
+
+## 高性能压测指南
+
+### 最快上手（3 步验证千万级 QPS）
+
+```bash
+# 步骤 1: 编译（约 10 秒）
+$env:CGO_ENABLED=0
+go build -o sgate.exe ./examples/high_concurrency_gateway/
+go build -o logic_server.exe ./examples/logic_server/
+go build -o bench.exe ./examples/bench/
+
+# 步骤 2: 启动服务（2 个终端）
+$env:BURST_COUNT="1000"; $env:LOGIC_STREAM_CH_SIZE="262144"; .\logic_server.exe
+.\sgate.exe
+
+# 步骤 3: 压测（约 10 秒出结果）
+.\bench.exe 127.0.0.1:48080 100 10 1 forward 4096 127.0.0.1:9091 110
+```
+
+预期结果：`PushQPS: ~1100万`，`DropOvl: 0`，`DropFull: 0`
+
+### bench 工具参数说明
+
+```
+bench.exe <addr> <conns> <duration> <batchSize> <mode> <inflight> <statsAddr> <ratePerConn>
+```
+
+| 参数 | 说明 | 推荐值 |
+|------|------|--------|
+| addr | sgate 地址 | 127.0.0.1:48080 |
+| conns | 客户端连接数 | 100 |
+| duration | 测试时长（秒） | 10 |
+| batchSize | 每次写入的消息数 | 1（反向）/ 64（正向） |
+| mode | 测试模式 | forward |
+| inflight | 最大在途消息数 | 4096 |
+| statsAddr | sgate 统计端点 | 127.0.0.1:9091 |
+| ratePerConn | 每连接发送速率（0=无限） | 110（反向）/ 0（正向） |
+
+### 关键配置项
+
+`config/config.yaml` 中的核心配置：
+
+```yaml
+grpc:
+  windowSize: 67108864        # gRPC 流控窗口 64MB
+  maxMessageSize: 8388608     # 单条消息最大 8MB
+
+stream:
+  shardCount: 16              # gRPC 流分片数（过多增加锁竞争）
+  sendChannelSize: 262144     # 每流发送通道大小
+  receiveBatchSize: 128       # 接收批量大小
+
+protection:
+  memoryThreshold: 92         # 内存熔断阈值 %
+  cpuThreshold: 92            # CPU 熔断阈值 %
+  dropOnOverload: true        # 过载时丢弃消息
+```
+
+### Logic Server 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| BURST_COUNT | 1000 | 反向突发消息数（0=关闭） |
+| LOGIC_STREAM_CH_SIZE | 65536 | gRPC 流发送通道大小 |
+| GRPC_WINDOW_SIZE | 67108864 | gRPC 窗口大小 |
+| GRPC_MAX_MSG_SIZE | 4194304 | gRPC 最大消息大小 |
+| LOGIC_PORT | 50052 | 监听端口 |
+| REDIS_ADDR | 127.0.0.1:6379 | Redis 地址 |
+
+### 正向压测（验证 client→sgate→logic 吞吐量）
+
+```bash
+# BURST_COUNT=0 关闭反向流量，测试纯正向
+$env:BURST_COUNT="0"
+.\bench.exe 127.0.0.1:48080 100 10 64 forward 4096 127.0.0.1:9091 0
+```
+
+预期：`FwdQPS` 首秒可达 18M+（峰值吞吐量）
+
+### 反向压测（验证 logic→sgate→client 吞吐量）
+
+```bash
+# BURST_COUNT=1000 放大反向流量，ratePerConn=110 控制正向触发频率
+$env:BURST_COUNT="1000"
+.\bench.exe 127.0.0.1:48080 100 10 1 forward 4096 127.0.0.1:9091 110
+```
+
+预期：`PushQPS` 持续 11M，`DropOvl: 0`，`DropFull: 0`
 
 ## 容错分析
 

@@ -72,8 +72,7 @@ func (g *Gateway) HealthCheck() *HealthStatus {
 	}{
 		{"gateway", g.checkGateway},
 		{"rate_limiter", g.checkRateLimiter},
-		{"worker_pool", g.checkWorkerPool},
-		{"message_queue", g.checkMessageQueue},
+		{"logic_server", g.checkWorkerPool},
 	}
 
 	for _, check := range checks {
@@ -112,16 +111,9 @@ func (g *Gateway) ReadinessCheck() *ReadinessStatus {
 	}
 
 	// 检查工作池是否就绪
-	if g.workerCount.Load() < g.minWorkers.Load() {
+	if !g.isLogicConnected() {
 		status.Ready = false
-		status.Reason = "Worker pool is not ready"
-		return status
-	}
-
-	// 检查消息队列是否已满
-	if len(g.messagePool) >= cap(g.messagePool)-100 {
-		status.Ready = false
-		status.Reason = "Message queue is almost full"
+		status.Reason = "Logic server not connected"
 		return status
 	}
 
@@ -146,54 +138,23 @@ func (g *Gateway) checkGateway() Check {
 
 // checkRateLimiter 检查速率限制器
 func (g *Gateway) checkRateLimiter() Check {
-	if g.rateLimiter == nil {
-		return Check{
-			Status:  "fail",
-			Message: "Rate limiter is not initialized",
-		}
-	}
 	return Check{
 		Status:  "pass",
-		Message: "Rate limiter is healthy",
+		Message: "Overload protector active",
 	}
 }
 
 // checkWorkerPool 检查工作池
 func (g *Gateway) checkWorkerPool() Check {
-	if g.workerCount.Load() < g.minWorkers.Load() {
-		return Check{
-			Status:  "warn",
-			Message: "Worker count is below minimum",
-		}
-	}
-	return Check{
-		Status:  "pass",
-		Message: "Worker pool is healthy",
-	}
-}
-
-// checkMessageQueue 检查消息队列
-func (g *Gateway) checkMessageQueue() Check {
-	queueLen := len(g.messagePool)
-	queueCap := cap(g.messagePool)
-	
-	if queueLen >= queueCap-100 {
+	if !g.isLogicConnected() {
 		return Check{
 			Status:  "fail",
-			Message: "Message queue is almost full",
+			Message: "Logic server not connected",
 		}
 	}
-	
-	if queueLen > queueCap/2 {
-		return Check{
-			Status:  "warn",
-			Message: "Message queue is more than half full",
-		}
-	}
-	
 	return Check{
 		Status:  "pass",
-		Message: "Message queue is healthy",
+		Message: "Logic server connected",
 	}
 }
 

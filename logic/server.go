@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"runtime"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 type DisconnectCallback func(connectionID string)
@@ -20,10 +22,13 @@ type streamConn struct {
 	done   chan struct{}
 }
 
-func newStreamConn(stream protobuf.GatewayService_StreamMessagesServer) *streamConn {
+func newStreamConn(stream protobuf.GatewayService_StreamMessagesServer, sendChSize int) *streamConn {
+	if sendChSize <= 0 {
+		sendChSize = 1048576
+	}
 	sc := &streamConn{
 		stream: stream,
-		sendCh: make(chan *protobuf.Message, 131072),
+		sendCh: make(chan *protobuf.Message, sendChSize),
 		done:   make(chan struct{}),
 	}
 	go sc.flushLoop()
@@ -41,7 +46,92 @@ func (sc *streamConn) Send(msg *protobuf.Message) error {
 
 func (sc *streamConn) flushLoop() {
 	defer close(sc.done)
-	batch := make([]*protobuf.Message, 0, 256)
+	const maxBatchCount = 256
+	batch := make([]*protobuf.Message, 0, maxBatchCount)
+
+	// sendBatch 发送一批消息：
+	// - 预打包的 _batch 消息直接透传
+	// - 常规消息按 connID 分组打包：同 connID 的消息用 single-conn 格式（connID 在外层），
+	//   不同 connID 的用 multi-conn 格式（connID 在每条条目内）
+	// - server.* 路由消息单独发送
+	sendBatch := func(msgs []*protobuf.Message) {
+		// single-conn batch: 同 connID 的常规消息
+		var scBuf []byte
+		var scConnID string
+		scCount := 0
+		flushSingleConn := func() {
+			if scCount == 0 {
+				return
+			}
+			_ = sc.stream.Send(&protobuf.Message{
+				Route:        protobuf.RouteBatch,
+				ConnectionId: scConnID,
+				Data:         scBuf,
+				Cmd:          int32(scCount),
+			})
+			scBuf = nil
+			scConnID = ""
+			scCount = 0
+		}
+		// multi-conn batch: 不同 connID 的常规消息
+		var mcBuf []byte
+		mcCount := 0
+		flushMultiConn := func() {
+			if mcCount == 0 {
+				return
+			}
+			_ = sc.stream.Send(&protobuf.Message{
+				Route: protobuf.RouteBatch,
+				Data:  mcBuf,
+				Cmd:   int32(mcCount),
+			})
+			mcBuf = nil
+			mcCount = 0
+		}
+		for _, m := range msgs {
+			if m.Route == protobuf.RouteBatch {
+				// 预打包消息：先刷新累积的常规消息，再直接发送
+				flushSingleConn()
+				flushMultiConn()
+				_ = sc.stream.Send(m)
+			} else if len(m.Route) >= 7 && m.Route[:7] == "server." {
+				flushSingleConn()
+				flushMultiConn()
+				_ = sc.stream.Send(m)
+			} else {
+				data, err := proto.Marshal(m)
+				if err != nil {
+					continue
+				}
+				var lenBuf [4]byte
+				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
+				connID := m.ConnectionId
+				if connID == scConnID && scCount > 0 {
+					// 追加到当前 single-conn batch
+					scBuf = append(scBuf, lenBuf[:]...)
+					scBuf = append(scBuf, data...)
+					scCount++
+				} else if scCount == 0 {
+					// 开启新的 single-conn batch
+					flushMultiConn()
+					scConnID = connID
+					scBuf = append(scBuf, lenBuf[:]...)
+					scBuf = append(scBuf, data...)
+					scCount = 1
+				} else {
+					// connID 变了：先刷新 single-conn，再开启新的
+					flushSingleConn()
+					scConnID = connID
+					scBuf = append(scBuf, lenBuf[:]...)
+					scBuf = append(scBuf, data...)
+					scCount = 1
+				}
+			}
+		}
+		flushSingleConn()
+		flushMultiConn()
+	}
+
 	for {
 		msg, ok := <-sc.sendCh
 		if !ok {
@@ -58,18 +148,14 @@ func (sc *streamConn) flushLoop() {
 					break
 				}
 				batch = append(batch, m)
-				if len(batch) >= cap(batch) {
+				if len(batch) >= maxBatchCount {
 					drained = false
 				}
 			default:
 				drained = false
 			}
 		}
-		for _, m := range batch {
-			if err := sc.stream.Send(m); err != nil {
-				return
-			}
-		}
+		sendBatch(batch)
 	}
 }
 
@@ -88,7 +174,10 @@ type Server struct {
 	groups     map[string]*pushGroup
 	connGroups map[string]map[string]struct{}
 
-	dispatchCh chan dispatchItem
+	dispatchCh          chan dispatchItem
+	dispatchWg          sync.WaitGroup
+	streamChSize        int
+	dispatchWorkerCount int
 }
 
 type dispatchItem struct {
@@ -98,16 +187,21 @@ type dispatchItem struct {
 
 func NewServer(opts ...ServerOption) *Server {
 	s := &Server{
-		groups:     make(map[string]*pushGroup),
-		connGroups: make(map[string]map[string]struct{}),
-		dispatchCh: make(chan dispatchItem, runtime.NumCPU()*8192),
+		groups:       make(map[string]*pushGroup),
+		connGroups:   make(map[string]map[string]struct{}),
+		dispatchCh:   make(chan dispatchItem, runtime.NumCPU()*65536),
+		streamChSize: 1048576,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 
 	workerCount := runtime.NumCPU() * 128
+	if s.dispatchWorkerCount > 0 {
+		workerCount = s.dispatchWorkerCount
+	}
 	for i := 0; i < workerCount; i++ {
+		s.dispatchWg.Add(1)
 		go s.dispatchWorker()
 	}
 
@@ -115,17 +209,20 @@ func NewServer(opts ...ServerOption) *Server {
 }
 
 func (s *Server) dispatchWorker() {
+	defer s.dispatchWg.Done()
 	for item := range s.dispatchCh {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					tlog.Error("dispatchWorker panic recovered", "error", r, "connectionID", item.msg.ConnectionId, "route", item.msg.Route, "cmd", item.msg.Cmd)
 				}
 			}()
 			s.dispatchMessage(item.msg, func(response *protobuf.Message) {
 				if response != nil {
 					if response.ConnectionId == "" {
 						response.ConnectionId = item.msg.ConnectionId
+					}
+					if response.ConnectionId == "" {
+						return
 					}
 					item.conn.Send(response)
 				}
@@ -138,6 +235,20 @@ type ServerOption func(*Server)
 
 func WithServerID(serverID string) ServerOption {
 	return func(s *Server) { s.serverID = serverID }
+}
+
+func WithDispatchWorkers(n int) ServerOption {
+	return func(s *Server) { s.dispatchWorkerCount = n }
+}
+
+func WithDispatchChSize(n int) ServerOption {
+	return func(s *Server) {
+		s.dispatchCh = make(chan dispatchItem, n)
+	}
+}
+
+func WithStreamChSize(n int) ServerOption {
+	return func(s *Server) { s.streamChSize = n }
 }
 
 func (s *Server) GetServerID() string {
@@ -155,7 +266,7 @@ func (s *Server) OnDisconnect(cb DisconnectCallback) {
 func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesServer) error {
 	connectionID := fmt.Sprintf("conn_%d", time.Now().UnixNano())
 
-	conn := newStreamConn(stream)
+	conn := newStreamConn(stream, s.streamChSize)
 	s.connections.Store(connectionID, conn)
 
 	if s.serverID != "" {
@@ -178,7 +289,15 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 			return err
 		}
 
-		s.dispatchCh <- dispatchItem{msg: msg, conn: conn}
+		if msg.ConnectionId == "" {
+			tlog.Warn("received message with empty ConnectionId", "route", msg.Route)
+		}
+
+		select {
+		case s.dispatchCh <- dispatchItem{msg: msg, conn: conn}:
+		default:
+			tlog.Warn("dispatch channel full, dropping message", "route", msg.Route, "connectionID", msg.ConnectionId)
+		}
 	}
 }
 
