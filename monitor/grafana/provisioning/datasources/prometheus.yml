@@ -1,0 +1,34 @@
+# ============================================================================
+# Grafana 数据源自动 provisioning 配置（Windows 本地原生安装版，使用默认端口）
+# ----------------------------------------------------------------------------
+# 作用：Grafana 启动时自动创建名为 "Prometheus" 的数据源，无需手动 UI 配置
+# 放置位置：Grafana 安装目录的 conf/provisioning/datasources/ 下
+#
+# Windows 默认路径（按实际安装位置调整）：
+#   C:\Program Files\GrafanaLabs\conf\provisioning\datasources\prometheus.yml
+#
+# 端口规划（全部使用默认端口）：
+#   Grafana       :3000  ← Grafana 自身默认
+#   Prometheus    :9090  ← Prometheus 自身默认（sgate metrics 让出到 9100）
+#
+# 也可以不用 provisioning，直接在 Grafana UI 操作：
+#   1. 浏览器打开 http://127.0.0.1:3000
+#   2. Configuration → Data Sources → Add data source
+#   3. 选 Prometheus
+#   4. Name 必须填 "Prometheus"（sgate 看板里 datasource 写死这个名字）
+#   5. URL 填 http://127.0.0.1:9090（指向 Prometheus，不是 sgate 的 9100）
+#   6. Save & Test
+# ============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus                          # 必须叫这个名字，sgate 看板 datasource 写死
+    type: prometheus
+    access: proxy                             # Grafana 后端代理访问（避免浏览器跨域）
+    url: http://127.0.0.1:9090                # 指向 Prometheus 自身默认端口（sgate metrics 在 9100）
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: '5s'                      # 与 scrape_interval 对齐
+      httpMethod: POST

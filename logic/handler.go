@@ -1,7 +1,6 @@
 package logic
 
 import (
-	"encoding/binary"
 	"fmt"
 	"reflect"
 	"sync"
@@ -200,15 +199,13 @@ func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.
 	case RouteHandler:
 		callback(entry(msg))
 	case BurstRouteHandler:
-		// 预序列化并打包所有响应为单个 _batch Message
-		// 优化：所有 burst 响应共享同一 ConnectionId（继承自 msg），
-		// 将 connID 放到外层 Message.ConnectionId，batch Data 仅含 [4字节 payloadLen][payload] 重复
-		// sgate 侧只需一次 GetConnection 查找即可发送整批消息
-		var buf []byte
-		count := 0
-		var lastData []byte
-		var lastRoute string
-		var lastTs int64
+		// 发送单条响应消息，由 flushLoop 批量打包后再 stream.Send。
+		// 旧实现将所有 burst 响应预打包为单个 RouteBatch 再 callback 一次，
+		// 导致 BURST_COUNT=1 时每条正向消息产生一次 stream.Send（反向 QPS 瓶颈）。
+		// 现改为每条响应单独 callback，flushLoop 可将最多 256 条合并为一次 stream.Send，
+		// 将 gRPC Send 调用数降低约 256 倍。
+		// BURST_COUNT>1 时，相同 Route+Timestamp 的消息会在 flushLoop 的 marshal 缓存中命中，
+		// 避免重复 Marshal。
 		entry(msg, func(response *protobuf.Message) {
 			if response == nil {
 				return
@@ -219,34 +216,8 @@ func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.
 			if response.ConnectionId == "" {
 				return
 			}
-			// 相同 Route+Timestamp 的响应复用已序列化的 bytes，避免重复 Marshal
-			var data []byte
-			if count > 0 && response.Route == lastRoute && response.Timestamp == lastTs && response.ConnectionId == msg.ConnectionId {
-				data = lastData
-			} else {
-				var err error
-				data, err = proto.Marshal(response)
-				if err != nil {
-					return
-				}
-				lastData = data
-				lastRoute = response.Route
-				lastTs = response.Timestamp
-			}
-			var lenBuf [4]byte
-			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
-			buf = append(buf, lenBuf[:]...)
-			buf = append(buf, data...)
-			count++
+			callback(response)
 		})
-		if count > 0 {
-			callback(&protobuf.Message{
-				Route:        protobuf.RouteBatch,
-				ConnectionId: msg.ConnectionId,
-				Data:         buf,
-				Cmd:          int32(count),
-			})
-		}
 	}
 }
 

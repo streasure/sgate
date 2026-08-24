@@ -158,6 +158,10 @@ func (s *Service) initRegistry() {
 
 	tlog.Info("Redis connected", "addr", s.cfg.RedisAddr)
 
+	zone := s.cfg.Zone
+	if zone == "" {
+		zone = "default"
+	}
 	serviceInfo := &discovery.ServiceInfo{
 		ServiceID:   s.cfg.ServiceID,
 		ServiceName: s.cfg.ServiceName,
@@ -167,6 +171,7 @@ func (s *Service) initRegistry() {
 			"version": "1.0.0",
 			"port":    s.cfg.ListenPort,
 			"routes":  strings.Join(s.GetRoutes(), ","),
+			"zone":    zone,
 		},
 		StartTime: time.Now().UnixMilli(),
 	}

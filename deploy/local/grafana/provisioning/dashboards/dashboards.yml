@@ -1,0 +1,28 @@
+# ============================================================================
+# Grafana 看板自动 provisioning 配置（Windows 本地原生安装版）
+# ----------------------------------------------------------------------------
+# 作用：Grafana 启动时自动加载 sgate 看板，无需手动 Import
+# 放置位置：Grafana 安装目录的 conf/provisioning/dashboards/ 下
+# 看板 JSON 文件：e:\sgate\k8s\grafana\sgate-dashboard.json
+#
+# Windows 默认路径：
+#   C:\Program Files\GrafanaLabs\conf\provisioning\dashboards\dashboards.yml
+#
+# 注意：需把 sgate-dashboard.json 复制到 provisioning/dashboards/ 目录下
+#   复制命令：
+#   copy e:\sgate\k8s\grafana\sgate-dashboard.json "C:\Program Files\GrafanaLabs\conf\provisioning\dashboards\"
+# ============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: 'sgate-dashboards'
+    orgId: 1
+    folder: 'sgate'                           # Grafana 中存放看板的文件夹名
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30                 # 每 30 秒检查看板文件变更
+    allowUiUpdates: true                      # 允许在 UI 修改看板
+    options:
+      # 看板 JSON 文件所在目录（Windows 路径，按你的 Grafana 安装位置修改）
+      path: C:\Program Files\GrafanaLabs\conf\provisioning\dashboards

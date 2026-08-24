@@ -78,8 +78,8 @@ func newBenchConn(addr string) (*benchConn, error) {
 	}
 	tcpConn := conn.(*net.TCPConn)
 	tcpConn.SetNoDelay(true)
-	tcpConn.SetReadBuffer(16 * 1024 * 1024)
-	tcpConn.SetWriteBuffer(4 * 1024 * 1024)
+	tcpConn.SetReadBuffer(64 * 1024 * 1024) // 64MB kernel recv buffer
+	tcpConn.SetWriteBuffer(8 * 1024 * 1024) // 8MB kernel send buffer
 	return &benchConn{conn: tcpConn}, nil
 }
 
@@ -159,13 +159,14 @@ func runForwardConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxIn
 	}
 
 	// 后台读取响应以避免内核接收缓冲区满导致 sgate 写阻塞
-	// 增大缓冲区到 1MB，应对反向千万级 QPS 的响应流量
+	// 不设 read deadline：连接在 stopCh 关闭时由 bc.conn.Close() 唤醒退出
+	// 设 deadline 会在高负载下因暂时无数据而误判超时退出，导致连接停止 drain →
+	// 内核缓冲区满 → sgate 写阻塞 → gnet 关闭连接 → PushDroppedNoConn 飙升
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		buf := make([]byte, 1024*1024)
+		buf := make([]byte, 4*1024*1024) // 4MB read buffer
 		for {
-			bc.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			_, err := bc.conn.Read(buf)
 			if err != nil {
 				return
@@ -221,10 +222,9 @@ func runFullDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, ma
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		buf := make([]byte, 512*1024)
+		buf := make([]byte, 4*1024*1024) // 4MB
 		var head, tail int
 		for {
-			bc.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			n, err := bc.conn.Read(buf[tail:])
 			if err != nil {
 				return
@@ -333,10 +333,9 @@ func runWSFullDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, 
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		buf := make([]byte, 512*1024)
+		buf := make([]byte, 4*1024*1024) // 4MB
 		var head, tail int
 		for {
-			bc.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			n, err := bc.conn.Read(buf[tail:])
 			if err != nil {
 				return
@@ -455,7 +454,7 @@ func main() {
 	if len(os.Args) >= 7 {
 		fmt.Sscanf(os.Args[6], "%d", &inflight)
 	}
-	statsAddr := "127.0.0.1:9091"
+	statsAddr := "127.0.0.1:8081"
 	if len(os.Args) >= 8 {
 		statsAddr = os.Args[7]
 	}

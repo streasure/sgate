@@ -288,8 +288,11 @@ func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOp
 }
 
 func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload []byte) error {
+	g.messagesReceived.Add(1)
+
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
+		g.messagesDroppedOverload.Add(1)
 		return nil
 	}
 
@@ -308,6 +311,53 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
+	// 安全防护链路（与 TCP 路径对齐，避免 WebSocket 绕过）
+	// 顺序：白名单/黑名单 → 限流 → WAF → 熔断 → 完整性校验 → filter chain
+	remoteIP := getRemoteIP(wsConn.Conn)
+	if g.whitelistBlacklist != nil {
+		if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
+			g.messagesDroppedBlacklist.Add(1)
+			return nil
+		}
+		whitelist := g.whitelistBlacklist.GetWhitelist()
+		if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
+			g.messagesDroppedBlacklist.Add(1)
+			return nil
+		}
+	}
+	if g.rateLimiter != nil {
+		if !g.rateLimiter.Allow("ip", remoteIP) {
+			g.messagesDroppedRateLimit.Add(1)
+			return nil
+		}
+		if !g.rateLimiter.Allow("route", route) {
+			g.messagesDroppedRateLimit.Add(1)
+			return nil
+		}
+	}
+	if g.waf != nil {
+		if !g.waf.Inspect(payload) {
+			g.messagesDroppedWAF.Add(1)
+			return nil
+		}
+	}
+	if g.circuitBreakerMgr != nil {
+		breaker := g.getOrCreateBreaker(route)
+		if !breaker.Allow() {
+			g.messagesDroppedCircuit.Add(1)
+			return nil
+		}
+	}
+
+	// C5: 入方向消息完整性校验（默认关闭以保证压测吞吐）。
+	if g.protection.VerifyInbound {
+		if err := g.messageIntegrity.ProcessMessage(message); err != nil {
+			errorMsg := NewErrorMessage("error", "Message integrity check failed", err.Error(), "")
+			responseData, _ := proto.Marshal(errorMsg)
+			return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
+		}
+	}
+
 	connectionID := wsConn.ConnectionID
 
 	if connectionID == "" {
@@ -316,8 +366,8 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		wsConn.ConnectionID = connectionID
 	}
 
-	if conn := g.connectionManager.GetConnection(connectionID); conn != nil && !conn.IsWS {
-		conn.IsWS = true
+	if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
+		conn.SetWS(true)
 	}
 
 	if message.UserUuid != "" {
@@ -331,21 +381,76 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return nil
 	}
 
+	// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
+	// 与 TCP 路径对齐，避免 WebSocket 绕过 JWT 鉴权
+	protoMsg, fcOK := g.applyForwardFilters(wsConn.Conn, payload, connectionID, route, message.Cmd)
+	if !fcOK {
+		return nil
+	}
+	if protoMsg == nil {
+		protoMsg = &protobuf.Message{
+			ConnectionId: connectionID,
+			UserUuid:     message.UserUuid,
+			Route:        route,
+			Cmd:          message.Cmd,
+			Data:         message.Data,
+			Timestamp:    message.Timestamp,
+			Sequence:     message.Sequence,
+		}
+		if message.Payload != nil {
+			p := make(map[string]string, len(message.Payload))
+			for k, v := range message.Payload {
+				p[k] = v
+			}
+			protoMsg.Payload = p
+		}
+	} else {
+		// filter chain 已构造 msg，补齐 WebSocket 路径特有的字段
+		if protoMsg.UserUuid == "" {
+			protoMsg.UserUuid = message.UserUuid
+		}
+		if protoMsg.Timestamp == 0 {
+			protoMsg.Timestamp = message.Timestamp
+		}
+		if protoMsg.Sequence == 0 {
+			protoMsg.Sequence = message.Sequence
+		}
+		if protoMsg.Payload == nil && message.Payload != nil {
+			p := make(map[string]string, len(message.Payload))
+			for k, v := range message.Payload {
+				p[k] = v
+			}
+			protoMsg.Payload = p
+		}
+	}
+
 	logicClient := g.getLogicClient()
 	if logicClient != nil {
-		protoMsg := logicProtoMsgPool.Get().(*protobuf.Message)
-		protoMsg.ConnectionId = connectionID
-		protoMsg.Route = route
-		protoMsg.Data = message.Data
-		protoMsg.Cmd = message.Cmd
-
 		if err := logicClient.SendMessage(protoMsg); err != nil {
+			g.messagesDroppedFull.Add(1)
+			if g.circuitBreakerMgr != nil {
+				g.getOrCreateBreaker(route).RecordFailure()
+			}
+			if g.balancer != nil {
+				g.balancer.RecordFailure(protoMsg.Route)
+			}
+			if g.degradation != nil {
+				g.degradation.RecordResult(protoMsg.Route, true)
+			}
 			errorMsg := NewErrorMessage("error", "Failed to send message to logic server", err.Error(), "")
 			responseData, _ := proto.Marshal(errorMsg)
 			return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 		}
-		resetLogicProtoMsg(protoMsg)
-		logicProtoMsgPool.Put(protoMsg)
+		g.messagesForwarded.Add(1)
+		if g.circuitBreakerMgr != nil {
+			g.getOrCreateBreaker(route).RecordSuccess()
+		}
+		if g.balancer != nil {
+			g.balancer.RecordSuccess(protoMsg.Route)
+		}
+		if g.degradation != nil {
+			g.degradation.RecordResult(protoMsg.Route, false)
+		}
 	} else {
 		errorMsg := NewErrorMessage("error", "Logic server not connected", "", "")
 		responseData, _ := proto.Marshal(errorMsg)

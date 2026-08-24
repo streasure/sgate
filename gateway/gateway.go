@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cast"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/metrics"
+	"github.com/streasure/sgate/monitor"
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
@@ -36,111 +37,20 @@ var (
 			return &buf
 		},
 	}
-
-	logicProtoMsgPool = sync.Pool{
-		New: func() interface{} {
-			return &protobuf.Message{
-				Payload: make(map[string]string, 8),
-			}
-		},
-	}
 )
 
-func resetLogicProtoMsg(msg *protobuf.Message) {
-	msg.ConnectionId = ""
-	msg.UserUuid = ""
-	msg.Route = ""
-	msg.Cmd = 0
-	msg.Data = nil
-	msg.Timestamp = 0
-	msg.Sequence = 0
-	msg.ProtocolVersion = ""
-	if msg.Payload != nil {
-		for k := range msg.Payload {
-			delete(msg.Payload, k)
-		}
-	}
-}
-
 func extractRouteFast(data []byte) string {
-	route, _ := extractRouteAndCmd(data)
-	return route
+	return protobuf.ExtractRouteFast(data)
 }
 
 func extractCmdFast(data []byte) int32 {
-	_, cmd := extractRouteAndCmd(data)
+	_, cmd := protobuf.ExtractRouteAndCmd(data)
 	return cmd
 }
 
-// extractRouteAndCmd parses protobuf data once to extract both route (field 3)
-// and cmd (field 4) in a single pass, reducing CPU overhead.
-func extractRouteAndCmd(data []byte) (route string, cmd int32) {
-	offset := 0
-	for offset < len(data) {
-		b := data[offset]
-		if b < 0x80 {
-			offset++
-			fieldNum := int(b >> 3)
-			wireType := int(b & 0x7)
-
-			switch wireType {
-			case 0:
-				if fieldNum == 4 {
-					v, n := decodeVarint(data[offset:])
-					if n > 0 {
-						cmd = int32(v)
-					}
-				}
-				for offset < len(data) && data[offset] >= 0x80 {
-					offset++
-				}
-				if offset < len(data) {
-					offset++
-				}
-			case 1:
-				offset += 8
-			case 2:
-				if offset >= len(data) {
-					return
-				}
-				l := int(data[offset])
-				offset++
-				if l >= 0x80 {
-					if offset >= len(data) {
-						return
-					}
-					l2 := int(data[offset])
-					offset++
-					l = (l & 0x7F) | (l2 << 7)
-				}
-				if fieldNum == 3 && l > 0 && l < 256 && offset+l <= len(data) {
-					route = string(data[offset : offset+l])
-				}
-				offset += l
-			case 5:
-				offset += 4
-			default:
-				return
-			}
-		} else {
-			offset++
-		}
-	}
-	return
-}
-
-func decodeVarint(buf []byte) (uint64, int) {
-	var x uint64
-	var s uint
-	for i := 0; i < len(buf) && i < 10; i++ {
-		b := buf[i]
-		if b < 0x80 {
-			return x | uint64(b)<<s, i + 1
-		}
-		x |= uint64(b&0x7f) << s
-		s += 7
-	}
-	return 0, 0
+// extractRouteAndCmd delegates to protobuf.ExtractRouteAndCmd (shared with logic server).
+func extractRouteAndCmd(data []byte) (string, int32) {
+	return protobuf.ExtractRouteAndCmd(data)
 }
 
 type Gateway struct {
@@ -170,12 +80,32 @@ type Gateway struct {
 	redisClient        *redis.Client
 	overloadProtector  *OverloadProtector
 	grpcServer         *grpc.Server
-	promServer         *http.Server
+	promExporter       *monitor.PrometheusExporter // Prometheus 指标导出器（enabled=false 时为 nil）
 	statsServer        *http.Server
+	msgRate            *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
 	zone               string
 	protection         config.ProtectionConfig
 	grpcCfg            config.GRPCConfig
 	streamCfg          config.StreamConfig
+	// 安全防护组件
+	whitelistBlacklist *WhitelistBlacklist
+	circuitBreakerMgr  *CircuitBreakerManager
+	rateLimiter        *RateLimiter
+	waf                *WAF
+	cluster            *Cluster
+	latencyTracker     *LatencyTracker
+
+	// 企业级扩展组件
+	filterChain   *FilterChain        // SPI 过滤器链
+	jwtAuth       *JWTAuthFilter      // JWT 鉴权
+	balancer      *Balancer           // 负载均衡 + 故障节点摘除
+	degradation   *DegradationManager // 降级管理
+	configCenter  ConfigCenter        // 配置中心（Nacos/Apollo/etcd/Consul）
+	otelTracer    *OTelTracer         // 分布式追踪导出
+	alertWebhook  *AlertWebhook       // 告警 webhook（企业微信/钉钉）
+	canaryFilter  *CanaryFilter       // 灰度发布
+	trafficMirror *TrafficMirror      // 流量镜像
+	logSanitizer  *LogSanitizer       // 日志脱敏
 
 	// 转发统计计数器（用于极限压测时观测 sgate 转发能力）
 	messagesForwarded                  atomic.Int64
@@ -186,6 +116,22 @@ type Gateway struct {
 	messagesReceived                   atomic.Int64
 	messagesPushedToClient             atomic.Int64
 	messagesPushDroppedNoConn          atomic.Int64
+	// 细分丢弃原因（与过载保护区分，便于排障）
+	messagesDroppedBlacklist   atomic.Int64 // 黑名单/白名单拦截
+	messagesDroppedRateLimit   atomic.Int64 // 限流拦截
+	messagesDroppedWAF         atomic.Int64 // WAF 拦截
+	messagesDroppedCircuit     atomic.Int64 // 熔断器拦截
+	messagesDroppedIntegrity   atomic.Int64 // 完整性校验失败
+	messagesDroppedFilterChain atomic.Int64 // filter chain 中止
+
+	// Prometheus 看板扩展计数器（Grafana dashboard 引用）
+	circuitBreakerTripped  atomic.Int64
+	degradationTriggered   atomic.Int64
+	canaryHit              atomic.Int64
+	trafficMirrorForwarded atomic.Int64
+	trafficMirrorDropped   atomic.Int64
+	alertSent              atomic.Int64
+	alertDropped           atomic.Int64
 }
 
 func (g *Gateway) SetTransportType(port string, transportType string) {
@@ -282,13 +228,6 @@ func PutProtobufMessage(msg *protobuf.Message) {
 	protobufMessagePool.Put(msg)
 }
 
-var frameDataPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 0, 4096)
-		return &buf
-	},
-}
-
 func NewGateway() *Gateway {
 	ctx := context.Background()
 
@@ -356,7 +295,28 @@ func NewGateway() *Gateway {
 		tlsConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			MaxVersion: tls.VersionTLS13,
+			// 硬件加速 cipher suite（AES-NI / AES-CLMUL 自动启用）
+			// 仅保留 AES-GCM 套件，避免 ChaCha20（无硬件加速时才用）
+			CipherSuites: []uint16{
+				// TLS 1.3 套件（Go 自动选择，列出仅文档意义）
+				tls.TLS_AES_128_GCM_SHA256,
+				tls.TLS_AES_256_GCM_SHA384,
+				tls.TLS_CHACHA20_POLY1305_SHA256, // fallback：客户端无 AES-NI 时
+				// TLS 1.2 套件
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+			PreferServerCipherSuites: true,
+			// 椭圆曲线偏好：X25519（CPU 友好）→ P256（Haswell 加速）
+			CurvePreferences: []tls.CurveID{
+				tls.X25519,
+				tls.CurveP256,
+			},
 		},
+		filterChain:       NewFilterChain(),
+		logSanitizer:      NewLogSanitizer(),
 		clusterID:         "sgate-cluster",
 		isLeader:          false,
 		minBufferSize:     4096,
@@ -367,12 +327,113 @@ func NewGateway() *Gateway {
 				return make([]byte, 16384)
 			},
 		},
-		configUpdateChan:  make(chan *config.Config),
-		overloadProtector: NewOverloadProtector(protection),
-		logicClient:       NewLogicClient(GatewayInterface(nil)),
-		protection:        protection,
-		grpcCfg:           grpcCfg,
-		streamCfg:         streamCfg,
+		configUpdateChan:   make(chan *config.Config),
+		overloadProtector:  NewOverloadProtector(protection),
+		logicClient:        NewLogicClient(GatewayInterface(nil)),
+		protection:         protection,
+		grpcCfg:            grpcCfg,
+		streamCfg:          streamCfg,
+		whitelistBlacklist: NewWhitelistBlacklist(),
+		circuitBreakerMgr:  NewCircuitBreakerManager(),
+		msgRate:            newMessageRateTracker(60 * time.Second),
+	}
+
+	// 加载 TLS 证书
+	if cfg.TLS.Enabled && cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		if err != nil {
+			tlog.Error("failed to load TLS certificate", "error", err)
+		} else {
+			gw.tlsConfig.Certificates = []tls.Certificate{cert}
+			// 强制 TLS 1.3 开关：当 minVersion 配置为 TLS1.3 时
+			if strings.EqualFold(cfg.TLS.MinVersion, "TLS1.3") {
+				gw.tlsConfig.MinVersion = tls.VersionTLS13
+				tlog.Info("TLS 1.3 enforced", "certFile", cfg.TLS.CertFile)
+			} else {
+				tlog.Info("TLS certificate loaded", "certFile", cfg.TLS.CertFile,
+					"minVersion", cfg.TLS.MinVersion)
+			}
+		}
+	}
+
+	// 初始化负载均衡器
+	gw.balancer = NewBalancer(cfg.Balancer)
+
+	// 初始化 JWT 鉴权
+	if cfg.JWTAuth.Enabled {
+		gw.jwtAuth = NewJWTAuthFilter(cfg.JWTAuth)
+		gw.filterChain.AddFilter(gw.jwtAuth)
+	}
+
+	// 初始化灰度发布
+	if cfg.Canary.Enabled {
+		gw.canaryFilter = NewCanaryFilter(cfg.Canary)
+		gw.filterChain.AddFilter(gw.canaryFilter)
+	}
+
+	// 初始化流量镜像
+	if cfg.TrafficMirror.Enabled {
+		gw.trafficMirror = NewTrafficMirror(cfg.TrafficMirror)
+		gw.filterChain.AddFilter(&MirrorFilter{tm: gw.trafficMirror})
+	}
+
+	// 初始化降级管理
+	if cfg.Degradation.Enabled {
+		gw.degradation = NewDegradationManager(cfg.Degradation.Rules)
+		gw.filterChain.AddFilter(gw.degradation)
+	}
+
+	// 初始化 OTel 分布式追踪
+	if cfg.OTelTracer.Enabled {
+		gw.otelTracer = NewOTelTracer(cfg.OTelTracer)
+		gw.filterChain.AddFilter(&OTelSpanFilter{tracer: gw.otelTracer})
+	}
+
+	// 初始化告警 webhook
+	if cfg.Alert.Enabled {
+		gw.alertWebhook = NewAlertWebhook(cfg.Alert)
+	}
+
+	// 初始化配置中心
+	if cfg.ConfigCenter.Enabled {
+		gw.configCenter = NewConfigCenter(cfg.ConfigCenter)
+		gw.startConfigCenterWatcher()
+	}
+
+	// 动态加载配置中声明的 SPI 过滤器
+	for _, fi := range cfg.FilterChain.Filters {
+		if err := gw.filterChain.LoadByName(fi.Name, fi.Config); err != nil {
+			tlog.Warn("failed to load filter from config",
+				"name", fi.Name, "error", err)
+		}
+	}
+
+	// 初始化限流器
+	if cfg.Security.RateLimit.Enabled {
+		refresh := time.Second
+		if d, err := time.ParseDuration(cfg.Security.RateLimit.TokenRefresh); err == nil {
+			refresh = d
+		}
+		tokens := cfg.Security.RateLimit.MaxTokens
+		if tokens <= 0 {
+			tokens = 10000
+		}
+		gw.rateLimiter = NewRateLimiter(tokens, refresh)
+	}
+
+	// 初始化 WAF
+	if cfg.WAF.Enabled {
+		gw.waf = NewWAF(cfg.WAF)
+	}
+
+	// 初始化白名单/黑名单配置
+	if cfg.Security.Enabled {
+		for _, ip := range cfg.Security.Whitelist {
+			gw.whitelistBlacklist.AddToWhitelist(ip)
+		}
+		for _, ip := range cfg.Security.Blacklist {
+			gw.whitelistBlacklist.AddToBlacklist(ip)
+		}
 	}
 
 	gw.cfg.Store(cfg)
@@ -387,6 +448,7 @@ func NewGateway() *Gateway {
 	gw.versionNegotiation = NewVersionNegotiation(supportedVersions, 10*time.Second)
 
 	gw.tracer = NewTracer(5 * time.Minute)
+	gw.latencyTracker = NewLatencyTracker(10000)
 
 	connCheckInterval, _ := time.ParseDuration(protection.ConnCheckInterval)
 	if connCheckInterval <= 0 {
@@ -419,6 +481,11 @@ func NewGateway() *Gateway {
 		cfg.Zone = "default"
 	}
 	gw.zone = cfg.Zone
+	// C3 修复: 统一 zone 来源。discovery.zone 未单独配置时回退到顶层 zone，
+	// 避免两个 zone 字段不一致导致过滤逻辑失效。
+	if cfg.Discovery.Zone == "" {
+		cfg.Discovery.Zone = cfg.Zone
+	}
 
 	tlog.Info("gateway zone configured", "zone", gw.zone)
 
@@ -449,17 +516,13 @@ func NewGateway() *Gateway {
 
 	if gw.serviceDiscovery == nil {
 		tlog.Info("service discovery disabled, using static logic server connection")
+		// 连接预热：立即建立 gRPC 连接，避免首个请求冷启动突刺
 		go func() {
-			select {
-			case <-time.After(2 * time.Second):
-				tlog.Info("connecting to logic server", "address", "localhost:50052")
-				if err := gw.logicClient.Connect("localhost:50052"); err != nil {
-					tlog.Error("failed to connect to logic server", "error", err)
-				} else {
-					tlog.Info("successfully connected to logic server")
-				}
-			case <-gw.stopChan:
-				return
+			tlog.Info("pre-warming logic server connection", "address", "localhost:50052")
+			if err := gw.logicClient.Connect("localhost:50052"); err != nil {
+				tlog.Error("failed to connect to logic server", "error", err)
+			} else {
+				tlog.Info("successfully connected to logic server (pre-warmed)")
 			}
 		}()
 	}
@@ -476,8 +539,27 @@ func NewGateway() *Gateway {
 		}
 	}()
 
-	// 启动统计 HTTP 服务（供压测工具查询转发计数）
-	gw.StartStatsServer(":9091")
+	// 初始化集群（依赖 Redis 做 Leader 选举与服务注册）
+	if cfg.Cluster.Enabled && gw.redisClient != nil {
+		gw.cluster = NewCluster(gw.redisClient, cfg.Cluster, gw.zone)
+		gw.cluster.Start(ctx)
+	}
+
+	// 启动统计 HTTP 服务（暴露 /stats /health /ready /live）
+	// 端口来自 config.yaml 的 port 字段（默认 8081，避开 Nacos 8080）
+	gw.StartStatsServer(fmt.Sprintf(":%d", cfg.Port))
+
+	// 启动 Prometheus 指标导出器（可插拔，通过配置开关控制）
+	// 使用独立的 monitor 包，可被任意 Go 项目 import
+	// 关闭时 sgate 单体也能正常运行，只是不暴露 /metrics 端点
+	if cfg.Monitoring.Prometheus.Enabled {
+		gw.promExporter = monitor.NewPrometheusExporter(
+			gw, // Gateway 实现 monitor.StatsProvider 接口
+			cfg.Monitoring.Prometheus.Addr,
+			cfg.Monitoring.Prometheus.Path,
+		)
+		gw.promExporter.Start()
+	}
 
 	return gw
 }
@@ -533,8 +615,11 @@ func (g *Gateway) configWatcher() {
 			tlog.Error("configWatcher panic recovered", "error", r)
 		}
 	}()
+	if g.configPath == "" {
+		g.configPath = "config/config.yaml"
+	}
 	if _, err := os.Stat(g.configPath); os.IsNotExist(err) {
-		altPaths := []string{"../config/config.yaml", "../../config/config.yaml"}
+		altPaths := []string{"config/config.yaml", "../config/config.yaml", "../../config/config.yaml"}
 		found := false
 		for _, path := range altPaths {
 			if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -585,8 +670,77 @@ func (g *Gateway) configWatcher() {
 }
 
 func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
+	oldCfg := g.cfg.Load().(*config.Config)
 	g.cfg.Store(newCfg)
-	tlog.Info("config updated")
+
+	// 动态更新限流阈值（无需重启）
+	if g.rateLimiter != nil && newCfg.Security.RateLimit.Enabled {
+		refresh := time.Second
+		if d, err := time.ParseDuration(newCfg.Security.RateLimit.TokenRefresh); err == nil {
+			refresh = d
+		}
+		tokens := newCfg.Security.RateLimit.MaxTokens
+		if tokens <= 0 {
+			tokens = 10000
+		}
+		g.rateLimiter.UpdateRate(tokens, refresh)
+		tlog.Info("rate limiter updated", "maxTokens", tokens, "refresh", refresh)
+	}
+
+	// 动态更新白名单/黑名单
+	if g.whitelistBlacklist != nil && newCfg.Security.Enabled {
+		// 清空旧名单
+		for _, ip := range g.whitelistBlacklist.GetWhitelist() {
+			g.whitelistBlacklist.RemoveFromWhitelist(ip)
+		}
+		for _, ip := range g.whitelistBlacklist.GetBlacklist() {
+			g.whitelistBlacklist.RemoveFromBlacklist(ip)
+		}
+		// 加载新名单
+		for _, ip := range newCfg.Security.Whitelist {
+			g.whitelistBlacklist.AddToWhitelist(ip)
+		}
+		for _, ip := range newCfg.Security.Blacklist {
+			g.whitelistBlacklist.AddToBlacklist(ip)
+		}
+		tlog.Info("whitelist/blacklist updated",
+			"whitelist", len(newCfg.Security.Whitelist),
+			"blacklist", len(newCfg.Security.Blacklist))
+	}
+
+	// 动态更新过载保护阈值
+	if g.overloadProtector != nil {
+		g.protection = newCfg.Protection
+	}
+
+	// 动态更新 JWT 密钥
+	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
+		g.jwtAuth.UpdateSecret(newCfg.JWTAuth.Secret)
+		tlog.Info("jwt secret updated")
+	}
+
+	// 动态更新灰度规则
+	if g.canaryFilter != nil && newCfg.Canary.Enabled {
+		g.canaryFilter.UpdateConfig(newCfg.Canary)
+		tlog.Info("canary config updated", "percent", newCfg.Canary.Percent)
+	}
+
+	// 动态更新流量镜像比例
+	if g.trafficMirror != nil && newCfg.TrafficMirror.Enabled {
+		g.trafficMirror.UpdatePercent(newCfg.TrafficMirror.Percent)
+		tlog.Info("traffic mirror updated", "percent", newCfg.TrafficMirror.Percent)
+	}
+
+	// 动态更新降级规则
+	if g.degradation != nil && newCfg.Degradation.Enabled {
+		for _, rc := range newCfg.Degradation.Rules {
+			g.degradation.AddRule(rc)
+		}
+		tlog.Info("degradation rules updated", "count", len(newCfg.Degradation.Rules))
+	}
+
+	_ = oldCfg
+	tlog.Info("config updated dynamically")
 }
 
 var connContextPool = sync.Pool{
@@ -613,6 +767,7 @@ func PutConnContext(ctx *ConnContext) {
 
 type ConnContext struct {
 	ConnectionID string
+	UserUUID     string
 	FrameBuf     []byte
 	FrameOff     int
 }
@@ -743,6 +898,13 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 
 	ctx.FrameBuf = append(ctx.FrameBuf, data...)
 
+	// 批量路径：VerifyInbound 关闭时，将本次 OnTraffic 的完整帧打包为
+	// 单个 RouteBatch 消息，消除逐帧 protobuf 解析、深拷贝和通道发送开销。
+	if !g.protection.VerifyInbound {
+		return g.handleBatchTraffic(c, ctx)
+	}
+
+	// Slow path: per-frame processing for VerifyInbound or handshake
 	maxFrame := g.protection.MaxFrameSize
 	for len(ctx.FrameBuf) >= 4 {
 		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
@@ -758,10 +920,6 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 
 		frameData := ctx.FrameBuf[4:totalLen]
 
-		frameCopyPtr := frameDataPool.Get().(*[]byte)
-		*frameCopyPtr = (*frameCopyPtr)[:0]
-		*frameCopyPtr = append(*frameCopyPtr, frameData...)
-
 		if len(ctx.FrameBuf) > totalLen {
 			ctx.FrameBuf = ctx.FrameBuf[totalLen:]
 		} else {
@@ -769,13 +927,122 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 		}
 		ctx.FrameOff = 0
 
-		ret := g.handleTCPRequest(c, *frameCopyPtr)
-		*frameCopyPtr = (*frameCopyPtr)[:0]
-		frameDataPool.Put(frameCopyPtr)
-
-		if ret == gnet.Close {
+		if ret := g.handleTCPRequest(c, frameData); ret == gnet.Close {
 			return gnet.Close
 		}
+	}
+
+	return
+}
+
+// handleBatchTraffic collects all complete frames from FrameBuf into a single
+// RouteBatch message and forwards it via one SendMessage call. This reduces
+// per-frame overhead (proto parse, deep copy, alloc, channel send) to per-batch.
+//
+// Zero-copy optimization: FrameBuf already contains [4-byte frameLen][frameData]
+// repeated, which is exactly the RouteBatch Data format. Instead of copying
+// frames into a separate batch buffer, we transfer ownership of the FrameBuf
+// slice to the batch message and let the next OnTraffic call allocate a fresh
+// buffer. This eliminates the per-batch 256KB allocation + copy that caused
+// GC pressure at 20M QPS.
+//
+// Batch format (single-conn): RouteBatch message with:
+//
+//	ConnectionId = ctx.ConnectionID (shared by all frames from this connection)
+//	Data = FrameBuf[:offset] (transferred ownership, zero copy)
+//	Cmd = frame count
+//
+// The logic server unmarshals each payload to get route and dispatches individually.
+// ConnectionId is set from the outer message if the inner message doesn't have one.
+func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet.Action) {
+	maxFrame := g.protection.MaxFrameSize
+
+	// Count complete frames and find the split point.
+	// FrameBuf format: [4-byte frameLen][frameData] repeated
+	// = exactly the batch format needed by the logic server.
+	offset := 0
+	batchCount := 0
+	for offset+4 <= len(ctx.FrameBuf) {
+		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[offset : offset+4])
+		if frameLen == 0 || frameLen > uint32(maxFrame) {
+			ctx.FrameBuf = nil
+			ctx.FrameOff = 0
+			return gnet.Close
+		}
+		totalLen := 4 + int(frameLen)
+		if offset+totalLen > len(ctx.FrameBuf) {
+			break // incomplete frame, wait for more data
+		}
+
+		// Quick handshake check on first frame only.
+		if batchCount == 0 {
+			frameData := ctx.FrameBuf[offset+4 : offset+totalLen]
+			route := extractRouteFast(frameData)
+			if route == protobuf.RouteHandshake {
+				// Fall back to per-frame handler for handshake
+				rest := ctx.FrameBuf[offset+totalLen:]
+				if len(rest) > 0 {
+					tail := make([]byte, len(rest))
+					copy(tail, rest)
+					ctx.FrameBuf = tail
+				} else {
+					ctx.FrameBuf = nil
+				}
+				ctx.FrameOff = 0
+				return g.handleTCPRequest(c, frameData)
+			}
+		}
+
+		offset += totalLen
+		batchCount++
+	}
+
+	if batchCount == 0 {
+		return
+	}
+
+	g.messagesReceived.Add(int64(batchCount))
+
+	// Split FrameBuf FIRST: transfer complete frames to batchData, keep
+	// incomplete tail in FrameBuf. This must happen before any early return
+	// (overload, no logic client) to prevent frames from being recounted
+	// on the next OnTraffic call — which would cause unbounded growth of
+	// messagesReceived/dropped counters and FrameBuf memory.
+	var batchData []byte
+	if offset == len(ctx.FrameBuf) {
+		batchData = ctx.FrameBuf
+		ctx.FrameBuf = nil
+	} else {
+		batchData = ctx.FrameBuf[:offset]
+		tail := make([]byte, len(ctx.FrameBuf)-offset)
+		copy(tail, ctx.FrameBuf[offset:])
+		ctx.FrameBuf = tail
+	}
+	ctx.FrameOff = 0
+
+	if g.overloadProtector.IsOverloaded() {
+		g.overloadProtector.RecordDrop(int64(batchCount))
+		g.messagesDroppedOverload.Add(int64(batchCount))
+		return
+	}
+
+	logicClient := g.getLogicClient()
+	if logicClient == nil {
+		g.messagesDroppedNoLogicNotConnected.Add(int64(batchCount))
+		return
+	}
+
+	batchMsg := &protobuf.Message{
+		ConnectionId: ctx.ConnectionID,
+		Route:        protobuf.RouteBatch,
+		Data:         batchData,
+		Cmd:          int32(batchCount),
+	}
+
+	if err := logicClient.SendMessage(batchMsg); err != nil {
+		g.messagesDroppedFull.Add(int64(batchCount))
+	} else {
+		g.messagesForwarded.Add(int64(batchCount))
 	}
 
 	return
@@ -841,29 +1108,158 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 			return g.handleHandshake(c, connectionID, message)
 		}
 
-		// 注意: 不能使用对象池复用 protoMsg，因为 SendMessage 是异步的
-		// (msg 指针放入 sendCh 后由 startSendLoop 异步发送)
-		// 如果在放入 sendCh 后 reset/put，会导致 use-after-reset 数据竞争
-		protoMsg := &protobuf.Message{
-			ConnectionId: connectionID,
-			Route:        route,
-			Data:         data,
+		// IP 白名单/黑名单检查
+		if g.whitelistBlacklist != nil {
+			remoteIP := getRemoteIP(c)
+			if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
+				g.messagesDroppedBlacklist.Add(1)
+				return
+			}
+			// 白名单非空时，仅放行白名单 IP
+			whitelist := g.whitelistBlacklist.GetWhitelist()
+			if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
+				g.messagesDroppedBlacklist.Add(1)
+				return
+			}
 		}
 
-		if cmd > 0 {
+		// 限流检查（按 IP 维度）
+		if g.rateLimiter != nil {
+			remoteIP := getRemoteIP(c)
+			if !g.rateLimiter.Allow("ip", remoteIP) {
+				g.messagesDroppedRateLimit.Add(1)
+				return
+			}
+			if !g.rateLimiter.Allow("route", route) {
+				g.messagesDroppedRateLimit.Add(1)
+				return
+			}
+		}
+
+		// WAF 检查（SQL 注入/XSS/大 payload）
+		if g.waf != nil {
+			if !g.waf.Inspect(data) {
+				g.messagesDroppedWAF.Add(1)
+				return
+			}
+		}
+
+		// 熔断器检查（按 route 维度，自动创建）
+		if g.circuitBreakerMgr != nil {
+			breaker := g.getOrCreateBreaker(route)
+			if !breaker.Allow() {
+				g.messagesDroppedCircuit.Add(1)
+				return
+			}
+		}
+
+		// 入方向消息完整性校验
+		if g.protection.VerifyInbound {
+			verifyMsg := GetProtobufMessage()
+			if uerr := proto.Unmarshal(data, verifyMsg); uerr == nil {
+				if verr := g.messageIntegrity.ProcessMessage(verifyMsg); verr != nil {
+					PutProtobufMessage(verifyMsg)
+					g.messagesDroppedIntegrity.Add(1)
+					return
+				}
+			}
+			PutProtobufMessage(verifyMsg)
+		}
+
+		// Tracer: 采样追踪转发延迟
+		var span *TraceSpan
+		if g.tracer != nil {
+			traceID := GenerateTraceID()
+			span = g.tracer.StartSpan(traceID, "forward", "")
+			g.tracer.AddAttribute(span, "route", route)
+			g.tracer.AddAttribute(span, "connectionID", connectionID)
+		}
+
+		// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
+		// 过滤器可修改 route/data/userUUID，或中止请求
+		protoMsg, ok := g.applyForwardFilters(c, data, connectionID, route, cmd)
+		if !ok {
+			if span != nil && g.tracer != nil {
+				g.tracer.EndSpan(span)
+			}
+			return
+		}
+		if protoMsg == nil {
+			// 兼容 filter chain 未启用场景：构造默认消息
+			protoMsg = &protobuf.Message{
+				ConnectionId: connectionID,
+				Route:        route,
+				Data:         append([]byte(nil), data...),
+			}
+			if cmd > 0 {
+				protoMsg.Cmd = cmd
+			}
+		} else if cmd > 0 && protoMsg.Cmd == 0 {
 			protoMsg.Cmd = cmd
 		}
 
 		if err := logicClient.SendMessage(protoMsg); err != nil {
 			g.messagesDroppedFull.Add(1)
+			if g.circuitBreakerMgr != nil {
+				breaker := g.getOrCreateBreaker(route)
+				breaker.RecordFailure()
+			}
+			if g.balancer != nil {
+				g.balancer.RecordFailure(protoMsg.Route)
+			}
+			if g.degradation != nil {
+				g.degradation.RecordResult(protoMsg.Route, true)
+			}
 		} else {
 			g.messagesForwarded.Add(1)
+			if g.circuitBreakerMgr != nil {
+				breaker := g.getOrCreateBreaker(route)
+				breaker.RecordSuccess()
+			}
+			if g.balancer != nil {
+				g.balancer.RecordSuccess(protoMsg.Route)
+			}
+			if g.degradation != nil {
+				g.degradation.RecordResult(protoMsg.Route, false)
+			}
+		}
+
+		if span != nil && g.tracer != nil {
+			g.tracer.EndSpan(span)
+			if g.latencyTracker != nil {
+				g.latencyTracker.Record(span.Duration)
+			}
 		}
 		return
 	}
 
 	g.messagesDroppedNoLogicNotConnected.Add(1)
 	return
+}
+
+// getRemoteIP 从 gnet.Conn 获取客户端 IP
+func getRemoteIP(c gnet.Conn) string {
+	addr := c.RemoteAddr()
+	if addr == nil {
+		return "unknown"
+	}
+	s := addr.String()
+	// 去掉端口部分
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == ':' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// getOrCreateBreaker 获取或创建指定 route 的熔断器
+func (g *Gateway) getOrCreateBreaker(route string) *CircuitBreaker {
+	timeout := 30 * time.Second
+	if d, err := time.ParseDuration(g.protection.ConnIdleTimeout); err == nil && d > 0 {
+		timeout = d
+	}
+	return g.circuitBreakerMgr.GetCircuitBreaker(route, 5, 3, timeout)
 }
 
 func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *protobuf.Message) gnet.Action {
@@ -979,7 +1375,9 @@ func (g *Gateway) Close() {
 		g.overloadProtector.Stop()
 		g.tracer.Stop()
 
-		g.StopPrometheusMetrics()
+		if g.promExporter != nil {
+			g.promExporter.Stop()
+		}
 		g.StopStatsServer()
 
 		tlog.Info("gateway closed")

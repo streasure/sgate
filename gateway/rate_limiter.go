@@ -9,7 +9,7 @@ import (
 type RateLimiter struct {
 	mu                sync.RWMutex
 	tokensByDimension map[string]map[string]*TokenBucket
-	globalBucket     *TokenBucket
+	globalBucket      *TokenBucket
 	tokenRefresh      time.Duration
 	maxTokens         int
 	burstTokens       int
@@ -33,7 +33,28 @@ type TokenBucket struct {
 	tokenRefresh time.Duration
 }
 
+// tryConsume 消耗一个令牌，同时按时间差补充令牌
+// 补充速率 = maxTokens 个/每个 tokenRefresh 周期，上限为 burstTokens
 func (tb *TokenBucket) tryConsume() bool {
+	now := time.Now().UnixNano()
+	last := tb.lastUpdate.Load()
+
+	// 按时间差补充令牌（CAS 更新 lastUpdate，只有一个 goroutine 执行补充）
+	if now-last > int64(tb.tokenRefresh) {
+		if tb.lastUpdate.CompareAndSwap(last, now) {
+			elapsed := time.Duration(now - last)
+			refill := int64(elapsed/tb.tokenRefresh) * tb.maxTokens
+			if refill > 0 {
+				current := tb.tokens.Load()
+				newTokens := current + refill
+				if newTokens > tb.burstTokens {
+					newTokens = tb.burstTokens
+				}
+				tb.tokens.Store(newTokens)
+			}
+		}
+	}
+
 	for {
 		current := tb.tokens.Load()
 		if current <= 0 {
@@ -48,18 +69,18 @@ func (tb *TokenBucket) tryConsume() bool {
 func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 	rl := &RateLimiter{
 		tokensByDimension: make(map[string]map[string]*TokenBucket),
-		tokenRefresh:     tokenRefresh,
-		maxTokens:        maxTokens,
-		burstTokens:      maxTokens * 2,
-		cleanupInterval:  5 * time.Minute,
-		dimensionConfigs: make(map[string]DimensionConfig),
-		maxBucketsPerDim: 100000,
-		stopCh:           make(chan struct{}),
+		tokenRefresh:      tokenRefresh,
+		maxTokens:         maxTokens,
+		burstTokens:       maxTokens * 2,
+		cleanupInterval:   5 * time.Minute,
+		dimensionConfigs:  make(map[string]DimensionConfig),
+		maxBucketsPerDim:  100000,
+		stopCh:            make(chan struct{}),
 	}
 
 	rl.globalBucket = &TokenBucket{
 		maxTokens:    int64(maxTokens * 10),
-		burstTokens: int64(maxTokens * 20),
+		burstTokens:  int64(maxTokens * 20),
 		tokenRefresh: tokenRefresh,
 	}
 	rl.globalBucket.tokens.Store(int64(maxTokens * 10))
@@ -151,7 +172,8 @@ func (rl *RateLimiter) Allow(dimension, key string) bool {
 			rl.tokensByDimension[dimension][key] = bucket
 		}
 		rl.mu.Unlock()
-		return true
+		// 修复：新建 bucket 时也要消耗 token，否则换 IP 即可绕过限流
+		return bucket.tryConsume()
 	}
 
 	return bucket.tryConsume()

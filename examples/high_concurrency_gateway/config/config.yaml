@@ -1,63 +1,171 @@
-# 服务端口
-port: 8080
+# ============================================================================
+# sgate 网关配置（精简版）
+# ----------------------------------------------------------------------------
+# 仅保留"高频改/按环境调整"字段；不常用参数已硬编码到 internal/config/defaults.go
+# yaml 中未列出的字段，加载时自动用 defaults.go 中的常量填充
+# 如需覆盖默认值，在此 yaml 显式列出即可
+# ============================================================================
 
-# 日志级别
+# --- 基础 ---
+# port HTTP 监控端口（health/stats/metrics）
+# 使用方法：访问 http://<host>:<port>/health 检查存活
+# 注意：Nacos 占用 8080，sgate 监控端口避让到 8081
+port: 8081
+
+# logLevel 日志级别：debug | info | warn | error
+# 排查问题时设 debug；生产环境用 info
 logLevel: info
 
-# Redis配置
-redis:
-  addr: "127.0.0.1:6379"
-  password: ""
-  db: 10
-  poolSize: 10
-  minIdleConns: 5
-  maxIdleConns: 10
+# zone 网关 zone 标识，用于服务发现的 zone 隔离
+# 留空视为 "default"；多机房部署时设 "bj01" / "sh02" 等
+zone: ""
 
-# 服务发现配置
+# --- Redis ---
+# 服务发现/集群选主依赖 Redis
+redis:
+  addr: "127.0.0.1:6379"      # Redis 地址
+  password: ""                 # Redis 密码（无密码留空）
+  db: 10                       # Redis DB 编号（隔离其他业务）
+  poolSize: 10                 # 连接池大小（按并发调整）
+  minIdleConns: 5              # 最小空闲连接数
+
+# --- 服务发现 ---
+# 启用后从 Redis 自动发现 logic server；关闭则用静态 localhost:50052
 discovery:
   enabled: false
-  serviceName: "logic"
-  heartbeatInterval: 3s
-  heartbeatTTL: 10s
-  deregisterDelay: 5s
-  scanInterval: 10s
+  serviceName: "logic"         # 注册到 Redis 的服务名
+  zone: ""                     # 留空则回退到顶层 zone
 
-# 协议配置
+# --- 监听协议 ---
+# 客户端接入端口（TCP/UDP/WebSocket）
 transports:
   - protocol: tcp
-    port: 48080
+    port: 48080               # TCP 接入端口
     type: ""
 
-# 工作池配置
-workerPool:
-  minWorkers: 128
-  maxWorkers: 1000
-  queueSize: 500000
-  queueSizeThreshold: 10000
+# --- gRPC ---
+# 网关侧 gRPC 端口（与 logic server 通信）
+# WindowSize/MaxMessageSize 等参数见 defaults.go
+grpc:
+  port: 50051
 
-# 速率限制配置
-rateLimiter:
-  rate: 500000
-  burst: 1000000
-  window: 1s
+# --- 过载保护（按环境调优）---
+# 仅列出"按机器配置调整"的字段；其余帧大小/检查间隔见 defaults.go
+protection:
+  memoryThreshold: 95.0        # 内存水位 %，超过则触发过载丢弃
+  cpuThreshold: 95.0           # CPU 水位 %，超过则触发过载丢弃
 
-# 安全配置
+# --- 安全防护 ---
+# 白名单/黑名单按业务调整；限流/熔断阈值见 defaults.go
 security:
-  authSecret: "default_secret"
-  authRoutes:
-    - "getConnections"
-    - "broadcast"
+  enabled: true
+  whitelist: []                 # IP 白名单（空=不限制）
+  blacklist: []                 # IP 黑名单（添加 IP 立即拦截）
+  rateLimit:
+    enabled: true
+    maxTokens: 10000000         # 每秒令牌数（压测时调高；生产按业务调整）
+    tokenRefresh: "1s"
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 5         # 连续失败次数触发熔断
+    successThreshold: 3         # 半开状态连续成功恢复
+    timeout: "30s"
 
-# 告警配置
-alerts:
-  activeConnectionsThreshold: 10000
-  failedMessagesThreshold: 100
-  processingTimeThreshold: 1000
-  redisErrorsThreshold: 10
-  queueLengthThreshold: 10000
+# --- TLS ---
+# 启用后客户端必须用 TLS 连接；证书文件路径必填
+# 默认 MinVersion=TLS1.2；强制 1.3 在 defaults.go 改 TLS1.3
+tls:
+  enabled: false
+  certFile: ""                  # 证书文件路径（如 ./certs/server.crt）
+  keyFile: ""                   # 私钥文件路径（如 ./certs/server.key）
 
-# 资源限制配置
-resources:
-  memoryThreshold: 95.0
-  cpuThreshold: 95.0
-  enableResourceCircuitBreaker: true
+# --- 集群 ---
+# 多节点部署时启用；Leader 选举锁 key/TTL 见 defaults.go
+cluster:
+  enabled: true
+  nodeID: ""                    # 留空=hostname-pid（推荐留空）
+
+# --- 负载均衡 ---
+# 到上游 logic server 的算法选择
+balancer:
+  algorithm: "roundRobin"       # roundRobin | weighted | leastConn | consistent
+
+# --- JWT 鉴权 ---
+# 启用后客户端必须在 X-Auth-Token 字段携带有效 JWT
+jwtAuth:
+  enabled: false
+  secret: "change-me"           # HS256 签名密钥（生产必须改！）
+  skipRoutes:                   # 跳过鉴权的路由（如握手/登录）
+    - "handshake"
+    - "login"
+
+# --- 灰度发布 ---
+# 按百分比/Header/用户 ID 把流量切到灰度路由
+canary:
+  enabled: false
+  percent: 0                    # 0-100，灰度命中比例
+  headers: {}                   # Header 匹配（key: value 命中灰度）
+  userIDs: []                   # 指定用户灰度
+  targetRoute: ""               # 灰度命中后切换到的上游路由
+
+# --- 流量镜像 ---
+# 按比例复制流量到测试环境，不影响主流量
+trafficMirror:
+  enabled: false
+  percent: 0                    # 0-100，镜像比例
+  targetAddr: ""                # 镜像目标地址（如 127.0.0.1:50099）
+
+# --- OpenTelemetry / Zipkin ---
+# 分布式追踪上报；endpoint 必填
+otelTracer:
+  enabled: false
+  endpoint: "http://127.0.0.1:9411/api/v2/spans"  # Zipkin/Jaeger collector
+
+# --- 配置中心 ---
+# 启用后从配置中心动态拉取配置（无需重启）
+# type: nacos | apollo | etcd | consul | http
+configCenter:
+  enabled: true                                      # 启用配置中心热加载
+  type: "nacos"                                       # 配置中心类型
+  endpoint: "http://127.0.0.1:8080"                   # Nacos 服务地址
+  dataID: "sgate.yaml"                                # Nacos 上配置的 Data ID（需与控制台一致）
+  group: "DEFAULT_GROUP"                              # Nacos Group（留空默认 DEFAULT_GROUP）
+  namespace: ""                                      # Nacos 命名空间 ID（默认 public 留空）
+  pollInterval: "5s"                                  # 长轮询兜底间隔（Nacos 内容哈希变化才推送）
+
+# --- 告警 webhook ---
+# 错误率/延迟突增时发送告警
+alert:
+  enabled: false
+  webhooks:
+    - name: "wecom-bot"
+      url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+      type: "wecom"            # wecom | dingtalk | generic
+      secret: ""
+    - name: "dingtalk-bot"
+      url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+      type: "dingtalk"
+      secret: ""
+
+# --- 降级 ---
+# 后端错误率超阈值返回兜底数据
+degradation:
+  enabled: false
+  rules:
+    - route: "high_failure_route"
+      errorThreshold: 0.5        # 50% 错误率触发降级
+      fallbackData: ""           # 兜底响应数据
+
+# --- 监控接入（可插拔）---
+# 通过开关控制是否启动 Prometheus /metrics 端点
+# 关闭时 sgate 单体也能正常运行（不暴露 /metrics，Prometheus 抓不到数据但不影响转发）
+# 启用时需配合本地 Prometheus + Grafana 环境使用
+# 端口规划（都用默认端口，无需任何 --web.listen-address 参数）：
+#   sgate metrics :9100  ← 默认值（让出 9090 给 Prometheus）
+#   Prometheus    :9090  ← Prometheus 自身默认
+#   Grafana       :3000  ← Grafana 自身默认
+monitoring:
+  prometheus:
+    enabled: true              # true=启动 /metrics 端点；false=不启动（单体模式）
+    addr: ":9100"             # sgate metrics 监听地址（让出 9090 给 Prometheus）
+    path: "/metrics"          # 指标路径（Prometheus scrape_config 的 metrics_path 必须与此一致）

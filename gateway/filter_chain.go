@@ -1,0 +1,226 @@
+package gateway
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+
+	"github.com/panjf2000/gnet/v2"
+	"github.com/streasure/sgate/protobuf"
+)
+
+// FilterPhase 过滤器执行阶段
+type FilterPhase int
+
+const (
+	PhasePreAuth  FilterPhase = iota // 鉴权前（黑名单/WAF/限流）
+	PhaseAuth                        // 鉴权（JWT/Token）
+	PhasePostAuth                    // 鉴权后（灰度/镜像/路由前）
+	PhaseForward                     // 转发前（最终修改请求）
+)
+
+// FilterContext 过滤器上下文（贯穿整条链）
+type FilterContext struct {
+	Ctx          context.Context
+	Conn         gnet.Conn
+	ConnectionID string
+	RemoteIP     string
+	Route        string
+	Cmd          int32
+	Data         []byte
+	UserUUID     string
+	Metadata     map[string]string // 透传元数据（如灰度标记、镜像标记）
+	// 结果控制
+	Abort      bool   // 中止后续过滤器与转发
+	DropReason string // 中止原因
+	// 镜像副作用
+	Mirrored bool
+}
+
+// Filter SPI 过滤器接口
+// 返回 (continue, error)：continue=false 表示中止链
+type Filter interface {
+	Name() string
+	Phase() FilterPhase
+	Priority() int // 数字越小越靠前
+	Process(fc *FilterContext) (bool, error)
+}
+
+// FilterFactory SPI 工厂：按名称动态构造过滤器
+type FilterFactory func(cfg map[string]interface{}) (Filter, error)
+
+// FilterChain 过滤器链
+type FilterChain struct {
+	mu       sync.RWMutex
+	filters  []Filter
+	registry map[string]FilterFactory // 全局 SPI 注册表
+	regMu    sync.RWMutex
+	enabled  atomic.Int32
+}
+
+var globalFilterRegistry = map[string]FilterFactory{}
+
+// RegisterFilter 全局注册过滤器工厂（SPI 入口）
+// 在 init() 中调用以注册内置过滤器；外部插件可通过此接口注册。
+func RegisterFilter(name string, f FilterFactory) {
+	globalFilterRegistry[name] = f
+}
+
+// NewFilterChain 创建过滤器链
+func NewFilterChain() *FilterChain {
+	fc := &FilterChain{
+		registry: globalFilterRegistry,
+	}
+	fc.enabled.Store(1)
+	return fc
+}
+
+// Register 注册过滤器工厂到本链
+func (fc *FilterChain) Register(name string, f FilterFactory) {
+	fc.regMu.Lock()
+	defer fc.regMu.Unlock()
+	fc.registry[name] = f
+}
+
+// LoadByName 按名称动态加载过滤器（SPI）
+func (fc *FilterChain) LoadByName(name string, cfg map[string]interface{}) error {
+	fc.regMu.RLock()
+	factory, ok := fc.registry[name]
+	fc.regMu.RUnlock()
+	if !ok {
+		return ErrFilterNotFound{name}
+	}
+	f, err := factory(cfg)
+	if err != nil {
+		return err
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.filters = append(fc.filters, f)
+	fc.sortFiltersLocked()
+	return nil
+}
+
+// UnloadByName 按名称卸载过滤器（SPI：运行时动态卸载）
+func (fc *FilterChain) UnloadByName(name string) bool {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	for i, f := range fc.filters {
+		if f.Name() == name {
+			fc.filters = append(fc.filters[:i], fc.filters[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// AddFilter 直接添加已构造的过滤器
+func (fc *FilterChain) AddFilter(f Filter) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.filters = append(fc.filters, f)
+	fc.sortFiltersLocked()
+}
+
+// List 列出已加载过滤器
+func (fc *FilterChain) List() []string {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	names := make([]string, 0, len(fc.filters))
+	for _, f := range fc.filters {
+		names = append(names, f.Name())
+	}
+	return names
+}
+
+// Enable / Disable 启停整条链
+func (fc *FilterChain) Enable()  { fc.enabled.Store(1) }
+func (fc *FilterChain) Disable() { fc.enabled.Store(0) }
+
+// RunByPhase 执行指定阶段的过滤器
+// 返回 false 表示链被中止
+func (fc *FilterChain) RunByPhase(phase FilterPhase, fcx *FilterContext) bool {
+	if fc.enabled.Load() == 0 {
+		return true
+	}
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	for _, f := range fc.filters {
+		if f.Phase() != phase {
+			continue
+		}
+		ok, err := f.Process(fcx)
+		if err != nil {
+			continue
+		}
+		if !ok {
+			fcx.Abort = true
+			return false
+		}
+	}
+	return true
+}
+
+func (fc *FilterChain) sortFiltersLocked() {
+	// 简单插入排序：按 Priority 升序
+	for i := 1; i < len(fc.filters); i++ {
+		for j := i; j > 0 && fc.filters[j].Priority() < fc.filters[j-1].Priority(); j-- {
+			fc.filters[j], fc.filters[j-1] = fc.filters[j-1], fc.filters[j]
+		}
+	}
+}
+
+// ErrFilterNotFound 过滤器未注册错误
+type ErrFilterNotFound struct{ Name string }
+
+func (e ErrFilterNotFound) Error() string { return "filter not found: " + e.Name }
+
+// BuildFilterContext 从原始请求构造过滤器上下文
+func (g *Gateway) BuildFilterContext(c gnet.Conn, data []byte, connectionID, route string, cmd int32) *FilterContext {
+	fc := &FilterContext{
+		Ctx:          g.ctx,
+		Conn:         c,
+		ConnectionID: connectionID,
+		RemoteIP:     getRemoteIP(c),
+		Route:        route,
+		Cmd:          cmd,
+		Data:         data,
+		Metadata:     make(map[string]string),
+	}
+	if ctx, ok := c.Context().(*ConnContext); ok && ctx != nil {
+		fc.UserUUID = ctx.UserUUID
+	}
+	return fc
+}
+
+// applyForwardFilters 在转发前运行全部过滤器
+// 返回 false 表示请求被中止，调用方应丢弃该请求
+func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, route string, cmd int32) (*protobuf.Message, bool) {
+	if g.filterChain == nil {
+		return nil, true
+	}
+	fcx := g.BuildFilterContext(c, data, connectionID, route, cmd)
+	for phase := PhasePreAuth; phase <= PhaseForward; phase++ {
+		if !g.filterChain.RunByPhase(phase, fcx) {
+			g.messagesDroppedFilterChain.Add(1)
+			return nil, false
+		}
+		if fcx.Abort {
+			return nil, false
+		}
+	}
+	// 镜像副作用标记
+	if fcx.Mirrored && g.trafficMirror != nil {
+		g.trafficMirror.Mirror(fcx)
+	}
+	// 构造转发消息（允许过滤器修改 metadata）
+	msg := &protobuf.Message{
+		ConnectionId: connectionID,
+		Route:        route,
+		Data:         append([]byte(nil), data...),
+	}
+	if fcx.UserUUID != "" {
+		msg.UserUuid = fcx.UserUUID
+	}
+	return msg, true
+}

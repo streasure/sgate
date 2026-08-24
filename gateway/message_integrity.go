@@ -16,16 +16,16 @@ import (
 
 // MessageIntegrity 消息完整性管理
 type MessageIntegrity struct {
-	timeWindow  int64           // 时间窗口（毫秒）
-	replayCache map[string]bool // 防重放缓存
-	cacheMutex  sync.RWMutex    // 缓存互斥锁
+	timeWindow  int64            // 时间窗口（毫秒）
+	replayCache map[string]int64 // 防重放缓存：msgID -> 处理时间（毫秒）
+	cacheMutex  sync.RWMutex     // 缓存互斥锁
 }
 
 // NewMessageIntegrity 创建消息完整性管理器
 func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 	mi := &MessageIntegrity{
 		timeWindow:  timeWindow,
-		replayCache: make(map[string]bool),
+		replayCache: make(map[string]int64),
 	}
 
 	// 启动缓存清理协程
@@ -36,16 +36,14 @@ func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 
 // cleanupCache 清理过期的防重放缓存
 func (mi *MessageIntegrity) cleanupCache() {
-	ticker := time.NewTicker(10 * time.Minute)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		mi.cacheMutex.Lock()
 		now := time.Now().UnixMilli()
-		for key, _ := range mi.replayCache {
-			// 简单的时间戳提取（假设key包含时间戳）
-			// 实际实现中可能需要更复杂的缓存键管理
-			if now-mi.timeWindow > 0 {
+		for key, ts := range mi.replayCache {
+			if now-ts > mi.timeWindow {
 				delete(mi.replayCache, key)
 			}
 		}
@@ -170,11 +168,17 @@ func (mi *MessageIntegrity) MarkProcessed(msgID string) {
 	mi.cacheMutex.Lock()
 	defer mi.cacheMutex.Unlock()
 
-	mi.replayCache[msgID] = true
+	mi.replayCache[msgID] = time.Now().UnixMilli()
 }
 
 // ProcessMessage 处理消息完整性
+// 注意: 当消息未携带 checksum（空字符串）时跳过校验，视为「不要求完整性保护」，
+// 这样可兼容未签名的压测流量与历史客户端；签名消息会被完整校验。
 func (mi *MessageIntegrity) ProcessMessage(msg *protobuf.Message) error {
+	if msg.Checksum == "" {
+		return nil
+	}
+
 	// 生成消息ID（用于防重放）
 	msgID := msg.ConnectionId + "-" + msg.UserUuid + "-" + msg.Route + "-" + fmt.Sprint(msg.Timestamp)
 

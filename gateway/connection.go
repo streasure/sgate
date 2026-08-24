@@ -35,10 +35,25 @@ type Connection struct {
 	Status     int8
 	Groups     map[string]struct{}
 	IsWS       bool
+	mu         sync.Mutex
 }
 
 func (c *Connection) ID() string {
 	return c.id
+}
+
+// SetWS 标记连接为 WebSocket（线程安全）
+func (c *Connection) SetWS(v bool) {
+	c.mu.Lock()
+	c.IsWS = v
+	c.mu.Unlock()
+}
+
+// IsWebSocket 返回是否为 WebSocket 连接（线程安全）
+func (c *Connection) IsWebSocket() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.IsWS
 }
 
 // noopAsyncCallback 空回调，用于 AsyncWrite/AsyncWritev
@@ -50,6 +65,7 @@ func (c *Connection) Send(data []byte) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
+	c.LastActive = time.Now().UnixMilli()
 	if c.IsWS {
 		return c.sendWSFrame(data)
 	}
@@ -66,6 +82,7 @@ func (c *Connection) SendMulti(combined []byte) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
+	c.LastActive = time.Now().UnixMilli()
 	if c.IsWS {
 		// WebSocket 不支持批量，逐帧发送
 		// 注：此路径在 burst 压测中不会触发（客户端为 TCP 连接）
@@ -128,15 +145,15 @@ type ConnectionManager struct {
 	groupMutex            sync.RWMutex
 	count                 int32
 	stopCh                chan struct{}
-	totalConnections    atomic.Int64
-	activeConnections   atomic.Int64
-	closedConnections   atomic.Int64
-	connectionTimeouts  atomic.Int64
-	connectionErrors    atomic.Int64
-	totalConnectionTime atomic.Int64
-	totalMessages       atomic.Int64
-	failedMessages      atomic.Int64
-	totalMessageLatency atomic.Int64
+	totalConnections      atomic.Int64
+	activeConnections     atomic.Int64
+	closedConnections     atomic.Int64
+	connectionTimeouts    atomic.Int64
+	connectionErrors      atomic.Int64
+	totalConnectionTime   atomic.Int64
+	totalMessages         atomic.Int64
+	failedMessages        atomic.Int64
+	totalMessageLatency   atomic.Int64
 }
 
 // connectionPool 连接对象池
@@ -761,8 +778,6 @@ func generateConnectionID() string {
 	n := atomic.AddUint64(&connIDCounter, 1)
 	return fmt.Sprintf("%d%06d", time.Now().UnixMilli(), n%1000000)
 }
-
-
 
 // CreateGroup 创建推送组
 // 功能: 创建一个新的推送组

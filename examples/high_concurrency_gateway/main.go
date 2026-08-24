@@ -13,26 +13,23 @@ import (
 	tlog "github.com/streasure/treasure-slog"
 )
 
-var (
-	modkernel32            = syscall.NewLazyDLL("kernel32.dll")
-	procSetPriorityClass   = modkernel32.NewProc("SetPriorityClass")
-	procSetProcessAffinity = modkernel32.NewProc("SetProcessAffinityMask")
-)
-
-func setProcessPriorityHigh() {
-	handle, _ := syscall.GetCurrentProcess()
-	procSetPriorityClass.Call(uintptr(handle), 0x00000080) // HIGH_PRIORITY_CLASS
-	_ = handle
-}
-
-func setProcessAffinity(mask uintptr) {
-	handle, _ := syscall.GetCurrentProcess()
-	procSetProcessAffinity.Call(uintptr(handle), mask)
-	_ = handle
-}
-
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	// GC 调优：千万级吞吐下减少 STW
+	//   GOGC=200 — 提高 GC 触发阈值，降低 GC 频率（默认 100）
+	//   GOMEMLIMIT — Go 1.19+ 软内存上限，建议在容器启动时通过环境变量设置：
+	//     GOMEMLIMIT=4GiB ./high_concurrency_gateway
+	//   （runtime 在启动时读环境变量；main 内设置已太晚）
+	if v := os.Getenv("GOGC"); v == "" {
+		os.Setenv("GOGC", "200")
+		debugSetGCPercent(200)
+	} else {
+		debugSetGCPercent(parseIntDefault(v, 100))
+	}
+	if v := os.Getenv("GOMEMLIMIT"); v != "" {
+		tlog.Info("GOMEMLIMIT from env", "value", v)
+	}
 
 	setProcessPriorityHigh()
 
@@ -43,6 +40,14 @@ func main() {
 			fmt.Fprintf(os.Stderr, "panic: %v\n%s\n", r, buf[:n])
 		}
 	}()
+
+	// 启动 pprof server（独立 goroutine，默认 :6060）
+	// 监控：goroutine 数量、heap 泄漏、schedlatency、CPU 热点
+	if addr := os.Getenv("SGATE_PPROF_ADDR"); addr != "" {
+		gateway.StartPProfServer(addr)
+	} else {
+		gateway.StartPProfServer(":6060")
+	}
 
 	if _, err := tlog.New("config/tlog.yaml"); err != nil {
 		if _, err := tlog.New("../config/tlog.yaml"); err != nil {
@@ -92,25 +97,25 @@ func main() {
 					gnet.WithMulticore(true),
 					gnet.WithReusePort(true),
 					gnet.WithTCPNoDelay(gnet.TCPNoDelay),
-					gnet.WithReadBufferCap(65536),
-					gnet.WithWriteBufferCap(65536),
-					gnet.WithSocketRecvBuffer(262144),
-					gnet.WithSocketSendBuffer(262144),
+					gnet.WithReadBufferCap(262144),             // 256KB — more data per OnTraffic = bigger batches
+					gnet.WithWriteBufferCap(262144),            // 256KB — larger write queue for reverse push
+					gnet.WithSocketRecvBuffer(4 * 1024 * 1024), // 4MB kernel recv buffer
+					gnet.WithSocketSendBuffer(4 * 1024 * 1024), // 4MB kernel send buffer
 				}
 			} else {
 				options = []gnet.Option{
 					gnet.WithMulticore(true),
 					gnet.WithReusePort(true),
-					gnet.WithReadBufferCap(65536),
-					gnet.WithWriteBufferCap(65536),
-					gnet.WithSocketRecvBuffer(262144),
-					gnet.WithSocketSendBuffer(262144),
+					gnet.WithReadBufferCap(262144),
+					gnet.WithWriteBufferCap(262144),
+					gnet.WithSocketRecvBuffer(4 * 1024 * 1024),
+					gnet.WithSocketSendBuffer(4 * 1024 * 1024),
 				}
 			}
 
 			tlog.Info("性能优化选项:", "multicore", true, "reusePort", true,
-				"tcpNoDelay", true, "readBuffer", 65536, "writeBuffer", 65536,
-				"socketRecvBuffer", 262144, "socketSendBuffer", 262144)
+				"tcpNoDelay", true, "readBuffer", 262144, "writeBuffer", 262144,
+				"socketRecvBuffer", 4*1024*1024, "socketSendBuffer", 4*1024*1024)
 
 			if err := gnet.Run(gw, addr, options...); err != nil {
 				tlog.Error("启动服务器失败", "error", err, "addr", addr)

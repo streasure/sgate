@@ -2,300 +2,206 @@ package gateway
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"net/http"
 	"runtime"
 	"sync"
 	"time"
 
+	"github.com/streasure/sgate/monitor"
 	tlog "github.com/streasure/treasure-slog"
 )
 
-// PrometheusMetrics Prometheus指标收集器
-type PrometheusMetrics struct {
-	mu sync.RWMutex
+// ============================================================================
+// gateway/metrics.go —— 网关统计与监控对接
+// ----------------------------------------------------------------------------
+// Prometheus 指标导出逻辑已抽到独立可 import 的 monitor 包：
+//   github.com/streasure/sgate/monitor
+//
+// Gateway 通过实现 monitor.StatsProvider 接口（Stats() 方法）向 monitor
+// 提供运行时快照，monitor.PrometheusExporter 负责渲染 /metrics 端点。
+//
+// 当 monitoring.prometheus.enabled=false 时，Gateway 不创建 exporter，
+// sgate 单体正常运行（仅不暴露 /metrics 端点）。
+// ============================================================================
 
-	// 连接指标
-	connectionsTotal   uint64
-	connectionsActive  int32
-	connectionsCreated uint64
-	connectionsClosed  uint64
-
-	// 消息指标
-	messagesReceived  uint64
-	messagesProcessed uint64
-	messagesFailed    uint64
-	messagesPerSecond float64
-
-	// 延迟指标
-	processingTimeTotal   int64
-	processingTimeAverage float64
-	processingTime99th    float64
-
-	rateLimitHits    uint64
-	rateLimitBlocked uint64
-
-	// 系统指标
-	goroutines  int
-	memoryAlloc uint64
-	memorySys   uint64
-	gcCount     uint32
-	cpuUsage    float64
-
-	// 时间窗口数据（用于计算每秒消息数）
-	messageHistory []messageSnapshot
-	historyMu      sync.Mutex
+// messageRateTracker 滚动窗口消息速率计算器
+// 在 Stats() 被调用时计算最近 window 内的每秒消息数
+type messageRateTracker struct {
+	mu        sync.Mutex
+	samples   []rateSample
+	window    time.Duration
+	lastCount int64
+	lastTime  time.Time
 }
 
-// messageSnapshot 消息快照
-type messageSnapshot struct {
+type rateSample struct {
 	timestamp time.Time
-	count     uint64
+	count     int64
 }
 
-// NewPrometheusMetrics 创建Prometheus指标收集器
-func NewPrometheusMetrics() *PrometheusMetrics {
-	pm := &PrometheusMetrics{
-		messageHistory: make([]messageSnapshot, 0, 60), // 保留60秒的历史数据
-	}
-
-	// 启动指标收集协程
-	go pm.collectMetrics()
-
-	return pm
-}
-
-// collectMetrics 定期收集指标
-func (pm *PrometheusMetrics) collectMetrics() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		pm.updateSystemMetrics()
-		pm.calculateMessagesPerSecond()
+func newMessageRateTracker(window time.Duration) *messageRateTracker {
+	return &messageRateTracker{
+		samples: make([]rateSample, 0, 64),
+		window:  window,
 	}
 }
 
-// updateSystemMetrics 更新系统指标
-func (pm *PrometheusMetrics) updateSystemMetrics() {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
+// record 记录当前消息总数快照（由 Stats() 调用）
+func (r *messageRateTracker) record(now time.Time, currentCount int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	pm.mu.Lock()
-	pm.goroutines = runtime.NumGoroutine()
-	pm.memoryAlloc = m.Alloc
-	pm.memorySys = m.Sys
-	pm.gcCount = m.NumGC
-	pm.mu.Unlock()
-}
+	r.samples = append(r.samples, rateSample{timestamp: now, count: currentCount})
 
-// calculateMessagesPerSecond 计算每秒消息数
-func (pm *PrometheusMetrics) calculateMessagesPerSecond() {
-	pm.historyMu.Lock()
-	defer pm.historyMu.Unlock()
-
-	now := time.Now()
-	currentCount := pm.GetMessagesReceived()
-
-	// 添加当前快照
-	pm.messageHistory = append(pm.messageHistory, messageSnapshot{
-		timestamp: now,
-		count:     currentCount,
-	})
-
-	// 清理过期数据（保留最近60秒）
-	cutoff := now.Add(-60 * time.Second)
+	// 清理过期数据
+	cutoff := now.Add(-r.window)
 	startIdx := 0
-	for i, snap := range pm.messageHistory {
-		if snap.timestamp.After(cutoff) {
+	for i, s := range r.samples {
+		if s.timestamp.After(cutoff) {
 			startIdx = i
 			break
 		}
 	}
-	pm.messageHistory = pm.messageHistory[startIdx:]
+	r.samples = r.samples[startIdx:]
+}
 
-	// 计算每秒消息数
-	if len(pm.messageHistory) >= 2 {
-		first := pm.messageHistory[0]
-		last := pm.messageHistory[len(pm.messageHistory)-1]
-		duration := last.timestamp.Sub(first.timestamp).Seconds()
-		if duration > 0 {
-			pm.mu.Lock()
-			pm.messagesPerSecond = float64(last.count-first.count) / duration
-			pm.mu.Unlock()
-		}
+// rate 计算每秒消息数
+func (r *messageRateTracker) rate() float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.samples) < 2 {
+		return 0
 	}
-}
-
-// IncConnectionsTotal 增加连接总数
-func (pm *PrometheusMetrics) IncConnectionsTotal() {
-	pm.mu.Lock()
-	pm.connectionsTotal++
-	pm.connectionsCreated++
-	pm.mu.Unlock()
-}
-
-// DecConnectionsActive 减少活跃连接数
-func (pm *PrometheusMetrics) DecConnectionsActive() {
-	pm.mu.Lock()
-	pm.connectionsActive--
-	pm.connectionsClosed++
-	pm.mu.Unlock()
-}
-
-// SetConnectionsActive 设置活跃连接数
-func (pm *PrometheusMetrics) SetConnectionsActive(count int32) {
-	pm.mu.Lock()
-	pm.connectionsActive = count
-	pm.mu.Unlock()
-}
-
-// IncMessagesReceived 增加接收消息数
-func (pm *PrometheusMetrics) IncMessagesReceived() {
-	pm.mu.Lock()
-	pm.messagesReceived++
-	pm.mu.Unlock()
-}
-
-// IncMessagesProcessed 增加处理成功消息数
-func (pm *PrometheusMetrics) IncMessagesProcessed() {
-	pm.mu.Lock()
-	pm.messagesProcessed++
-	pm.mu.Unlock()
-}
-
-// IncMessagesFailed 增加处理失败消息数
-func (pm *PrometheusMetrics) IncMessagesFailed() {
-	pm.mu.Lock()
-	pm.messagesFailed++
-	pm.mu.Unlock()
-}
-
-// AddProcessingTime 添加处理时间
-func (pm *PrometheusMetrics) AddProcessingTime(duration time.Duration) {
-	pm.mu.Lock()
-	pm.processingTimeTotal += int64(duration)
-	if pm.messagesProcessed > 0 {
-		pm.processingTimeAverage = float64(pm.processingTimeTotal) / float64(pm.messagesProcessed)
+	first := r.samples[0]
+	last := r.samples[len(r.samples)-1]
+	duration := last.timestamp.Sub(first.timestamp).Seconds()
+	if duration <= 0 {
+		return 0
 	}
-	pm.mu.Unlock()
+	return float64(last.count-first.count) / duration
 }
 
-// GetMessagesReceived 获取接收消息数
-func (pm *PrometheusMetrics) GetMessagesReceived() uint64 {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-	return pm.messagesReceived
-}
+// Stats 实现 monitor.StatsProvider 接口，返回当前网关运行时统计快照。
+// 每次 Prometheus scrape 时由 monitor.PrometheusExporter 调用。
+func (g *Gateway) Stats() monitor.GatewayStats {
+	var s monitor.GatewayStats
 
-// GetMessagesPerSecond 获取每秒消息数
-func (pm *PrometheusMetrics) GetMessagesPerSecond() float64 {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-	return pm.messagesPerSecond
-}
+	// --- 连接指标 ---
+	s.ConnectionsTotal = uint64(g.metrics.GetConnectionsTotal())
+	s.ConnectionsActive = g.metrics.GetConnectionsActive()
 
-// ServeMetricsHTTP 提供Prometheus格式的指标端点
-func (pm *PrometheusMetrics) ServeMetricsHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/metrics" {
-		http.NotFound(w, r)
-		return
+	// --- 消息指标 ---
+	s.MessagesReceived = g.messagesReceived.Load()
+	s.MessagesForwarded = g.messagesForwarded.Load()
+	s.MessagesPushed = g.messagesPushedToClient.Load()
+	s.MessagesDroppedOverload = g.messagesDroppedOverload.Load()
+	s.MessagesDroppedFull = g.messagesDroppedFull.Load()
+	s.MessagesDroppedNoLogic = g.messagesDroppedNoLogic.Load()
+	s.MessagesDroppedNoLogicNotConn = g.messagesDroppedNoLogicNotConnected.Load()
+	s.MessagesPushDroppedNoConn = g.messagesPushDroppedNoConn.Load()
+	s.MessagesDroppedBlacklist = g.messagesDroppedBlacklist.Load()
+	s.MessagesDroppedRateLimit = g.messagesDroppedRateLimit.Load()
+	s.MessagesDroppedWAF = g.messagesDroppedWAF.Load()
+	s.MessagesDroppedCircuit = g.messagesDroppedCircuit.Load()
+	s.MessagesDroppedIntegrity = g.messagesDroppedIntegrity.Load()
+	s.MessagesDroppedFilterChain = g.messagesDroppedFilterChain.Load()
+	s.MessagesProcessed = g.metrics.GetMessagesProcessed()
+	s.MessagesFailed = g.metrics.GetMessagesFailed()
+
+	// 消息速率（滚动窗口估算）
+	now := time.Now()
+	if g.msgRate != nil {
+		g.msgRate.record(now, s.MessagesReceived)
+		s.MessagesPerSecond = g.msgRate.rate()
 	}
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	// 输出Prometheus格式的指标
-	fmt.Fprintf(w, "# HELP sgate_connections_total Total number of connections\n")
-	fmt.Fprintf(w, "# TYPE sgate_connections_total counter\n")
-	fmt.Fprintf(w, "sgate_connections_total %d\n\n", pm.connectionsTotal)
-
-	fmt.Fprintf(w, "# HELP sgate_connections_active Number of active connections\n")
-	fmt.Fprintf(w, "# TYPE sgate_connections_active gauge\n")
-	fmt.Fprintf(w, "sgate_connections_active %d\n\n", pm.connectionsActive)
-
-	fmt.Fprintf(w, "# HELP sgate_connections_created Total number of created connections\n")
-	fmt.Fprintf(w, "# TYPE sgate_connections_created counter\n")
-	fmt.Fprintf(w, "sgate_connections_created %d\n\n", pm.connectionsCreated)
-
-	fmt.Fprintf(w, "# HELP sgate_connections_closed Total number of closed connections\n")
-	fmt.Fprintf(w, "# TYPE sgate_connections_closed counter\n")
-	fmt.Fprintf(w, "sgate_connections_closed %d\n\n", pm.connectionsClosed)
-
-	fmt.Fprintf(w, "# HELP sgate_messages_received_total Total number of received messages\n")
-	fmt.Fprintf(w, "# TYPE sgate_messages_received_total counter\n")
-	fmt.Fprintf(w, "sgate_messages_received_total %d\n\n", pm.messagesReceived)
-
-	fmt.Fprintf(w, "# HELP sgate_messages_processed_total Total number of processed messages\n")
-	fmt.Fprintf(w, "# TYPE sgate_messages_processed_total counter\n")
-	fmt.Fprintf(w, "sgate_messages_processed_total %d\n\n", pm.messagesProcessed)
-
-	fmt.Fprintf(w, "# HELP sgate_messages_failed_total Total number of failed messages\n")
-	fmt.Fprintf(w, "# TYPE sgate_messages_failed_total counter\n")
-	fmt.Fprintf(w, "sgate_messages_failed_total %d\n\n", pm.messagesFailed)
-
-	fmt.Fprintf(w, "# HELP sgate_messages_per_second Number of messages per second\n")
-	fmt.Fprintf(w, "# TYPE sgate_messages_per_second gauge\n")
-	fmt.Fprintf(w, "sgate_messages_per_second %.2f\n\n", pm.messagesPerSecond)
-
-	fmt.Fprintf(w, "# HELP sgate_processing_time_average Average processing time in microseconds\n")
-	fmt.Fprintf(w, "# TYPE sgate_processing_time_average gauge\n")
-	fmt.Fprintf(w, "sgate_processing_time_average %.2f\n\n", pm.processingTimeAverage/1000)
-
-	fmt.Fprintf(w, "# HELP sgate_rate_limit_hits_total Total number of rate limit hits\n")
-	fmt.Fprintf(w, "# TYPE sgate_rate_limit_hits_total counter\n")
-	fmt.Fprintf(w, "sgate_rate_limit_hits_total %d\n\n", pm.rateLimitHits)
-
-	fmt.Fprintf(w, "# HELP sgate_rate_limit_blocked_total Total number of rate limit blocks\n")
-	fmt.Fprintf(w, "# TYPE sgate_rate_limit_blocked_total counter\n")
-	fmt.Fprintf(w, "sgate_rate_limit_blocked_total %d\n\n", pm.rateLimitBlocked)
-
-	fmt.Fprintf(w, "# HELP sgate_goroutines Number of goroutines\n")
-	fmt.Fprintf(w, "# TYPE sgate_goroutines gauge\n")
-	fmt.Fprintf(w, "sgate_goroutines %d\n\n", pm.goroutines)
-
-	fmt.Fprintf(w, "# HELP sgate_memory_alloc_bytes Allocated memory in bytes\n")
-	fmt.Fprintf(w, "# TYPE sgate_memory_alloc_bytes gauge\n")
-	fmt.Fprintf(w, "sgate_memory_alloc_bytes %d\n\n", pm.memoryAlloc)
-
-	fmt.Fprintf(w, "# HELP sgate_memory_sys_bytes System memory in bytes\n")
-	fmt.Fprintf(w, "# TYPE sgate_memory_sys_bytes gauge\n")
-	fmt.Fprintf(w, "sgate_memory_sys_bytes %d\n\n", pm.memorySys)
-
-	fmt.Fprintf(w, "# HELP sgate_gc_count Total number of garbage collections\n")
-	fmt.Fprintf(w, "# TYPE sgate_gc_count counter\n")
-	fmt.Fprintf(w, "sgate_gc_count %d\n", pm.gcCount)
-}
-
-// RegisterPrometheusMetrics 注册Prometheus指标到Gateway
-func (g *Gateway) RegisterPrometheusMetrics() {
-	promMetrics := NewPrometheusMetrics()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/metrics", promMetrics.ServeMetricsHTTP)
-
-	srv := &http.Server{Addr: ":9090", Handler: mux}
-	g.promServer = srv
-
-	go func() {
-		tlog.Info("启动Prometheus指标服务器", "addr", ":9090")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			tlog.Error("Prometheus指标服务器启动失败", "error", err)
-		}
-	}()
-}
-
-func (g *Gateway) StopPrometheusMetrics() {
-	if g.promServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		g.promServer.Shutdown(ctx)
+	// --- 延迟指标 ---
+	if g.latencyTracker != nil {
+		ls := g.latencyTracker.GetStats()
+		s.LatencyP50Us = ls.P50.Microseconds()
+		s.LatencyP95Us = ls.P95.Microseconds()
+		s.LatencyP99Us = ls.P99.Microseconds()
+		s.LatencyMaxUs = ls.Max.Microseconds()
 	}
+
+	// --- 安全防护指标 ---
+	if g.waf != nil {
+		s.WAFBlocked = g.waf.GetBlockedCount()
+	}
+	if g.circuitBreakerMgr != nil {
+		s.CircuitBreakerTripped = g.circuitBreakerMgr.GetTrippedCount()
+	}
+	if g.degradation != nil {
+		s.DegradationTriggered = g.degradation.GetTriggeredCount()
+	}
+
+	// --- 集群指标 ---
+	if g.cluster != nil && g.cluster.IsLeader() {
+		s.IsLeader = 1
+	}
+
+	// --- 灰度 / 镜像 ---
+	if g.canaryFilter != nil {
+		s.CanaryHit = g.canaryFilter.GetHitCount()
+	}
+	if g.trafficMirror != nil {
+		s.TrafficMirrorForwarded, s.TrafficMirrorDropped = g.trafficMirror.Stats()
+	}
+
+	// --- 告警 ---
+	if g.alertWebhook != nil {
+		s.AlertSent, s.AlertDropped = g.alertWebhook.Stats()
+	}
+
+	// --- 系统指标 ---
+	if g.overloadProtector != nil {
+		s.CPUUsagePercent, s.MemUsagePercent, _, _ = g.overloadProtector.Stats()
+	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	s.Goroutines = runtime.NumGoroutine()
+	s.MemoryAlloc = m.Alloc
+	s.MemorySys = m.Sys
+	s.GCCount = m.NumGC
+
+	return s
 }
 
-// StartStatsServer 启动轻量级统计 HTTP 服务，供压测工具查询转发计数
+// statsPayload 是 /stats 端点返回的 JSON 结构
+type statsPayload struct {
+	Received              int64   `json:"received"`
+	Forwarded             int64   `json:"forwarded"`
+	DroppedOverload       int64   `json:"droppedOverload"`
+	DroppedFull           int64   `json:"droppedFull"`
+	DroppedNoLogic        int64   `json:"droppedNoLogic"`
+	DroppedNoLogicNotConn int64   `json:"droppedNoLogicNotConnected"`
+	DroppedBlacklist      int64   `json:"droppedBlacklist"`
+	DroppedRateLimit      int64   `json:"droppedRateLimit"`
+	DroppedWAF            int64   `json:"droppedWAF"`
+	DroppedCircuit        int64   `json:"droppedCircuit"`
+	DroppedIntegrity      int64   `json:"droppedIntegrity"`
+	DroppedFilterChain    int64   `json:"droppedFilterChain"`
+	DroppedTotal          int64   `json:"droppedTotal"`
+	PushedToClient        int64   `json:"pushedToClient"`
+	PushDroppedNoConn     int64   `json:"pushDroppedNoConn"`
+	Overloaded            bool    `json:"overloaded"`
+	CPUPercent            float64 `json:"cpuPercent"`
+	MemPercent            float64 `json:"memPercent"`
+	OverloadDropped       int64   `json:"overloadDropped"`
+	ActiveConnections     int64   `json:"activeConnections"`
+	WAFBlocked            int64   `json:"wafBlocked"`
+	IsLeader              bool    `json:"isLeader"`
+	NodeID                string  `json:"nodeID,omitempty"`
+	LatencyP50Us          int64   `json:"latencyP50Us"`
+	LatencyP95Us          int64   `json:"latencyP95Us"`
+	LatencyP99Us          int64   `json:"latencyP99Us"`
+	LatencyMaxUs          int64   `json:"latencyMaxUs"`
+}
+
+// StartStatsServer 启动统计 HTTP 服务，暴露 /stats /health /ready /live
+// 此服务与 Prometheus /metrics 独立，始终启动（用于 K8s probe 和运维查看）
 func (g *Gateway) StartStatsServer(addr string) {
 	if addr == "" {
 		addr = ":9091"
@@ -303,28 +209,71 @@ func (g *Gateway) StartStatsServer(addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		cpuPct, memPct, overloaded, dropped := g.overloadProtector.Stats()
-		forwarded := g.messagesForwarded.Load()
-		recv := g.messagesReceived.Load()
 		dropOverload := g.messagesDroppedOverload.Load()
 		dropFull := g.messagesDroppedFull.Load()
 		dropNoLogic := g.messagesDroppedNoLogic.Load()
 		dropNoLogicNotConn := g.messagesDroppedNoLogicNotConnected.Load()
-		pushedToClient := g.messagesPushedToClient.Load()
-		pushDroppedNoConn := g.messagesPushDroppedNoConn.Load()
+		dropBlacklist := g.messagesDroppedBlacklist.Load()
+		dropRateLimit := g.messagesDroppedRateLimit.Load()
+		dropWAF := g.messagesDroppedWAF.Load()
+		dropCircuit := g.messagesDroppedCircuit.Load()
+		dropIntegrity := g.messagesDroppedIntegrity.Load()
+		dropFilterChain := g.messagesDroppedFilterChain.Load()
+		stats := statsPayload{
+			Received:              g.messagesReceived.Load(),
+			Forwarded:             g.messagesForwarded.Load(),
+			DroppedOverload:       dropOverload,
+			DroppedFull:           dropFull,
+			DroppedNoLogic:        dropNoLogic,
+			DroppedNoLogicNotConn: dropNoLogicNotConn,
+			DroppedBlacklist:      dropBlacklist,
+			DroppedRateLimit:      dropRateLimit,
+			DroppedWAF:            dropWAF,
+			DroppedCircuit:        dropCircuit,
+			DroppedIntegrity:      dropIntegrity,
+			DroppedFilterChain:    dropFilterChain,
+			DroppedTotal:          dropOverload + dropFull + dropNoLogic + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain,
+			PushedToClient:        g.messagesPushedToClient.Load(),
+			PushDroppedNoConn:     g.messagesPushDroppedNoConn.Load(),
+			Overloaded:            overloaded,
+			CPUPercent:            cpuPct,
+			MemPercent:            memPct,
+			OverloadDropped:       dropped,
+			ActiveConnections:     g.metrics.GetConnectionsActive(),
+		}
+		if g.waf != nil {
+			stats.WAFBlocked = g.waf.GetBlockedCount()
+		}
+		if g.cluster != nil {
+			stats.IsLeader = g.cluster.IsLeader()
+			stats.NodeID = g.cluster.GetNodeID()
+		}
+		if g.latencyTracker != nil {
+			latStats := g.latencyTracker.GetStats()
+			stats.LatencyP50Us = latStats.P50.Microseconds()
+			stats.LatencyP95Us = latStats.P95.Microseconds()
+			stats.LatencyP99Us = latStats.P99.Microseconds()
+			stats.LatencyMaxUs = latStats.Max.Microseconds()
+		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"received":%d,"forwarded":%d,"droppedOverload":%d,"droppedFull":%d,"droppedNoLogic":%d,"droppedNoLogicNotConnected":%d,"droppedTotal":%d,"pushedToClient":%d,"pushDroppedNoConn":%d,"overloaded":%t,"cpuPercent":%.2f,"memPercent":%.2f,"overloadDropped":%d,"activeConnections":%d}`,
-			recv, forwarded, dropOverload, dropFull, dropNoLogic, dropNoLogicNotConn, dropOverload+dropFull+dropNoLogic+dropNoLogicNotConn, pushedToClient, pushDroppedNoConn, overloaded, cpuPct, memPct, dropped, g.metrics.GetConnectionsActive())
+		data, _ := json.Marshal(stats)
+		w.Write(data)
 	})
+	// 健康检查 HTTP 端点（与 stats 同端口，便于 K8s probe 对接）
+	mux.HandleFunc("/health", g.ServeHealthHTTP)
+	mux.HandleFunc("/ready", g.ServeHealthHTTP)
+	mux.HandleFunc("/live", g.ServeHealthHTTP)
 	srv := &http.Server{Addr: addr, Handler: mux}
 	g.statsServer = srv
 	go func() {
-		tlog.Info("启动统计服务器", "addr", addr)
+		tlog.Info("starting stats server", "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			tlog.Error("统计服务器启动失败", "error", err)
+			tlog.Error("stats server failed", "error", err)
 		}
 	}()
 }
 
+// StopStatsServer 停止统计 HTTP 服务
 func (g *Gateway) StopStatsServer() {
 	if g.statsServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

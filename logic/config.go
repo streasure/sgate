@@ -8,6 +8,7 @@ type ServiceConfig struct {
 	AdvertiseAddr      string
 	ServiceID          string
 	ServiceName        string
+	Zone               string
 	RedisAddr          string
 	RedisPassword      string
 	RedisDB            int
@@ -27,6 +28,7 @@ func defaultConfig() ServiceConfig {
 		AdvertiseAddr:      "",
 		ServiceID:          "",
 		ServiceName:        "logic",
+		Zone:               "default",
 		RedisAddr:          "127.0.0.1:6379",
 		RedisPassword:      "",
 		RedisDB:            10,
@@ -56,6 +58,14 @@ func WithServiceID(id string) ServiceOption {
 
 func WithServiceName(name string) ServiceOption {
 	return func(c *ServiceConfig) { c.ServiceName = name }
+}
+
+func WithZone(zone string) ServiceOption {
+	return func(c *ServiceConfig) {
+		if zone != "" {
+			c.Zone = zone
+		}
+	}
 }
 
 func WithRedisAddr(addr string) ServiceOption {

@@ -1,0 +1,55 @@
+# ============================================================================
+# 本地监控栈一键启动（Prometheus + Grafana）
+# ----------------------------------------------------------------------------
+# 前置：Nacos 已独立启动在 http://127.0.0.1:8080
+#       sgate 网关已启动，metrics 端点在 127.0.0.1:9090，health 在 127.0.0.1:8081
+#
+# 启动：docker-compose -f deploy/local/docker-compose.yml up -d
+# 停止：docker-compose -f deploy/local/docker-compose.yml down
+#
+# 端口规划：
+#   9091  Prometheus UI（http://127.0.0.1:9091）
+#   3000  Grafana UI（http://127.0.0.1:3000，admin/admin）
+# ============================================================================
+
+version: '3.8'
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: sgate-prometheus
+    ports:
+      - "9091:9090"                          # 容器内 9090 → 主机 9091（避开 sgate metrics 的 9090）
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'   # 数据保留 7 天
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 让容器访问宿主机 sgate
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: sgate-grafana
+    ports:
+      - "3000:3000"                          # Grafana UI
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../k8s/grafana/sgate-dashboard.json:/etc/grafana/provisioning/dashboards/sgate-dashboard.json:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin         # 首次登录用户名
+      - GF_SECURITY_ADMIN_PASSWORD=admin     # 首次登录密码（生产必改）
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:

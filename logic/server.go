@@ -16,9 +16,17 @@ import (
 
 type DisconnectCallback func(connectionID string)
 
+// reverseItem 携带预序列化的反向消息，避免 flushLoop 单协程做 proto.Marshal。
+// 调用方（dispatchWorker 等）在 Send 时完成 Marshal，利用多协程并行化。
+type reverseItem struct {
+	connID string
+	route  string
+	data   []byte // 预序列化的 protobuf.Message bytes
+}
+
 type streamConn struct {
 	stream protobuf.GatewayService_StreamMessagesServer
-	sendCh chan *protobuf.Message
+	sendCh chan reverseItem
 	done   chan struct{}
 }
 
@@ -28,16 +36,28 @@ func newStreamConn(stream protobuf.GatewayService_StreamMessagesServer, sendChSi
 	}
 	sc := &streamConn{
 		stream: stream,
-		sendCh: make(chan *protobuf.Message, sendChSize),
+		sendCh: make(chan reverseItem, sendChSize),
 		done:   make(chan struct{}),
 	}
 	go sc.flushLoop()
 	return sc
 }
 
+// Send 预序列化消息后推入 sendCh。
+// Marshal 在调用方协程完成（dispatchWorker 有 1536 个协程并行），
+// flushLoop 只需拷贝 bytes 到批量缓冲，不再做 Marshal（消除单协程瓶颈）。
 func (sc *streamConn) Send(msg *protobuf.Message) error {
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	item := reverseItem{
+		connID: msg.ConnectionId,
+		route:  msg.Route,
+		data:   data,
+	}
 	select {
-	case sc.sendCh <- msg:
+	case sc.sendCh <- item:
 		return nil
 	default:
 		return fmt.Errorf("send channel full")
@@ -47,33 +67,14 @@ func (sc *streamConn) Send(msg *protobuf.Message) error {
 func (sc *streamConn) flushLoop() {
 	defer close(sc.done)
 	const maxBatchCount = 256
-	batch := make([]*protobuf.Message, 0, maxBatchCount)
+	batch := make([]reverseItem, 0, maxBatchCount)
 
 	// sendBatch 发送一批消息：
-	// - 预打包的 _batch 消息直接透传
-	// - 常规消息按 connID 分组打包：同 connID 的消息用 single-conn 格式（connID 在外层），
-	//   不同 connID 的用 multi-conn 格式（connID 在每条条目内）
-	// - server.* 路由消息单独发送
-	sendBatch := func(msgs []*protobuf.Message) {
-		// single-conn batch: 同 connID 的常规消息
-		var scBuf []byte
-		var scConnID string
-		scCount := 0
-		flushSingleConn := func() {
-			if scCount == 0 {
-				return
-			}
-			_ = sc.stream.Send(&protobuf.Message{
-				Route:        protobuf.RouteBatch,
-				ConnectionId: scConnID,
-				Data:         scBuf,
-				Cmd:          int32(scCount),
-			})
-			scBuf = nil
-			scConnID = ""
-			scCount = 0
-		}
-		// multi-conn batch: 不同 connID 的常规消息
+	// - RouteBatch / server.* 路由消息直接 stream.Send
+	// - 常规消息用 multi-conn 格式打包：[2字节 connIDLen][connID][4字节 payloadLen][payload] 重复
+	//   可将不同 connID 的消息合并为一次 stream.Send
+	// 所有消息已在调用方预序列化，flushLoop 只做内存拷贝
+	sendBatch := func(items []reverseItem) {
 		var mcBuf []byte
 		mcCount := 0
 		flushMultiConn := func() {
@@ -88,66 +89,47 @@ func (sc *streamConn) flushLoop() {
 			mcBuf = nil
 			mcCount = 0
 		}
-		for _, m := range msgs {
-			if m.Route == protobuf.RouteBatch {
-				// 预打包消息：先刷新累积的常规消息，再直接发送
-				flushSingleConn()
+		for _, item := range items {
+			if item.route == protobuf.RouteBatch || (len(item.route) >= 7 && item.route[:7] == "server.") {
 				flushMultiConn()
-				_ = sc.stream.Send(m)
-			} else if len(m.Route) >= 7 && m.Route[:7] == "server." {
-				flushSingleConn()
-				flushMultiConn()
-				_ = sc.stream.Send(m)
+				_ = sc.stream.Send(&protobuf.Message{
+					Route:        item.route,
+					ConnectionId: item.connID,
+					Data:         item.data,
+				})
 			} else {
-				data, err := proto.Marshal(m)
-				if err != nil {
-					continue
-				}
+				// multi-conn 格式: [2字节 connIDLen][connID][4字节 payloadLen][payload]
+				connID := item.connID
+				var connIDLenBuf [2]byte
+				binary.BigEndian.PutUint16(connIDLenBuf[:], uint16(len(connID)))
+				mcBuf = append(mcBuf, connIDLenBuf[:]...)
+				mcBuf = append(mcBuf, connID...)
 				var lenBuf [4]byte
-				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
-				connID := m.ConnectionId
-				if connID == scConnID && scCount > 0 {
-					// 追加到当前 single-conn batch
-					scBuf = append(scBuf, lenBuf[:]...)
-					scBuf = append(scBuf, data...)
-					scCount++
-				} else if scCount == 0 {
-					// 开启新的 single-conn batch
-					flushMultiConn()
-					scConnID = connID
-					scBuf = append(scBuf, lenBuf[:]...)
-					scBuf = append(scBuf, data...)
-					scCount = 1
-				} else {
-					// connID 变了：先刷新 single-conn，再开启新的
-					flushSingleConn()
-					scConnID = connID
-					scBuf = append(scBuf, lenBuf[:]...)
-					scBuf = append(scBuf, data...)
-					scCount = 1
-				}
+				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(item.data)))
+				mcBuf = append(mcBuf, lenBuf[:]...)
+				mcBuf = append(mcBuf, item.data...)
+				mcCount++
 			}
 		}
-		flushSingleConn()
 		flushMultiConn()
 	}
 
 	for {
-		msg, ok := <-sc.sendCh
+		item, ok := <-sc.sendCh
 		if !ok {
 			return
 		}
 		batch = batch[:0]
-		batch = append(batch, msg)
+		batch = append(batch, item)
 		drained := true
 		for drained {
 			select {
-			case m, ok := <-sc.sendCh:
+			case it, ok := <-sc.sendCh:
 				if !ok {
 					drained = false
 					break
 				}
-				batch = append(batch, m)
+				batch = append(batch, it)
 				if len(batch) >= maxBatchCount {
 					drained = false
 				}
@@ -185,6 +167,15 @@ type dispatchItem struct {
 	conn *streamConn
 }
 
+// msgPool reuses protobuf.Message structs in the RouteBatch dispatch path
+// to eliminate per-frame struct allocation at 20M+ QPS.
+// After dispatchMessage returns, the dispatch worker resets and returns
+// the Message to the pool. This is safe because all callbacks are called
+// synchronously within dispatchMessage — no async reference to msg survives.
+var msgPool = sync.Pool{
+	New: func() interface{} { return &protobuf.Message{} },
+}
+
 func NewServer(opts ...ServerOption) *Server {
 	s := &Server{
 		groups:       make(map[string]*pushGroup),
@@ -216,10 +207,11 @@ func (s *Server) dispatchWorker() {
 				if r := recover(); r != nil {
 				}
 			}()
+			connID := item.msg.ConnectionId
 			s.dispatchMessage(item.msg, func(response *protobuf.Message) {
 				if response != nil {
 					if response.ConnectionId == "" {
-						response.ConnectionId = item.msg.ConnectionId
+						response.ConnectionId = connID
 					}
 					if response.ConnectionId == "" {
 						return
@@ -227,6 +219,11 @@ func (s *Server) dispatchWorker() {
 					item.conn.Send(response)
 				}
 			})
+			// Return pooled Message after dispatch.
+			// Safe because dispatchMessage calls all callbacks synchronously;
+			// no async reference to item.msg survives after this point.
+			item.msg.Reset()
+			msgPool.Put(item.msg)
 		}()
 	}
 }
@@ -287,6 +284,51 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 				go cb(connectionID)
 			}
 			return err
+		}
+
+		// Forward batch: unbatch and dispatch each entry individually.
+		// Format: [4-byte payloadLen][payload] repeated, payload = serialized protobuf.Message
+		// Two sources of RouteBatch:
+		//   1. Gateway gnet-level batch (handleBatchTraffic): ConnectionId on outer message,
+		//      inner payloads are raw client frames (may lack ConnectionId)
+		//   2. Gateway startSendLoop batch: each inner payload is a full protobuf.Message
+		//      with its own ConnectionId
+		//
+		// Optimization: use ExtractRouteAndCmd (lightweight field scan) instead of
+		// full proto.Unmarshal. This avoids allocating strings/maps for Payload,
+		// UserUuid, etc. — reducing per-frame allocation from ~200B to ~0B at 20M QPS.
+		// The Data field points to the raw payload (zero-copy) for handlers that
+		// need full message data (Dispatcher/protoEntry will Unmarshal Data themselves).
+		if msg.Route == protobuf.RouteBatch {
+			data := msg.Data
+			connID := msg.ConnectionId
+			for len(data) >= 4 {
+				payloadLen := int(binary.BigEndian.Uint32(data[:4]))
+				if payloadLen == 0 || len(data) < 4+payloadLen {
+					break
+				}
+				payload := data[4 : 4+payloadLen]
+				data = data[4+payloadLen:]
+
+				route, cmd := protobuf.ExtractRouteAndCmd(payload)
+				if route == "" {
+					continue
+				}
+				innerMsg := msgPool.Get().(*protobuf.Message)
+				innerMsg.Route = route
+				innerMsg.Cmd = cmd
+				innerMsg.ConnectionId = connID
+				innerMsg.Data = payload // zero-copy: points into batch's Data buffer
+
+				select {
+				case s.dispatchCh <- dispatchItem{msg: innerMsg, conn: conn}:
+				default:
+					// dispatch channel full, drop and return msg to pool
+					innerMsg.Reset()
+					msgPool.Put(innerMsg)
+				}
+			}
+			continue
 		}
 
 		if msg.ConnectionId == "" {

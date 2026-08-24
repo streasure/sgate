@@ -117,6 +117,20 @@ func (sd *ServiceDiscovery) GetServiceByAddress(address string) *discovery.Servi
 	return nil
 }
 
+// shouldAcceptZone 判断服务是否属于本网关 zone。
+// C3 修复: 无 zone 元数据的服务视为 "default"；网关未配置 zone 时放行所有。
+// 网关配置了 zone 时，仅接受 zone 相同的服务（含 "default" 匹配）。
+func (sd *ServiceDiscovery) shouldAcceptZone(meta map[string]string) bool {
+	if sd.cfg.Zone == "" {
+		return true
+	}
+	svcZone := meta["zone"]
+	if svcZone == "" {
+		svcZone = "default"
+	}
+	return svcZone == sd.cfg.Zone
+}
+
 func (sd *ServiceDiscovery) subscribeLoop() {
 	defer sd.wg.Done()
 
@@ -259,15 +273,13 @@ func (sd *ServiceDiscovery) handleMessage(msg *redis.Message) {
 }
 
 func (sd *ServiceDiscovery) handleRegister(event discovery.ServiceEvent) {
-	if sd.cfg.Zone != "" {
-		if svcZone, ok := event.Service.Metadata["zone"]; ok && svcZone != sd.cfg.Zone {
-			tlog.Debug("skipping service from different zone",
-				"serviceID", event.Service.ServiceID,
-				"serviceZone", svcZone,
-				"localZone", sd.cfg.Zone,
-			)
-			return
-		}
+	if !sd.shouldAcceptZone(event.Service.Metadata) {
+		tlog.Debug("skipping service from different zone",
+			"serviceID", event.Service.ServiceID,
+			"serviceZone", event.Service.Metadata["zone"],
+			"localZone", sd.cfg.Zone,
+		)
+		return
 	}
 
 	sd.mu.Lock()
@@ -303,10 +315,8 @@ func (sd *ServiceDiscovery) handleDeregister(event discovery.ServiceEvent) {
 }
 
 func (sd *ServiceDiscovery) handleHeartbeat(event discovery.ServiceEvent) {
-	if sd.cfg.Zone != "" {
-		if svcZone, ok := event.Service.Metadata["zone"]; ok && svcZone != sd.cfg.Zone {
-			return
-		}
+	if !sd.shouldAcceptZone(event.Service.Metadata) {
+		return
 	}
 
 	sd.mu.Lock()
@@ -371,10 +381,8 @@ func (sd *ServiceDiscovery) scanServices(ctx context.Context) error {
 			continue
 		}
 
-		if sd.cfg.Zone != "" {
-			if svcZone, ok := svc.Metadata["zone"]; ok && svcZone != sd.cfg.Zone {
-				continue
-			}
+		if !sd.shouldAcceptZone(svc.Metadata) {
+			continue
 		}
 
 		activeServices[svc.ServiceID] = &svc

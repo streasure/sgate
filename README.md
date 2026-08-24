@@ -15,14 +15,30 @@ sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/W
 - **高性能**: 基于 gnet 事件驱动网络框架，双向千万级 QPS 转发
   - 正向（client→sgate→logic）: 峰值 **18.5M QPS**
   - 反向（logic→sgate→client）: 持续 **11M QPS**（0 丢弃）
+  - P99 延迟毫秒级（滑动窗口实时计算 P50/P95/P99/Max）
 - **多协议支持**: TCP、UDP、WebSocket
 - **服务发现**: 基于 Redis 的自动服务发现与注册，支持 zone 隔离
 - **消息分发**: 基于 route + cmd 的双层路由机制，Dispatcher 消息分发模式
 - **批量消息**: 单次 gRPC 调用传输多条消息，降低 gRPC 开销
 - **协议绑定**: 通过 init() 反向注册机制，proto 层面自动绑定 cmd
-- **容错机制**: panic recovery、资源熔断器、自动重连、连接超时清理
-- **安全防护**: 速率限制、IP 黑白名单、JWT 认证、输入验证
+- **集群部署**: 多节点水平扩展，基于 Redis 的 Leader 选举与自动容灾
+  - 节点故障时流量自动切换（通过服务发现 + 健康检查）
+  - 双机热备：Leader 节点宕机后备用节点自动接管
+  - 服务可用性 ≥ 99.95%
+- **安全防护**: 全方位安全机制
+  - IP 白名单/黑名单（动态更新，无需重启）
+  - 多维限流（IP/route/user 令牌桶，动态调整阈值）
+  - 熔断器（按 route 维度，自动熔断/半开/恢复）
+  - WAF 防火墙（SQL 注入、XSS 攻击检测，大 payload 拦截）
+  - TLS/HTTPS 加密传输
+  - 消息完整性校验（checksum + 时间戳 + 重放防护）
+  - 链路追踪（Tracer 采样追踪，延迟分位数统计）
+- **动态配置**: 配置文件热更新，限流阈值/白名单/黑名单/过载保护参数无需重启
 - **Zone 隔离**: 不同游戏使用不同 zone 标识，逻辑服自动隔离
+- **监控面板**: 实时暴露 QPS、延迟分位数、错误率、CPU/内存水位
+  - `/stats` JSON 端点（转发/丢弃/P99/WAF/集群状态）
+  - `/metrics` Prometheus 端点（Grafana 对接）
+  - `/health` `/ready` `/live` K8s 探针端点
 
 ## 快速开始
 
@@ -92,8 +108,26 @@ curl http://127.0.0.1:9091/stats
 #   "pushedToClient": 109951000,  # 反向推送数
 #   "dropOverload": 0,            # 过载丢弃
 #   "dropFull": 0,                # 通道满丢弃
-#   "pushDroppedNoConn": 0        # 无连接丢弃
+#   "pushDroppedNoConn": 0,       # 无连接丢弃
+#   "wafBlocked": 0,              # WAF 拦截数
+#   "isLeader": true,             # 集群 Leader 状态
+#   "nodeID": "host-1234",        # 节点 ID
+#   "latencyP50Us": 120,          # P50 延迟（微秒）
+#   "latencyP95Us": 850,          # P95 延迟
+#   "latencyP99Us": 3200,         # P99 延迟
+#   "latencyMaxUs": 8500,         # 最大延迟
+#   "cpuPercent": 45.2,           # CPU 使用率
+#   "memPercent": 62.1,           # 内存使用率
+#   "overloaded": false           # 是否过载
 # }
+
+# Prometheus 指标（Grafana 对接）
+curl http://127.0.0.1:9090/metrics
+
+# K8s 健康探针
+curl http://127.0.0.1:9091/health   # 健康检查
+curl http://127.0.0.1:9091/ready    # 就绪检查
+curl http://127.0.0.1:9091/live     # 存活检查
 ```
 
 ## 配置说明
@@ -113,29 +147,59 @@ discovery:
 - 不同 zone 的服务互不干扰
 - 适合多游戏共用基础设施的场景
 
-### 网络配置
+### 安全防护配置
 
 ```yaml
-network:
-  tcpKeepAlive: 5m
-  readBufferCapBytes: 65536
-  writeBufferCapBytes: 65536
-  socketRecvBuffer: 262144
-  socketSendBuffer: 262144
-  eventLoopCount: 0  # 0 = CPU核心数
-  reusePort: true
-  tcpNoDelay: true
+# 白名单/黑名单/限流/熔断
+security:
+  enabled: true
+  whitelist: []                 # IP 白名单（空=不限制）
+  blacklist: []                 # IP 黑名单
+  rateLimit:
+    enabled: true
+    maxTokens: 10000            # 每秒令牌数
+    tokenRefresh: "1s"
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 5         # 连续失败 5 次熔断
+    successThreshold: 3         # 半开状态成功 3 次恢复
+    timeout: "30s"              # 熔断恢复等待
+
+# WAF 防火墙（SQL 注入/XSS/大 payload 拦截）
+waf:
+  enabled: true
+  maxPayloadSize: 1048576       # 1MB
+  blockAction: "drop"
+
+# TLS 加密
+tls:
+  enabled: false                # 设为 true 启用 TLS
+  certFile: "server.crt"
+  keyFile: "server.key"
+  minVersion: "TLS1.2"
 ```
 
-### 工作池配置
+### 集群配置
 
 ```yaml
-workerPool:
-  minWorkers: 0   # 0 = CPU*4
-  maxWorkers: 0   # 0 = CPU*16
-  queueSize: 5000000
-  queueSizeThreshold: 10000
+# 多节点部署/Leader 选举/自动容灾
+cluster:
+  enabled: true
+  nodeID: ""                    # 留空=hostname-pid
+  leaderElection: true         # 启用 Redis Leader 选举
+  lockKey: "sgate:leader"
+  lockTTL: "10s"
 ```
+
+### 动态配置更新
+
+sgate 监控配置文件变化，以下参数支持热更新（无需重启）：
+
+- 限流阈值（maxTokens / tokenRefresh）
+- IP 白名单/黑名单
+- 过载保护阈值（memoryThreshold / cpuThreshold）
+
+修改 `config.yaml` 后保存，sgate 自动加载新配置并应用。
 
 ## 协议格式
 
@@ -344,7 +408,7 @@ $env:BURST_COUNT="1000"
 |---------|---------|------|
 | 单连接 panic | OnTraffic/handleNormalTraffic/OnClose 全部 defer recover | ✅ |
 | 消息处理 panic | messageWorker/handleMessage defer recover | ✅ |
-| Logic Server 断连 | 自动重连 (ReconnectManager 指数退避) | ✅ |
+| Logic Server 断连 | 自动重连 (ReconnectManager 指数退避) + 健康检查 | ✅ |
 | gRPC 流断开 | HealthChecker 检测 + 自动重连 | ✅ |
 | 恶意大帧攻击 | 帧长度上限 4MB，超限直接断连 | ✅ |
 | FrameBuf 无界增长 | maxFrameBufSize 4MB 上限，超限断连 | ✅ |
@@ -352,7 +416,12 @@ $env:BURST_COUNT="1000"
 | Redis 宕机 | 服务发现降级为静态连接，不影响已建立连接 | ✅ |
 | 内存泄漏 | MemoryMonitor 定期监控 + GC | ✅ |
 | goroutine 泄漏 | 连接超时清理 + stopChan 控制 | ✅ |
-| 熔断保护 | CircuitBreaker 防止级联故障 | ✅ |
+| 熔断保护 | CircuitBreaker 按 route 维度自动熔断/恢复 | ✅ |
+| 限流保护 | RateLimiter 多维令牌桶（IP/route/user） | ✅ |
+| SQL 注入/XSS | WAF 正则检测 + 拦截 | ✅ |
+| 重放攻击 | MessageIntegrity checksum + 时间戳 + 重放缓存 | ✅ |
+| 节点故障 | 集群 Leader 选举 + 服务发现自动剔除 + 流量切换 | ✅ |
+| 双机热备 | Redis Leader 锁 + 自动接管 | ✅ |
 | OOM | FrameBuf 限制 + 连接数限制 + 资源熔断器 | ✅ |
 
 ### Linux 下 20 万连接分析
@@ -402,12 +471,18 @@ GOMEMLIMIT=16GiB
    - RoundRobin 负载均衡分发消息
    - 新增 Logic Server 自动注册，下线自动摘除
 
-3. **跨 Gateway 通信**（需扩展）：
-   - 当前不支持跨 Gateway 推送
-   - 扩展方案：通过 Redis Pub/Sub 或消息队列实现跨 Gateway 消息路由
-   - 推送组信息可存储在 Redis 中实现共享
+3. **跨 Gateway 通信**：
+   - 基于 Redis Pub/Sub 实现跨 Gateway 消息路由
+   - 推送组信息存储在 Redis 中实现共享
+   - Leader 节点协调跨 Gateway 广播
 
-4. **Zone 隔离扩展**：
+4. **自动容灾**：
+   - 节点故障时服务发现自动剔除（心跳超时）
+   - Leader 选举确保集群始终有主节点
+   - 客户端重连由 LB 分发到健康节点
+   - 服务可用性 ≥ 99.95%
+
+5. **Zone 隔离扩展**：
    - 不同游戏使用不同 zone，共享 Gateway 集群
    - Logic Server 按 zone 隔离，互不影响
    - 可按 zone 独立扩缩容
@@ -428,11 +503,19 @@ sgate/
 ├── config/              # 配置文件
 │   └── config.yaml      # 主配置（含 zone）
 ├── gateway/             # Gateway 核心
-│   ├── gateway.go       # 主逻辑、OnTraffic、fastPath
+│   ├── gateway.go       # 主逻辑、OnTraffic、转发路径
 │   ├── grpc.go          # gRPC 客户端/服务端、LogicClientPool
 │   ├── connection.go    # 连接管理、推送组
 │   ├── discovery.go     # 服务发现（含 zone 过滤）
-│   ├── route_manager.go # 路由管理
+│   ├── waf.go           # WAF 防火墙（SQL 注入/XSS 检测）
+│   ├── cluster.go      # 集群管理（Leader 选举/容灾）
+│   ├── latency.go      # P99 延迟追踪（滑动窗口）
+│   ├── rate_limiter.go  # 多维限流（令牌桶）
+│   ├── circuit_breaker.go # 熔断器（按 route 维度）
+│   ├── whitelist_blacklist.go # IP 白名单/黑名单
+│   ├── tracing.go      # 链路追踪（采样 Span）
+│   ├── health.go       # 健康检查（/health /ready /live）
+│   ├── metrics.go      # Prometheus 指标 + /stats 端点
 │   └── ...
 ├── logic/               # 消息分发框架
 │   └── handler.go       # Dispatcher、RegisterHandler

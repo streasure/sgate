@@ -130,6 +130,16 @@ func (g *Gateway) LivenessCheck() *LivenessStatus {
 
 // checkGateway 检查网关状态
 func (g *Gateway) checkGateway() Check {
+	// 真实检查：连接管理器与过载保护器是否就绪
+	if g.connectionManager == nil {
+		return Check{Status: "fail", Message: "connection manager not initialized"}
+	}
+	if g.overloadProtector == nil {
+		return Check{Status: "fail", Message: "overload protector not initialized"}
+	}
+	if g.overloadProtector.IsOverloaded() {
+		return Check{Status: "warn", Message: "gateway overloaded"}
+	}
 	return Check{
 		Status:  "pass",
 		Message: "Gateway is running",
@@ -138,10 +148,17 @@ func (g *Gateway) checkGateway() Check {
 
 // checkRateLimiter 检查速率限制器
 func (g *Gateway) checkRateLimiter() Check {
-	return Check{
-		Status:  "pass",
-		Message: "Overload protector active",
+	// 真实检查：过载保护器是否已启动（非 nil）
+	if g.overloadProtector == nil {
+		return Check{Status: "fail", Message: "overload protector not initialized"}
 	}
+	cpuPct, memPct, overloaded, dropped := g.overloadProtector.Stats()
+	msg := fmt.Sprintf("overload protector active (cpu=%.1f%%, mem=%.1f%%, overloaded=%v, dropped=%d)", cpuPct, memPct, overloaded, dropped)
+	status := "pass"
+	if overloaded {
+		status = "warn"
+	}
+	return Check{Status: status, Message: msg}
 }
 
 // checkWorkerPool 检查工作池

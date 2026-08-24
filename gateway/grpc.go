@@ -54,10 +54,10 @@ var (
 	ErrConnectionClosing = errors.New("connection is closing")
 )
 
-// marshalBufPool 复用 proto 序列化缓冲区，消除 receiveMessages 热路径上的 []byte 分配
+// marshalBufPool 复用 proto 序列化缓冲区，消除 startSendLoop 热路径上的 []byte 分配
 var marshalBufPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, 0, 256)
+		b := make([]byte, 0, 4096)
 		return &b
 	},
 }
@@ -80,12 +80,16 @@ type HealthCheckConfig struct {
 	Interval    time.Duration
 	Timeout     time.Duration
 	MaxFailures int
+	// Enabled 控制是否对逻辑服做主动健康检查（ping）。
+	// 默认 true：主动 ping 并在连续失败超阈值后重连，保障容灾切换。
+	Enabled bool
 }
 
 var DefaultHealthCheckConfig = HealthCheckConfig{
 	Interval:    5 * time.Second,
 	Timeout:     3 * time.Second,
 	MaxFailures: 3,
+	Enabled:     true,
 }
 
 type StreamShard struct {
@@ -139,12 +143,33 @@ func (s *StreamShard) startSendLoop() {
 			fmt.Fprintf(os.Stderr, "startSendLoop shard %d panic recovered: %v\n", s.index, r)
 		}
 	}()
-	batch := make([]*protobuf.Message, 0, 64)
+	const maxBatchCount = 256
+	batch := make([]*protobuf.Message, 0, maxBatchCount)
 	for {
 		msg, ok := <-s.sendCh
 		if !ok {
 			return
 		}
+
+		// Pre-batched RouteBatch messages from handleBatchTraffic: send directly
+		// to avoid double-batching overhead. These messages already contain
+		// multiple frames packed into Data with ConnectionId on the outer message.
+		// This is the hot path for high-throughput forwarding (gnet-level batching).
+		if msg.Route == protobuf.RouteBatch {
+			s.mu.Lock()
+			stream := s.stream
+			s.mu.Unlock()
+			if stream != nil {
+				if err := safeStreamSend(stream, msg); err != nil {
+					tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
+					s.mu.Lock()
+					s.stream = nil
+					s.mu.Unlock()
+				}
+			}
+			continue
+		}
+
 		batch = batch[:0]
 		batch = append(batch, msg)
 		drained := true
@@ -156,7 +181,7 @@ func (s *StreamShard) startSendLoop() {
 					break
 				}
 				batch = append(batch, m)
-				if len(batch) >= cap(batch) {
+				if len(batch) >= maxBatchCount {
 					drained = false
 				}
 			default:
@@ -172,14 +197,52 @@ func (s *StreamShard) startSendLoop() {
 			if stream == nil {
 				return
 			}
-			for _, m := range batch {
-				if err := safeStreamSend(stream, m); err != nil {
+
+			// Fast path: single message, send directly to avoid batch overhead
+			if len(batch) == 1 {
+				if err := safeStreamSend(stream, batch[0]); err != nil {
 					tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
 					s.mu.Lock()
 					s.stream = nil
 					s.mu.Unlock()
-					return
 				}
+				return
+			}
+
+			// Batch path: serialize multiple messages into a single RouteBatch
+			// to reduce gRPC stream.Send calls by up to maxBatchCount times.
+			// Format: [4-byte payloadLen][payload] repeated
+			bufPtr := marshalBufPool.Get().(*[]byte)
+			buf := (*bufPtr)[:0]
+			count := 0
+			for _, m := range batch {
+				data, err := proto.Marshal(m)
+				if err != nil {
+					continue
+				}
+				var lenBuf [4]byte
+				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
+				buf = append(buf, lenBuf[:]...)
+				buf = append(buf, data...)
+				count++
+			}
+			if count > 0 {
+				batchMsg := &protobuf.Message{
+					Route: protobuf.RouteBatch,
+					Data:  buf,
+					Cmd:   int32(count),
+				}
+				if err := safeStreamSend(stream, batchMsg); err != nil {
+					tlog.Warn("shard batch send error, isolating shard", "shard", s.index, "error", err)
+					s.mu.Lock()
+					s.stream = nil
+					s.mu.Unlock()
+				}
+			}
+			// Return buffer to pool (cap-based reuse, avoid holding large bufs)
+			if cap(buf) <= 4<<20 {
+				*bufPtr = buf
+				marshalBufPool.Put(bufPtr)
 			}
 		}()
 	}
@@ -589,6 +652,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 
 			// multi-conn 路径：逐条解析 connID
 			var prevConn *Connection
+			var prevConnID string
 			var combined []byte
 			var pushed, dropped int64
 			flushCombined := func() {
@@ -597,6 +661,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				}
 				combined = nil
 				prevConn = nil
+				prevConnID = ""
 			}
 			for len(data) >= 6 {
 				connIDLen := int(binary.BigEndian.Uint16(data[:2]))
@@ -611,10 +676,15 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				payload := data[6+connIDLen : 6+connIDLen+payloadLen]
 				data = data[6+connIDLen+payloadLen:]
 
-				conn := cm.GetConnection(connID)
-				if conn != prevConn {
+				// 仅在 connID 变化时才 GetConnection，避免重复 map 查找
+				var conn *Connection
+				if connID == prevConnID {
+					conn = prevConn
+				} else {
+					conn = cm.GetConnection(connID)
 					flushCombined()
 					prevConn = conn
+					prevConnID = connID
 				}
 				if conn == nil {
 					dropped++
@@ -854,6 +924,7 @@ type HealthChecker struct {
 	timeout     time.Duration
 	maxFailures int
 	failCount   int
+	enabled     bool
 	stopCh      chan struct{}
 	wg          sync.WaitGroup
 }
@@ -864,6 +935,7 @@ func NewHealthChecker(lc *LogicClient, config HealthCheckConfig) *HealthChecker 
 		interval:    config.Interval,
 		timeout:     config.Timeout,
 		maxFailures: config.MaxFailures,
+		enabled:     config.Enabled,
 		stopCh:      make(chan struct{}),
 	}
 }
@@ -902,9 +974,10 @@ func (hc *HealthChecker) doCheck() {
 		return
 	}
 
-	// 压测模式下跳过健康检查，避免因发送通道满触发不必要的重连
-	// 健康检查在高负载下容易误判连接状态，导致消息大量丢弃
-	return
+	// enabled=false 时跳过主动健康检查（可选关闭）。
+	if !hc.enabled {
+		return
+	}
 
 	pingMsg := &protobuf.Message{
 		Route:   protobuf.RoutePing,
