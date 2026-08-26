@@ -82,6 +82,71 @@ func ExtractRouteAndCmd(data []byte) (route string, cmd int32) {
 	return
 }
 
+// ExtractRouteCmdAndConnID 在单次扫描中提取 route (field 3)、cmd (field 4) 和
+// connection_id (field 1)，避免对 multi-conn batch 的每个 payload 做完整 Unmarshal。
+// 用于 logic server 收到 ConnectionId 为空的多连接 RouteBatch 时，从 payload 中提取
+// 各消息自己的 ConnectionId，确保反向推送能路由到正确的客户端连接。
+func ExtractRouteCmdAndConnID(data []byte) (route string, cmd int32, connID string) {
+	offset := 0
+	for offset < len(data) {
+		b := data[offset]
+		if b < 0x80 {
+			offset++
+			fieldNum := int(b >> 3)
+			wireType := int(b & 0x7)
+
+			switch wireType {
+			case 0:
+				if fieldNum == 4 {
+					v, n := decodeVarintFast(data[offset:])
+					if n > 0 {
+						cmd = int32(v)
+					}
+				}
+				for offset < len(data) && data[offset] >= 0x80 {
+					offset++
+				}
+				if offset < len(data) {
+					offset++
+				}
+			case 1:
+				offset += 8
+			case 2:
+				if offset >= len(data) {
+					return
+				}
+				l := int(data[offset])
+				offset++
+				if l >= 0x80 {
+					if offset >= len(data) {
+						return
+					}
+					l2 := int(data[offset])
+					offset++
+					l = (l & 0x7F) | (l2 << 7)
+				}
+				if fieldNum == 1 {
+					if offset+l <= len(data) {
+						connID = string(data[offset : offset+l])
+					}
+				} else if fieldNum == 3 {
+					if offset+l <= len(data) {
+						route = string(data[offset : offset+l])
+					}
+				}
+				offset += l
+			case 5:
+				offset += 4
+			default:
+				return
+			}
+		} else {
+			offset++
+		}
+	}
+	return
+}
+
 // ExtractRouteFast returns only the route field from a serialized Message.
 // Even lighter than ExtractRouteAndCmd (stops after finding field 3).
 func ExtractRouteFast(data []byte) string {

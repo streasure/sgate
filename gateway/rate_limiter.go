@@ -78,29 +78,7 @@ func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 		stopCh:            make(chan struct{}),
 	}
 
-	rl.globalBucket = &TokenBucket{
-		maxTokens:    int64(maxTokens * 10),
-		burstTokens:  int64(maxTokens * 20),
-		tokenRefresh: tokenRefresh,
-	}
-	rl.globalBucket.tokens.Store(int64(maxTokens * 10))
-	rl.globalBucket.lastUpdate.Store(time.Now().UnixNano())
-
-	rl.dimensionConfigs["ip"] = DimensionConfig{
-		MaxTokens:    maxTokens,
-		BurstTokens:  maxTokens * 2,
-		TokenRefresh: tokenRefresh,
-	}
-	rl.dimensionConfigs["user"] = DimensionConfig{
-		MaxTokens:    maxTokens / 2,
-		BurstTokens:  maxTokens,
-		TokenRefresh: tokenRefresh,
-	}
-	rl.dimensionConfigs["route"] = DimensionConfig{
-		MaxTokens:    maxTokens * 4,
-		BurstTokens:  maxTokens * 8,
-		TokenRefresh: tokenRefresh,
-	}
+	rl.resetConfig(maxTokens, tokenRefresh)
 
 	go rl.cleanup()
 
@@ -110,31 +88,24 @@ func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 func (rl *RateLimiter) UpdateRate(maxTokens int, tokenRefresh time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	rl.tokenRefresh = tokenRefresh
-	rl.maxTokens = maxTokens
-	rl.burstTokens = maxTokens * 2
-	rl.globalBucket = &TokenBucket{
-		maxTokens:    int64(maxTokens * 10),
-		burstTokens:  int64(maxTokens * 20),
-		tokenRefresh: tokenRefresh,
+	rl.resetConfig(maxTokens, tokenRefresh)
+}
+
+func (rl *RateLimiter) resetConfig(maxTokens int, tokenRefresh time.Duration) {
+	rl.tokenRefresh, rl.maxTokens, rl.burstTokens = tokenRefresh, maxTokens, maxTokens*2
+	rl.globalBucket = newTokenBucket(maxTokens*10, maxTokens*20, tokenRefresh)
+	rl.dimensionConfigs = map[string]DimensionConfig{
+		"ip":    {MaxTokens: maxTokens, BurstTokens: maxTokens * 2, TokenRefresh: tokenRefresh},
+		"user":  {MaxTokens: maxTokens / 2, BurstTokens: maxTokens, TokenRefresh: tokenRefresh},
+		"route": {MaxTokens: maxTokens * 4, BurstTokens: maxTokens * 8, TokenRefresh: tokenRefresh},
 	}
-	rl.globalBucket.tokens.Store(int64(maxTokens * 10))
-	rl.globalBucket.lastUpdate.Store(time.Now().UnixNano())
-	rl.dimensionConfigs["ip"] = DimensionConfig{
-		MaxTokens:    maxTokens,
-		BurstTokens:  maxTokens * 2,
-		TokenRefresh: tokenRefresh,
-	}
-	rl.dimensionConfigs["user"] = DimensionConfig{
-		MaxTokens:    maxTokens / 2,
-		BurstTokens:  maxTokens,
-		TokenRefresh: tokenRefresh,
-	}
-	rl.dimensionConfigs["route"] = DimensionConfig{
-		MaxTokens:    maxTokens * 4,
-		BurstTokens:  maxTokens * 8,
-		TokenRefresh: tokenRefresh,
-	}
+}
+
+func newTokenBucket(maxTokens, burstTokens int, tokenRefresh time.Duration) *TokenBucket {
+	bucket := &TokenBucket{maxTokens: int64(maxTokens), burstTokens: int64(burstTokens), tokenRefresh: tokenRefresh}
+	bucket.tokens.Store(int64(maxTokens))
+	bucket.lastUpdate.Store(time.Now().UnixNano())
+	return bucket
 }
 
 func (rl *RateLimiter) Allow(dimension, key string) bool {
@@ -162,13 +133,7 @@ func (rl *RateLimiter) Allow(dimension, key string) bool {
 				config.BurstTokens = rl.burstTokens
 				config.TokenRefresh = rl.tokenRefresh
 			}
-			bucket = &TokenBucket{
-				maxTokens:    int64(config.MaxTokens),
-				burstTokens:  int64(config.BurstTokens),
-				tokenRefresh: config.TokenRefresh,
-			}
-			bucket.tokens.Store(int64(config.MaxTokens))
-			bucket.lastUpdate.Store(time.Now().UnixNano())
+			bucket = newTokenBucket(config.MaxTokens, config.BurstTokens, config.TokenRefresh)
 			rl.tokensByDimension[dimension][key] = bucket
 		}
 		rl.mu.Unlock()

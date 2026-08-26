@@ -20,19 +20,10 @@ port: 8081                    # HTTP 监控端口（health/stats/metrics）— N
 logLevel: info                # 日志级别：debug | info | warn | error
 zone: ""                      # zone 标识，多机房部署时设 bj01/sh02
 
-# --- Redis ---
-# 服务发现/集群选主依赖 Redis
-redis:
-  addr: "127.0.0.1:6379"
-  password: ""
-  db: 10
-  poolSize: 10
-  minIdleConns: 5
-
 # --- 服务发现 ---
-# 启用后从 Redis 自动发现 logic server；关闭则用静态 localhost:50052
+# 启用后从 Nacos 自动发现 logic server；关闭则用静态 localhost:50052
 discovery:
-  enabled: false
+  enabled: true
   serviceName: "logic"
   zone: ""
 
@@ -64,6 +55,7 @@ tls:
   keyFile: ""
 
 # --- 集群 ---
+# 节点注册为 Nacos 临时实例（sgate-gateway 服务），同 zone 内按 ip:port 排序选举 Leader
 cluster:
   enabled: true
   nodeID: ""                  # 留空=hostname-pid

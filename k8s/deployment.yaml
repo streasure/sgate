@@ -61,11 +61,6 @@ spec:
                 secretKeyRef:
                   name: sgate-secrets
                   key: db-password
-            - name: REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: sgate-secrets
-                  key: redis-password
             - name: AUTH_SECRET
               valueFrom:
                 secretKeyRef:

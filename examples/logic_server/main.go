@@ -14,10 +14,19 @@ func main() {
 		logic.WithServiceID(envOr("LOGIC_SERVICE_ID", "logic-1")),
 		logic.WithAdvertiseAddr(envOr("LOGIC_ADVERTISE_ADDR", "localhost:50052")),
 		logic.WithListenPort(envOr("LOGIC_PORT", "50052")),
-		logic.WithRedisAddr(envOr("REDIS_ADDR", "127.0.0.1:6379")),
+		logic.WithNacosEndpoint(envOr("NACOS_ENDPOINT", "http://127.0.0.1:8080")),
+		logic.WithNacosNamingEndpoint(envOr("NACOS_NAMING_ENDPOINT", "http://127.0.0.1:8848")),
+		logic.WithNacosNamespace(envOr("NACOS_NAMESPACE", "public")),
+		logic.WithNacosGroup(envOr("NACOS_GROUP", "DEFAULT_GROUP")),
+		logic.WithNacosAuth(envOr("NACOS_USERNAME", "nacos"), envOr("NACOS_PASSWORD", "nacos")),
+		logic.WithNacosAPIVersion(envOr("NACOS_API_VERSION", "v3")),
+		logic.WithServiceName(envOr("LOGIC_SERVICE_NAME", "logic")),
 		logic.WithGRPCWindowSize(envInt("GRPC_WINDOW_SIZE", 67108864)),
 		logic.WithGRPCMaxMessageSize(envInt("GRPC_MAX_MSG_SIZE", 4194304)),
 		logic.WithStreamSendChSize(envInt("LOGIC_STREAM_CH_SIZE", 65536)),
+		// 默认走路由分发，确保 BURST_COUNT 反向推送处理器在双向压测中生效。
+		// 需要纯透传吞吐时仍可显式设置 LOGIC_PASSTHROUGH=true。
+		logic.WithPassthrough(envBool("LOGIC_PASSTHROUGH", false)),
 	)
 
 	svc.RegisterRoute(protobuf.RoutePing, func(msg *protobuf.Message) *protobuf.Message {
@@ -32,7 +41,9 @@ func main() {
 	// 反向链路压测：每条 RouteTest 触发 burstCount 条推送回客户端
 	// 正向流量极低（仅触发），反向流量被放大 burstCount 倍
 	// 避免正向与反向在同一 gRPC 双向流上竞争流控窗口
-	burstCount := envInt("BURST_COUNT", 1000)
+	// 默认放大反向响应，配合批量发送可覆盖千万级双向吞吐压测；
+	// 生产环境可通过 BURST_COUNT 调整为业务所需值。
+	burstCount := envInt("BURST_COUNT", 2000)
 	svc.RegisterBurstRoute(protobuf.RouteTest, func(msg *protobuf.Message, push func(*protobuf.Message)) {
 		ts := time.Now().UnixMilli()
 		for i := 0; i < burstCount; i++ {
@@ -79,6 +90,15 @@ func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			return parsed
 		}
 	}
 	return def

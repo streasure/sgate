@@ -128,6 +128,141 @@ func NewStreamManager(shardCount int, sendChannelSize int) *StreamManager {
 	return sm
 }
 
+// writeCoalescer 跨多个 RouteBatch 累积反向推送数据，按连接合并后一次性 flush。
+// 目的：减少 gnet AsyncWrite 调用次数。每次 AsyncWrite 向 event-loop channel 发送一个 task，
+// 在 Windows 上 channel send 竞争 runtime 互斥锁（runtime.lock2），94 个 receiveMessages
+// goroutine 同时发送时 lock 竞争达 74% CPU。通过跨 batch 合并，将 N 次 SendMulti
+// 降为 M 次（M=不同连接数），减少 channel send 约 10-50 倍。
+//
+// 内存优化：每个 entry 的 data buffer 从 coalescerBufPool 获取，在 AsyncWrite 完成后
+// 通过 callback 归还到池，避免每帧分配导致 GC 压力（千万级 QPS 下 GC 无法跟上分配速度）。
+type writeCoalescer struct {
+	entries   []coalescedEntry // 每个连接一个 entry，存储累积的帧数据
+	index     map[string]int   // connID -> entries 下标，避免重复 GetConnection
+	count     int              // 累积消息总数（用于触发 flush）
+	cm        *ConnectionManager
+	lastFlush time.Time
+}
+
+// coalescedEntry 累积一个连接的帧数据。
+// bufPtr 持有指向池化 buffer 的指针，在 flush 后通过 AsyncWrite callback 归还。
+type coalescedEntry struct {
+	conn   *Connection
+	data   []byte // [4字节 len][payload] 重复格式，底层数组来自 coalescerBufPool
+	bufPtr *[]byte // 指向 coalescerBufPool 中获取的 buffer，用于归还
+}
+
+// coalescerBufPool 复用 coalescer 的 data buffer，避免每帧 append 分配导致 GC 风暴。
+// buffer 初始容量 4KB，可动态扩展。归还时保留扩展后的容量（上限 1MB）以复用。
+var coalescerBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
+
+const (
+	coalesceFlushCount    = 10000                 // 累积 1 万条消息后 flush
+	coalesceFlushInterval = 5 * time.Millisecond // 5ms 超时 flush，减少 gRPC 流控窗口阻塞
+	coalescerMaxBufCap    = 1 << 20              // 1MB：归还到池的 buffer 容量上限，避免持有过大 buffer
+)
+
+func newWriteCoalescer(cm *ConnectionManager) *writeCoalescer {
+	return &writeCoalescer{
+		entries:   make([]coalescedEntry, 0, 64),
+		index:     make(map[string]int, 64),
+		cm:        cm,
+		lastFlush: time.Now(),
+	}
+}
+
+// getBuf 获取或复用一个 entry 的 data buffer
+func (wc *writeCoalescer) getBuf(idx int) {
+	if wc.entries[idx].bufPtr == nil {
+		bufPtr := coalescerBufPool.Get().(*[]byte)
+		wc.entries[idx].bufPtr = bufPtr
+		wc.entries[idx].data = (*bufPtr)[:0]
+	}
+}
+
+// addMulti 将 multi-conn 格式的一条消息加入 coalescer。
+// payload 是已序列化的单条消息 bytes。
+func (wc *writeCoalescer) addMulti(connID string, payload []byte) bool {
+	idx, ok := wc.index[connID]
+	if !ok {
+		conn := wc.cm.GetConnection(connID)
+		if conn == nil {
+			return false
+		}
+		idx = len(wc.entries)
+		wc.entries = append(wc.entries, coalescedEntry{conn: conn})
+		wc.index[connID] = idx
+	}
+	wc.getBuf(idx)
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(payload)))
+	wc.entries[idx].data = append(wc.entries[idx].data, lenBuf[:]...)
+	wc.entries[idx].data = append(wc.entries[idx].data, payload...)
+	wc.count++
+	return true
+}
+
+// addSingle 将 single-conn 格式的整个 batch data 加入 coalescer。
+// data 已是 [4字节 len][payload] 重复格式，直接追加。
+func (wc *writeCoalescer) addSingle(connID string, data []byte, count int) bool {
+	idx, ok := wc.index[connID]
+	if !ok {
+		conn := wc.cm.GetConnection(connID)
+		if conn == nil {
+			return false
+		}
+		idx = len(wc.entries)
+		wc.entries = append(wc.entries, coalescedEntry{conn: conn})
+		wc.index[connID] = idx
+	}
+	wc.getBuf(idx)
+	wc.entries[idx].data = append(wc.entries[idx].data, data...)
+	wc.count += count
+	return true
+}
+
+func (wc *writeCoalescer) shouldFlush() bool {
+	return wc.count >= coalesceFlushCount || time.Since(wc.lastFlush) >= coalesceFlushInterval
+}
+
+// flush 将所有连接的累积数据通过一次 SendMultiWithCallback 发送，然后重置。
+// buffer 在 gnet AsyncWrite 完成后通过 callback 归还到 coalescerBufPool。
+// 返回 pushed（成功推送的消息数）。
+func (wc *writeCoalescer) flush() int64 {
+	var pushed int64
+	for i := range wc.entries {
+		entry := &wc.entries[i]
+		if len(entry.data) > 0 {
+			bufPtr := entry.bufPtr
+			// SendMultiWithCallback 在 gnet 写完成后调用 callback，
+			// callback 归还 buffer 到池，消除每帧分配导致的 GC 压力
+			entry.conn.SendMultiWithCallback(entry.data, func() {
+				if bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
+					*bufPtr = (*bufPtr)[:0]
+					coalescerBufPool.Put(bufPtr)
+				}
+			})
+		}
+		entry.data = nil
+		entry.bufPtr = nil
+		entry.conn = nil
+	}
+	pushed = int64(wc.count)
+	// 重置：保留 slice/map 底层数组以复用，避免重复分配
+	wc.entries = wc.entries[:0]
+	for k := range wc.index {
+		delete(wc.index, k)
+	}
+	wc.count = 0
+	wc.lastFlush = time.Now()
+	return pushed
+}
+
 func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
 	h := uint32(2166136261)
 	for i := 0; i < len(connectionID); i++ {
@@ -599,6 +734,24 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		return
 	}
 
+	// 每个 shard 维护一个 writeCoalescer，跨多个 RouteBatch 累积反向推送数据。
+	// flush 时每个连接只调用一次 SendMulti（= 一次 gnet AsyncWrite = 一次 event-loop channel send），
+	// 将 channel send 次数从 ~250/batch 降至 ~M/flush（M=不同连接数），减少 runtime lock 竞争。
+	var wc *writeCoalescer
+	if lc.gateway != nil {
+		wc = newWriteCoalescer(lc.gateway.GetConnectionManager())
+	}
+
+	// 退出时 flush 残留数据
+	defer func() {
+		if wc.count > 0 {
+			pushed := wc.flush()
+			if pushed > 0 {
+				lc.gateway.AddPushedToClient(pushed)
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-lc.closed:
@@ -632,80 +785,54 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		//     → 每条消息单独查找连接
 		if lc.gateway != nil && msg.Route == protobuf.RouteBatch {
 			data := msg.Data
-			cm := lc.gateway.GetConnectionManager()
 
 			if msg.ConnectionId != "" {
-				// single-conn 快速路径：一次查找，批量发送
-				conn := cm.GetConnection(msg.ConnectionId)
-				if conn == nil {
+				// single-conn 快速路径：data 已是 [4字节 len][payload] 格式，直接追加到 coalescer
+				if !wc.addSingle(msg.ConnectionId, data, int(msg.Cmd)) {
 					lc.gateway.AddPushDroppedNoConn(int64(msg.Cmd))
-					continue
 				}
-				// 合并所有 [4字节 len][payload] 为一个连续 buffer，一次 AsyncWrite
-				// data 已经是这个格式，直接发送
-				if len(data) > 0 {
-					conn.SendMulti(data)
-					lc.gateway.AddPushedToClient(int64(msg.Cmd))
+			} else {
+				// multi-conn 路径：逐条解析 connID，加入 coalescer（不再逐条 flush）
+				var dropped int64
+				for len(data) >= 6 {
+					connIDLen := int(binary.BigEndian.Uint16(data[:2]))
+					if connIDLen == 0 || len(data) < 2+connIDLen+4 {
+						break
+					}
+					connID := string(data[2 : 2+connIDLen])
+					payloadLen := int(binary.BigEndian.Uint32(data[2+connIDLen : 6+connIDLen]))
+					if len(data) < 6+connIDLen+payloadLen {
+						break
+					}
+					payload := data[6+connIDLen : 6+connIDLen+payloadLen]
+					data = data[6+connIDLen+payloadLen:]
+
+					if !wc.addMulti(connID, payload) {
+						dropped++
+					}
 				}
-				continue
+				if dropped > 0 {
+					lc.gateway.AddPushDroppedNoConn(dropped)
+				}
 			}
 
-			// multi-conn 路径：逐条解析 connID
-			var prevConn *Connection
-			var prevConnID string
-			var combined []byte
-			var pushed, dropped int64
-			flushCombined := func() {
-				if prevConn != nil && len(combined) > 0 {
-					prevConn.SendMulti(combined)
+			// 累积到阈值或时间到达时 flush，减少 AsyncWrite 调用
+			if wc.shouldFlush() {
+				pushed := wc.flush()
+				if pushed > 0 {
+					lc.gateway.AddPushedToClient(pushed)
 				}
-				combined = nil
-				prevConn = nil
-				prevConnID = ""
-			}
-			for len(data) >= 6 {
-				connIDLen := int(binary.BigEndian.Uint16(data[:2]))
-				if connIDLen == 0 || len(data) < 2+connIDLen+4 {
-					break
-				}
-				connID := string(data[2 : 2+connIDLen])
-				payloadLen := int(binary.BigEndian.Uint32(data[2+connIDLen : 6+connIDLen]))
-				if len(data) < 6+connIDLen+payloadLen {
-					break
-				}
-				payload := data[6+connIDLen : 6+connIDLen+payloadLen]
-				data = data[6+connIDLen+payloadLen:]
-
-				// 仅在 connID 变化时才 GetConnection，避免重复 map 查找
-				var conn *Connection
-				if connID == prevConnID {
-					conn = prevConn
-				} else {
-					conn = cm.GetConnection(connID)
-					flushCombined()
-					prevConn = conn
-					prevConnID = connID
-				}
-				if conn == nil {
-					dropped++
-				} else {
-					var lenBuf [4]byte
-					binary.BigEndian.PutUint32(lenBuf[:], uint32(payloadLen))
-					combined = append(combined, lenBuf[:]...)
-					combined = append(combined, payload...)
-					pushed++
-				}
-			}
-			flushCombined()
-			if pushed > 0 {
-				lc.gateway.AddPushedToClient(pushed)
-			}
-			if dropped > 0 {
-				lc.gateway.AddPushDroppedNoConn(dropped)
 			}
 			continue
 		}
 
+		// 非 RouteBatch 消息：先 flush 累积数据，保持消息顺序
+		if wc.count > 0 {
+			pushed := wc.flush()
+			if pushed > 0 {
+				lc.gateway.AddPushedToClient(pushed)
+			}
+		}
 		lc.handleReceivedMessage(msg)
 	}
 }
@@ -1330,11 +1457,21 @@ func (pool *LogicClientPool) handleServiceChange(event discovery.ServiceEvent) {
 
 func (pool *LogicClientPool) handleServiceRegister(event discovery.ServiceEvent) {
 	pool.mu.RLock()
-	_, exists := pool.clients[event.Service.ServiceID]
+	existing, exists := pool.clients[event.Service.ServiceID]
 	pool.mu.RUnlock()
 
-	if exists {
+	// 已存在且连接正常，跳过
+	if exists && existing != nil && existing.IsConnected() {
 		return
+	}
+
+	// 已存在但连接已断开，先清理旧 client
+	if exists && existing != nil && !existing.IsConnected() {
+		pool.mu.Lock()
+		delete(pool.clients, event.Service.ServiceID)
+		pool.updateFastClient()
+		pool.mu.Unlock()
+		go existing.Close()
 	}
 
 	client := NewLogicClient(pool.gateway)
@@ -1372,23 +1509,35 @@ func (pool *LogicClientPool) handleServiceRegister(event discovery.ServiceEvent)
 }
 
 func (pool *LogicClientPool) handleServiceDeregister(event discovery.ServiceEvent) {
-	pool.mu.Lock()
+	// 高负载下 Nacos 心跳可能超时导致实例被摘除，但 gRPC 连接可能仍可用。
+	// 不立即从 pool 删除和关闭连接，避免误判导致转发中断。
+	// 让 HealthChecker 和 gRPC 流自身错误检测来处理真正的连接断开。
+	pool.mu.RLock()
 	client, exists := pool.clients[event.Service.ServiceID]
-	if exists {
-		delete(pool.clients, event.Service.ServiceID)
-	}
-	pool.updateFastClient()
-	pool.mu.Unlock()
+	pool.mu.RUnlock()
 
 	if exists && client != nil {
-		tlog.Warn("logic service offline, closing connection immediately",
-			"serviceID", event.Service.ServiceID,
-			"address", event.Service.Address,
-		)
-		go client.Close()
+		if !client.IsConnected() {
+			// gRPC 连接已断开，安全清理
+			pool.mu.Lock()
+			delete(pool.clients, event.Service.ServiceID)
+			pool.updateFastClient()
+			pool.mu.Unlock()
+			go client.Close()
+			tlog.Warn("logic service offline and connection already disconnected, cleaning up",
+				"serviceID", event.Service.ServiceID,
+				"address", event.Service.Address,
+			)
+		} else {
+			// gRPC 连接仍存活，保留连接，等服务重新注册或 HealthChecker 检测到断开
+			tlog.Warn("logic service deregistered from nacos, keeping gRPC connection (still connected)",
+				"serviceID", event.Service.ServiceID,
+				"address", event.Service.Address,
+			)
+		}
 	}
 
-	tlog.Warn("logic client removed from pool",
+	tlog.Warn("logic client deregister event processed",
 		"serviceID", event.Service.ServiceID,
 		"address", event.Service.Address,
 		"totalClients", pool.ClientCount(),

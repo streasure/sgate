@@ -4,30 +4,40 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/streasure/sgate/discovery"
 	"github.com/streasure/sgate/internal/config"
 	tlog "github.com/streasure/treasure-slog"
 )
 
+// ServiceChangeCallback 服务变更回调函数类型
 type ServiceChangeCallback func(event discovery.ServiceEvent)
 
+// ServiceDiscovery 服务发现消费者（基于 Nacos naming API）
+// 网关启动时创建，定期从 Nacos 拉取 logic server 实例列表并通知回调
 type ServiceDiscovery struct {
-	rdb         *redis.Client
-	cfg         config.DiscoveryConfig
-	services    map[string]*discovery.ServiceInfo
-	mu          sync.RWMutex
-	callbacks   []ServiceChangeCallback
-	stopCh      chan struct{}
-	wg          sync.WaitGroup
-	sub         *redis.PubSub
-	keyEventSub *redis.PubSub
+	cfg        config.DiscoveryConfig
+	nacosCfg   discovery.NacosNamingConfig
+	httpClient *http.Client
+	services   map[string]*discovery.ServiceInfo
+	mu         sync.RWMutex
+	callbacks  []ServiceChangeCallback
+	stopCh     chan struct{}
+	wg         sync.WaitGroup
+	// Nacos 3.x 认证 token 缓存
+	authToken  string
+	authExpire time.Time
+	authMu     sync.Mutex
 }
 
-func NewServiceDiscovery(rdb *redis.Client, cfg config.DiscoveryConfig) *ServiceDiscovery {
+// NewServiceDiscovery 创建服务发现消费者
+func NewServiceDiscovery(cfg config.DiscoveryConfig) *ServiceDiscovery {
 	if cfg.ScanInterval <= 0 {
 		cfg.ScanInterval = discovery.DefaultScan
 	}
@@ -35,64 +45,63 @@ func NewServiceDiscovery(rdb *redis.Client, cfg config.DiscoveryConfig) *Service
 		cfg.DeregisterDelay = discovery.DefaultDeregister
 	}
 	return &ServiceDiscovery{
-		rdb:       rdb,
-		cfg:       cfg,
-		services:  make(map[string]*discovery.ServiceInfo),
-		callbacks: make([]ServiceChangeCallback, 0),
-		stopCh:    make(chan struct{}),
+		cfg:        cfg,
+		services:   make(map[string]*discovery.ServiceInfo),
+		callbacks:  make([]ServiceChangeCallback, 0),
+		stopCh:     make(chan struct{}),
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
-func (sd *ServiceDiscovery) Start() error {
-	ctx := context.Background()
-
-	sd.rdb.ConfigSet(ctx, "notify-keyspace-events", "Ex")
-
-	if err := sd.scanServices(ctx); err != nil {
-		tlog.Warn("initial service scan failed", "error", err)
+// SetNacosConfig 注入 Nacos naming 配置
+func (sd *ServiceDiscovery) SetNacosConfig(cfg discovery.NacosNamingConfig) {
+	sd.nacosCfg = cfg
+	if sd.nacosCfg.Group == "" {
+		sd.nacosCfg.Group = "DEFAULT_GROUP"
 	}
+	if sd.nacosCfg.APIVersion == "" {
+		sd.nacosCfg.APIVersion = "v3"
+	}
+}
 
-	sd.sub = sd.rdb.Subscribe(ctx, discovery.ServiceChannel)
-
-	keyEventChannel := fmt.Sprintf("__keyevent@%d__:expired", sd.rdb.Options().DB)
-	sd.keyEventSub = sd.rdb.Subscribe(ctx, keyEventChannel)
-
-	sd.wg.Add(3)
-	go sd.subscribeLoop()
-	go sd.keyEventLoop()
+// Start 启动服务发现：立即拉取一次 + 定期轮询
+func (sd *ServiceDiscovery) Start() error {
+	if sd.nacosCfg.Endpoint == "" {
+		return fmt.Errorf("nacos endpoint empty, service discovery disabled")
+	}
+	if err := sd.pullServices(); err != nil {
+		tlog.Warn("initial service pull failed", "error", err)
+	}
+	sd.wg.Add(1)
 	go sd.scanLoop()
 
-	tlog.Info("service discovery started",
+	tlog.Info("service discovery started (nacos)",
 		"serviceName", sd.cfg.ServiceName,
+		"endpoint", sd.nacosCfg.Endpoint,
+		"group", sd.nacosCfg.Group,
 		"scanInterval", sd.cfg.ScanInterval,
-		"deregisterDelay", sd.cfg.DeregisterDelay,
-		"keyEventChannel", keyEventChannel,
 	)
 	return nil
 }
 
+// Stop 停止服务发现
 func (sd *ServiceDiscovery) Stop() {
 	close(sd.stopCh)
-	if sd.sub != nil {
-		sd.sub.Close()
-	}
-	if sd.keyEventSub != nil {
-		sd.keyEventSub.Close()
-	}
 	sd.wg.Wait()
 	tlog.Info("service discovery stopped")
 }
 
+// OnServiceChange 注册服务变更回调
 func (sd *ServiceDiscovery) OnServiceChange(callback ServiceChangeCallback) {
 	sd.mu.Lock()
 	defer sd.mu.Unlock()
 	sd.callbacks = append(sd.callbacks, callback)
 }
 
+// GetServices 返回当前所有服务实例快照
 func (sd *ServiceDiscovery) GetServices() []*discovery.ServiceInfo {
 	sd.mu.RLock()
 	defer sd.mu.RUnlock()
-
 	result := make([]*discovery.ServiceInfo, 0, len(sd.services))
 	for _, svc := range sd.services {
 		result = append(result, svc)
@@ -100,12 +109,14 @@ func (sd *ServiceDiscovery) GetServices() []*discovery.ServiceInfo {
 	return result
 }
 
+// GetService 根据 serviceID 查询服务实例
 func (sd *ServiceDiscovery) GetService(serviceID string) *discovery.ServiceInfo {
 	sd.mu.RLock()
 	defer sd.mu.RUnlock()
 	return sd.services[serviceID]
 }
 
+// GetServiceByAddress 根据地址查询服务实例
 func (sd *ServiceDiscovery) GetServiceByAddress(address string) *discovery.ServiceInfo {
 	sd.mu.RLock()
 	defer sd.mu.RUnlock()
@@ -117,9 +128,7 @@ func (sd *ServiceDiscovery) GetServiceByAddress(address string) *discovery.Servi
 	return nil
 }
 
-// shouldAcceptZone 判断服务是否属于本网关 zone。
-// C3 修复: 无 zone 元数据的服务视为 "default"；网关未配置 zone 时放行所有。
-// 网关配置了 zone 时，仅接受 zone 相同的服务（含 "default" 匹配）。
+// shouldAcceptZone 判断服务是否属于本网关 zone
 func (sd *ServiceDiscovery) shouldAcceptZone(meta map[string]string) bool {
 	if sd.cfg.Zone == "" {
 		return true
@@ -131,311 +140,218 @@ func (sd *ServiceDiscovery) shouldAcceptZone(meta map[string]string) bool {
 	return svcZone == sd.cfg.Zone
 }
 
-func (sd *ServiceDiscovery) subscribeLoop() {
-	defer sd.wg.Done()
-
-	for {
-		ch := sd.sub.Channel()
-
-		for {
-			select {
-			case <-sd.stopCh:
-				return
-			case msg, ok := <-ch:
-				if !ok {
-					tlog.Warn("subscribe channel closed, attempting reconnect...")
-					if sd.reconnectSubscription() {
-						ch = sd.sub.Channel()
-						continue
-					}
-					return
-				}
-				sd.handleMessage(msg)
-			}
-		}
-	}
-}
-
-func (sd *ServiceDiscovery) keyEventLoop() {
-	defer sd.wg.Done()
-	prefix := fmt.Sprintf("%s%s:", discovery.ServiceKeyPrefix, sd.cfg.ServiceName)
-
-	for {
-		ch := sd.keyEventSub.Channel()
-
-		for {
-			select {
-			case <-sd.stopCh:
-				return
-			case msg, ok := <-ch:
-				if !ok {
-					tlog.Warn("keyEvent channel closed, attempting reconnect...")
-					if sd.reconnectKeyEvent() {
-						ch = sd.keyEventSub.Channel()
-						continue
-					}
-					return
-				}
-				if msg.Channel != "" {
-					key := msg.Payload
-					if len(key) > len(prefix) && key[:len(prefix)] == prefix {
-						sd.handleKeyExpired(key)
-					}
-				}
-			}
-		}
-	}
-}
-
-func (sd *ServiceDiscovery) reconnectSubscription() bool {
-	ctx := context.Background()
-	for i := 0; i < 5; i++ {
-		select {
-		case <-sd.stopCh:
-			return false
-		default:
-		}
-		time.Sleep(time.Duration(i+1) * 2 * time.Second)
-		sd.sub = sd.rdb.Subscribe(ctx, discovery.ServiceChannel)
-		if err := sd.sub.Ping(ctx); err != nil {
-			tlog.Warn("subscription reconnect failed", "attempt", i+1, "error", err)
-			continue
-		}
-		tlog.Info("subscription reconnected")
-		return true
-	}
-	tlog.Error("subscription reconnect exhausted")
-	return false
-}
-
-func (sd *ServiceDiscovery) reconnectKeyEvent() bool {
-	ctx := context.Background()
-	keyEventChannel := fmt.Sprintf("__keyevent@%d__:expired", sd.rdb.Options().DB)
-	for i := 0; i < 5; i++ {
-		select {
-		case <-sd.stopCh:
-			return false
-		default:
-		}
-		time.Sleep(time.Duration(i+1) * 2 * time.Second)
-		sd.keyEventSub = sd.rdb.Subscribe(ctx, keyEventChannel)
-		if err := sd.keyEventSub.Ping(ctx); err != nil {
-			tlog.Warn("keyEvent reconnect failed", "attempt", i+1, "error", err)
-			continue
-		}
-		tlog.Info("keyEvent reconnected")
-		return true
-	}
-	tlog.Error("keyEvent reconnect exhausted")
-	return false
-}
-
-func (sd *ServiceDiscovery) handleKeyExpired(key string) {
-	prefix := fmt.Sprintf("%s%s:", discovery.ServiceKeyPrefix, sd.cfg.ServiceName)
-	serviceID := key[len(prefix):]
-
-	sd.mu.Lock()
-	svc, exists := sd.services[serviceID]
-	if exists {
-		delete(sd.services, serviceID)
-	}
-	sd.mu.Unlock()
-
-	if exists {
-		tlog.Warn("service key expired, immediate offline detection",
-			"serviceID", svc.ServiceID,
-			"address", svc.Address,
-			"key", key,
-		)
-		sd.notifyCallbacks(discovery.ServiceEvent{
-			Type:      discovery.EventDeregister,
-			Service:   *svc,
-			Timestamp: time.Now().UnixMilli(),
-		})
-	}
-}
-
-func (sd *ServiceDiscovery) handleMessage(msg *redis.Message) {
-	var event discovery.ServiceEvent
-	if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-		tlog.Error("discovery event unmarshal failed", "error", err)
-		return
-	}
-
-	switch event.Type {
-	case discovery.EventRegister:
-		sd.handleRegister(event)
-	case discovery.EventDeregister:
-		sd.handleDeregister(event)
-	case discovery.EventHeartbeat:
-		sd.handleHeartbeat(event)
-	}
-}
-
-func (sd *ServiceDiscovery) handleRegister(event discovery.ServiceEvent) {
-	if !sd.shouldAcceptZone(event.Service.Metadata) {
-		tlog.Debug("skipping service from different zone",
-			"serviceID", event.Service.ServiceID,
-			"serviceZone", event.Service.Metadata["zone"],
-			"localZone", sd.cfg.Zone,
-		)
-		return
-	}
-
-	sd.mu.Lock()
-	_, existed := sd.services[event.Service.ServiceID]
-	sd.services[event.Service.ServiceID] = &event.Service
-	sd.mu.Unlock()
-
-	if !existed {
-		tlog.Info("service registered",
-			"serviceID", event.Service.ServiceID,
-			"address", event.Service.Address,
-			"serviceName", event.Service.ServiceName,
-		)
-		sd.notifyCallbacks(event)
-	}
-}
-
-func (sd *ServiceDiscovery) handleDeregister(event discovery.ServiceEvent) {
-	sd.mu.Lock()
-	_, existed := sd.services[event.Service.ServiceID]
-	if existed {
-		delete(sd.services, event.Service.ServiceID)
-	}
-	sd.mu.Unlock()
-
-	if existed {
-		tlog.Info("service deregistered",
-			"serviceID", event.Service.ServiceID,
-			"address", event.Service.Address,
-		)
-		sd.notifyCallbacks(event)
-	}
-}
-
-func (sd *ServiceDiscovery) handleHeartbeat(event discovery.ServiceEvent) {
-	if !sd.shouldAcceptZone(event.Service.Metadata) {
-		return
-	}
-
-	sd.mu.Lock()
-	_, existed := sd.services[event.Service.ServiceID]
-	sd.services[event.Service.ServiceID] = &event.Service
-	sd.mu.Unlock()
-
-	if !existed {
-		tlog.Info("service discovered via heartbeat",
-			"serviceID", event.Service.ServiceID,
-			"address", event.Service.Address,
-		)
-		sd.notifyCallbacks(discovery.ServiceEvent{
-			Type:      discovery.EventRegister,
-			Service:   event.Service,
-			Timestamp: event.Timestamp,
-		})
-	}
-}
-
+// scanLoop 定期拉取服务列表
 func (sd *ServiceDiscovery) scanLoop() {
 	defer sd.wg.Done()
 	ticker := time.NewTicker(sd.cfg.ScanInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-sd.stopCh:
 			return
 		case <-ticker.C:
-			ctx := context.Background()
-			if err := sd.scanServices(ctx); err != nil {
-				tlog.Error("service scan failed", "error", err)
+			if err := sd.pullServices(); err != nil {
+				tlog.Error("service pull failed", "error", err)
 			}
 		}
 	}
 }
 
-func (sd *ServiceDiscovery) scanServices(ctx context.Context) error {
-	pattern := fmt.Sprintf("%s%s:*", discovery.ServiceKeyPrefix, sd.cfg.ServiceName)
-	keys, err := sd.rdb.Keys(ctx, pattern).Result()
-	if err != nil {
-		return fmt.Errorf("scan service keys: %w", err)
+// namingEndpoint 返回用于实例查询的 Nacos 地址
+// 优先使用 NamingEndpoint（主端口），否则回退到 Endpoint
+func (sd *ServiceDiscovery) namingEndpoint() string {
+	if sd.nacosCfg.NamingEndpoint != "" {
+		return sd.nacosCfg.NamingEndpoint
+	}
+	return sd.nacosCfg.Endpoint
+}
+
+// pullServices 从 Nacos 拉取服务实例列表并对比变更
+// Nacos 3.x: GET {NamingEndpoint}/nacos/v3/client/ns/instance/list
+// Nacos 2.x: GET {Endpoint}/nacos/v1/ns/instance/list
+func (sd *ServiceDiscovery) pullServices() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	token, _ := sd.ensureToken(ctx)
+
+	q := url.Values{}
+	q.Set("serviceName", sd.cfg.ServiceName)
+	q.Set("groupName", sd.nacosCfg.Group)
+	q.Set("namespaceId", sd.nacosCfg.Namespace)
+
+	var reqURL string
+	if strings.ToLower(sd.nacosCfg.APIVersion) == "v1" {
+		// Nacos 2.x
+		reqURL = fmt.Sprintf("%s/nacos/v1/ns/instance/list?%s",
+			sd.nacosCfg.Endpoint, q.Encode())
+	} else {
+		// Nacos 3.x: 客户端 API 走主端口 /nacos/v3/client/ns/instance/list
+		reqURL = fmt.Sprintf("%s/nacos/v3/client/ns/instance/list?%s",
+			sd.namingEndpoint(), q.Encode())
 	}
 
-	tlog.Info("scanServices", "pattern", pattern, "keysFound", len(keys))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := sd.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("nacos list status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
 
-	activeServices := make(map[string]*discovery.ServiceInfo)
-	for _, key := range keys {
-		data, err := sd.rdb.Get(ctx, key).Result()
-		if err != nil {
-			if err == redis.Nil {
-				continue
+	instances, err := sd.parseInstances(body)
+	if err != nil {
+		return err
+	}
+
+	sd.reconcile(instances)
+	return nil
+}
+
+// nacosInstance Nacos 实例 JSON 结构
+type nacosInstance struct {
+	InstanceID string            `json:"instanceId"`
+	IP         string            `json:"ip"`
+	Port       int               `json:"port"`
+	Weight     float64           `json:"weight"`
+	Metadata   map[string]string `json:"metadata"`
+	Healthy    bool              `json:"healthy"`
+	Enabled    bool              `json:"enabled"`
+}
+
+// nacosListResponse Nacos 列表响应（兼容 v1/v3）
+type nacosListResponse struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data json.RawMessage `json:"data"`
+}
+
+// parseInstances 解析 Nacos 响应为 ServiceInfo 列表
+// 兼容三种响应格式：
+//   - Nacos 3.x 客户端 API: {"code":0,"data":[{instance}, ...]}      （data 为实例数组）
+//   - Nacos 3.x 控制台 API: {"code":0,"data":{"pageItems":[...]}}    （data 为分页对象）
+//   - Nacos 2.x API:        {"instances":[...]}                       （顶层 instances 数组）
+func (sd *ServiceDiscovery) parseInstances(body []byte) ([]*discovery.ServiceInfo, error) {
+	var wrapper nacosListResponse
+	var instances []nacosInstance
+
+	if err := json.Unmarshal(body, &wrapper); err == nil && len(wrapper.Data) > 0 {
+		// 情况 1：data 是实例数组（3.x 客户端 API）
+		if arrErr := json.Unmarshal(wrapper.Data, &instances); arrErr == nil && instances != nil {
+			// instances 已填充
+		} else {
+			// 情况 2：data 是带 pageItems 的分页对象（3.x 控制台 API）
+			var paged struct {
+				Instances []nacosInstance `json:"instances"`
+				PageItems []nacosInstance `json:"pageItems"`
 			}
-			tlog.Warn("get service key failed", "key", key, "error", err)
+			if err := json.Unmarshal(wrapper.Data, &paged); err != nil {
+				return nil, fmt.Errorf("unmarshal data: %w", err)
+			}
+			instances = append(instances, paged.Instances...)
+			instances = append(instances, paged.PageItems...)
+		}
+	} else {
+		// 情况 3：v1 顶层 instances 数组
+		var data struct {
+			Instances []nacosInstance `json:"instances"`
+		}
+		if err := json.Unmarshal(body, &data); err != nil {
+			return nil, fmt.Errorf("unmarshal v1 response: %w", err)
+		}
+		instances = data.Instances
+	}
+
+	result := make([]*discovery.ServiceInfo, 0, len(instances))
+	for _, inst := range instances {
+		if !inst.Healthy || !inst.Enabled {
 			continue
 		}
-
-		var svc discovery.ServiceInfo
-		if err := json.Unmarshal([]byte(data), &svc); err != nil {
-			tlog.Warn("unmarshal service info failed", "key", key, "error", err)
-			continue
+		// 使用 IP:Port 作为唯一 ServiceID（Nacos 的 instanceId 在 v3 中可能为空）
+		instanceID := inst.InstanceID
+		if instanceID == "" {
+			instanceID = fmt.Sprintf("%s:%d", inst.IP, inst.Port)
 		}
-
+		svc := &discovery.ServiceInfo{
+			ServiceID:   instanceID,
+			ServiceName: sd.cfg.ServiceName,
+			Address:     fmt.Sprintf("%s:%d", inst.IP, inst.Port),
+			Weight:      int(inst.Weight),
+			Metadata:    inst.Metadata,
+		}
 		if !sd.shouldAcceptZone(svc.Metadata) {
 			continue
 		}
+		result = append(result, svc)
+	}
+	return result, nil
+}
 
-		activeServices[svc.ServiceID] = &svc
+// reconcile 对比新拉取的服务列表与本地缓存，触发注册/注销回调
+func (sd *ServiceDiscovery) reconcile(newServices []*discovery.ServiceInfo) {
+	activeMap := make(map[string]*discovery.ServiceInfo, len(newServices))
+	for _, svc := range newServices {
+		activeMap[svc.ServiceID] = svc
 	}
 
 	sd.mu.Lock()
-	oldServices := make(map[string]*discovery.ServiceInfo)
+	oldServices := make(map[string]*discovery.ServiceInfo, len(sd.services))
 	for k, v := range sd.services {
 		oldServices[k] = v
 	}
 
-	for id, svc := range activeServices {
+	// 更新本地缓存为最新快照
+	sd.services = make(map[string]*discovery.ServiceInfo, len(newServices))
+	for id, svc := range activeMap {
 		sd.services[id] = svc
-	}
-
-	var deregistered []*discovery.ServiceInfo
-	for id, svc := range oldServices {
-		if _, ok := activeServices[id]; !ok {
-			delete(sd.services, id)
-			deregistered = append(deregistered, svc)
-		}
 	}
 	sd.mu.Unlock()
 
-	for _, svc := range deregistered {
-		tlog.Warn("service expired (heartbeat TTL)",
-			"serviceID", svc.ServiceID,
-			"address", svc.Address,
-		)
-		sd.notifyCallbacks(discovery.ServiceEvent{
-			Type:      discovery.EventDeregister,
-			Service:   *svc,
-			Timestamp: time.Now().UnixMilli(),
-		})
-	}
-
-	for id := range activeServices {
-		if _, ok := oldServices[id]; !ok {
-			tlog.Info("service discovered by scan",
-				"serviceID", activeServices[id].ServiceID,
-				"address", activeServices[id].Address,
+	// 通知新增
+	for id, svc := range activeMap {
+		if _, existed := oldServices[id]; !existed {
+			tlog.Info("service registered",
+				"serviceID", svc.ServiceID,
+				"address", svc.Address,
+				"serviceName", svc.ServiceName,
 			)
 			sd.notifyCallbacks(discovery.ServiceEvent{
 				Type:      discovery.EventRegister,
-				Service:   *activeServices[id],
+				Service:   *svc,
 				Timestamp: time.Now().UnixMilli(),
 			})
 		}
 	}
 
-	return nil
+	// 通知注销
+	for id, svc := range oldServices {
+		if _, exists := activeMap[id]; !exists {
+			tlog.Warn("service deregistered",
+				"serviceID", svc.ServiceID,
+				"address", svc.Address,
+			)
+			sd.notifyCallbacks(discovery.ServiceEvent{
+				Type:      discovery.EventDeregister,
+				Service:   *svc,
+				Timestamp: time.Now().UnixMilli(),
+			})
+		}
+	}
 }
 
+// notifyCallbacks 通知所有回调（panic 安全）
 func (sd *ServiceDiscovery) notifyCallbacks(event discovery.ServiceEvent) {
 	sd.mu.RLock()
 	callbacks := make([]ServiceChangeCallback, len(sd.callbacks))
@@ -452,4 +368,39 @@ func (sd *ServiceDiscovery) notifyCallbacks(event discovery.ServiceEvent) {
 			cb(event)
 		}()
 	}
+}
+
+// ensureToken 获取 Nacos 3.x 认证 token
+func (sd *ServiceDiscovery) ensureToken(ctx context.Context) (string, error) {
+	if sd.nacosCfg.Username == "" || sd.nacosCfg.Password == "" {
+		return "", nil
+	}
+	sd.authMu.Lock()
+	defer sd.authMu.Unlock()
+	if sd.authToken != "" && time.Now().Before(sd.authExpire.Add(-60*time.Second)) {
+		return sd.authToken, nil
+	}
+
+	loginURL := fmt.Sprintf("%s/v1/auth/users/login", sd.nacosCfg.Endpoint)
+	form := fmt.Sprintf("username=%s&password=%s", sd.nacosCfg.Username, sd.nacosCfg.Password)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, strings.NewReader(form))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := sd.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("nacos login status %d", resp.StatusCode)
+	}
+	authHeader := resp.Header.Get("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		sd.authToken = strings.TrimPrefix(authHeader, "Bearer ")
+		sd.authExpire = time.Now().Add(18000 * time.Second)
+		return sd.authToken, nil
+	}
+	return "", fmt.Errorf("no token in login response")
 }

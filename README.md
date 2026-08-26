@@ -7,7 +7,7 @@ sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/W
 ```
 客户端 (TCP/UDP/WS) ──→ sgate Gateway ──(gRPC)──→ Logic Server
          ↑                    │
-         └──(gRPC 反向推送)───┘     Redis (服务发现)
+         └──(gRPC 反向推送)───┘     Nacos (配置中心/服务发现/集群选举)
 ```
 
 ## 核心特性
@@ -17,11 +17,11 @@ sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/W
   - 反向（logic→sgate→client）: 持续 **11M QPS**（0 丢弃）
   - P99 延迟毫秒级（滑动窗口实时计算 P50/P95/P99/Max）
 - **多协议支持**: TCP、UDP、WebSocket
-- **服务发现**: 基于 Redis 的自动服务发现与注册，支持 zone 隔离
+- **服务发现**: 基于 Nacos 的自动服务发现与注册，支持 zone 隔离
 - **消息分发**: 基于 route + cmd 的双层路由机制，Dispatcher 消息分发模式
 - **批量消息**: 单次 gRPC 调用传输多条消息，降低 gRPC 开销
 - **协议绑定**: 通过 init() 反向注册机制，proto 层面自动绑定 cmd
-- **集群部署**: 多节点水平扩展，基于 Redis 的 Leader 选举与自动容灾
+- **集群部署**: 多节点水平扩展，基于 Nacos 临时实例的 Leader 选举与自动容灾
   - 节点故障时流量自动切换（通过服务发现 + 健康检查）
   - 双机热备：Leader 节点宕机后备用节点自动接管
   - 服务可用性 ≥ 99.95%
@@ -45,7 +45,7 @@ sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/W
 ### 环境要求
 
 - Go 1.21+
-- Redis 6.0+
+- Nacos 2.x/3.x（配置中心/服务发现/集群选举；本地单体模式可不部署）
 - CGO 禁用（跨平台编译兼容）
 
 ### 编译
@@ -68,8 +68,8 @@ CGO_ENABLED=0 go build -o bench ./examples/bench/
 ### 启动
 
 ```bash
-# 1. 启动 Redis
-redis-server
+# 1. 启动 Nacos（服务发现/配置中心；本地静态模式可跳过）
+#    Docker: docker run -d -p 8080:8080 -p 8848:8848 nacos/nacos-server:v3.2.3
 
 # 2. 启动 Logic Server（默认端口 50052）
 #    环境变量配置：
@@ -183,12 +183,12 @@ tls:
 
 ```yaml
 # 多节点部署/Leader 选举/自动容灾
+# 节点注册为 Nacos 临时实例（sgate-gateway 服务），同 zone 内按 ip:port 排序选举 Leader
 cluster:
   enabled: true
   nodeID: ""                    # 留空=hostname-pid
-  leaderElection: true         # 启用 Redis Leader 选举
-  lockKey: "sgate:leader"
-  lockTTL: "10s"
+  leaderElection: true          # 启用 Nacos Leader 选举
+  lockTTL: "10s"                # 心跳/选举 TTL
 ```
 
 ### 动态配置更新
@@ -376,7 +376,6 @@ protection:
 | GRPC_WINDOW_SIZE | 67108864 | gRPC 窗口大小 |
 | GRPC_MAX_MSG_SIZE | 4194304 | gRPC 最大消息大小 |
 | LOGIC_PORT | 50052 | 监听端口 |
-| REDIS_ADDR | 127.0.0.1:6379 | Redis 地址 |
 
 ### 正向压测（验证 client→sgate→logic 吞吐量）
 
@@ -413,7 +412,7 @@ $env:BURST_COUNT="1000"
 | 恶意大帧攻击 | 帧长度上限 4MB，超限直接断连 | ✅ |
 | FrameBuf 无界增长 | maxFrameBufSize 4MB 上限，超限断连 | ✅ |
 | 消息队列满 | 队列 500 万容量，满时降级为同步处理 | ✅ |
-| Redis 宕机 | 服务发现降级为静态连接，不影响已建立连接 | ✅ |
+| Nacos 宕机 | 服务发现降级为静态连接，不影响已建立连接 | ✅ |
 | 内存泄漏 | MemoryMonitor 定期监控 + GC | ✅ |
 | goroutine 泄漏 | 连接超时清理 + stopChan 控制 | ✅ |
 | 熔断保护 | CircuitBreaker 按 route 维度自动熔断/恢复 | ✅ |
@@ -421,7 +420,7 @@ $env:BURST_COUNT="1000"
 | SQL 注入/XSS | WAF 正则检测 + 拦截 | ✅ |
 | 重放攻击 | MessageIntegrity checksum + 时间戳 + 重放缓存 | ✅ |
 | 节点故障 | 集群 Leader 选举 + 服务发现自动剔除 + 流量切换 | ✅ |
-| 双机热备 | Redis Leader 锁 + 自动接管 | ✅ |
+| 双机热备 | Nacos 临时实例排序选举 + 自动接管 | ✅ |
 | OOM | FrameBuf 限制 + 连接数限制 + 资源熔断器 | ✅ |
 
 ### Linux 下 20 万连接分析
@@ -472,8 +471,7 @@ GOMEMLIMIT=16GiB
    - 新增 Logic Server 自动注册，下线自动摘除
 
 3. **跨 Gateway 通信**：
-   - 基于 Redis Pub/Sub 实现跨 Gateway 消息路由
-   - 推送组信息存储在 Redis 中实现共享
+   - 基于 Nacos 服务发现实现跨 Gateway 消息路由
    - Leader 节点协调跨 Gateway 广播
 
 4. **自动容灾**：

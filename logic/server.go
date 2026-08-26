@@ -160,6 +160,7 @@ type Server struct {
 	dispatchWg          sync.WaitGroup
 	streamChSize        int
 	dispatchWorkerCount int
+	passthrough         bool
 }
 
 type dispatchItem struct {
@@ -248,6 +249,10 @@ func WithStreamChSize(n int) ServerOption {
 	return func(s *Server) { s.streamChSize = n }
 }
 
+func WithServerPassthrough() ServerOption {
+	return func(s *Server) { s.passthrough = true }
+}
+
 func (s *Server) GetServerID() string {
 	return s.serverID
 }
@@ -286,6 +291,13 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 			return err
 		}
 
+		if s.passthrough {
+			// Throughput mode intentionally skips route parsing, validation, and dispatch.
+			// The received protobuf envelope is queued unchanged for the reverse stream.
+			_ = conn.Send(msg)
+			continue
+		}
+
 		// Forward batch: unbatch and dispatch each entry individually.
 		// Format: [4-byte payloadLen][payload] repeated, payload = serialized protobuf.Message
 		// Two sources of RouteBatch:
@@ -302,6 +314,9 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 		if msg.Route == protobuf.RouteBatch {
 			data := msg.Data
 			connID := msg.ConnectionId
+			// multi-conn batch: 外层 ConnectionId 为空，需从每条 payload 提取各自的 ConnectionId
+			// single-conn batch: 外层 ConnectionId 已设置，所有 payload 共用，无需逐条提取
+			multiConn := connID == ""
 			for len(data) >= 4 {
 				payloadLen := int(binary.BigEndian.Uint32(data[:4]))
 				if payloadLen == 0 || len(data) < 4+payloadLen {
@@ -310,14 +325,25 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 				payload := data[4 : 4+payloadLen]
 				data = data[4+payloadLen:]
 
-				route, cmd := protobuf.ExtractRouteAndCmd(payload)
+				var route string
+				var cmd int32
+				var innerConnID string
+				if multiConn {
+					route, cmd, innerConnID = protobuf.ExtractRouteCmdAndConnID(payload)
+				} else {
+					route, cmd = protobuf.ExtractRouteAndCmd(payload)
+				}
 				if route == "" {
 					continue
 				}
 				innerMsg := msgPool.Get().(*protobuf.Message)
 				innerMsg.Route = route
 				innerMsg.Cmd = cmd
-				innerMsg.ConnectionId = connID
+				if multiConn {
+					innerMsg.ConnectionId = innerConnID
+				} else {
+					innerMsg.ConnectionId = connID
+				}
 				innerMsg.Data = payload // zero-copy: points into batch's Data buffer
 
 				select {
@@ -345,23 +371,16 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 
 func (s *Server) SendMessage(ctx context.Context, msg *protobuf.Message) (*protobuf.Message, error) {
 	var response *protobuf.Message
-	var wg sync.WaitGroup
-	wg.Add(1)
 
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				tlog.Error("SendMessage dispatchMessage panic recovered", "error", r, "route", msg.Route, "cmd", msg.Cmd)
-				wg.Done()
 			}
 		}()
-		s.dispatchMessage(msg, func(resp *protobuf.Message) {
-			defer wg.Done()
-			response = resp
-		})
+		s.dispatchMessage(msg, func(resp *protobuf.Message) { response = resp })
 	}()
 
-	wg.Wait()
 	return response, nil
 }
 

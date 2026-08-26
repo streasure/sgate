@@ -1,7 +1,6 @@
 package logic
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/streasure/sgate/discovery"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
@@ -22,7 +20,6 @@ import (
 type Service struct {
 	server     *Server
 	registry   *discovery.ServiceRegistry
-	rdb        *redis.Client
 	listener   net.Listener
 	grpcServer *grpc.Server
 	cfg        ServiceConfig
@@ -52,6 +49,9 @@ func NewService(opts ...ServiceOption) *Service {
 	}
 	if cfg.StreamSendChSize > 0 {
 		serverOpts = append(serverOpts, WithStreamChSize(cfg.StreamSendChSize))
+	}
+	if cfg.Passthrough {
+		serverOpts = append(serverOpts, WithServerPassthrough())
 	}
 
 	return &Service{
@@ -141,22 +141,10 @@ func (s *Service) initRegistry() {
 		tlog.Warn("ServiceID is empty, skipping service discovery registration")
 		return
 	}
-
-	s.rdb = redis.NewClient(&redis.Options{
-		Addr:     s.cfg.RedisAddr,
-		Password: s.cfg.RedisPassword,
-		DB:       s.cfg.RedisDB,
-	})
-
-	ctx := context.Background()
-	if err := s.rdb.Ping(ctx).Err(); err != nil {
-		tlog.Warn("Redis connection failed, service discovery unavailable", "error", err, "addr", s.cfg.RedisAddr)
-		s.rdb.Close()
-		s.rdb = nil
+	if s.cfg.NacosEndpoint == "" {
+		tlog.Warn("Nacos endpoint is empty, skipping service discovery registration")
 		return
 	}
-
-	tlog.Info("Redis connected", "addr", s.cfg.RedisAddr)
 
 	zone := s.cfg.Zone
 	if zone == "" {
@@ -176,7 +164,16 @@ func (s *Service) initRegistry() {
 		StartTime: time.Now().UnixMilli(),
 	}
 
-	s.registry = discovery.NewServiceRegistry(s.rdb, serviceInfo, s.cfg.HeartbeatInterval, s.cfg.HeartbeatTTL)
+	s.registry = discovery.NewServiceRegistry(serviceInfo, s.cfg.HeartbeatInterval, s.cfg.HeartbeatTTL)
+	s.registry.SetNacosConfig(discovery.NacosNamingConfig{
+		Endpoint:       s.cfg.NacosEndpoint,
+		NamingEndpoint: s.cfg.NacosNamingEndpoint,
+		Namespace:      s.cfg.NacosNamespace,
+		Group:          s.cfg.NacosGroup,
+		Username:       s.cfg.NacosUsername,
+		Password:       s.cfg.NacosPassword,
+		APIVersion:     s.cfg.NacosAPIVersion,
+	})
 	if err := s.registry.Start(); err != nil {
 		tlog.Error("service registration failed", "error", err)
 	}
@@ -185,10 +182,6 @@ func (s *Service) initRegistry() {
 func (s *Service) Stop() {
 	if s.registry != nil {
 		s.registry.Stop()
-	}
-
-	if s.rdb != nil {
-		s.rdb.Close()
 	}
 
 	if s.grpcServer != nil {

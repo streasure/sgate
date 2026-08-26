@@ -32,6 +32,9 @@ type Connection struct {
 	RemoteAddr string
 	CreatedAt  int64
 	LastActive int64
+	// activitySeq 用于在高吞吐连接上降低时间戳更新频率。
+	// LastActive 仅用于空闲连接回收，不需要每条消息都刷新。
+	activitySeq atomic.Uint32
 	Status     int8
 	Groups     map[string]struct{}
 	IsWS       bool
@@ -65,7 +68,7 @@ func (c *Connection) Send(data []byte) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
-	c.LastActive = time.Now().UnixMilli()
+	c.touch()
 	if c.IsWS {
 		return c.sendWSFrame(data)
 	}
@@ -82,13 +85,42 @@ func (c *Connection) SendMulti(combined []byte) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
-	c.LastActive = time.Now().UnixMilli()
+	c.touch()
 	if c.IsWS {
 		// WebSocket 不支持批量，逐帧发送
 		// 注：此路径在 burst 压测中不会触发（客户端为 TCP 连接）
 		return c.Conn.AsyncWrite(combined, noopAsyncCallback)
 	}
 	return c.Conn.AsyncWrite(combined, noopAsyncCallback)
+}
+
+// SendMultiWithCallback 与 SendMulti 相同，但在 gnet 写完成后调用 cb。
+// 用于 writeCoalescer 在 AsyncWrite 完成后归还池化 buffer，减少 GC 压力。
+// cb 在 gnet event-loop goroutine 中被调用，不可执行耗时操作。
+func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
+	if c.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	c.touch()
+	if c.IsWS {
+		return c.Conn.AsyncWrite(combined, noopAsyncCallback)
+	}
+	return c.Conn.AsyncWrite(combined, func(_ gnet.Conn, _ error) error {
+		if cb != nil {
+			cb()
+		}
+		return nil
+	})
+}
+
+// touch 以固定频率更新活跃时间。反向千万级 QPS 场景下，同一连接在一个毫秒内
+// 可能发送成千上万条消息；空闲回收只关心毫秒级精度，无需每条消息调用 time.Now。
+func (c *Connection) touch() {
+	seq := c.activitySeq.Add(1)
+	if seq&63 != 0 && atomic.LoadInt64(&c.LastActive) != 0 {
+		return
+	}
+	atomic.StoreInt64(&c.LastActive, time.Now().UnixMilli())
 }
 
 func (c *Connection) sendWSFrame(data []byte) error {
@@ -185,7 +217,8 @@ func getConnection(connectionID string, conn gnet.Conn, userUUID, remoteAddr str
 	c.RemoteAddr = remoteAddr
 	c.CreatedAt = time.Now().UnixMilli()
 	c.Status = 0
-	c.LastActive = time.Now().UnixMilli()
+	atomic.StoreInt64(&c.LastActive, time.Now().UnixMilli())
+	c.activitySeq.Store(0)
 	return c
 }
 
@@ -197,7 +230,8 @@ func putConnection(c *Connection) {
 	c.RemoteAddr = ""
 	c.CreatedAt = 0
 	c.Status = 0
-	c.LastActive = 0
+	atomic.StoreInt64(&c.LastActive, 0)
+	c.activitySeq.Store(0)
 	c.Groups = nil
 	c.ServerID = ""
 	c.IsWS = false
@@ -630,7 +664,7 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 	}
 
 	cm.totalMessages.Add(1)
-	conn.LastActive = time.Now().UnixMilli()
+	atomic.StoreInt64(&conn.LastActive, time.Now().UnixMilli())
 
 	return true
 }
@@ -723,7 +757,7 @@ func (cm *ConnectionManager) Broadcast(message interface{}) {
 			} else {
 				atomic.AddInt32(&successCount, 1)
 				// 更新最后活跃时间
-				conn.LastActive = time.Now().UnixMilli()
+				atomic.StoreInt64(&conn.LastActive, time.Now().UnixMilli())
 			}
 		}(c)
 	}
@@ -1078,7 +1112,7 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 		conn := value.(*Connection)
 
 		// 检查连接是否超过超时时间
-		if now-conn.LastActive > timeoutMs {
+		if now-atomic.LoadInt64(&conn.LastActive) > timeoutMs {
 			connectionsToRemove = append(connectionsToRemove, connectionID)
 		}
 		return true

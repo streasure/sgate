@@ -28,7 +28,12 @@ func main() {
 		debugSetGCPercent(parseIntDefault(v, 100))
 	}
 	if v := os.Getenv("GOMEMLIMIT"); v != "" {
-		tlog.Info("GOMEMLIMIT from env", "value", v)
+		// 显式调用 debug.SetMemoryLimit() 兜底，避免 env 未被 runtime 读取时 heap 失控
+		if applied := applyGOMEMLIMIT(); applied > 0 {
+			tlog.Info("GOMEMLIMIT applied", "env", v, "bytes", applied)
+		} else {
+			tlog.Info("GOMEMLIMIT parse failed", "env", v)
+		}
 	}
 
 	setProcessPriorityHigh()

@@ -23,9 +23,6 @@ type Metrics struct {
 	errorCount    int64
 	lastErrorTime time.Time
 
-	redisConnections int64
-	redisErrors      int64
-
 	cpuUsage    float64
 	memoryUsage uint64
 
@@ -41,7 +38,6 @@ type Metrics struct {
 	activeConnectionsThreshold int64
 	failedMessagesThreshold    int64
 	processingTimeThreshold    int64
-	redisErrorsThreshold       int64
 }
 
 func NewMetrics() *Metrics {
@@ -49,7 +45,6 @@ func NewMetrics() *Metrics {
 		activeConnectionsThreshold: 100000,
 		failedMessagesThreshold:    100,
 		processingTimeThreshold:    100,
-		redisErrorsThreshold:       10,
 	}
 }
 
@@ -60,9 +55,6 @@ func (m *Metrics) IncMessagesReceived()            { atomic.AddInt64(&m.messages
 func (m *Metrics) IncMessagesProcessed()           { atomic.AddInt64(&m.messagesProcessed, 1) }
 func (m *Metrics) IncMessagesFailed()              { atomic.AddInt64(&m.messagesFailed, 1) }
 func (m *Metrics) IncErrorCount()                  { atomic.AddInt64(&m.errorCount, 1); m.lastErrorTime = time.Now() }
-func (m *Metrics) IncRedisConnections()            { atomic.AddInt64(&m.redisConnections, 1) }
-func (m *Metrics) DecRedisConnections()            { atomic.AddInt64(&m.redisConnections, -1) }
-func (m *Metrics) IncRedisErrors()                 { atomic.AddInt64(&m.redisErrors, 1) }
 func (m *Metrics) IncRateLimitCount()              { atomic.AddInt64(&m.rateLimitCount, 1) }
 func (m *Metrics) IncBlacklistRejects()            { atomic.AddInt64(&m.blacklistRejects, 1) }
 func (m *Metrics) IncWhitelistAllows()             { atomic.AddInt64(&m.whitelistAllows, 1) }
@@ -89,8 +81,6 @@ func (m *Metrics) GetMessagesFailed() int64        { return atomic.LoadInt64(&m.
 func (m *Metrics) GetMaxProcessingTime() int64     { return atomic.LoadInt64(&m.maxProcessingTime) }
 func (m *Metrics) GetErrorCount() int64            { return atomic.LoadInt64(&m.errorCount) }
 func (m *Metrics) GetLastErrorTime() time.Time     { return m.lastErrorTime }
-func (m *Metrics) GetRedisConnections() int64      { return atomic.LoadInt64(&m.redisConnections) }
-func (m *Metrics) GetRedisErrors() int64           { return atomic.LoadInt64(&m.redisErrors) }
 func (m *Metrics) GetMemoryUsage() uint64          { return atomic.LoadUint64(&m.memoryUsage) }
 func (m *Metrics) GetCPUUsage() float64            { return m.cpuUsage }
 func (m *Metrics) GetWebSocketConnections() int64  { return atomic.LoadInt64(&m.websocketConnections) }
@@ -110,7 +100,6 @@ func (m *Metrics) GetAverageProcessingTime() float64 {
 func (m *Metrics) SetActiveConnectionsThreshold(v int64) { m.activeConnectionsThreshold = v }
 func (m *Metrics) SetFailedMessagesThreshold(v int64)    { m.failedMessagesThreshold = v }
 func (m *Metrics) SetProcessingTimeThreshold(v int64)    { m.processingTimeThreshold = v }
-func (m *Metrics) SetRedisErrorsThreshold(v int64)       { m.redisErrorsThreshold = v }
 
 func (m *Metrics) UpdateSystemMetrics() {
 	var memStats runtime.MemStats
@@ -128,8 +117,6 @@ func (m *Metrics) Reset() {
 	atomic.StoreInt64(&m.totalProcessingTime, 0)
 	atomic.StoreInt64(&m.maxProcessingTime, 0)
 	atomic.StoreInt64(&m.errorCount, 0)
-	atomic.StoreInt64(&m.redisConnections, 0)
-	atomic.StoreInt64(&m.redisErrors, 0)
 	atomic.StoreInt64(&m.rateLimitCount, 0)
 	atomic.StoreInt64(&m.blacklistRejects, 0)
 	atomic.StoreInt64(&m.whitelistAllows, 0)
@@ -161,8 +148,5 @@ func (m *Metrics) CheckAlerts() {
 	}
 	if v := m.GetAverageProcessingTime(); v > float64(m.processingTimeThreshold) {
 		tlog.Warn("processing time threshold exceeded", "current", v, "threshold", m.processingTimeThreshold)
-	}
-	if v := m.GetRedisErrors(); v > m.redisErrorsThreshold {
-		tlog.Warn("redis errors threshold exceeded", "current", v, "threshold", m.redisErrorsThreshold)
 	}
 }

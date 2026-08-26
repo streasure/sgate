@@ -35,7 +35,7 @@ jobs:
       continue-on-error: true
       run: |
         chmod +x scripts/perf-gate.sh
-        # 启动 redis 与上游服务后运行压测，对比基线
+        # 启动 Nacos 与上游服务后运行压测，对比基线
         # 如环境不具备可注释；通过 -e BENCH_DURATION=5s 加速
         ./scripts/perf-gate.sh || echo "perf gate skipped (env not ready)"
 

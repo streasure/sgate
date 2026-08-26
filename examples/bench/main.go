@@ -25,6 +25,11 @@ var (
 	batchSend    map[int][]byte
 )
 
+// drainBufPool 复用读取缓冲区，避免高并发下大量 4MB 分配导致 Go runtime heap 扩展失败
+var drainBufPool = sync.Pool{
+	New: func() interface{} { return make([]byte, 1024*1024) }, // 1MB
+}
+
 func buildSendFrame() {
 	msg := &protobuf.Message{
 		Route:   protobuf.RouteTest,
@@ -165,7 +170,8 @@ func runForwardConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxIn
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		buf := make([]byte, 4*1024*1024) // 4MB read buffer
+		buf := drainBufPool.Get().([]byte)
+		defer drainBufPool.Put(buf)
 		for {
 			_, err := bc.conn.Read(buf)
 			if err != nil {
@@ -222,7 +228,8 @@ func runFullDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, ma
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		buf := make([]byte, 4*1024*1024) // 4MB
+		buf := drainBufPool.Get().([]byte)
+		defer drainBufPool.Put(buf)
 		var head, tail int
 		for {
 			n, err := bc.conn.Read(buf[tail:])
@@ -333,7 +340,8 @@ func runWSFullDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, 
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		buf := make([]byte, 4*1024*1024) // 4MB
+		buf := drainBufPool.Get().([]byte)
+		defer drainBufPool.Put(buf)
 		var head, tail int
 		for {
 			n, err := bc.conn.Read(buf[tail:])

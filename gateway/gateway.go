@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cast"
+	"github.com/streasure/sgate/discovery"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/metrics"
 	"github.com/streasure/sgate/monitor"
@@ -77,7 +77,6 @@ type Gateway struct {
 	logicClient        *LogicClient
 	logicClientPool    *LogicClientPool
 	serviceDiscovery   *ServiceDiscovery
-	redisClient        *redis.Client
 	overloadProtector  *OverloadProtector
 	grpcServer         *grpc.Server
 	promExporter       *monitor.PrometheusExporter // Prometheus 指标导出器（enabled=false 时为 nil）
@@ -489,29 +488,28 @@ func NewGateway() *Gateway {
 
 	tlog.Info("gateway zone configured", "zone", gw.zone)
 
-	if cfg.Discovery.Enabled && cfg.Redis.Addr != "" {
-		gw.redisClient = redis.NewClient(&redis.Options{
-			Addr:         cfg.Redis.Addr,
-			Password:     cfg.Redis.Password,
-			DB:           cfg.Redis.DB,
-			PoolSize:     cfg.Redis.PoolSize,
-			MinIdleConns: cfg.Redis.MinIdleConns,
+	if cfg.Discovery.Enabled && cfg.ConfigCenter.Endpoint != "" {
+		// 服务发现使用 Nacos naming API，复用配置中心的 endpoint/认证信息
+		gw.serviceDiscovery = NewServiceDiscovery(cfg.Discovery)
+		gw.serviceDiscovery.SetNacosConfig(discovery.NacosNamingConfig{
+			Endpoint:       cfg.ConfigCenter.Endpoint,
+			NamingEndpoint: cfg.ConfigCenter.NamingEndpoint,
+			Namespace:      cfg.ConfigCenter.Namespace,
+			Group:          cfg.ConfigCenter.Group,
+			Username:       cfg.ConfigCenter.Username,
+			Password:       cfg.ConfigCenter.Password,
+			APIVersion:     cfg.ConfigCenter.APIVersion,
 		})
+		gw.logicClientPool.SetDiscovery(gw.serviceDiscovery)
 
-		ctx := context.Background()
-		if err := gw.redisClient.Ping(ctx).Err(); err != nil {
-			tlog.Warn("Redis connection failed, service discovery disabled", "error", err)
-			gw.redisClient = nil
-		} else {
-			tlog.Info("Redis connected, starting service discovery", "addr", cfg.Redis.Addr)
-
-			gw.serviceDiscovery = NewServiceDiscovery(gw.redisClient, cfg.Discovery)
-			gw.logicClientPool.SetDiscovery(gw.serviceDiscovery)
-
-			if err := gw.serviceDiscovery.Start(); err != nil {
-				tlog.Error("service discovery start failed", "error", err)
-			}
+		if err := gw.serviceDiscovery.Start(); err != nil {
+			tlog.Error("service discovery start failed", "error", err)
 		}
+		tlog.Info("service discovery enabled (nacos)",
+			"endpoint", cfg.ConfigCenter.Endpoint,
+			"namingEndpoint", cfg.ConfigCenter.NamingEndpoint,
+			"serviceName", cfg.Discovery.ServiceName,
+		)
 	}
 
 	if gw.serviceDiscovery == nil {
@@ -539,10 +537,19 @@ func NewGateway() *Gateway {
 		}
 	}()
 
-	// 初始化集群（依赖 Redis 做 Leader 选举与服务注册）
-	if cfg.Cluster.Enabled && gw.redisClient != nil {
-		gw.cluster = NewCluster(gw.redisClient, cfg.Cluster, gw.zone)
-		gw.cluster.Start(ctx)
+	// 初始化集群（基于 Nacos 临时实例：节点注册 + 排序选举 Leader）
+	// 复用配置中心的 Nacos 连接信息，实例地址用本机 IP + gRPC 端口
+	if cfg.Cluster.Enabled && cfg.ConfigCenter.Endpoint != "" {
+		gw.cluster = NewCluster(cfg.Cluster, discovery.NacosNamingConfig{
+			Endpoint:       cfg.ConfigCenter.Endpoint,
+			NamingEndpoint: cfg.ConfigCenter.NamingEndpoint,
+			Namespace:      cfg.ConfigCenter.Namespace,
+			Group:          cfg.ConfigCenter.Group,
+			Username:       cfg.ConfigCenter.Username,
+			Password:       cfg.ConfigCenter.Password,
+			APIVersion:     cfg.ConfigCenter.APIVersion,
+		}, gw.zone, grpcCfg.Port)
+		gw.cluster.Start(context.Background())
 	}
 
 	// 启动统计 HTTP 服务（暴露 /stats /health /ready /live）
@@ -1348,6 +1355,10 @@ func (g *Gateway) Close() {
 			g.serviceDiscovery.Stop()
 		}
 
+		if g.cluster != nil {
+			g.cluster.Stop()
+		}
+
 		if g.logicClientPool != nil {
 			g.logicClientPool.Close()
 		}
@@ -1363,10 +1374,6 @@ func (g *Gateway) Close() {
 			case <-time.After(5 * time.Second):
 				g.grpcServer.Stop()
 			}
-		}
-
-		if g.redisClient != nil {
-			g.redisClient.Close()
 		}
 
 		g.connectionManager.StopConnectionChecker()

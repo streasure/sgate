@@ -20,20 +20,12 @@ logLevel: info
 # 留空视为 "default"；多机房部署时设 "bj01" / "sh02" 等
 zone: ""
 
-# --- Redis ---
-# 服务发现/集群选主依赖 Redis
-redis:
-  addr: "127.0.0.1:6379"      # Redis 地址
-  password: ""                 # Redis 密码（无密码留空）
-  db: 10                       # Redis DB 编号（隔离其他业务）
-  poolSize: 10                 # 连接池大小（按并发调整）
-  minIdleConns: 5              # 最小空闲连接数
-
 # --- 服务发现 ---
-# 启用后从 Redis 自动发现 logic server；关闭则用静态 localhost:50052
+# 启用后从 Nacos 自动发现 logic server；关闭则用静态 localhost:50052（单节点模式，无需 Nacos）
+# Nacos 连接信息复用 configCenter 中的 endpoint/namespace/group/username/password
 discovery:
-  enabled: false
-  serviceName: "logic"         # 注册到 Redis 的服务名
+  enabled: true
+  serviceName: "logic"         # 注册到 Nacos 的服务名
   zone: ""                     # 留空则回退到顶层 zone
 
 # --- 监听协议 ---
@@ -80,7 +72,9 @@ tls:
   keyFile: ""                   # 私钥文件路径（如 ./certs/server.key）
 
 # --- 集群 ---
-# 多节点部署时启用；Leader 选举锁 key/TTL 见 defaults.go
+# 多节点部署时启用；节点注册为 Nacos 临时实例（sgate-gateway 服务），
+# 同 zone 内按 ip:port 排序选举 Leader；Nacos 连接信息复用 configCenter
+# 单节点模式：enabled: false（集群依赖 Nacos）
 cluster:
   enabled: true
   nodeID: ""                    # 留空=hostname-pid（推荐留空）
@@ -124,13 +118,18 @@ otelTracer:
 # --- 配置中心 ---
 # 启用后从配置中心动态拉取配置（无需重启）
 # type: nacos | apollo | etcd | consul | http
+# 单节点模式：enabled: false 且 endpoint 必须留空（endpoint 非空时 discovery/cluster 仍会尝试连接）
 configCenter:
-  enabled: true                                      # 启用配置中心热加载
+  enabled: true                                     # 是否启用配置中心（关闭=单体模式，从本地 config.yaml 读配置）
   type: "nacos"                                       # 配置中心类型
-  endpoint: "http://127.0.0.1:8080"                   # Nacos 服务地址
+  endpoint: "http://127.0.0.1:8080"                   # Nacos 控制台地址（配置拉取/登录认证）
+  namingEndpoint: "http://127.0.0.1:8848"             # Nacos 3.x Server API 端口（naming API 无需认证）；为空则回退到 endpoint
   dataID: "sgate.yaml"                                # Nacos 上配置的 Data ID（需与控制台一致）
   group: "DEFAULT_GROUP"                              # Nacos Group（留空默认 DEFAULT_GROUP）
   namespace: ""                                      # Nacos 命名空间 ID（默认 public 留空）
+  apiVersion: "v3"                                    # Nacos API 版本: v3（Nacos 3.x）或 v1（Nacos 2.x）
+  username: "nacos"                                  # Nacos 3.x 认证用户名
+  password: "nacos"                                  # Nacos 3.x 认证密码
   pollInterval: "5s"                                  # 长轮询兜底间隔（Nacos 内容哈希变化才推送）
 
 # --- 告警 webhook ---

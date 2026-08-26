@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -12,7 +13,6 @@ type Config struct {
 	Port       int              `yaml:"port"`
 	LogLevel   string           `yaml:"logLevel"`
 	Zone       string           `yaml:"zone"`
-	Redis      RedisConfig      `yaml:"redis"`
 	Discovery  DiscoveryConfig  `yaml:"discovery"`
 	Transports []Transport      `yaml:"transports"`
 	GRPC       GRPCConfig       `yaml:"grpc"`
@@ -95,14 +95,18 @@ type OTelTracerConfig struct {
 
 // ConfigCenterConfig 配置中心配置（兼容 Nacos/Apollo/etcd-v3-gateway/Consul）
 type ConfigCenterConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	Type         string `yaml:"type"` // nacos | apollo | etcd | consul | http
-	Endpoint     string `yaml:"endpoint"`
-	Namespace    string `yaml:"namespace"`
-	DataID       string `yaml:"dataID"`
-	Group        string `yaml:"group"`
-	Token        string `yaml:"token"`
-	PollInterval string `yaml:"pollInterval"`
+	Enabled        bool   `yaml:"enabled"`
+	Type           string `yaml:"type"`           // nacos | apollo | etcd | consul | http
+	Endpoint       string `yaml:"endpoint"`      // Nacos 控制台地址（用于登录认证/配置拉取）
+	NamingEndpoint string `yaml:"namingEndpoint"` // Nacos 主端口地址（用于服务注册/发现）；为空则回退到 Endpoint
+	Namespace      string `yaml:"namespace"`     // 命名空间
+	DataID         string `yaml:"dataID"`         // 配置 ID
+	Group          string `yaml:"group"`          // 分组
+	Token          string `yaml:"token"`          // 认证 token（直接使用，不登录）
+	Username       string `yaml:"username"`       // Nacos 3.x 用户名（用于登录获取 token）
+	Password       string `yaml:"password"`       // Nacos 3.x 密码
+	PollInterval   string `yaml:"pollInterval"`
+	APIVersion     string `yaml:"apiVersion"`     // Nacos API 版本: "v3"（默认，Nacos 3.x）或 "v1"（Nacos 2.x）
 }
 
 // AlertWebhookConfig 告警 webhook 配置
@@ -189,20 +193,12 @@ type TLSConfig struct {
 }
 
 // ClusterConfig 集群配置
+// 基于 Nacos 临时实例实现节点注册与 Leader 选举（同 zone 内按 ip:port 排序，排名第一者为 Leader）
 type ClusterConfig struct {
 	Enabled        bool   `yaml:"enabled"`
 	NodeID         string `yaml:"nodeID"`
 	LeaderElection bool   `yaml:"leaderElection"`
-	LockKey        string `yaml:"lockKey"`
 	LockTTL        string `yaml:"lockTTL"`
-}
-
-type RedisConfig struct {
-	Addr         string `yaml:"addr"`
-	Password     string `yaml:"password"`
-	DB           int    `yaml:"db"`
-	PoolSize     int    `yaml:"poolSize"`
-	MinIdleConns int    `yaml:"minIdleConns"`
 }
 
 type DiscoveryConfig struct {
@@ -252,19 +248,15 @@ type Transport struct {
 }
 
 func LoadConfig() (*Config, error) {
-	configFile := "config/config.yaml"
-	if _, err := os.Stat(configFile); err != nil {
-		configFile = "../config/config.yaml"
-		if _, err := os.Stat(configFile); err != nil {
-			configFile = "../../config/config.yaml"
-			if _, err := os.Stat(configFile); err != nil {
-				return loadDefaultConfig(), nil
-			}
+	var file *os.File
+	for _, name := range []string{"config/config.yaml", "../config/config.yaml", "../../config/config.yaml"} {
+		candidate, err := os.Open(filepath.Clean(name))
+		if err == nil {
+			file = candidate
+			break
 		}
 	}
-
-	file, err := os.Open(configFile)
-	if err != nil {
+	if file == nil {
 		return loadDefaultConfig(), nil
 	}
 	defer file.Close()
@@ -282,11 +274,6 @@ func LoadConfig() (*Config, error) {
 func loadDefaultConfig() *Config {
 	port := getEnvInt("PORT", 8080)
 	logLevel := getEnvString("LOG_LEVEL", "info")
-	redisAddr := getEnvString("REDIS_ADDR", "127.0.0.1:6379")
-	redisPassword := getEnvString("REDIS_PASSWORD", "")
-	redisDB := getEnvInt("REDIS_DB", 10)
-	redisPoolSize := getEnvInt("REDIS_POOL_SIZE", 10)
-	redisMinIdleConns := getEnvInt("REDIS_MIN_IDLE_CONNS", 5)
 
 	defaultTransports := []Transport{
 		{Protocol: "tcp", Port: 8080},
@@ -297,13 +284,6 @@ func loadDefaultConfig() *Config {
 	return &Config{
 		Port:     port,
 		LogLevel: logLevel,
-		Redis: RedisConfig{
-			Addr:         redisAddr,
-			Password:     redisPassword,
-			DB:           redisDB,
-			PoolSize:     redisPoolSize,
-			MinIdleConns: redisMinIdleConns,
-		},
 		Discovery: DiscoveryConfig{
 			Enabled:           true,
 			ServiceName:       "logic",
@@ -336,7 +316,7 @@ func loadDefaultConfig() *Config {
 			WSCheckInterval:    DefaultWSCheckIntervalSec,
 			ConnCheckInterval:  DefaultConnCheckInterval,
 			ConnIdleTimeout:    DefaultConnIdleTimeout,
-			VerifyInbound:      true,
+			VerifyInbound:      false,
 		},
 		Security: SecurityConfig{
 			Enabled: true,
@@ -365,7 +345,6 @@ func loadDefaultConfig() *Config {
 			Enabled:        true,
 			NodeID:         "",
 			LeaderElection: true,
-			LockKey:        DefaultClusterLockKey,
 			LockTTL:        DefaultClusterLockTTL,
 		},
 		Balancer: BalancerConfig{
@@ -396,6 +375,7 @@ func loadDefaultConfig() *Config {
 		ConfigCenter: ConfigCenterConfig{
 			Enabled:      false,
 			PollInterval: DefaultConfigCenterPollInterval,
+			APIVersion:   DefaultConfigCenterAPIVersion,
 		},
 		Alert: AlertWebhookConfig{
 			Enabled:   false,

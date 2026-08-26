@@ -98,10 +98,11 @@ const (
 // --- 集群 ---
 
 const (
-	// DefaultClusterLockKey Redis Leader 选举锁 key
-	DefaultClusterLockKey = "sgate:leader"
+	// DefaultClusterServiceName 网关节点注册到 Nacos 的服务名
+	// 集群 Leader 选举基于该服务的实例列表：同 zone 内按 ip:port 字典序排序，排名第一者为 Leader
+	DefaultClusterServiceName = "sgate-gateway"
 
-	// DefaultClusterLockTTL Leader 锁 TTL
+	// DefaultClusterLockTTL 集群心跳/选举 TTL
 	// 必须 > renewInterval（TTL/3），否则续期不及时丢主
 	DefaultClusterLockTTL = "10s"
 )
@@ -157,6 +158,10 @@ const (
 	// DefaultConfigCenterPollInterval 配置中心拉取间隔
 	// Nacos/Apollo 长轮询可设更短；etcd watch 模式可设长一些
 	DefaultConfigCenterPollInterval = "5s"
+	// DefaultConfigCenterAPIVersion Nacos API 版本
+	// "v3" = Nacos 3.x（路径 /nacos/v3/admin/cs/config，响应 JSON 包装）
+	// "v1" = Nacos 2.x（路径 /nacos/v1/cs/configs，响应纯文本）
+	DefaultConfigCenterAPIVersion = "v3"
 )
 
 // --- 告警 ---
