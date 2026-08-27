@@ -16,11 +16,6 @@ import (
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	// GC 调优：千万级吞吐下减少 STW
-	//   GOGC=200 — 提高 GC 触发阈值，降低 GC 频率（默认 100）
-	//   GOMEMLIMIT — Go 1.19+ 软内存上限，建议在容器启动时通过环境变量设置：
-	//     GOMEMLIMIT=4GiB ./high_concurrency_gateway
-	//   （runtime 在启动时读环境变量；main 内设置已太晚）
 	if v := os.Getenv("GOGC"); v == "" {
 		os.Setenv("GOGC", "200")
 		debugSetGCPercent(200)
@@ -28,7 +23,6 @@ func main() {
 		debugSetGCPercent(parseIntDefault(v, 100))
 	}
 	if v := os.Getenv("GOMEMLIMIT"); v != "" {
-		// 显式调用 debug.SetMemoryLimit() 兜底，避免 env 未被 runtime 读取时 heap 失控
 		if applied := applyGOMEMLIMIT(); applied > 0 {
 			tlog.Info("GOMEMLIMIT applied", "env", v, "bytes", applied)
 		} else {
@@ -46,18 +40,19 @@ func main() {
 		}
 	}()
 
-	// 启动 pprof server（独立 goroutine，默认 :6060）
-	// 监控：goroutine 数量、heap 泄漏、schedlatency、CPU 热点
 	if addr := os.Getenv("SGATE_PPROF_ADDR"); addr != "" {
 		gateway.StartPProfServer(addr)
 	} else {
 		gateway.StartPProfServer(":6060")
 	}
 
+	// tlog 负责自动创建日志目录（基于 exe 所在目录解析相对路径）；
+	// 初始化失败意味着日志不可用，直接退出避免静默丢失错误信息。
 	if _, err := tlog.New("config/tlog.yaml"); err != nil {
 		if _, err := tlog.New("../config/tlog.yaml"); err != nil {
 			if _, err := tlog.New("../../config/tlog.yaml"); err != nil {
-				fmt.Println("failed to initialize tlog:", err)
+				fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
+				os.Exit(1)
 			}
 		}
 	}
@@ -102,10 +97,10 @@ func main() {
 					gnet.WithMulticore(true),
 					gnet.WithReusePort(true),
 					gnet.WithTCPNoDelay(gnet.TCPNoDelay),
-					gnet.WithReadBufferCap(262144),             // 256KB — more data per OnTraffic = bigger batches
-					gnet.WithWriteBufferCap(262144),            // 256KB — larger write queue for reverse push
-					gnet.WithSocketRecvBuffer(4 * 1024 * 1024), // 4MB kernel recv buffer
-					gnet.WithSocketSendBuffer(4 * 1024 * 1024), // 4MB kernel send buffer
+					gnet.WithReadBufferCap(262144),
+					gnet.WithWriteBufferCap(262144),
+					gnet.WithSocketRecvBuffer(4 * 1024 * 1024),
+					gnet.WithSocketSendBuffer(4 * 1024 * 1024),
 				}
 			} else {
 				options = []gnet.Option{

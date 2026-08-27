@@ -24,5 +24,5 @@ providers:
     updateIntervalSeconds: 30                 # 每 30 秒检查看板文件变更
     allowUiUpdates: true                      # 允许在 UI 修改看板
     options:
-      # 看板 JSON 文件所在目录（Windows 路径，按你的 Grafana 安装位置修改）
-      path: C:\Program Files\GrafanaLabs\conf\provisioning\dashboards
+      # Docker Compose 容器内路径；原生 Windows Grafana 需改回本机路径。
+      path: /etc/grafana/provisioning/dashboards

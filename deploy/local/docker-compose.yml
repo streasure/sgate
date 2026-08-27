@@ -32,7 +32,7 @@ services:
     ports:
       - "9091:9090"                          # 容器内 9090 → 主机 9091（避开 sgate metrics 的 9090）
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-docker.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'

@@ -42,13 +42,21 @@ func buildSendFrame() {
 	sendFrame = frame
 
 	batchSend = make(map[int][]byte)
-	for _, n := range []int{1, 2, 4, 8, 16, 32, 64, 128, 256} {
-		buf := make([]byte, len(frame)*n)
-		for i := 0; i < n; i++ {
-			copy(buf[i*len(frame):], frame)
-		}
-		batchSend[n] = buf
+}
+
+func buildTCPBatch(n int) []byte {
+	if n <= 0 {
+		n = 1
 	}
+	if batch, ok := batchSend[n]; ok {
+		return batch
+	}
+	batch := make([]byte, len(sendFrame)*n)
+	for i := 0; i < n; i++ {
+		copy(batch[i*len(sendFrame):], sendFrame)
+	}
+	batchSend[n] = batch
+	return batch
 }
 
 func buildWSBinaryFrame(payload []byte) []byte {
@@ -160,7 +168,7 @@ func runForwardConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxIn
 			copy(batch[i*len(wsFrame):], wsFrame)
 		}
 	} else {
-		batch = batchSend[batchSize]
+		batch = buildTCPBatch(batchSize)
 	}
 
 	// 后台读取响应以避免内核接收缓冲区满导致 sgate 写阻塞
@@ -180,16 +188,11 @@ func runForwardConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxIn
 		}
 	}()
 
-	// 速率限制：使用 token bucket
-	var rateLimiter *time.Ticker
+	// 用单调时钟做批量 pacing，避免每条连接创建微秒级 ticker。
+	// Windows 下大量 ticker 会产生调度抖动，实际吞吐会远低于目标值。
+	var nextSend time.Time
 	if ratePerConn > 0 {
-		// 每批发送 batchSize 个消息，所以 ticker 频率 = ratePerConn / batchSize
-		interval := time.Duration(float64(batchSize) / float64(ratePerConn) * float64(time.Second))
-		if interval < time.Microsecond {
-			interval = time.Microsecond
-		}
-		rateLimiter = time.NewTicker(interval)
-		defer rateLimiter.Stop()
+		nextSend = time.Now()
 	}
 
 	for {
@@ -201,8 +204,11 @@ func runForwardConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxIn
 		default:
 		}
 
-		if rateLimiter != nil {
-			<-rateLimiter.C
+		if ratePerConn > 0 {
+			now := time.Now()
+			if now.Before(nextSend) {
+				time.Sleep(nextSend.Sub(now))
+			}
 		}
 
 		// 无 inflight 控制，尽可能快速发送
@@ -211,6 +217,12 @@ func runForwardConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxIn
 			return
 		}
 		atomic.AddInt64(&totalSent, int64(batchSize))
+		if ratePerConn > 0 {
+			nextSend = nextSend.Add(time.Duration(float64(batchSize) / float64(ratePerConn) * float64(time.Second)))
+			if nextSend.Before(time.Now()) {
+				nextSend = time.Now()
+			}
+		}
 	}
 }
 
@@ -474,6 +486,10 @@ func main() {
 	buildSendFrame()
 
 	useWS := mode == "ws-forward" || mode == "ws" || mode == "websocket"
+	if !useWS {
+		// 在启动发送 goroutine 前构造，避免并发写入 batchSend map。
+		buildTCPBatch(batchSize)
+	}
 
 	fmt.Printf("Benchmark: addr=%s conns=%d duration=%ds batchSize=%d mode=%s inflight=%d statsAddr=%s ratePerConn=%d\n",
 		addr, conns, duration, batchSize, mode, inflight, statsAddr, ratePerConn)

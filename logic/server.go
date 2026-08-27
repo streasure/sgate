@@ -251,7 +251,9 @@ func NewServer(opts ...ServerOption) *Server {
 		s.dispatchChs[i] = make(chan dispatchItem, chSize)
 	}
 
-	workerCount := runtime.NumCPU() * 128
+	// 过多 worker 会让 dispatch channel 和调度器成为瓶颈。
+	// 默认使用每核 2 个 worker；高负载部署可通过 WithDispatchWorkerCount 覆盖。
+	workerCount := runtime.NumCPU() * 2
 	if s.dispatchWorkerCount > 0 {
 		workerCount = s.dispatchWorkerCount
 	}
@@ -316,8 +318,6 @@ func WithDispatchWorkers(n int) ServerOption {
 
 func WithDispatchChSize(n int) ServerOption {
 	return func(s *Server) {
-		// 总容量 n 均分到各分片通道（在 NewServer 中生效）
-		s.dispatchWorkerCount = s.dispatchWorkerCount // no-op, 保留选项兼容
 		if n > 0 {
 			s.dispatchChTotalSize = n
 		}

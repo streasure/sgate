@@ -21,7 +21,14 @@ data:
         type: ""
       - protocol: tcp
         port: 8085
-        type: websocket
+       type: websocket
+
+    # Prometheus metrics must be explicitly enabled; deployment.yaml exposes :9090.
+    monitoring:
+      prometheus:
+        enabled: true
+        addr: ":9090"
+        path: "/metrics"
 
     # 工作池配置
     workerPool:

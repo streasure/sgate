@@ -14,7 +14,7 @@
 #   2. Configuration → Data Sources → Add data source
 #   3. 选 Prometheus
 #   4. Name 必须填 "Prometheus"（sgate 看板里 datasource 写死这个名字）
-#   5. URL 填 http://127.0.0.1:9091（指向 Prometheus，不是 sgate）
+#   5. Docker Compose 使用 http://prometheus:9090；原生 Windows Grafana 使用 http://127.0.0.1:9090
 #   6. Save & Test
 # ============================================================================
 
@@ -24,7 +24,7 @@ datasources:
   - name: Prometheus                          # 必须叫这个名字，sgate 看板 datasource 写死
     type: prometheus
     access: proxy                             # Grafana 后端代理访问（避免浏览器跨域）
-    url: http://127.0.0.1:9091                # 指向 Prometheus（不是 sgate metrics 的 9090）
+    url: http://prometheus:9090               # Docker Compose 服务名和容器端口
     isDefault: true
     editable: true
     jsonData:

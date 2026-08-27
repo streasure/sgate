@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -9,9 +10,21 @@ import (
 
 	"github.com/streasure/sgate/logic"
 	"github.com/streasure/sgate/protobuf"
+	tlog "github.com/streasure/treasure-slog"
 )
 
 func main() {
+	// tlog 负责自动创建日志目录（基于 exe 所在目录解析相对路径）；
+	// 初始化失败意味着日志不可用，直接退出避免静默丢失错误信息。
+	if _, err := tlog.New("config/tlog.yaml"); err != nil {
+		if _, err := tlog.New("../config/tlog.yaml"); err != nil {
+			if _, err := tlog.New("../../config/tlog.yaml"); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
+
 	if addr := os.Getenv("LOGIC_PPROF_ADDR"); addr != "" {
 		go http.ListenAndServe(addr, nil)
 	}
@@ -19,7 +32,6 @@ func main() {
 		logic.WithServiceID(envOr("LOGIC_SERVICE_ID", "logic-1")),
 		logic.WithAdvertiseAddr(envOr("LOGIC_ADVERTISE_ADDR", "localhost:50052")),
 		logic.WithListenPort(envOr("LOGIC_PORT", "50052")),
-		// Nacos 注册默认关闭（仅监控 sgate 网关）；需要注册 logic 时设置 NACOS_ENDPOINT/NACOS_NAMING_ENDPOINT
 		logic.WithNacosEndpoint(envOr("NACOS_ENDPOINT", "")),
 		logic.WithNacosNamingEndpoint(envOr("NACOS_NAMING_ENDPOINT", "")),
 		logic.WithNacosNamespace(envOr("NACOS_NAMESPACE", "public")),
@@ -29,12 +41,8 @@ func main() {
 		logic.WithServiceName(envOr("LOGIC_SERVICE_NAME", "logic")),
 		logic.WithGRPCWindowSize(envInt("GRPC_WINDOW_SIZE", 67108864)),
 		logic.WithGRPCMaxMessageSize(envInt("GRPC_MAX_MSG_SIZE", 4194304)),
-		logic.WithStreamSendChSize(envInt("LOGIC_STREAM_CH_SIZE", 65536)),
-		// 分发 worker 数：默认 NumCPU*128，高并发下过多 worker 会加剧
-		// 调度与 sync.Pool 竞争，可通过 LOGIC_DISPATCH_WORKERS 调优
-		logic.WithDispatchWorkerCount(envInt("LOGIC_DISPATCH_WORKERS", 0)),
-		// 默认走路由分发，确保 BURST_COUNT 反向推送处理器在双向压测中生效。
-		// 需要纯透传吞吐时仍可显式设置 LOGIC_PASSTHROUGH=true。
+		logic.WithStreamSendChSize(envInt("LOGIC_STREAM_CH_SIZE", 1048576)),
+		logic.WithDispatchWorkerCount(envInt("LOGIC_DISPATCH_WORKERS", 24)),
 		logic.WithPassthrough(envBool("LOGIC_PASSTHROUGH", false)),
 	)
 
@@ -47,11 +55,6 @@ func main() {
 		}
 	})
 
-	// 反向链路压测：每条 RouteTest 触发 burstCount 条推送回客户端
-	// 正向流量极低（仅触发），反向流量被放大 burstCount 倍
-	// 避免正向与反向在同一 gRPC 双向流上竞争流控窗口
-	// 默认放大反向响应，配合批量发送可覆盖千万级双向吞吐压测；
-	// 生产环境可通过 BURST_COUNT 调整为业务所需值。
 	burstCount := envInt("BURST_COUNT", 2000)
 	svc.RegisterBurstRoute(protobuf.RouteTest, func(msg *protobuf.Message, push func(*protobuf.Message)) {
 		ts := time.Now().UnixMilli()
@@ -84,8 +87,11 @@ func main() {
 	})
 
 	if err := svc.Run(); err != nil {
-		panic(err)
+		tlog.Error("logic service failed", "error", err)
+		tlog.Sync()
+		os.Exit(1)
 	}
+	tlog.Sync()
 }
 
 func envOr(key, def string) string {

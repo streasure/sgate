@@ -12,9 +12,10 @@ sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/W
 
 ## 核心特性
 
-- **高性能**: 基于 gnet 事件驱动网络框架，双向千万级 QPS 转发
-  - 正向（client→sgate→logic）: 峰值 **18.5M QPS**
-  - 反向（logic→sgate→client）: 持续 **11M QPS**（0 丢弃）
+- **高性能**: 基于 gnet 事件驱动网络框架，支持千万级压力测试
+  - 本次 Windows 单机实测正向（client→sgate→logic）：约 **9.24M QPS**，0 正向丢弃
+  - 同次测试反向（logic→sgate→client）：约 **1.50M QPS**，`PushDroppedNoConn=20,480`
+  - 受控双向实测：约 **2.46M QPS × 2**，正向 0 丢弃
   - P99 延迟毫秒级（滑动窗口实时计算 P50/P95/P99/Max）
 - **多协议支持**: TCP、UDP、WebSocket
 - **服务发现**: 基于 Nacos 的自动服务发现与注册，支持 zone 隔离
@@ -72,15 +73,19 @@ CGO_ENABLED=0 go build -o bench ./examples/bench/
 #    Docker: docker run -d -p 8080:8080 -p 8848:8848 nacos/nacos-server:v3.2.3
 
 # 2. 启动 Logic Server（默认端口 50052）
+#    日志目录 ./logs 会自动创建，无需手动 mkdir
 #    环境变量配置：
-#    - BURST_COUNT: 反向突发消息数（默认 1000，设为 0 关闭）
+#    - BURST_COUNT: 反向突发消息数（默认 1，设为 0 关闭）
 #    - LOGIC_STREAM_CH_SIZE: gRPC 流发送通道大小（建议 262144）
 #    - GRPC_WINDOW_SIZE: gRPC 窗口大小（建议 64MB）
-$env:BURST_COUNT="1000"
+$env:BURST_COUNT="1"
 $env:LOGIC_STREAM_CH_SIZE="262144"
+$env:GRPC_WINDOW_SIZE="67108864"
+$env:GRPC_MAX_MSG_SIZE="16777216"
 ./logic_server.exe
 
 # 3. 启动 Gateway（默认端口 48080 TCP / 48081 UDP / 48082 WS）
+#    日志目录 ./logs 会自动创建，无需手动 mkdir
 ./sgate.exe
 ```
 
@@ -89,18 +94,19 @@ $env:LOGIC_STREAM_CH_SIZE="262144"
 ```bash
 # 正向压测（client → sgate → logic）
 # 参数: 地址 连接数 时长(s) 批大小 模式 inflight 统计地址 速率/连接(0=无限)
-./bench.exe 127.0.0.1:48080 100 10 64 forward 4096 127.0.0.1:9091 0
+./bench.exe 127.0.0.1:48080 100 10 256 forward 4096 127.0.0.1:8081 0
 
-# 反向压测（logic → sgate → client，需 BURST_COUNT=1000）
-# ratePerConn=110 控制正向触发频率，反向流量被放大 1000 倍
-./bench.exe 127.0.0.1:48080 100 10 1 forward 4096 127.0.0.1:9091 110
+# 反向压测（logic → sgate → client，BURST_COUNT 由 logic 配置）
+# ratePerConn 控制正向触发频率；BURST_COUNT=1 适合测稳定双向能力
+# 千万级发送能力测试：100 × 100,000 msg/s，批量发送 1024 条消息
+./bench.exe 127.0.0.1:48080 100 10 1024 forward 4096 127.0.0.1:8081 100000
 ```
 
 ### 查看统计
 
 ```bash
 # 实时查看 sgate 转发统计
-curl http://127.0.0.1:9091/stats
+curl http://127.0.0.1:8081/stats
 
 # 输出示例:
 # {
@@ -122,12 +128,12 @@ curl http://127.0.0.1:9091/stats
 # }
 
 # Prometheus 指标（Grafana 对接）
-curl http://127.0.0.1:9090/metrics
+curl http://127.0.0.1:9100/metrics
 
 # K8s 健康探针
-curl http://127.0.0.1:9091/health   # 健康检查
-curl http://127.0.0.1:9091/ready    # 就绪检查
-curl http://127.0.0.1:9091/live     # 存活检查
+curl http://127.0.0.1:8081/health   # 健康检查
+curl http://127.0.0.1:8081/ready    # 就绪检查
+curl http://127.0.0.1:8081/live     # 存活检查
 ```
 
 ## 配置说明
@@ -275,39 +281,69 @@ svc.RegisterBurstRoute(protobuf.RouteTest, func(msg, push) {
 
 ## 性能
 
-### 压测结果 (Windows, 12核)
+### 压测结果 (Windows 12线程, 同机 client+sgate+logic)
 
-| 方向 | 模式 | 连接数 | QPS | 丢弃 |
-|------|------|--------|-----|------|
-| 正向 (client→sgate→logic) | forward, batchSize=64 | 100 | **18.5M 峰值** | 有（超 gRPC 容量） |
-| 反向 (logic→sgate→client) | burst×1000, ratePerConn=110 | 100 | **11.0M 持续** | **0** |
-| 反向 (logic→sgate→client) | burst×1000, ratePerConn=110 | 200 | **10.8M 持续** | **0** |
+硬件环境：Intel Core i5-10400F，6 个物理核心、12 个逻辑处理器，2.90GHz，Windows。
+压测统计端点：`127.0.0.1:8081/stats`。bench 使用单调时钟 pacing，并支持任意批量大小；`batchSize=1024` 时每次 socket 写入承载 1024 个 TCP 消息。
 
-### 双向千万级 QPS 优化要点
+本次干净重启后的千万级目标测试使用 100 个连接、`BURST_COUNT=1`、`batchSize=1024`、每连接目标 100,000 msg/s、持续 10 秒。实际发送和 gateway 转发约 **9.24M QPS**，接收/转发 `92,583,936` 条，正向丢弃为 `0`。bench 的单秒瞬时值超过 10M，但在 Windows 同机三进程条件下，10 秒稳定平均值约为 9.24M。
 
-1. **正向链路优化（client→sgate→logic）**
-   - 合并 protobuf 解析函数（`extractRouteAndCmd`），消除冗余 RLock，CPU 从 87% 降至 50-60%
-   - gRPC 多 shard（16 流），每流独立通道，降低锁竞争
-   - 大窗口配置（windowSize=64MB，sendChannelSize=262144）
-   - batchSize=64 时吞吐量最高，单次 TCP 读取批量处理多帧
+#### 单向压测（反向链路，logic→sgate→client）
 
-2. **反向链路优化（logic→sgate→client）**
-   - **BurstRouteHandler**: 单次请求触发 N 条反向响应，放大反向流量测试纯反向路径容量
-   - **Marshal 缓存**: 相同 Route+Timestamp 的响应复用序列化 bytes，1000 次 Marshal 降为 1 次
-   - **Single-conn 批量格式**: 同一连接的 N 条消息共享 connID（放外层），sgate 仅需 1 次 `GetConnection`
-   - **SendMulti 单次写入**: N 条消息合并为连续 buffer，单次 `AsyncWrite` 发送，event-loop 入队从 N 次降为 1 次
-   - **零拷贝传递**: sgate 收到 batch 后直接将 `msg.Data` 传给 `AsyncWrite`，无需逐条解析
+| 模式 | 连接数 | Burst | PushQPS | 丢弃 |
+|------|--------|-------|---------|------|
+| `BURST_COUNT=1`, ratePerConn=1000 | 100 | ×1 | **103K** | **2,232** |
+| `BURST_COUNT=1`, ratePerConn=5000 | 100 | ×1 | **427K** | **2,880** |
 
-3. **批量消息协议**
-   - `RouteBatch` 伪路由标记批量消息
-   - Single-conn 格式: `msg.ConnectionId` 非空，`Data = [4字节 len][payload] 重复`
-   - Multi-conn 格式: `msg.ConnectionId` 为空，`Data = [2字节 connIDLen][connID][4字节 len][payload] 重复`
-   - 单批最大 256 条消息，避免 gRPC 消息过大
+#### 双向压测（client↔sgate↔logic 同时收发）
 
-4. **资源熔断器**
-   - CPU/内存阈值监控（默认 92%）
-   - 超阈值时丢弃新消息，保护已有连接
-   - HTTP `/stats` 端点实时暴露统计
+| 模式 | 连接数 | 持续时长 | Avg QPS (单向) | 峰值 QPS | 正向丢弃 | 反向丢弃 |
+|------|--------|----------|----------------|----------|----------|----------|
+| forward, batchSize=256 | 100 | 20s | **约 4.99M** | **约 5.95M** | **0** | **0** |
+| forward, batchSize=1024 | 100 | 10s | **约 9.24M** | **约 10.59M** | **0** | **20,480** |
+
+> 千万级测试中的 `PushDroppedNoConn` 主要出现在连接建立/关闭边界；正向 gateway→logic 没有丢弃。不限速、长时间压测会受同机 client 反向读取和内存压力影响，应使用多机压测验证生产容量。
+
+### 反向链路优化（v2 — 双向场景优化）
+
+logic server 反向推送路径的核心优化：
+
+| 优化项 | 优化前 | 优化后 |
+|--------|--------|--------|
+| 分发通道 | 单一全局 channel（1536 worker 抢锁，占 CPU 42%） | 按 CPU 核数分片，worker 均匀绑定各自分片 |
+| 回包序列化 | 每条回复单独 `proto.Marshal` → 独立 buffer → flushLoop 整体拷贝 | `appendMessageFast` 直写批量缓冲（protowire 手动编码），零中间分配 |
+| 批量缓冲 | 每批重新分配 mcBuf | 跨批次复用（gRPC Send 同步返回后安全重用） |
+| 批量粒度 | 256 条/stream.Send | 1024 条/stream.Send，固定开销再摊薄 4 倍 |
+| Shard 重连 | 分片断开后永久死亡 | 自动触发 `handleDisconnection()` 全量重连 |
+
+**压测对比**（200 连接 duplex 120s，看门狗无触发）：
+- 优化前：双向各 ~2.1M QPS
+- 优化后：**平均 3.15M、峰值 3.8M（+50~60%）**，累计收发 3.78 亿条，回环完成率 99.1%
+- logic CPU 从 8.0 核降到 6.9 核（同流量下）
+
+### 正向链路优化
+
+1. **合并 protobuf 解析函数**（`extractRouteAndCmd`），消除冗余 RLock，CPU 从 87% 降至 50-60%
+2. **gRPC 多 shard**（16 流），每流独立通道，降低锁竞争
+3. **大窗口配置**（windowSize=64MB，sendChannelSize=262144）
+4. **batchSize=64** 时正向吞吐量最高，单次 TCP 读取批量处理多帧
+
+### 反向链路优化（单向高吞吐）
+
+1. **BurstRouteHandler**: 单次请求触发 N 条反向响应，放大反向流量测试纯反向路径容量
+2. **Marshal 缓存**: 相同 Route+Timestamp 的响应复用序列化 bytes，1000 次 Marshal 降为 1 次
+3. **Single-conn 批量格式**: 同一连接的 N 条消息共享 connID（放外层），sgate 仅需 1 次 `GetConnection`
+4. **SendMulti 单次写入**: N 条消息合并为连续 buffer，单次 `AsyncWrite` 发送
+5. **零拷贝传递**: sgate 收到 batch 后直接将 `msg.Data` 传给 `AsyncWrite`，无需逐条解析
+
+### 关于千万级双向的说明
+
+在本次单机测试中，client+sgate+logic 三进程共址时可稳定完成约 9.24M/s 的正向压力；logic-to-client 反向能力取决于 logic 业务产生速度和客户端读取能力。
+
+**达到千万级双向需要分布式部署**：
+1. 客户端与服务端分机部署，多台 logic 实例横向扩展
+2. 或将 sgate↔logic 的 gRPC 层替换为裸 TCP 长连接批量协议，消除 gRPC HTTP/2 帧开销
+3. 当前架构下，10M 双向需要 logic 侧同时维持约 20M msg/s 的收发吞吐，单机 client+sgate+logic 共址通常不现实
 
 ## 高性能压测指南
 
@@ -321,81 +357,67 @@ go build -o logic_server.exe ./examples/logic_server/
 go build -o bench.exe ./examples/bench/
 
 # 步骤 2: 启动服务（2 个终端）
-$env:BURST_COUNT="1000"; $env:LOGIC_STREAM_CH_SIZE="262144"; .\logic_server.exe
+$env:BURST_COUNT="1"; $env:LOGIC_STREAM_CH_SIZE="262144"
+$env:GRPC_WINDOW_SIZE="67108864"; $env:GRPC_MAX_MSG_SIZE="16777216"
+.\logic_server.exe
 .\sgate.exe
 
-# 步骤 3: 压测（约 10 秒出结果）
-.\bench.exe 127.0.0.1:48080 100 10 1 forward 4096 127.0.0.1:9091 110
+# 步骤 3: 双向压测（120 秒带看门狗）
+.\bench.exe 127.0.0.1:48080 200 120 16 duplex 16384
 ```
 
-预期结果：`PushQPS: ~1100万`，`DropOvl: 0`，`DropFull: 0`
+预期结果：双向各 **3M+ QPS**，`Dropped: 0`
 
 ### bench 工具参数说明
 
 ```
-bench.exe <addr> <conns> <duration> <batchSize> <mode> <inflight> <statsAddr> <ratePerConn>
+bench.exe <addr> <conns> <duration> <batchSize> <mode> <inflight>
 ```
 
 | 参数 | 说明 | 推荐值 |
 |------|------|--------|
-| addr | sgate 地址 | 127.0.0.1:48080 |
-| conns | 客户端连接数 | 100 |
-| duration | 测试时长（秒） | 10 |
-| batchSize | 每次写入的消息数 | 1（反向）/ 64（正向） |
-| mode | 测试模式 | forward |
-| inflight | 最大在途消息数 | 4096 |
-| statsAddr | sgate 统计端点 | 127.0.0.1:9091 |
-| ratePerConn | 每连接发送速率（0=无限） | 110（反向）/ 0（正向） |
+| addr | sgate TCP 地址 | 127.0.0.1:48080 |
+| conns | 客户端连接数 | 200 |
+| duration | 测试时长（秒） | 120 |
+| batchSize | 每次写入的消息数 | 16（duplex）/ 64（forward） |
+| mode | 测试模式 | duplex（双向）/ forward（正向） |
+| inflight | 最大在途消息数 | 16384 |
 
 ### 关键配置项
 
-`config/config.yaml` 中的核心配置：
-
-```yaml
-grpc:
-  windowSize: 67108864        # gRPC 流控窗口 64MB
-  maxMessageSize: 8388608     # 单条消息最大 8MB
-
-stream:
-  shardCount: 16              # gRPC 流分片数（过多增加锁竞争）
-  sendChannelSize: 262144     # 每流发送通道大小
-  receiveBatchSize: 128       # 接收批量大小
-
-protection:
-  memoryThreshold: 92         # 内存熔断阈值 %
-  cpuThreshold: 92            # CPU 熔断阈值 %
-  dropOnOverload: true        # 过载时丢弃消息
-```
-
-### Logic Server 环境变量
+**Logic Server 环境变量**：
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| BURST_COUNT | 1000 | 反向突发消息数（0=关闭） |
-| LOGIC_STREAM_CH_SIZE | 65536 | gRPC 流发送通道大小 |
-| GRPC_WINDOW_SIZE | 67108864 | gRPC 窗口大小 |
-| GRPC_MAX_MSG_SIZE | 4194304 | gRPC 最大消息大小 |
+| BURST_COUNT | 1 | 反向突发消息数（1=正向1条触发反向1条） |
+| LOGIC_STREAM_CH_SIZE | 65536 | gRPC 流发送通道大小（建议 262144） |
+| LOGIC_DISPATCH_WORKERS | 0 | 分发 worker 数（0=默认 NumCPU×128） |
+| GRPC_WINDOW_SIZE | 67108864 | gRPC 窗口大小（建议 64MB） |
+| GRPC_MAX_MSG_SIZE | 4194304 | gRPC 最大消息大小（建议 16MB） |
 | LOGIC_PORT | 50052 | 监听端口 |
+| LOGIC_PPROF_ADDR | (空) | pprof 地址（如 127.0.0.1:6070） |
 
-### 正向压测（验证 client→sgate→logic 吞吐量）
+**Gateway 配置** (`examples/high_concurrency_gateway/config/config.yaml`)：
 
-```bash
-# BURST_COUNT=0 关闭反向流量，测试纯正向
-$env:BURST_COUNT="0"
-.\bench.exe 127.0.0.1:48080 100 10 64 forward 4096 127.0.0.1:9091 0
+```yaml
+# 压测模式：关闭服务发现，直连 localhost:50052
+discovery:
+  enabled: false
+
+# TCP 接入端口
+transports:
+  - protocol: tcp
+    port: 48080
+
+# 监控端口（让出 8080 给 Nacos）
+port: 8081
+
+# Prometheus 指标端口
+monitoring:
+  prometheus:
+    enabled: true
+    addr: ":9100"
 ```
-
-预期：`FwdQPS` 首秒可达 18M+（峰值吞吐量）
-
-### 反向压测（验证 logic→sgate→client 吞吐量）
-
-```bash
-# BURST_COUNT=1000 放大反向流量，ratePerConn=110 控制正向触发频率
-$env:BURST_COUNT="1000"
-.\bench.exe 127.0.0.1:48080 100 10 1 forward 4096 127.0.0.1:9091 110
-```
-
-预期：`PushQPS` 持续 11M，`DropOvl: 0`，`DropFull: 0`
 
 ## 容错分析
 

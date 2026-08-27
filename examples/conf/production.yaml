@@ -1,0 +1,92 @@
+# sgate production baseline
+# Replace Nacos credentials/endpoints and security secrets for the target environment.
+
+port: 8081
+logLevel: info
+zone: "default"
+
+discovery:
+  enabled: true
+  serviceName: "logic"
+  zone: "default"
+  heartbeatInterval: 3s
+  heartbeatTTL: 10s
+  deregisterDelay: 5s
+  scanInterval: 10s
+
+transports:
+  - protocol: tcp
+    port: 48080
+  - protocol: udp
+    port: 48081
+  - protocol: tcp
+    port: 48082
+    type: websocket
+
+grpc:
+  port: 50051
+  windowSize: 67108864
+  maxMessageSize: 16777216
+
+# 12-core benchmark baseline. Scale with CPU count and connection count.
+stream:
+  shardCount: 96
+  sendChannelSize: 1048576
+  receiveBatchSize: 128
+
+protection:
+  maxFrameSize: 4194304
+  maxFrameBufSize: 4194304
+  maxWSFrameSize: 4194304
+  maxWSBufferSize: 4194304
+  memoryThreshold: 90
+  cpuThreshold: 90
+  dropOnOverload: true
+  checkIntervalMs: 200
+  wsHeartbeatTimeout: 60
+  wsCheckInterval: 30
+  connCheckInterval: "5m"
+  connIdleTimeout: "30s"
+  verifyInbound: true
+
+configCenter:
+  enabled: true
+  type: "nacos"
+  endpoint: "http://nacos:8080"
+  namingEndpoint: "http://nacos:56000"
+  dataID: "sgate.yaml"
+  group: "DEFAULT_GROUP"
+  namespace: ""
+  apiVersion: "v3"
+
+cluster:
+  enabled: true
+  nodeID: ""
+
+security:
+  enabled: true
+  whitelist: []
+  blacklist: []
+  rateLimit:
+    enabled: true
+    maxTokens: 1000000
+    tokenRefresh: "1s"
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 5
+    successThreshold: 3
+    timeout: "30s"
+
+tls:
+  # Keep false until certFile/keyFile point to deployed certificates.
+  enabled: false
+  certFile: ""
+  keyFile: ""
+
+jwtAuth:
+  # Enable after replacing the secret and provisioning client tokens.
+  enabled: false
+  secret: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
+  skipRoutes:
+    - "handshake"
+    - "login"
