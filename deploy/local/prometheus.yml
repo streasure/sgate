@@ -1,13 +1,13 @@
 # ============================================================================
 # Prometheus 抓取配置（Windows 本地原生安装版）
 # ----------------------------------------------------------------------------
-# 作用：告诉 Prometheus 去 sgate 的 :9090/metrics 拉取指标
+# 作用：告诉 Prometheus 去 sgate 的 :9100/metrics 拉取指标
 # 启动方式：
-#   prometheus.exe --config.file=e:\sgate\deploy\local\prometheus.yml --web.listen-address=:9091 --storage.tsdb.path=e:\sgate\deploy\local\prometheus-data
-# 注意：
-#   - Prometheus 自身默认端口 9090 与 sgate metrics 冲突，故用 --web.listen-address=:9091
-#   - storage.tsdb.path 必须指向已存在的目录
-#   - Windows 下 prometheus.exe 从 https://prometheus.io/download/ 下载
+#   prometheus.exe --config.file=e:\sgate\deploy\local\prometheus.yml
+#
+# 端口说明：
+#   - sgate metrics 监听 :9100（见 config.yaml monitoring.prometheus.addr）
+#   - Prometheus 使用默认端口 :9090（Grafana 数据源默认指向 http://localhost:9090）
 # ============================================================================
 
 global:
@@ -22,10 +22,7 @@ scrape_configs:
     scrape_interval: 5s
     metrics_path: '/metrics'  # 必须与 sgate config.yaml 的 monitoring.prometheus.path 一致
     static_configs:
-      - targets: ['127.0.0.1:9090']   # sgate 的 Prometheus 指标端点
-        labels:
-          service: 'sgate'
-          zone: 'default'
+      - targets: ['127.0.0.1:9100']   # sgate 的 Prometheus 指标端点
 
   # sgate 健康检查（可选，仅作存活参考）
   - job_name: 'sgate-health'

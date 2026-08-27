@@ -6,22 +6,69 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/encoding/protowire"
 )
+
+// appendMessageFast 将 *protobuf.Message 序列化后直接追加到 dst（零中间分配）。
+// 快速路径仅覆盖常见字段：connection_id(1)/user_uuid(2)/route(3)/cmd(4)/
+// data(5)/timestamp(6)——反向推送的绝大多数消息（回包/推送通知）只含这些字段。
+// 若设置了扩展字段（payload/checksum/compression 等），回退到 proto.Marshal 以保证
+// 与标准序列化字节完全一致。字段号与 message.proto 定义一一对应。
+func appendMessageFast(dst []byte, m *protobuf.Message) []byte {
+	if m.Payload != nil || m.Checksum != "" || m.Signature != nil || m.Sequence != 0 ||
+		m.RequireAck || m.Compression != 0 || m.OriginalSize != 0 || m.CompressedSize != 0 ||
+		m.ProtocolVersion != "" {
+		b, err := proto.Marshal(m)
+		if err != nil {
+			return dst
+		}
+		return append(dst, b...)
+	}
+	if m.ConnectionId != "" {
+		dst = protowire.AppendTag(dst, 1, protowire.BytesType)
+		dst = protowire.AppendString(dst, m.ConnectionId)
+	}
+	if m.UserUuid != "" {
+		dst = protowire.AppendTag(dst, 2, protowire.BytesType)
+		dst = protowire.AppendString(dst, m.UserUuid)
+	}
+	if m.Route != "" {
+		dst = protowire.AppendTag(dst, 3, protowire.BytesType)
+		dst = protowire.AppendString(dst, m.Route)
+	}
+	if m.Cmd != 0 {
+		dst = protowire.AppendTag(dst, 4, protowire.VarintType)
+		dst = protowire.AppendVarint(dst, uint64(m.Cmd))
+	}
+	if len(m.Data) > 0 {
+		dst = protowire.AppendTag(dst, 5, protowire.BytesType)
+		dst = protowire.AppendBytes(dst, m.Data)
+	}
+	if m.Timestamp != 0 {
+		dst = protowire.AppendTag(dst, 6, protowire.VarintType)
+		dst = protowire.AppendVarint(dst, uint64(m.Timestamp))
+	}
+	return dst
+}
 
 type DisconnectCallback func(connectionID string)
 
 // reverseItem 携带预序列化的反向消息，避免 flushLoop 单协程做 proto.Marshal。
-// 调用方（dispatchWorker 等）在 Send 时完成 Marshal，利用多协程并行化。
+// reverseItem 反向推送队列条目。
+// 优化：直接携带 *protobuf.Message 引用，由 flushLoop 在组装 multi-conn
+// 批量缓冲时用 appendMessageFast 就地序列化。原先在 worker 侧先 proto.Marshal
+// 分配独立 []byte、flushLoop 再整体拷贝一次，两条开销全部消除。
 type reverseItem struct {
 	connID string
 	route  string
-	data   []byte // 预序列化的 protobuf.Message bytes
+	msg    *protobuf.Message
 }
 
 type streamConn struct {
@@ -43,18 +90,13 @@ func newStreamConn(stream protobuf.GatewayService_StreamMessagesServer, sendChSi
 	return sc
 }
 
-// Send 预序列化消息后推入 sendCh。
-// Marshal 在调用方协程完成（dispatchWorker 有 1536 个协程并行），
-// flushLoop 只需拷贝 bytes 到批量缓冲，不再做 Marshal（消除单协程瓶颈）。
+// Send 将消息引用推入 sendCh（无序列化、无分配）。
+// 序列化延迟到 flushLoop 组批时用 appendMessageFast 直写完成。
 func (sc *streamConn) Send(msg *protobuf.Message) error {
-	data, err := proto.Marshal(msg)
-	if err != nil {
-		return err
-	}
 	item := reverseItem{
 		connID: msg.ConnectionId,
 		route:  msg.Route,
-		data:   data,
+		msg:    msg,
 	}
 	select {
 	case sc.sendCh <- item:
@@ -66,16 +108,19 @@ func (sc *streamConn) Send(msg *protobuf.Message) error {
 
 func (sc *streamConn) flushLoop() {
 	defer close(sc.done)
-	const maxBatchCount = 256
+	// 批量上限 1024：单次 stream.Send 携带更多回复帧，
+	// 将 gRPC Send 固定开销（HTTP/2 帧、封送、syscall）再摊薄 4 倍
+	const maxBatchCount = 1024
 	batch := make([]reverseItem, 0, maxBatchCount)
+	// mcBuf 跨批次复用（gRPC Send 同步序列化，返回后即可安全重用）
+	mcBuf := make([]byte, 0, 128*1024)
 
 	// sendBatch 发送一批消息：
 	// - RouteBatch / server.* 路由消息直接 stream.Send
 	// - 常规消息用 multi-conn 格式打包：[2字节 connIDLen][connID][4字节 payloadLen][payload] 重复
 	//   可将不同 connID 的消息合并为一次 stream.Send
-	// 所有消息已在调用方预序列化，flushLoop 只做内存拷贝
+	// payload 由 appendMessageFast 直写进 mcBuf，无中间分配、无二次拷贝
 	sendBatch := func(items []reverseItem) {
-		var mcBuf []byte
 		mcCount := 0
 		flushMultiConn := func() {
 			if mcCount == 0 {
@@ -86,17 +131,13 @@ func (sc *streamConn) flushLoop() {
 				Data:  mcBuf,
 				Cmd:   int32(mcCount),
 			})
-			mcBuf = nil
+			mcBuf = mcBuf[:0]
 			mcCount = 0
 		}
 		for _, item := range items {
 			if item.route == protobuf.RouteBatch || (len(item.route) >= 7 && item.route[:7] == "server.") {
 				flushMultiConn()
-				_ = sc.stream.Send(&protobuf.Message{
-					Route:        item.route,
-					ConnectionId: item.connID,
-					Data:         item.data,
-				})
+				_ = sc.stream.Send(item.msg)
 			} else {
 				// multi-conn 格式: [2字节 connIDLen][connID][4字节 payloadLen][payload]
 				connID := item.connID
@@ -104,10 +145,10 @@ func (sc *streamConn) flushLoop() {
 				binary.BigEndian.PutUint16(connIDLenBuf[:], uint16(len(connID)))
 				mcBuf = append(mcBuf, connIDLenBuf[:]...)
 				mcBuf = append(mcBuf, connID...)
-				var lenBuf [4]byte
-				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(item.data)))
-				mcBuf = append(mcBuf, lenBuf[:]...)
-				mcBuf = append(mcBuf, item.data...)
+				lenPos := len(mcBuf)
+				mcBuf = append(mcBuf, 0, 0, 0, 0)
+				mcBuf = appendMessageFast(mcBuf, item.msg)
+				binary.BigEndian.PutUint32(mcBuf[lenPos:], uint32(len(mcBuf)-lenPos-4))
 				mcCount++
 			}
 		}
@@ -156,7 +197,12 @@ type Server struct {
 	groups     map[string]*pushGroup
 	connGroups map[string]map[string]struct{}
 
-	dispatchCh          chan dispatchItem
+	// dispatchChs 分片分发通道：单一全局 channel 在千万级 QPS 下成为
+	// 锁竞争热点（96 个 recv 生产者 + 1536 个 worker 抢一把 chan lock），
+	// 分片后竞争面缩小为 1/N。
+	dispatchChs         []chan dispatchItem
+	dispatchChTotalSize int
+	dispatchRR          atomic.Uint64
 	dispatchWg          sync.WaitGroup
 	streamChSize        int
 	dispatchWorkerCount int
@@ -181,52 +227,81 @@ func NewServer(opts ...ServerOption) *Server {
 	s := &Server{
 		groups:       make(map[string]*pushGroup),
 		connGroups:   make(map[string]map[string]struct{}),
-		dispatchCh:   make(chan dispatchItem, runtime.NumCPU()*65536),
 		streamChSize: 1048576,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 
+	// 分片分发：每 CPU 一个 channel，总容量与原先单通道相当
+	shardCount := runtime.NumCPU()
+	if shardCount < 4 {
+		shardCount = 4
+	}
+	totalSize := runtime.NumCPU() * 65536
+	if s.dispatchChTotalSize > 0 {
+		totalSize = s.dispatchChTotalSize
+	}
+	chSize := totalSize / shardCount
+	if chSize < 4096 {
+		chSize = 4096
+	}
+	s.dispatchChs = make([]chan dispatchItem, shardCount)
+	for i := range s.dispatchChs {
+		s.dispatchChs[i] = make(chan dispatchItem, chSize)
+	}
+
 	workerCount := runtime.NumCPU() * 128
 	if s.dispatchWorkerCount > 0 {
 		workerCount = s.dispatchWorkerCount
 	}
-	for i := 0; i < workerCount; i++ {
-		s.dispatchWg.Add(1)
-		go s.dispatchWorker()
+	// worker 均匀绑定到各分片，只消费自己分片的通道
+	base := workerCount / shardCount
+	rem := workerCount % shardCount
+	for i, ch := range s.dispatchChs {
+		n := base
+		if i < rem {
+			n++
+		}
+		for j := 0; j < n; j++ {
+			s.dispatchWg.Add(1)
+			go s.dispatchWorker(ch)
+		}
 	}
 
 	return s
 }
 
-func (s *Server) dispatchWorker() {
+func (s *Server) dispatchWorker(ch <-chan dispatchItem) {
 	defer s.dispatchWg.Done()
-	for item := range s.dispatchCh {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-				}
-			}()
-			connID := item.msg.ConnectionId
-			s.dispatchMessage(item.msg, func(response *protobuf.Message) {
-				if response != nil {
-					if response.ConnectionId == "" {
-						response.ConnectionId = connID
-					}
-					if response.ConnectionId == "" {
-						return
-					}
-					item.conn.Send(response)
-				}
-			})
-			// Return pooled Message after dispatch.
-			// Safe because dispatchMessage calls all callbacks synchronously;
-			// no async reference to item.msg survives after this point.
-			item.msg.Reset()
-			msgPool.Put(item.msg)
-		}()
+	for item := range ch {
+		s.dispatchOne(item)
 	}
+}
+
+// dispatchOne 处理单条消息：执行路由回调并归还 Message 到池。
+func (s *Server) dispatchOne(item dispatchItem) {
+	defer func() {
+		if r := recover(); r != nil {
+		}
+	}()
+	connID := item.msg.ConnectionId
+	s.dispatchMessage(item.msg, func(response *protobuf.Message) {
+		if response != nil {
+			if response.ConnectionId == "" {
+				response.ConnectionId = connID
+			}
+			if response.ConnectionId == "" {
+				return
+			}
+			item.conn.Send(response)
+		}
+	})
+	// Return pooled Message after dispatch.
+	// Safe because dispatchMessage calls all callbacks synchronously;
+	// no async reference to item.msg survives after this point.
+	item.msg.Reset()
+	msgPool.Put(item.msg)
 }
 
 type ServerOption func(*Server)
@@ -241,7 +316,11 @@ func WithDispatchWorkers(n int) ServerOption {
 
 func WithDispatchChSize(n int) ServerOption {
 	return func(s *Server) {
-		s.dispatchCh = make(chan dispatchItem, n)
+		// 总容量 n 均分到各分片通道（在 NewServer 中生效）
+		s.dispatchWorkerCount = s.dispatchWorkerCount // no-op, 保留选项兼容
+		if n > 0 {
+			s.dispatchChTotalSize = n
+		}
 	}
 }
 
@@ -347,7 +426,7 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 				innerMsg.Data = payload // zero-copy: points into batch's Data buffer
 
 				select {
-				case s.dispatchCh <- dispatchItem{msg: innerMsg, conn: conn}:
+				case s.dispatchChs[s.dispatchRR.Add(1)%uint64(len(s.dispatchChs))] <- dispatchItem{msg: innerMsg, conn: conn}:
 				default:
 					// dispatch channel full, drop and return msg to pool
 					innerMsg.Reset()
@@ -362,7 +441,7 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 		}
 
 		select {
-		case s.dispatchCh <- dispatchItem{msg: msg, conn: conn}:
+		case s.dispatchChs[s.dispatchRR.Add(1)%uint64(len(s.dispatchChs))] <- dispatchItem{msg: msg, conn: conn}:
 		default:
 			tlog.Warn("dispatch channel full, dropping message", "route", msg.Route, "connectionID", msg.ConnectionId)
 		}

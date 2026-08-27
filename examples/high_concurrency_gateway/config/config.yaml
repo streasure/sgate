@@ -24,7 +24,7 @@ zone: ""
 # 启用后从 Nacos 自动发现 logic server；关闭则用静态 localhost:50052（单节点模式，无需 Nacos）
 # Nacos 连接信息复用 configCenter 中的 endpoint/namespace/group/username/password
 discovery:
-  enabled: true
+  enabled: false               # 压测走静态直连 localhost:50052；需要 Nacos 发现时改 true
   serviceName: "logic"         # 注册到 Nacos 的服务名
   zone: ""                     # 留空则回退到顶层 zone
 
@@ -123,7 +123,7 @@ configCenter:
   enabled: true                                     # 是否启用配置中心（关闭=单体模式，从本地 config.yaml 读配置）
   type: "nacos"                                       # 配置中心类型
   endpoint: "http://127.0.0.1:8080"                   # Nacos 控制台地址（配置拉取/登录认证）
-  namingEndpoint: "http://127.0.0.1:8848"             # Nacos 3.x Server API 端口（naming API 无需认证）；为空则回退到 endpoint
+  namingEndpoint: "http://127.0.0.1:56000"            # Nacos 3.x Server API 端口（naming API 无需认证）；为空则回退到 endpoint
   dataID: "sgate.yaml"                                # Nacos 上配置的 Data ID（需与控制台一致）
   group: "DEFAULT_GROUP"                              # Nacos Group（留空默认 DEFAULT_GROUP）
   namespace: ""                                      # Nacos 命名空间 ID（默认 public 留空）

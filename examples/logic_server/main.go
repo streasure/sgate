@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"strconv"
 	"time"
@@ -10,12 +12,16 @@ import (
 )
 
 func main() {
+	if addr := os.Getenv("LOGIC_PPROF_ADDR"); addr != "" {
+		go http.ListenAndServe(addr, nil)
+	}
 	svc := logic.NewService(
 		logic.WithServiceID(envOr("LOGIC_SERVICE_ID", "logic-1")),
 		logic.WithAdvertiseAddr(envOr("LOGIC_ADVERTISE_ADDR", "localhost:50052")),
 		logic.WithListenPort(envOr("LOGIC_PORT", "50052")),
-		logic.WithNacosEndpoint(envOr("NACOS_ENDPOINT", "http://127.0.0.1:8080")),
-		logic.WithNacosNamingEndpoint(envOr("NACOS_NAMING_ENDPOINT", "http://127.0.0.1:8848")),
+		// Nacos 注册默认关闭（仅监控 sgate 网关）；需要注册 logic 时设置 NACOS_ENDPOINT/NACOS_NAMING_ENDPOINT
+		logic.WithNacosEndpoint(envOr("NACOS_ENDPOINT", "")),
+		logic.WithNacosNamingEndpoint(envOr("NACOS_NAMING_ENDPOINT", "")),
 		logic.WithNacosNamespace(envOr("NACOS_NAMESPACE", "public")),
 		logic.WithNacosGroup(envOr("NACOS_GROUP", "DEFAULT_GROUP")),
 		logic.WithNacosAuth(envOr("NACOS_USERNAME", "nacos"), envOr("NACOS_PASSWORD", "nacos")),
@@ -24,6 +30,9 @@ func main() {
 		logic.WithGRPCWindowSize(envInt("GRPC_WINDOW_SIZE", 67108864)),
 		logic.WithGRPCMaxMessageSize(envInt("GRPC_MAX_MSG_SIZE", 4194304)),
 		logic.WithStreamSendChSize(envInt("LOGIC_STREAM_CH_SIZE", 65536)),
+		// 分发 worker 数：默认 NumCPU*128，高并发下过多 worker 会加剧
+		// 调度与 sync.Pool 竞争，可通过 LOGIC_DISPATCH_WORKERS 调优
+		logic.WithDispatchWorkerCount(envInt("LOGIC_DISPATCH_WORKERS", 0)),
 		// 默认走路由分发，确保 BURST_COUNT 反向推送处理器在双向压测中生效。
 		// 需要纯透传吞吐时仍可显式设置 LOGIC_PASSTHROUGH=true。
 		logic.WithPassthrough(envBool("LOGIC_PASSTHROUGH", false)),

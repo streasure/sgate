@@ -272,6 +272,19 @@ func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
 	return sm.shards[h%uint32(len(sm.shards))]
 }
 
+// markShardBroken 分片流失效后的统一处理：触发整体重连。
+// 没有这一步，logic 重启/网络闪断后 shard.stream 永远为 nil，
+// 正向消息静默丢弃、反向推送归零，且 health check 的 ping 也只会
+// 塞进已死的 sendCh 而永远探测不出故障。
+func (s *StreamShard) markShardBroken() {
+	s.mu.Lock()
+	s.stream = nil
+	s.mu.Unlock()
+	if s.lc != nil {
+		go s.lc.handleDisconnection()
+	}
+}
+
 func (s *StreamShard) startSendLoop() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -297,9 +310,7 @@ func (s *StreamShard) startSendLoop() {
 			if stream != nil {
 				if err := safeStreamSend(stream, msg); err != nil {
 					tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
-					s.mu.Lock()
-					s.stream = nil
-					s.mu.Unlock()
+					s.markShardBroken()
 				}
 			}
 			continue
@@ -337,9 +348,7 @@ func (s *StreamShard) startSendLoop() {
 			if len(batch) == 1 {
 				if err := safeStreamSend(stream, batch[0]); err != nil {
 					tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
-					s.mu.Lock()
-					s.stream = nil
-					s.mu.Unlock()
+					s.markShardBroken()
 				}
 				return
 			}
@@ -369,9 +378,7 @@ func (s *StreamShard) startSendLoop() {
 				}
 				if err := safeStreamSend(stream, batchMsg); err != nil {
 					tlog.Warn("shard batch send error, isolating shard", "shard", s.index, "error", err)
-					s.mu.Lock()
-					s.stream = nil
-					s.mu.Unlock()
+					s.markShardBroken()
 				}
 			}
 			// Return buffer to pool (cap-based reuse, avoid holding large bufs)
@@ -385,8 +392,7 @@ func (s *StreamShard) startSendLoop() {
 
 // safeStreamSend wraps stream.Send() to recover from panics caused by
 // concurrent close operations on the gRPC stream.
-func safeStreamSend(stream protobuf.GatewayService_StreamMessagesClient, msg *protobuf.Message) (err error) {
-	defer func() {
+func safeStreamSend(stream protobuf.GatewayService_StreamMessagesClient, msg *protobuf.Message) (err error) {	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("stream send panic: %v", r)
 		}
@@ -731,6 +737,10 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	s.mu.Unlock()
 
 	if stream == nil {
+		// 分片已被 sendLoop 隔离（stream 断开）：必须触发重连，否则该分片永久失效
+		if !lc.closing {
+			s.markShardBroken()
+		}
 		return
 	}
 
@@ -771,9 +781,8 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				return
 			}
 
-			s.mu.Lock()
-			s.stream = nil
-			s.mu.Unlock()
+			tlog.Warn("shard receive error, triggering reconnect", "shard", shardIdx, "error", err)
+			s.markShardBroken()
 			return
 		}
 

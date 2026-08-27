@@ -137,3 +137,9 @@ func WithStreamSendChSize(n int) ServiceOption {
 func WithPassthrough(enabled bool) ServiceOption {
 	return func(c *ServiceConfig) { c.Passthrough = enabled }
 }
+
+// WithDispatchWorkerCount 设置分发 worker 数（0=默认 NumCPU*128）。
+// 注意与 server.go 中面向 Server 的 WithDispatchWorkers(ServerOption) 区分。
+func WithDispatchWorkerCount(n int) ServiceOption {
+	return func(c *ServiceConfig) { c.DispatchWorkers = n }
+}

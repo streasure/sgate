@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -514,13 +515,28 @@ func NewGateway() *Gateway {
 
 	if gw.serviceDiscovery == nil {
 		tlog.Info("service discovery disabled, using static logic server connection")
-		// 连接预热：立即建立 gRPC 连接，避免首个请求冷启动突刺
+		// 连接预热：立即建立 gRPC 连接，避免首个请求冷启动突刺。
+		// 首连失败（如 logic 尚未就绪）必须重试：ReconnectManager 只在连接成功后启动，
+		// 否则网关会永久处于断连状态。
 		go func() {
-			tlog.Info("pre-warming logic server connection", "address", "localhost:50052")
-			if err := gw.logicClient.Connect("localhost:50052"); err != nil {
-				tlog.Error("failed to connect to logic server", "error", err)
-			} else {
-				tlog.Info("successfully connected to logic server (pre-warmed)")
+			address := "localhost:50052"
+			backoff := time.Second
+			for {
+				tlog.Info("pre-warming logic server connection", "address", address)
+				err := gw.logicClient.Connect(address)
+				if err == nil {
+					tlog.Info("successfully connected to logic server (pre-warmed)")
+					return
+				}
+				if errors.Is(err, ErrConnectionClosing) {
+					return
+				}
+				tlog.Error("failed to connect to logic server, retrying", "error", err, "backoff", backoff)
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
 			}
 		}()
 	}
