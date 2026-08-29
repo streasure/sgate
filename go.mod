@@ -7,11 +7,14 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cast v1.10.0
 	github.com/streasure/treasure-slog v1.0.15
+	github.com/streasure/util v1.0.1
 	github.com/tetratelabs/wazero v1.8.0
 	google.golang.org/grpc v1.64.0
 	google.golang.org/protobuf v1.33.0
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+replace github.com/streasure/util => ../util
 
 require (
 	github.com/go-ole/go-ole v1.2.6 // indirect

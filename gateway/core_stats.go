@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/monitor"
+	"github.com/streasure/util/monitor"
 	tlog "github.com/streasure/treasure-slog"
 )
 
@@ -65,11 +65,11 @@ func (r *messageRateTracker) rate() float64 {
 	return float64(last.count-first.count) / duration
 }
 
-func (g *Gateway) Stats() monitor.GatewayStats {
-	var s monitor.GatewayStats
+func (g *Gateway) Stats() monitor.Stats {
+	var s monitor.Stats
 
-	s.ConnectionsTotal = uint64(g.metrics.GetConnectionsTotal())
-	s.ConnectionsActive = g.metrics.GetConnectionsActive()
+	s.ConnectionsTotal = uint64(g.connectionsTotal.Load())
+	s.ConnectionsActive = g.connectionsActive.Load()
 
 	s.MessagesReceived = g.messagesReceived.Load()
 	s.MessagesForwarded = g.messagesForwarded.Load()
@@ -85,8 +85,8 @@ func (g *Gateway) Stats() monitor.GatewayStats {
 	s.MessagesDroppedCircuit = g.messagesDroppedCircuit.Load()
 	s.MessagesDroppedIntegrity = g.messagesDroppedIntegrity.Load()
 	s.MessagesDroppedFilterChain = g.messagesDroppedFilterChain.Load()
-	s.MessagesProcessed = g.metrics.GetMessagesProcessed()
-	s.MessagesFailed = g.metrics.GetMessagesFailed()
+	s.MessagesProcessed = g.messagesProcessed.Load()
+	s.MessagesFailed = g.messagesFailed.Load()
 
 	now := time.Now()
 	if g.msgRate != nil {
@@ -207,7 +207,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 			CPUPercent:            cpuPct,
 			MemPercent:            memPct,
 			OverloadDropped:       dropped,
-			ActiveConnections:     g.metrics.GetConnectionsActive(),
+			ActiveConnections:     g.connectionsActive.Load(),
 		}
 		if g.waf != nil {
 			stats.WAFBlocked = g.waf.GetBlockedCount()

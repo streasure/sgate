@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/streasure/sgate/discovery"
+	"github.com/streasure/util/nacos"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -19,7 +19,7 @@ import (
 
 type Service struct {
 	server     *Server
-	registry   *discovery.ServiceRegistry
+	registry   *nacos.Registry
 	listener   net.Listener
 	grpcServer *grpc.Server
 	cfg        ServiceConfig
@@ -79,6 +79,17 @@ func (s *Service) RegisterProto(route string, cmd int32, reqProto proto.Message,
 
 func (s *Service) RegisterDispatcher(d *Dispatcher) {
 	s.server.RegisterDispatcher(d)
+}
+
+// RegisterUser 注册 userUUID → connectionID 映射。
+// 在 login/handshake handler 中调用，使 Broadcast/PushToGroup 等 API 能正确工作。
+func (s *Service) RegisterUser(userUUID, connectionID string) {
+	s.server.RegisterUser(userUUID, connectionID)
+}
+
+// UnregisterUser 移除 userUUID → connectionID 映射。
+func (s *Service) UnregisterUser(userUUID string) {
+	s.server.UnregisterUser(userUUID)
 }
 
 func (s *Service) GetRoutes() []string {
@@ -150,29 +161,31 @@ func (s *Service) initRegistry() {
 	if zone == "" {
 		zone = "default"
 	}
-	serviceInfo := &discovery.ServiceInfo{
-		ServiceID:   s.cfg.ServiceID,
-		ServiceName: s.cfg.ServiceName,
-		Address:     s.cfg.AdvertiseAddr,
-		Weight:      1,
-		Metadata: map[string]string{
-			"version": "1.0.0",
-			"port":    s.cfg.ListenPort,
-			"routes":  strings.Join(s.GetRoutes(), ","),
-			"zone":    zone,
-		},
-		StartTime: time.Now().UnixMilli(),
-	}
 
-	s.registry = discovery.NewServiceRegistry(serviceInfo, s.cfg.HeartbeatInterval, s.cfg.HeartbeatTTL)
-	s.registry.SetNacosConfig(discovery.NacosNamingConfig{
-		Endpoint:       s.cfg.NacosEndpoint,
-		NamingEndpoint: s.cfg.NacosNamingEndpoint,
-		Namespace:      s.cfg.NacosNamespace,
-		Group:          s.cfg.NacosGroup,
-		Username:       s.cfg.NacosUsername,
-		Password:       s.cfg.NacosPassword,
-		APIVersion:     s.cfg.NacosAPIVersion,
+	s.registry = nacos.NewRegistry(nacos.RegistryConfig{
+		Enabled: true,
+		Nacos: nacos.Config{
+			Endpoint:       s.cfg.NacosEndpoint,
+			NamingEndpoint: s.cfg.NacosNamingEndpoint,
+			Namespace:      s.cfg.NacosNamespace,
+			Group:          s.cfg.NacosGroup,
+			Username:       s.cfg.NacosUsername,
+			Password:       s.cfg.NacosPassword,
+			APIVersion:     s.cfg.NacosAPIVersion,
+		},
+		Service: nacos.NamingConfig{
+			ServiceName: s.cfg.ServiceName,
+			Addr:        s.cfg.AdvertiseAddr,
+			Weight:      1,
+			Zone:        zone,
+			Metadata: map[string]string{
+				"version": "1.0.0",
+				"port":    s.cfg.ListenPort,
+				"routes":  strings.Join(s.GetRoutes(), ","),
+			},
+		},
+		HeartbeatInterval: s.cfg.HeartbeatInterval,
+		HeartbeatTTL:      s.cfg.HeartbeatTTL,
 	})
 	if err := s.registry.Start(); err != nil {
 		tlog.Error("service registration failed", "error", err)
@@ -181,7 +194,7 @@ func (s *Service) initRegistry() {
 
 func (s *Service) Stop() {
 	if s.registry != nil {
-		s.registry.Stop()
+		s.registry.Destroy()
 	}
 
 	if s.grpcServer != nil {

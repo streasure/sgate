@@ -13,8 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/sgate/discovery"
-	"github.com/streasure/sgate/gateway/cluster"
+	"github.com/streasure/util/nacos"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
@@ -852,13 +851,13 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 	if lc.gateway == nil {
 		return
 	}
-	if msg.ConnectionId == "" {
-		tlog.Warn("received message with empty ConnectionId", "route", msg.Route)
-		return
-	}
 	// 快速路径：非 server.* 路由直接序列化转发，避免遍历所有 RouteServer* 分支
 	route := msg.Route
 	if len(route) < 7 || route[:7] != "server." {
+		if msg.ConnectionId == "" {
+			tlog.Warn("received message with empty ConnectionId", "route", route)
+			return
+		}
 		conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
 		if conn == nil {
 			lc.gateway.AddPushDroppedNoConn(1)
@@ -873,6 +872,35 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		return
 	}
 
+	// server.* 路由：部分指令不需要 ConnectionId（broadcast）
+	if route == protobuf.RouteServerBroadcast {
+		pushMsg := &protobuf.Message{
+			Route:   "broadcast",
+			Payload: msg.Payload,
+		}
+		lc.gateway.GetConnectionManager().Broadcast(pushMsg)
+		return
+	}
+
+	if route == protobuf.RouteServerSendToUser {
+		userUUID := msg.Payload["userUUID"]
+		if userUUID != "" {
+			responseData, _ := proto.Marshal(&protobuf.Message{
+				Route:   msg.Payload["route"],
+				Payload: msg.Payload,
+			})
+			if responseData != nil {
+				lc.gateway.GetConnectionManager().SendToUser(userUUID, responseData)
+			}
+		}
+		return
+	}
+
+	// 以下 server.* 指令需要 ConnectionId
+	if msg.ConnectionId == "" {
+		tlog.Warn("server.* message requires ConnectionId", "route", route)
+		return
+	}
 	conn := lc.gateway.GetConnectionManager().GetConnection(msg.ConnectionId)
 	if conn == nil {
 		return
@@ -949,9 +977,14 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		}
 	} else if route == protobuf.RouteServerSendToGroup {
 		groupID := msg.Payload["groupID"]
+		originalRoute := msg.Payload["route"]
 		if groupID != "" {
-			lc.gateway.GetConnectionManager().SendToGroup(groupID, msg)
-			tlog.Debug("message sent to group", "groupID", groupID)
+			sendMsg := &protobuf.Message{
+				Route:   originalRoute,
+				Payload: msg.Payload,
+			}
+			lc.gateway.GetConnectionManager().SendToGroup(groupID, sendMsg)
+			tlog.Debug("message sent to group", "groupID", groupID, "route", originalRoute)
 		}
 	} else if route == protobuf.RouteServerGetGroupInfo {
 		groupID := msg.Payload["groupID"]
@@ -1422,7 +1455,7 @@ type LogicClientPool struct {
 	clients   map[string]*LogicClient
 	mu        sync.RWMutex
 	gateway   GatewayInterface
-	discovery *cluster.ServiceDiscovery
+	discovery *nacos.Discovery
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
 	rrIndex   uint64
@@ -1451,21 +1484,21 @@ func (pool *LogicClientPool) updateFastClient() {
 	pool.fastClient.Store(nil)
 }
 
-func (pool *LogicClientPool) SetDiscovery(discovery *cluster.ServiceDiscovery) {
+func (pool *LogicClientPool) SetDiscovery(discovery *nacos.Discovery) {
 	pool.discovery = discovery
 	discovery.OnServiceChange(pool.handleServiceChange)
 }
 
-func (pool *LogicClientPool) handleServiceChange(event discovery.ServiceEvent) {
+func (pool *LogicClientPool) handleServiceChange(event nacos.ServiceEvent) {
 	switch event.Type {
-	case discovery.EventRegister:
+	case nacos.EventRegister:
 		pool.handleServiceRegister(event)
-	case discovery.EventDeregister:
+	case nacos.EventDeregister:
 		pool.handleServiceDeregister(event)
 	}
 }
 
-func (pool *LogicClientPool) handleServiceRegister(event discovery.ServiceEvent) {
+func (pool *LogicClientPool) handleServiceRegister(event nacos.ServiceEvent) {
 	pool.mu.RLock()
 	existing, exists := pool.clients[event.Service.ServiceID]
 	pool.mu.RUnlock()
@@ -1518,7 +1551,7 @@ func (pool *LogicClientPool) handleServiceRegister(event discovery.ServiceEvent)
 	)
 }
 
-func (pool *LogicClientPool) handleServiceDeregister(event discovery.ServiceEvent) {
+func (pool *LogicClientPool) handleServiceDeregister(event nacos.ServiceEvent) {
 	// 高负载下 Nacos 心跳可能超时导致实例被摘除，但 gRPC 连接可能仍可用。
 	// 不立即从 pool 删除和关闭连接，避免误判导致转发中断。
 	// 让 HealthChecker 和 gRPC 流自身错误检测来处理真正的连接断开。

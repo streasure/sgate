@@ -55,22 +55,21 @@ func main() {
 		}
 	})
 
-	burstCount := envInt("BURST_COUNT", 2000)
 	svc.RegisterBurstRoute(protobuf.RouteTest, func(msg *protobuf.Message, push func(*protobuf.Message)) {
-		ts := time.Now().UnixMilli()
-		for i := 0; i < burstCount; i++ {
-			push(&protobuf.Message{
-				Route:     protobuf.RouteTestResult,
-				Timestamp: ts,
-			})
-		}
+		push(&protobuf.Message{
+			Route:     protobuf.RouteTestResult,
+			Timestamp: time.Now().UnixMilli(),
+		})
 	})
 
 	svc.RegisterRoute(protobuf.RouteLogin, func(msg *protobuf.Message) *protobuf.Message {
 		userID := msg.GetPayload()["userId"]
+		userUUID := "uuid_" + userID
+		// 注册 userUUID → connectionID 映射，使 Broadcast/PushToGroup 能正确工作
+		svc.RegisterUser(userUUID, msg.ConnectionId)
 		return &protobuf.Message{
 			ConnectionId: msg.ConnectionId,
-			UserUuid:     "uuid_" + userID,
+			UserUuid:     userUUID,
 			Route:        protobuf.RouteLogin,
 			Payload:      map[string]string{"code": "200", "message": "ok", "userId": userID},
 			Timestamp:    time.Now().UnixMilli(),
@@ -82,6 +81,48 @@ func main() {
 			ConnectionId: msg.ConnectionId,
 			Route:        protobuf.RouteEcho,
 			Payload:      map[string]string{"echo": msg.GetPayload()["message"], "timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10)},
+			Timestamp:    time.Now().UnixMilli(),
+		}
+	})
+
+	svc.RegisterRoute("test_broadcast", func(msg *protobuf.Message) *protobuf.Message {
+		svc.Server().Broadcast(&protobuf.Message{
+			Route: "broadcast_event",
+			Payload: map[string]string{
+				"message": msg.GetPayload()["message"],
+				"from":    msg.UserUuid,
+			},
+		})
+		return &protobuf.Message{
+			ConnectionId: msg.ConnectionId,
+			Route:        "test_broadcast_ack",
+			Payload:      map[string]string{"code": "200", "message": "broadcast sent"},
+			Timestamp:    time.Now().UnixMilli(),
+		}
+	})
+
+	svc.RegisterRoute("test_send_to_user", func(msg *protobuf.Message) *protobuf.Message {
+		targetUUID := msg.GetPayload()["targetUUID"]
+		connID, ok := svc.Server().GetConnectionIDByUser(targetUUID)
+		if !ok {
+			return &protobuf.Message{
+				ConnectionId: msg.ConnectionId,
+				Route:        "test_send_to_user_ack",
+				Payload:      map[string]string{"code": "404", "message": "target user not found"},
+				Timestamp:    time.Now().UnixMilli(),
+			}
+		}
+		svc.Server().PushToConnection(connID, &protobuf.Message{
+			Route: "direct_message",
+			Payload: map[string]string{
+				"message": msg.GetPayload()["message"],
+				"from":    msg.UserUuid,
+			},
+		})
+		return &protobuf.Message{
+			ConnectionId: msg.ConnectionId,
+			Route:        "test_send_to_user_ack",
+			Payload:      map[string]string{"code": "200", "message": "sent"},
 			Timestamp:    time.Now().UnixMilli(),
 		}
 	})

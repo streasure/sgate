@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/streasure/sgate/gateway/obs"
+	"github.com/streasure/sgate/obs"
 	"github.com/streasure/sgate/protobuf"
 )
 
@@ -133,7 +133,7 @@ func (g *Gateway) collectMetrics() obs.HealthMetrics {
 		MemoryAlloc:    m.Alloc / 1024 / 1024,
 		MemorySys:      m.Sys / 1024 / 1024,
 		GCCount:        m.NumGC,
-		MessagesPerSec: float64(g.metrics.GetMessagesReceived()),
+		MessagesPerSec: float64(g.messagesReceived.Load()),
 	}
 }
 

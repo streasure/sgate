@@ -2,8 +2,13 @@
 # sgate 网关配置（精简版）
 # ----------------------------------------------------------------------------
 # 仅保留"高频改/按环境调整"字段；不常用参数已硬编码到 internal/config/defaults.go
-# yaml 中未列出的字段，加载时自动用 defaults.go 中的常量填充
+# yaml 中未列出的字段，加载时自动用 defaults.go 的常量填充
 # 如需覆盖默认值，在此 yaml 显式列出即可
+#
+# 共用配置参考（github.com/streasure/util/config/）：
+#   nacos.yaml      → Nacos 连接/注册/发现/配置中心
+#   prometheus.yaml → Prometheus 指标导出
+#   grafana.yaml    → Grafana 数据源/Dashboard
 # ============================================================================
 
 # --- 基础 ---
@@ -40,6 +45,7 @@ transports:
 # WindowSize/MaxMessageSize 等参数见 defaults.go
 grpc:
   port: 50051
+  logicAddr: "localhost:50052"
 
 # --- 过载保护（按环境调优）---
 # 仅列出"按机器配置调整"的字段；其余帧大小/检查间隔见 defaults.go
@@ -119,6 +125,7 @@ otelTracer:
 # 启用后从配置中心动态拉取配置（无需重启）
 # type: nacos | apollo | etcd | consul | http
 # 单节点模式：enabled: false 且 endpoint 必须留空（endpoint 非空时 discovery/cluster 仍会尝试连接）
+# 共用配置：github.com/streasure/util/config/nacos.yaml
 configCenter:
   enabled: true                                     # 是否启用配置中心（关闭=单体模式，从本地 config.yaml 读配置）
   type: "nacos"                                       # 配置中心类型
@@ -163,8 +170,10 @@ degradation:
 #   sgate metrics :9100  ← 默认值（让出 9090 给 Prometheus）
 #   Prometheus    :9090  ← Prometheus 自身默认
 #   Grafana       :3000  ← Grafana 自身默认
+# 共用配置：github.com/streasure/util/config/prometheus.yaml
 monitoring:
   prometheus:
     enabled: true              # true=启动 /metrics 端点；false=不启动（单体模式）
     addr: ":9100"             # sgate metrics 监听地址（让出 9090 给 Prometheus）
     path: "/metrics"          # 指标路径（Prometheus scrape_config 的 metrics_path 必须与此一致）
+    prefix: "app"             # 指标前缀（与 util/config/prometheus.yaml 一致）

@@ -199,6 +199,8 @@ const (
 	RouteServerDeleteGroup      = "server.delete_group"
 	RouteServerSendToGroup      = "server.send_to_group"
 	RouteServerGetGroupInfo     = "server.get_group_info"
+	RouteServerBroadcast        = "server.broadcast"
+	RouteServerSendToUser       = "server.send_to_user"
 
 	RoutePing               = "ping"
 	RoutePong               = "pong"

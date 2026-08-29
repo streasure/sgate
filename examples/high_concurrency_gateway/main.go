@@ -7,8 +7,9 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/panjf2000/gnet/v2"
+	"github.com/streasure/util/component"
 	"github.com/streasure/sgate/gateway"
+	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
 	tlog "github.com/streasure/treasure-slog"
 )
@@ -40,14 +41,7 @@ func main() {
 		}
 	}()
 
-	if addr := os.Getenv("SGATE_PPROF_ADDR"); addr != "" {
-		gateway.StartPProfServer(addr)
-	} else {
-		gateway.StartPProfServer(":6060")
-	}
-
-	// tlog 负责自动创建日志目录（基于 exe 所在目录解析相对路径）；
-	// 初始化失败意味着日志不可用，直接退出避免静默丢失错误信息。
+	// tlog init
 	if _, err := tlog.New("config/tlog.yaml"); err != nil {
 		if _, err := tlog.New("../config/tlog.yaml"); err != nil {
 			if _, err := tlog.New("../../config/tlog.yaml"); err != nil {
@@ -57,78 +51,98 @@ func main() {
 		}
 	}
 
-	tlog.Info("系统信息:", "CPU核心数", runtime.NumCPU(), "GOMAXPROCS", runtime.GOMAXPROCS(0))
-	tlog.Info("开始启动高并发网关服务...")
-
-	tlog.Info("加载服务配置...")
+	tlog.Info("system info", "cpu", runtime.NumCPU(), "GOMAXPROCS", runtime.GOMAXPROCS(0))
+	tlog.Info("loading config...")
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		tlog.Warn("加载配置失败，使用默认配置", "error", err)
+		tlog.Warn("load config failed, using defaults", "error", err)
 	}
-	tlog.Info("配置加载成功:", "port", cfg.Port, "logLevel", cfg.LogLevel)
-
-	tlog.Info("支持的协议:")
-	for _, proto := range cfg.Transports {
-		tlog.Info("协议配置:", "protocol", proto.Protocol, "port", proto.Port, "type", proto.Type)
-	}
-
-	tlog.Info("创建网关实例...")
-	gw := gateway.NewGateway()
-	if gw == nil {
-		tlog.Error("创建网关实例失败")
-		tlog.Sync()
-		return
-	}
-	tlog.Info("网关实例创建成功")
+	tlog.Info("config loaded", "port", cfg.Port, "logLevel", cfg.LogLevel)
 
 	for _, proto := range cfg.Transports {
-		addr := fmt.Sprintf("%s://:%d", proto.Protocol, proto.Port)
-		tlog.Info("启动服务器:", "addr", addr, "type", proto.Type)
-
-		gw.SetTransportType(fmt.Sprintf("%d", proto.Port), proto.Type)
-
-		tlog.Info("网关服务已启动:", "addr", addr, "type", proto.Type)
-		tlog.Info("开始启动gnet服务器:", "addr", addr)
-
-		go func(addr string, protoType string) {
-			var options []gnet.Option
-			if protoType == "websocket" || proto.Protocol == "tcp" {
-				options = []gnet.Option{
-					gnet.WithMulticore(true),
-					gnet.WithReusePort(true),
-					gnet.WithTCPNoDelay(gnet.TCPNoDelay),
-					gnet.WithReadBufferCap(262144),
-					gnet.WithWriteBufferCap(262144),
-					gnet.WithSocketRecvBuffer(4 * 1024 * 1024),
-					gnet.WithSocketSendBuffer(4 * 1024 * 1024),
-				}
-			} else {
-				options = []gnet.Option{
-					gnet.WithMulticore(true),
-					gnet.WithReusePort(true),
-					gnet.WithReadBufferCap(262144),
-					gnet.WithWriteBufferCap(262144),
-					gnet.WithSocketRecvBuffer(4 * 1024 * 1024),
-					gnet.WithSocketSendBuffer(4 * 1024 * 1024),
-				}
-			}
-
-			tlog.Info("性能优化选项:", "multicore", true, "reusePort", true,
-				"tcpNoDelay", true, "readBuffer", 262144, "writeBuffer", 262144,
-				"socketRecvBuffer", 4*1024*1024, "socketSendBuffer", 4*1024*1024)
-
-			if err := gnet.Run(gw, addr, options...); err != nil {
-				tlog.Error("启动服务器失败", "error", err, "addr", addr)
-			}
-		}(addr, proto.Type)
+		tlog.Info("transport configured", "protocol", proto.Protocol, "port", proto.Port, "type", proto.Type)
 	}
 
+	// Shared FilterChain
+	fc := types.NewFilterChain()
+
+	// Create all lifecycle components
+	secComp := gateway.NewSecurityComponent(cfg.Security, cfg.WAF, cfg.JWTAuth, fc)
+	obsComp := gateway.NewObservabilityComponent(cfg.OTelTracer, pprofAddrFromEnv(), fc)
+	traComp := gateway.NewTrafficComponent(cfg.Canary, cfg.TrafficMirror, cfg.Degradation, fc)
+	clsComp := gateway.NewClusterComponent(*cfg, cfg.GRPC.Port, nil)
+	trnComp := gateway.NewTransportComponent(nil, cfg.Transports)
+
+	// Init + Start all components
+	for _, c := range []component.Component{secComp, obsComp, traComp, clsComp} {
+		if err := c.Init(); err != nil {
+			tlog.Error("component init failed", "name", c.Name(), "error", err)
+			os.Exit(1)
+		}
+	}
+	for _, c := range []component.Component{secComp, obsComp, traComp, clsComp} {
+		if err := c.Start(); err != nil {
+			tlog.Error("component start failed", "name", c.Name(), "error", err)
+			os.Exit(1)
+		}
+	}
+
+	// Load SPI filters from config
+	for _, fi := range cfg.FilterChain.Filters {
+		if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
+			tlog.Warn("failed to load filter", "name", fi.Name, "error", err)
+		}
+	}
+
+	// Create Gateway via dependency injection
+	gw := gateway.NewGatewayWithDeps(gateway.GatewayDeps{
+		Config:             *cfg,
+		FilterChain:        fc,
+		LogSanitizer:       obsComp.LogSanitizer,
+		WhitelistBlacklist: secComp.WhitelistBlacklist,
+		WAF:                secComp.WAF,
+		RateLimiter:        secComp.RateLimiter,
+		JWTAuth:            secComp.JWTAuth,
+		CircuitBreakerMgr:  secComp.CircuitBreakerMgr,
+		Tracer:             obsComp.Tracer,
+		OTelTracer:         obsComp.OTelTracer,
+		LatencyTracker:     obsComp.LatencyTracker,
+		CanaryFilter:       traComp.CanaryFilter,
+		TrafficMirror:      traComp.TrafficMirror,
+		Degradation:        traComp.Degradation,
+		Discovery:          clsComp.Discovery,
+		Balancer:           clsComp.Balancer,
+		ConfigCenter:       clsComp.ConfigCenter,
+		ClusterNode:        clsComp.Cluster,
+		AlertWebhook:       clsComp.AlertWebhook,
+	})
+
+	trnComp.SetGateway(gw)
+	gw.StartServices()
+
+	tlog.Info("starting gateway components...")
+	trnComp.StartTransports()
+
+	tlog.Info("all components started, waiting for signal...")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigCh
+	<-sigCh
 
-	tlog.Info("收到退出信号，开始关闭...", "signal", sig.String())
+	tlog.Info("signal received, shutting down...")
+	trnComp.Destroy()
 	gw.Close()
-	tlog.Info("网关服务已关闭")
+	for i := len([]component.Component{clsComp, traComp, obsComp, secComp}) - 1; i >= 0; i-- {
+		comps := []component.Component{secComp, obsComp, traComp, clsComp}
+		comps[i].Destroy()
+	}
+
+	tlog.Info("gateway stopped")
 	tlog.Sync()
+}
+
+func pprofAddrFromEnv() string {
+	if addr := os.Getenv("SGATE_PPROF_ADDR"); addr != "" {
+		return addr
+	}
+	return ":6060"
 }

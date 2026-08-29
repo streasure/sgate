@@ -47,6 +47,7 @@ type PrometheusConfig struct {
 	Enabled bool   `yaml:"enabled"` // 是否启动 /metrics 端点（关闭则 sgate 不暴露 Prometheus 指标）
 	Addr    string `yaml:"addr"`    // 监听地址（如 :9090）
 	Path    string `yaml:"path"`    // 指标路径（默认 /metrics）
+	Prefix  string `yaml:"prefix"`  // 指标前缀（默认 "app"）
 }
 
 // BalancerConfig 负载均衡配置
@@ -212,9 +213,10 @@ type DiscoveryConfig struct {
 }
 
 type GRPCConfig struct {
-	Port           int `yaml:"port"`
-	WindowSize     int `yaml:"windowSize"`
-	MaxMessageSize int `yaml:"maxMessageSize"`
+	Port           int    `yaml:"port"`
+	LogicAddr      string `yaml:"logicAddr"`
+	WindowSize     int    `yaml:"windowSize"`
+	MaxMessageSize int    `yaml:"maxMessageSize"`
 }
 
 type StreamConfig struct {
@@ -392,6 +394,7 @@ func loadDefaultConfig() *Config {
 				Enabled: false, // 默认关闭，单体运行不依赖 Prometheus
 				Addr:    DefaultPrometheusAddr,
 				Path:    DefaultPrometheusPath,
+				Prefix:  DefaultPrometheusPrefix,
 			},
 		},
 	}

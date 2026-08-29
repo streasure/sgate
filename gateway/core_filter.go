@@ -1,7 +1,7 @@
 package gateway
 
 import (
-	"github.com/streasure/sgate/gateway/types"
+	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/protobuf"
 	"github.com/panjf2000/gnet/v2"
 )

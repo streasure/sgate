@@ -16,15 +16,15 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cast"
-	"github.com/streasure/sgate/discovery"
-	"github.com/streasure/sgate/gateway/cluster"
-	"github.com/streasure/sgate/gateway/obs"
-	"github.com/streasure/sgate/gateway/security"
-	"github.com/streasure/sgate/gateway/traffic"
-	"github.com/streasure/sgate/gateway/types"
+	"github.com/streasure/util/component"
+	"github.com/streasure/util/monitor"
+	"github.com/streasure/util/nacos"
+	"github.com/streasure/sgate/cluster"
+	"github.com/streasure/sgate/obs"
+	"github.com/streasure/sgate/security"
+	"github.com/streasure/sgate/traffic"
+	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/metrics"
-	"github.com/streasure/sgate/monitor"
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
@@ -63,7 +63,6 @@ type Gateway struct {
 	connectionManager  *ConnectionManager
 	stopChan           chan struct{}
 	closeOnce          sync.Once
-	metrics            *metrics.Metrics
 	transportType      map[string]string
 	ctx                context.Context
 	tlsConfig          *tls.Config
@@ -82,10 +81,10 @@ type Gateway struct {
 	tracer             *obs.Tracer
 	logicClient        *LogicClient
 	logicClientPool    *LogicClientPool
-	serviceDiscovery   *cluster.ServiceDiscovery
+	serviceDiscovery   *nacos.Discovery
 	overloadProtector  *OverloadProtector
 	grpcServer         *grpc.Server
-	promExporter       *monitor.PrometheusExporter // Prometheus 指标导出器（enabled=false 时为 nil）
+	promExporter       *monitor.Exporter // Prometheus 指标导出器（enabled=false 时为 nil）
 	statsServer        *http.Server
 	msgRate            *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
 	zone               string
@@ -113,14 +112,18 @@ type Gateway struct {
 	logSanitizer  *obs.LogSanitizer         // 日志脱敏
 
 	// 转发统计计数器（用于极限压测时观测 sgate 转发能力）
-	messagesForwarded                  atomic.Int64
-	messagesDroppedOverload            atomic.Int64
-	messagesDroppedFull                atomic.Int64
-	messagesDroppedNoLogic             atomic.Int64
-	messagesDroppedNoLogicNotConnected atomic.Int64
-	messagesReceived                   atomic.Int64
-	messagesPushedToClient             atomic.Int64
-	messagesPushDroppedNoConn          atomic.Int64
+	connectionsTotal                    atomic.Int64
+	connectionsActive                   atomic.Int64
+	messagesForwarded                   atomic.Int64
+	messagesDroppedOverload             atomic.Int64
+	messagesDroppedFull                 atomic.Int64
+	messagesDroppedNoLogic              atomic.Int64
+	messagesDroppedNoLogicNotConnected  atomic.Int64
+	messagesReceived                    atomic.Int64
+	messagesPushedToClient              atomic.Int64
+	messagesPushDroppedNoConn           atomic.Int64
+	messagesProcessed                   atomic.Int64
+	messagesFailed                      atomic.Int64
 	// 细分丢弃原因（与过载保护区分，便于排障）
 	messagesDroppedBlacklist   atomic.Int64 // 黑名单/白名单拦截
 	messagesDroppedRateLimit   atomic.Int64 // 限流拦截
@@ -234,8 +237,6 @@ func PutProtobufMessage(msg *protobuf.Message) {
 }
 
 func NewGateway() *Gateway {
-	ctx := context.Background()
-
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		tlog.Warn("load config failed, using defaults", "error", err)
@@ -252,283 +253,148 @@ func NewGateway() *Gateway {
 		tlog.SetLevel("error")
 	}
 
-	protection := cfg.Protection
-	if protection.MaxFrameSize <= 0 {
-		protection.MaxFrameSize = 4 * 1024 * 1024
+	// Create shared FilterChain
+	fc := types.NewFilterChain()
+
+	// Create all lifecycle components
+	secComp := NewSecurityComponent(cfg.Security, cfg.WAF, cfg.JWTAuth, fc)
+	obsComp := NewObservabilityComponent(cfg.OTelTracer, pprofAddrFromEnv(), fc)
+	traComp := NewTrafficComponent(cfg.Canary, cfg.TrafficMirror, cfg.Degradation, fc)
+	clsComp := NewClusterComponent(*cfg, cfg.GRPC.Port, nil)
+
+	// Init + Start all components
+	for _, comp := range []component.Component{secComp, obsComp, traComp, clsComp} {
+		if err := comp.Init(); err != nil {
+			panic(fmt.Sprintf("component %s init failed: %v", comp.Name(), err))
+		}
 	}
-	if protection.MaxFrameBufSize <= 0 {
-		protection.MaxFrameBufSize = 4 * 1024 * 1024
-	}
-	if protection.MaxWSFrameSize <= 0 {
-		protection.MaxWSFrameSize = 4 * 1024 * 1024
-	}
-	if protection.MaxWSBufferSize <= 0 {
-		protection.MaxWSBufferSize = 4 * 1024 * 1024
-	}
-	if protection.WSHeartbeatTimeout <= 0 {
-		protection.WSHeartbeatTimeout = 60
-	}
-	if protection.WSCheckInterval <= 0 {
-		protection.WSCheckInterval = 30
+	for _, comp := range []component.Component{secComp, obsComp, traComp, clsComp} {
+		if err := comp.Start(); err != nil {
+			panic(fmt.Sprintf("component %s start failed: %v", comp.Name(), err))
+		}
 	}
 
-	grpcCfg := cfg.GRPC
-	if grpcCfg.Port <= 0 {
-		grpcCfg.Port = 50051
-	}
-	if grpcCfg.WindowSize <= 0 {
-		grpcCfg.WindowSize = 524288
-	}
-	if grpcCfg.MaxMessageSize <= 0 {
-		grpcCfg.MaxMessageSize = 4 * 1024 * 1024
+	// Load SPI filters from config
+	for _, fi := range cfg.FilterChain.Filters {
+		if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
+			tlog.Warn("failed to load filter from config", "name", fi.Name, "error", err)
+		}
 	}
 
-	streamCfg := cfg.Stream
-	if streamCfg.SendChannelSize <= 0 {
-		streamCfg.SendChannelSize = 65536
-	}
-	if streamCfg.ReceiveBatchSize <= 0 {
-		streamCfg.ReceiveBatchSize = 64
-	}
+	// Build Gateway via dependency injection
+	gw := NewGatewayWithDeps(GatewayDeps{
+		Config:             *cfg,
+		FilterChain:        fc,
+		LogSanitizer:       obsComp.LogSanitizer,
+		WhitelistBlacklist: secComp.WhitelistBlacklist,
+		WAF:                secComp.WAF,
+		RateLimiter:        secComp.RateLimiter,
+		JWTAuth:            secComp.JWTAuth,
+		CircuitBreakerMgr:  secComp.CircuitBreakerMgr,
+		Tracer:             obsComp.Tracer,
+		OTelTracer:         obsComp.OTelTracer,
+		LatencyTracker:     obsComp.LatencyTracker,
+		CanaryFilter:       traComp.CanaryFilter,
+		TrafficMirror:      traComp.TrafficMirror,
+		Degradation:        traComp.Degradation,
+		Discovery:          clsComp.Discovery,
+		Balancer:           clsComp.Balancer,
+		ConfigCenter:       clsComp.ConfigCenter,
+		ClusterNode:        clsComp.Cluster,
+		AlertWebhook:       clsComp.AlertWebhook,
+	})
 
-	gw := &Gateway{
-		connectionManager: NewConnectionManager(),
-		stopChan:          make(chan struct{}),
-		metrics:           metrics.NewMetrics(),
-		transportType:     make(map[string]string),
-		ctx:               ctx,
-		tlsConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			MaxVersion: tls.VersionTLS13,
-			// 硬件加速 cipher suite（AES-NI / AES-CLMUL 自动启用）
-			// 仅保留 AES-GCM 套件，避免 ChaCha20（无硬件加速时才用）
-			CipherSuites: []uint16{
-				// TLS 1.3 套件（Go 自动选择，列出仅文档意义）
-				tls.TLS_AES_128_GCM_SHA256,
-				tls.TLS_AES_256_GCM_SHA384,
-				tls.TLS_CHACHA20_POLY1305_SHA256, // fallback：客户端无 AES-NI 时
-				// TLS 1.2 套件
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			},
-			PreferServerCipherSuites: true,
-			// 椭圆曲线偏好：X25519（CPU 友好）→ P256（Haswell 加速）
-			CurvePreferences: []tls.CurveID{
-				tls.X25519,
-				tls.CurveP256,
-			},
+	// TLS
+	gw.tlsConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		},
-		filterChain:       types.NewFilterChain(),
-		logSanitizer:      obs.NewLogSanitizer(),
-		clusterID:         "sgate-cluster",
-		isLeader:          false,
-		minBufferSize:     4096,
-		maxBufferSize:     65536,
-		defaultBufferSize: 16384,
-		bufferPool: &sync.Pool{
-			New: func() interface{} {
-				return make([]byte, 16384)
-			},
-		},
-		configUpdateChan:   make(chan *config.Config),
-		overloadProtector:  NewOverloadProtector(protection),
-		logicClient:        NewLogicClient(GatewayInterface(nil)),
-		protection:         protection,
-		grpcCfg:            grpcCfg,
-		streamCfg:          streamCfg,
-		whitelistBlacklist: security.NewWhitelistBlacklist(),
-		circuitBreakerMgr:  security.NewCircuitBreakerManager(),
-		msgRate:            newMessageRateTracker(60 * time.Second),
+		PreferServerCipherSuites: true,
+		CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
 	}
-
-	// 加载 TLS 证书
 	if cfg.TLS.Enabled && cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 		if err != nil {
 			tlog.Error("failed to load TLS certificate", "error", err)
 		} else {
 			gw.tlsConfig.Certificates = []tls.Certificate{cert}
-			// 强制 TLS 1.3 开关：当 minVersion 配置为 TLS1.3 时
 			if strings.EqualFold(cfg.TLS.MinVersion, "TLS1.3") {
 				gw.tlsConfig.MinVersion = tls.VersionTLS13
-				tlog.Info("TLS 1.3 enforced", "certFile", cfg.TLS.CertFile)
-			} else {
-				tlog.Info("TLS certificate loaded", "certFile", cfg.TLS.CertFile,
-					"minVersion", cfg.TLS.MinVersion)
 			}
-		}
-	}
-
-	// 初始化负载均衡器
-	gw.balancer = cluster.NewBalancer(cfg.Balancer)
-
-	// 初始化 JWT 鉴权
-	if cfg.JWTAuth.Enabled {
-		gw.jwtAuth = security.NewJWTAuthFilter(cfg.JWTAuth)
-		gw.filterChain.AddFilter(gw.jwtAuth)
-	}
-
-	// 初始化灰度发布
-	if cfg.Canary.Enabled {
-		gw.canaryFilter = traffic.NewCanaryFilter(cfg.Canary)
-		gw.filterChain.AddFilter(gw.canaryFilter)
-	}
-
-	// 初始化流量镜像
-	if cfg.TrafficMirror.Enabled {
-		gw.trafficMirror = traffic.NewTrafficMirror(cfg.TrafficMirror)
-		gw.filterChain.AddFilter(&traffic.MirrorFilter{TM: gw.trafficMirror})
-	}
-
-	// 初始化降级管理
-	if cfg.Degradation.Enabled {
-		gw.degradation = traffic.NewDegradationManager(cfg.Degradation.Rules)
-		gw.filterChain.AddFilter(gw.degradation)
-	}
-
-	// 初始化 OTel 分布式追踪
-	if cfg.OTelTracer.Enabled {
-		gw.otelTracer = obs.NewOTelTracer(cfg.OTelTracer)
-		gw.filterChain.AddFilter(&obs.OTelSpanFilter{Tracer: gw.otelTracer})
-	}
-
-	// 初始化告警 webhook
-	if cfg.Alert.Enabled {
-		gw.alertWebhook = cluster.NewAlertWebhook(cfg.Alert)
-	}
-
-	// 初始化配置中心
-	if cfg.ConfigCenter.Enabled {
-		gw.configCenter = cluster.NewConfigCenter(cfg.ConfigCenter)
-		gw.startConfigCenterWatcher()
-	}
-
-	// 动态加载配置中声明的 SPI 过滤器
-	for _, fi := range cfg.FilterChain.Filters {
-		if err := gw.filterChain.LoadByName(fi.Name, fi.Config); err != nil {
-			tlog.Warn("failed to load filter from config",
-				"name", fi.Name, "error", err)
-		}
-	}
-
-	// 初始化限流器
-	if cfg.Security.RateLimit.Enabled {
-		refresh := time.Second
-		if d, err := time.ParseDuration(cfg.Security.RateLimit.TokenRefresh); err == nil {
-			refresh = d
-		}
-		tokens := cfg.Security.RateLimit.MaxTokens
-		if tokens <= 0 {
-			tokens = 10000
-		}
-		gw.rateLimiter = security.NewRateLimiter(tokens, refresh)
-	}
-
-	// 初始化 WAF
-	if cfg.WAF.Enabled {
-		gw.waf = security.NewWAF(cfg.WAF)
-	}
-
-	// 初始化白名单/黑名单配置
-	if cfg.Security.Enabled {
-		for _, ip := range cfg.Security.Whitelist {
-			gw.whitelistBlacklist.AddToWhitelist(ip)
-		}
-		for _, ip := range cfg.Security.Blacklist {
-			gw.whitelistBlacklist.AddToBlacklist(ip)
 		}
 	}
 
 	gw.cfg.Store(cfg)
+	gw.ctx = context.Background()
 
-	gw.overloadProtector.Start()
+	// Start all gateway services
+	gw.StartServices()
 
-	go gw.wsHeartbeatChecker()
+	return gw
+}
 
-	gw.messageIntegrity = NewMessageIntegrity(30000)
+// StartServices launches gateway-specific services: gRPC server, stats HTTP,
+// Prometheus metrics, overload protector, WebSocket heartbeat, config watcher.
+func (g *Gateway) StartServices() {
+	cfg := g.cfg.Load().(*config.Config)
 
-	supportedVersions := []string{"1.0.0", "1.1.0", "2.0.0"}
-	gw.versionNegotiation = NewVersionNegotiation(supportedVersions, 10*time.Second)
+	g.overloadProtector.Start()
+	go g.wsHeartbeatChecker()
+	g.messageIntegrity = NewMessageIntegrity(30000)
+	g.versionNegotiation = NewVersionNegotiation([]string{"1.0.0", "1.1.0", "2.0.0"}, 10*time.Second)
 
-	gw.tracer = obs.NewTracer(5 * time.Minute)
-	gw.latencyTracker = obs.NewLatencyTracker(10000)
-
-	connCheckInterval, _ := time.ParseDuration(protection.ConnCheckInterval)
+	connCheckInterval, _ := time.ParseDuration(g.protection.ConnCheckInterval)
 	if connCheckInterval <= 0 {
 		connCheckInterval = 5 * time.Minute
 	}
-	connIdleTimeout, _ := time.ParseDuration(protection.ConnIdleTimeout)
+	connIdleTimeout, _ := time.ParseDuration(g.protection.ConnIdleTimeout)
 	if connIdleTimeout <= 0 {
 		connIdleTimeout = 30 * time.Second
 	}
-	gw.connectionManager.StartConnectionChecker(connCheckInterval, connIdleTimeout)
+	g.connectionManager.StartConnectionChecker(connCheckInterval, connIdleTimeout)
 
-	go gw.configWatcher()
-
+	if g.configCenter != nil {
+		g.startConfigCenterWatcher()
+	}
+	go g.configWatcher()
 	go func() {
 		for {
 			select {
-			case <-gw.stopChan:
+			case <-g.stopChan:
 				return
-			case newCfg := <-gw.configUpdateChan:
-				gw.handleConfigUpdate(newCfg)
+			case newCfg := <-g.configUpdateChan:
+				g.handleConfigUpdate(newCfg)
 			}
 		}
 	}()
 
-	gw.logicClient.gateway = gw
+	g.logicClient.gateway = g
+	g.logicClientPool = NewLogicClientPool(g)
 
-	gw.logicClientPool = NewLogicClientPool(gw)
-
-	if cfg.Zone == "" {
-		cfg.Zone = "default"
-	}
-	gw.zone = cfg.Zone
-	// C3 修复: 统一 zone 来源。discovery.zone 未单独配置时回退到顶层 zone，
-	// 避免两个 zone 字段不一致导致过滤逻辑失效。
-	if cfg.Discovery.Zone == "" {
-		cfg.Discovery.Zone = cfg.Zone
+	if g.serviceDiscovery != nil {
+		g.logicClientPool.SetDiscovery(g.serviceDiscovery)
 	}
 
-	tlog.Info("gateway zone configured", "zone", gw.zone)
-
-	if cfg.Discovery.Enabled && cfg.ConfigCenter.Endpoint != "" {
-		// 服务发现使用 Nacos naming API，复用配置中心的 endpoint/认证信息
-		gw.serviceDiscovery = cluster.NewServiceDiscovery(cfg.Discovery)
-		gw.serviceDiscovery.SetNacosConfig(discovery.NacosNamingConfig{
-			Endpoint:       cfg.ConfigCenter.Endpoint,
-			NamingEndpoint: cfg.ConfigCenter.NamingEndpoint,
-			Namespace:      cfg.ConfigCenter.Namespace,
-			Group:          cfg.ConfigCenter.Group,
-			Username:       cfg.ConfigCenter.Username,
-			Password:       cfg.ConfigCenter.Password,
-			APIVersion:     cfg.ConfigCenter.APIVersion,
-		})
-		gw.logicClientPool.SetDiscovery(gw.serviceDiscovery)
-
-		if err := gw.serviceDiscovery.Start(); err != nil {
-			tlog.Error("service discovery start failed", "error", err)
-		}
-		tlog.Info("service discovery enabled (nacos)",
-			"endpoint", cfg.ConfigCenter.Endpoint,
-			"namingEndpoint", cfg.ConfigCenter.NamingEndpoint,
-			"serviceName", cfg.Discovery.ServiceName,
-		)
-	}
-
-	if gw.serviceDiscovery == nil {
+	// Static connection pre-warm (no discovery)
+	if g.serviceDiscovery == nil {
 		tlog.Info("service discovery disabled, using static logic server connection")
-		// 连接预热：立即建立 gRPC 连接，避免首个请求冷启动突刺。
-		// 首连失败（如 logic 尚未就绪）必须重试：ReconnectManager 只在连接成功后启动，
-		// 否则网关会永久处于断连状态。
 		go func() {
-			address := "localhost:50052"
+			address := g.grpcCfg.LogicAddr
+			if address == "" {
+				address = fmt.Sprintf("localhost:%d", g.grpcCfg.Port)
+			}
 			backoff := time.Second
 			for {
 				tlog.Info("pre-warming logic server connection", "address", address)
-				err := gw.logicClient.Connect(address)
+				err := g.logicClient.Connect(address)
 				if err == nil {
 					tlog.Info("successfully connected to logic server (pre-warmed)")
 					return
@@ -546,50 +412,39 @@ func NewGateway() *Gateway {
 		}()
 	}
 
-	grpcPort := fmt.Sprintf(":%d", grpcCfg.Port)
-	tlog.Info("about to start gRPC server", "port", grpcPort)
+	// gRPC server
+	grpcPort := fmt.Sprintf(":%d", g.grpcCfg.Port)
+	tlog.Info("starting gRPC server", "port", grpcPort)
 	go func() {
-		tlog.Info("starting gRPC server", "port", grpcPort)
-		if server, err := StartGRPCServer(gw, grpcPort, gw.grpcCfg.MaxMessageSize, gw.grpcCfg.WindowSize); err != nil {
+		if server, err := StartGRPCServer(g, grpcPort, g.grpcCfg.MaxMessageSize, g.grpcCfg.WindowSize); err != nil {
 			tlog.Error("failed to start gRPC server", "error", err)
 		} else {
-			gw.grpcServer = server
+			g.grpcServer = server
 			tlog.Info("gRPC server started", "port", grpcPort)
 		}
 	}()
 
-	// 初始化集群（基于 Nacos 临时实例：节点注册 + 排序选举 Leader）
-	// 复用配置中心的 Nacos 连接信息，实例地址用本机 IP + gRPC 端口
-	if cfg.Cluster.Enabled && cfg.ConfigCenter.Endpoint != "" {
-		gw.cluster = cluster.NewCluster(cfg.Cluster, discovery.NacosNamingConfig{
-			Endpoint:       cfg.ConfigCenter.Endpoint,
-			NamingEndpoint: cfg.ConfigCenter.NamingEndpoint,
-			Namespace:      cfg.ConfigCenter.Namespace,
-			Group:          cfg.ConfigCenter.Group,
-			Username:       cfg.ConfigCenter.Username,
-			Password:       cfg.ConfigCenter.Password,
-			APIVersion:     cfg.ConfigCenter.APIVersion,
-		}, gw.zone, grpcCfg.Port)
-		gw.cluster.Start(context.Background())
-	}
+	// Stats HTTP server
+	g.StartStatsServer(fmt.Sprintf(":%d", cfg.Port))
 
-	// 启动统计 HTTP 服务（暴露 /stats /health /ready /live）
-	// 端口来自 config.yaml 的 port 字段（默认 8081，避开 Nacos 8080）
-	gw.StartStatsServer(fmt.Sprintf(":%d", cfg.Port))
-
-	// 启动 Prometheus 指标导出器（可插拔，通过配置开关控制）
-	// 使用独立的 monitor 包，可被任意 Go 项目 import
-	// 关闭时 sgate 单体也能正常运行，只是不暴露 /metrics 端点
+	// Prometheus
 	if cfg.Monitoring.Prometheus.Enabled {
-		gw.promExporter = monitor.NewPrometheusExporter(
-			gw, // Gateway 实现 monitor.StatsProvider 接口
-			cfg.Monitoring.Prometheus.Addr,
-			cfg.Monitoring.Prometheus.Path,
-		)
-		gw.promExporter.Start()
+		g.promExporter = monitor.NewExporter(monitor.ExporterConfig{
+			Enabled: true,
+			Addr:    cfg.Monitoring.Prometheus.Addr,
+			Path:    cfg.Monitoring.Prometheus.Path,
+			Prefix:  cfg.Monitoring.Prometheus.Prefix,
+		}, g)
+		g.promExporter.Init()
+		g.promExporter.Start()
 	}
+}
 
-	return gw
+func pprofAddrFromEnv() string {
+	if addr := os.Getenv("SGATE_PPROF_ADDR"); addr != "" {
+		return addr
+	}
+	return ":6060"
 }
 
 func (g *Gateway) wsHeartbeatChecker() {
@@ -829,8 +684,8 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 		c.SetContext(connCtx)
 	}
 
-	g.metrics.IncConnectionsTotal()
-	g.metrics.IncConnectionsActive()
+	g.connectionsTotal.Add(1)
+	g.connectionsActive.Add(1)
 
 	tlog.Debug("new connection", "localAddr", localAddr, "isWS", isWS)
 	return
@@ -866,7 +721,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 	if connectionID != "" {
 		g.connectionManager.RemoveConnection(connectionID)
 		g.versionNegotiation.RemoveClientVersion(connectionID)
-		g.metrics.DecConnectionsActive()
+		g.connectionsActive.Add(-1)
 		tlog.Debug("connection closed", "connectionID", connectionID, "error", err)
 	}
 
@@ -1359,8 +1214,20 @@ func (g *Gateway) GetStreamConfig() config.StreamConfig {
 	return g.streamCfg
 }
 
+func (g *Gateway) logMetrics() {
+	tlog.Info("gateway metrics",
+		"connectionsActive", g.connectionsActive.Load(),
+		"connectionsTotal", g.connectionsTotal.Load(),
+		"messagesReceived", g.messagesReceived.Load(),
+		"messagesForwarded", g.messagesForwarded.Load(),
+		"messagesPushed", g.messagesPushedToClient.Load(),
+		"messagesProcessed", g.messagesProcessed.Load(),
+		"messagesFailed", g.messagesFailed.Load(),
+	)
+}
+
 func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
-	g.metrics.LogMetrics()
+	g.logMetrics()
 	return 1 * time.Second, gnet.None
 }
 
@@ -1373,7 +1240,7 @@ func (g *Gateway) Close() {
 		close(g.stopChan)
 
 		if g.serviceDiscovery != nil {
-			g.serviceDiscovery.Stop()
+			g.serviceDiscovery.Destroy()
 		}
 
 		if g.cluster != nil {
@@ -1404,7 +1271,7 @@ func (g *Gateway) Close() {
 		g.tracer.Stop()
 
 		if g.promExporter != nil {
-			g.promExporter.Stop()
+			g.promExporter.Destroy()
 		}
 		g.StopStatsServer()
 

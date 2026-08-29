@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -197,6 +198,13 @@ type Server struct {
 	groups     map[string]*pushGroup
 	connGroups map[string]map[string]struct{}
 
+	// userConnections 存储 userUUID → connectionID 映射。
+	// Logic 不需要关心 streamConn ID，只需知道 client 的 connectionID。
+	// 由 handler 在 login/handshake 时调用 RegisterUser 注册。
+	userConnections sync.Map // userUUID -> connectionID
+	// connUserReverse 存储 connectionID → userUUID 反向映射，用于断连时自动清理。
+	connUserReverse sync.Map // connectionID -> userUUID
+
 	// dispatchChs 分片分发通道：单一全局 channel 在千万级 QPS 下成为
 	// 锁竞争热点（96 个 recv 生产者 + 1536 个 worker 抢一把 chan lock），
 	// 分片后竞争面缩小为 1/N。
@@ -363,6 +371,7 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 			<-conn.done
 			s.connections.CompareAndDelete(connectionID, conn)
 			s.leaveAllGroups(connectionID)
+			s.cleanupUserByConnection(connectionID)
 			tlog.Info("stream connection closed", "connectionID", connectionID, "serverID", s.serverID)
 			for _, cb := range s.onDisconnect {
 				go cb(connectionID)
@@ -478,39 +487,81 @@ func (s *Server) PushToConnection(connectionID string, msg *protobuf.Message) er
 	return conn.Send(msg)
 }
 
+// RegisterUser 注册 userUUID → connectionID 映射。
+// 在 login/handshake handler 中调用，使 Broadcast/PushToGroup 等 API 能正确工作。
+func (s *Server) RegisterUser(userUUID, connectionID string) {
+	// 先清理旧的映射（同 userUUID 可能重连）
+	if oldConnID, ok := s.userConnections.LoadAndDelete(userUUID); ok {
+		s.connUserReverse.Delete(oldConnID.(string))
+	}
+	s.userConnections.Store(userUUID, connectionID)
+	s.connUserReverse.Store(connectionID, userUUID)
+}
+
+// UnregisterUser 移除 userUUID → connectionID 映射。
+func (s *Server) UnregisterUser(userUUID string) {
+	if connID, ok := s.userConnections.LoadAndDelete(userUUID); ok {
+		s.connUserReverse.Delete(connID.(string))
+	}
+}
+
+// GetConnectionIDByUser 获取 userUUID 对应的 connectionID。
+func (s *Server) GetConnectionIDByUser(userUUID string) (string, bool) {
+	val, ok := s.userConnections.Load(userUUID)
+	if !ok {
+		return "", false
+	}
+	return val.(string), true
+}
+
+// cleanupUserByConnection 断连时根据 connectionID 自动清理 userUUID 映射。
+func (s *Server) cleanupUserByConnection(connectionID string) {
+	if userUUID, ok := s.connUserReverse.LoadAndDelete(connectionID); ok {
+		s.userConnections.Delete(userUUID.(string))
+	}
+}
+
 func (s *Server) PushToServer(msg *protobuf.Message, exclude ...string) int {
 	if s.serverID == "" {
 		return 0
 	}
-	return s.PushToGroup(s.serverGroupID(), msg, exclude...)
-}
-
-func (s *Server) Broadcast(msg *protobuf.Message, exclude ...string) int {
-	excludeSet := make(map[string]struct{}, len(exclude))
-	for _, id := range exclude {
-		excludeSet[id] = struct{}{}
+	if msg.Timestamp == 0 {
+		msg.Timestamp = time.Now().UnixMilli()
 	}
-
-	sent := 0
-	s.connections.Range(func(key, val interface{}) bool {
-		connID := key.(string)
-		if _, excluded := excludeSet[connID]; excluded {
-			return true
-		}
-
-		conn := val.(*streamConn)
-		pushMsg := &protobuf.Message{
-			ConnectionId: connID,
-			Route:        msg.Route,
-			Payload:      msg.Payload,
-			Timestamp:    time.Now().UnixMilli(),
-		}
-		if err := conn.Send(pushMsg); err == nil {
-			sent++
+	count := 0
+	s.connections.Range(func(key, value interface{}) bool {
+		conn := value.(*streamConn)
+		if err := conn.Send(msg); err == nil {
+			count++
 		}
 		return true
 	})
-	return sent
+	return count
+}
+
+// Broadcast 向所有客户端广播消息。
+// 通过 server.broadcast 指令让 Gateway 的 ConnectionManager.Broadcast 执行推送。
+// Logic 不直接操作 streamConn，只通过 Gateway 侧的推送机制。
+func (s *Server) Broadcast(msg *protobuf.Message, exclude ...string) int {
+	pushMsg := &protobuf.Message{
+		Route:   protobuf.RouteServerBroadcast,
+		Payload: make(map[string]string),
+	}
+	if msg.Route != "" {
+		pushMsg.Payload["route"] = msg.Route
+	}
+	if msg.Payload != nil {
+		for k, v := range msg.Payload {
+			pushMsg.Payload[k] = v
+		}
+	}
+	if len(exclude) > 0 {
+		pushMsg.Payload["exclude"] = strings.Join(exclude, ",")
+	}
+	pushMsg.Timestamp = time.Now().UnixMilli()
+
+	s.PushToServer(pushMsg)
+	return 0
 }
 
 func (s *Server) JoinGroup(groupID, connectionID string) int {
@@ -581,47 +632,26 @@ func (s *Server) leaveAllGroups(connectionID string) {
 }
 
 func (s *Server) PushToGroup(groupID string, msg *protobuf.Message, exclude ...string) int {
-	s.groupMu.RLock()
-	g, ok := s.groups[groupID]
-	if !ok {
-		s.groupMu.RUnlock()
-		return 0
+	pushMsg := &protobuf.Message{
+		Route:   protobuf.RouteServerSendToGroup,
+		Payload: make(map[string]string),
 	}
-
-	members := make([]string, 0, len(g.members))
-	for connID := range g.members {
-		members = append(members, connID)
+	pushMsg.Payload["groupID"] = groupID
+	if msg.Route != "" {
+		pushMsg.Payload["route"] = msg.Route
 	}
-	s.groupMu.RUnlock()
-
-	excludeSet := make(map[string]struct{}, len(exclude))
-	for _, id := range exclude {
-		excludeSet[id] = struct{}{}
-	}
-
-	sent := 0
-	for _, connID := range members {
-		if _, excluded := excludeSet[connID]; excluded {
-			continue
-		}
-
-		val, ok := s.connections.Load(connID)
-		if !ok {
-			continue
-		}
-
-		conn := val.(*streamConn)
-		pushMsg := &protobuf.Message{
-			ConnectionId: connID,
-			Route:        msg.Route,
-			Payload:      msg.Payload,
-			Timestamp:    time.Now().UnixMilli(),
-		}
-		if err := conn.Send(pushMsg); err == nil {
-			sent++
+	if msg.Payload != nil {
+		for k, v := range msg.Payload {
+			pushMsg.Payload[k] = v
 		}
 	}
-	return sent
+	if len(exclude) > 0 {
+		pushMsg.Payload["exclude"] = strings.Join(exclude, ",")
+	}
+	pushMsg.Timestamp = time.Now().UnixMilli()
+
+	s.PushToServer(pushMsg)
+	return 0
 }
 
 func (s *Server) GetGroupMembers(groupID string) []string {

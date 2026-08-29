@@ -183,6 +183,10 @@ const (
 	// DefaultPrometheusPath Prometheus 指标路径
 	// 使用方法：Prometheus scrape_config 的 metrics_path 必须与此一致
 	DefaultPrometheusPath = "/metrics"
+
+	// DefaultPrometheusPrefix Prometheus 指标前缀
+	// 使用方法：所有指标自动加此前缀（如 app_connections_total）
+	DefaultPrometheusPrefix = "app"
 )
 
 // --- 灰度 ---

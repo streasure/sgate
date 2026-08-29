@@ -1,0 +1,6 @@
+level: info
+filename: logs/logic.log
+max_size: 100
+max_backups: 3
+max_age: 7
+compress: true
