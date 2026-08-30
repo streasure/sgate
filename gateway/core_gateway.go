@@ -1288,7 +1288,9 @@ func (g *Gateway) Close() {
 		g.connectionManager.CloseAllConnections()
 
 		g.overloadProtector.Stop()
-		g.tracer.Stop()
+		if g.tracer != nil {
+			g.tracer.Stop()
+		}
 
 		if g.promExporter != nil {
 			g.promExporter.Destroy()

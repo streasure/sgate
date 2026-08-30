@@ -222,6 +222,7 @@ type Server struct {
 	dispatchWorkerCount int
 	passthrough         bool
 	connIDCounter       atomic.Uint64
+	stopOnce            sync.Once
 }
 
 type dispatchItem struct {
@@ -300,6 +301,10 @@ func (s *Server) dispatchWorker(ch <-chan dispatchItem) {
 func (s *Server) dispatchOne(item dispatchItem) {
 	defer func() {
 		if r := recover(); r != nil {
+			tlog.Error("dispatch handler panic",
+				"route", item.msg.Route,
+				"error", r,
+			)
 		}
 	}()
 	connID := item.msg.ConnectionId
@@ -349,10 +354,12 @@ func WithServerPassthrough() ServerOption {
 
 // Stop gracefully shuts down dispatch workers by closing channels and waiting.
 func (s *Server) Stop() {
-	for _, ch := range s.dispatchChs {
-		close(ch)
-	}
-	s.dispatchWg.Wait()
+	s.stopOnce.Do(func() {
+		for _, ch := range s.dispatchChs {
+			close(ch)
+		}
+		s.dispatchWg.Wait()
+	})
 }
 
 func (s *Server) GetServerID() string {

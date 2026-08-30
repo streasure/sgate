@@ -193,16 +193,16 @@ func (s *Service) initRegistry() {
 }
 
 func (s *Service) Stop() {
-	if s.server != nil {
-		s.server.Stop()
-	}
-
 	if s.registry != nil {
 		s.registry.Destroy()
 	}
 
 	if s.grpcServer != nil {
 		s.grpcServer.GracefulStop()
+	}
+
+	if s.server != nil {
+		s.server.Stop()
 	}
 
 	tlog.Info("logic service stopped",

@@ -92,6 +92,7 @@ type httpConfigCenter struct {
 	httpClient  *http.Client
 	notifyCh    chan []byte
 	stopCh      chan struct{}
+	stopOnce    sync.Once
 	lastVersion string
 	lastContent []byte
 	mu          sync.Mutex
@@ -332,11 +333,9 @@ func (c *httpConfigCenter) unwrap(body []byte) []byte {
 }
 
 func (c *httpConfigCenter) Stop() {
-	select {
-	case <-c.stopCh:
-	default:
+	c.stopOnce.Do(func() {
 		close(c.stopCh)
-	}
+	})
 }
 
 func hashContent(b []byte) string {

@@ -240,14 +240,16 @@ func (wc *writeCoalescer) flush() int64 {
 		entry := &wc.entries[i]
 		if len(entry.data) > 0 {
 			bufPtr := entry.bufPtr
-			// SendMultiWithCallback 在 gnet 写完成后调用 callback，
-			// callback 归还 buffer 到池，消除每帧分配导致的 GC 压力
-			entry.conn.SendMultiWithCallback(entry.data, func() {
+			err := entry.conn.SendMultiWithCallback(entry.data, func() {
 				if bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
 					*bufPtr = (*bufPtr)[:0]
 					coalescerBufPool.Put(bufPtr)
 				}
 			})
+			if err != nil && bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
+				*bufPtr = (*bufPtr)[:0]
+				coalescerBufPool.Put(bufPtr)
+			}
 		}
 		entry.data = nil
 		entry.bufPtr = nil
@@ -573,6 +575,16 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		lc.setState(StateDisconnected)
 		return err
 	}
+
+	// Re-check closing after blocking dial — Close() may have been called during dial
+	lc.mu.RLock()
+	if lc.closing {
+		lc.mu.RUnlock()
+		conn.Close()
+		lc.setState(StateDisconnected)
+		return ErrConnectionClosing
+	}
+	lc.mu.RUnlock()
 
 	lc.mu.Lock()
 	lc.conn = conn

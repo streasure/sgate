@@ -33,8 +33,8 @@ type OverloadProtector struct {
 	checkInterval   time.Duration
 	stopChan        chan struct{}
 	proc            *process.Process
-	memPercent      float64 // 保留用于监控展示（heap 占 GOMEMLIMIT 百分比）
-	cpuPercent      float64
+	memPercent      atomic.Pointer[float64] // 保留用于监控展示
+	cpuPercent      atomic.Pointer[float64]
 	heapThreshold   uint64 // 仅用于 memPercent 展示，不参与过载判断
 	totalDropped    atomic.Int64
 	lastLogTime     atomic.Int64
@@ -150,7 +150,8 @@ func (op *OverloadProtector) check() {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	if op.heapThreshold > 0 {
-		op.memPercent = float64(m.Alloc) / float64(op.heapThreshold) * 100.0
+		v := float64(m.Alloc) / float64(op.heapThreshold) * 100.0
+		op.memPercent.Store(&v)
 	}
 
 	// CPU 检查：使用 process.Times() 手动计算增量，避免 Percent(0) 在 Windows 上的 bug
@@ -177,7 +178,7 @@ func (op *OverloadProtector) check() {
 				if cpuPct > op.cpuThreshold {
 					overloaded = true
 				}
-				op.cpuPercent = cpuPct
+				op.cpuPercent.Store(&cpuPct)
 			}
 		}
 	}
@@ -188,9 +189,17 @@ func (op *OverloadProtector) check() {
 		lastLog := op.lastLogTime.Load()
 		if now-lastLog > 5000 {
 			op.lastLogTime.Store(now)
+			cpuVal := 0.0
+			if p := op.cpuPercent.Load(); p != nil {
+				cpuVal = *p
+			}
+			memVal := 0.0
+			if p := op.memPercent.Load(); p != nil {
+				memVal = *p
+			}
 			tlog.Warn("overload detected, dropping messages",
-				"cpu", op.cpuPercent,
-				"heapPercent", op.memPercent,
+				"cpu", cpuVal,
+				"heapPercent", memVal,
 				"heapAllocMB", m.Alloc/1024/1024,
 				"totalDropped", op.totalDropped.Load(),
 			)
@@ -209,7 +218,13 @@ func (op *OverloadProtector) RecordDrop(n int64) {
 }
 
 func (op *OverloadProtector) Stats() (cpuPercent float64, memPercent float64, overloaded bool, dropped int64) {
-	return op.cpuPercent, op.memPercent, op.IsOverloaded(), op.totalDropped.Load()
+	if p := op.cpuPercent.Load(); p != nil {
+		cpuPercent = *p
+	}
+	if p := op.memPercent.Load(); p != nil {
+		memPercent = *p
+	}
+	return cpuPercent, memPercent, op.IsOverloaded(), op.totalDropped.Load()
 }
 
 func (op *OverloadProtector) Stop() {

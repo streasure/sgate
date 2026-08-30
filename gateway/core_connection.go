@@ -377,8 +377,8 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 		atomic.AddInt32(&cm.count, -1)
 
 		connection := conn.(*Connection)
-		userUUID := connection.UserUUID
-		serverID := connection.ServerID
+		userUUID := connection.GetUserUUID()
+		serverID := connection.GetServerID()
 
 		if connection.Groups != nil {
 			cm.groupMutex.Lock()
@@ -441,8 +441,8 @@ func (cm *ConnectionManager) GetConnection(connectionID string) *Connection {
 func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string) {
 	if conn, ok := cm.connections.Load(connectionID); ok {
 		c := conn.(*Connection)
-		oldServerID := c.ServerID
-		userUUID := c.UserUUID
+		oldServerID := c.GetServerID()
+		userUUID := c.GetUserUUID()
 
 		if oldServerID != "" && userUUID != "" {
 			cm.RemoveUserFromGroup("server:"+oldServerID, oldServerID, userUUID)
@@ -450,7 +450,7 @@ func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string
 
 		cm.removeFromServerIndex(oldServerID, userUUID)
 
-		c.ServerID = serverID
+		c.SetServerID(serverID)
 
 		cm.addToServerIndex(c)
 
@@ -490,13 +490,13 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUs
 		return
 	}
 
-	oldUserUUID := conn.UserUUID
+	oldUserUUID := conn.GetUserUUID()
 
 	if oldUserUUID == newUserUUID {
 		return
 	}
 
-	serverID := conn.ServerID
+	serverID := conn.GetServerID()
 
 	cm.removeFromServerIndex(serverID, oldUserUUID)
 
@@ -522,7 +522,7 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUs
 	}
 
 	// 更新Connection的UserUUID
-	conn.UserUUID = newUserUUID
+	conn.SetUserUUID(newUserUUID)
 
 	cm.addToServerIndex(conn)
 
@@ -530,8 +530,8 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUs
 }
 
 func (cm *ConnectionManager) addToServerIndex(conn *Connection) {
-	serverID := conn.ServerID
-	userUUID := conn.UserUUID
+	serverID := conn.GetServerID()
+	userUUID := conn.GetUserUUID()
 	if serverID == "" || userUUID == "" {
 		return
 	}
@@ -790,6 +790,7 @@ func (cm *ConnectionManager) CloseAllConnections() {
 	cm.serverUserConnections = sync.Map{}
 	cm.serverConnections = sync.Map{}
 	cm.groups = sync.Map{}
+	cm.userConnections = sync.Map{}
 
 	atomic.StoreInt32(&cm.count, 0)
 
@@ -1141,7 +1142,7 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 			// 从连接管理器中移除
 			cm.RemoveConnection(connectionID)
 
-			tlog.Info("清理不活跃连接", "connectionID", connectionID, "userUUID", conn.UserUUID)
+			tlog.Info("清理不活跃连接", "connectionID", connectionID, "userUUID", conn.GetUserUUID())
 		}
 	}
 }
