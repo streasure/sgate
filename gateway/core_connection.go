@@ -675,20 +675,15 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 //
 //	message: 消息内容
 func (cm *ConnectionManager) Broadcast(message interface{}) {
-	// 先序列化消息，减少锁的持有时间
 	var responseData []byte
 	var marshalErr error
 
-	// 处理不同类型的消息
 	switch msg := message.(type) {
 	case *protobuf.Message:
-		// 使用Protocol Buffers序列化
 		responseData, marshalErr = proto.Marshal(msg)
 	case *protobuf.ErrorResponse:
-		// 使用Protocol Buffers序列化错误消息
 		responseData, marshalErr = proto.Marshal(msg)
 	case map[string]string:
-		// 如果是map[string]string，直接创建Protocol Buffers消息
 		protoMsg := &protobuf.Message{
 			Route:   "broadcast",
 			Payload: msg,
@@ -703,18 +698,15 @@ func (cm *ConnectionManager) Broadcast(message interface{}) {
 		}
 		responseData, marshalErr = proto.Marshal(protoMsg)
 	default:
-		// 不支持的消息类型
 		tlog.Error("不支持的消息类型", "type", message)
 		return
 	}
 
 	if marshalErr != nil {
-		// 输出错误日志
 		tlog.Error("序列化广播消息失败", "error", marshalErr)
 		return
 	}
 
-	// 预先分配切片，减少内存分配
 	var connections []*Connection
 	cm.connections.Range(func(key, value interface{}) bool {
 		connections = append(connections, value.(*Connection))
@@ -725,48 +717,23 @@ func (cm *ConnectionManager) Broadcast(message interface{}) {
 		return
 	}
 
-	// 使用并发发送消息
-	successCount := int32(0) // 成功发送计数
-	errorCount := int32(0)   // 失败发送计数
 	var wg sync.WaitGroup
-
-	// 动态调整并发数，根据连接数自动调整
-	concurrencyLimit := 200
-	if len(connections) < 1000 {
-		concurrencyLimit = 50
-	} else if len(connections) > 10000 {
-		concurrencyLimit = 500
-	}
-
-	semaphore := make(chan struct{}, concurrencyLimit)
+	semaphore := make(chan struct{}, 200)
 
 	for _, c := range connections {
 		wg.Add(1)
-		semaphore <- struct{}{} // 获取信号量
-
+		semaphore <- struct{}{}
 		go func(conn *Connection) {
 			defer func() {
 				wg.Done()
-				<-semaphore // 释放信号量
+				<-semaphore
 			}()
-
-			if _, err := conn.Conn.Write(responseData); err != nil {
-				// 输出错误日志
-				tlog.Error("广播消息失败", "error", err)
-				atomic.AddInt32(&errorCount, 1)
-			} else {
-				atomic.AddInt32(&successCount, 1)
-				// 更新最后活跃时间
-				atomic.StoreInt64(&conn.LastActive, time.Now().UnixMilli())
-			}
+			conn.Send(responseData)
 		}(c)
 	}
 
-	// 等待所有发送完成
 	wg.Wait()
-
-	// 输出调试日志
-	tlog.Debug("广播完成", "success", atomic.LoadInt32(&successCount), "error", atomic.LoadInt32(&errorCount))
+	cm.totalMessages.Add(int64(len(connections)))
 }
 
 // GetConnectionCount 获取连接数

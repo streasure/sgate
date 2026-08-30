@@ -1,15 +1,12 @@
-// Package main benchmarks push throughput: personal push, group push, broadcast.
+// Package main benchmarks all push patterns with optimized batching.
 //
 // Usage:
-//   go run . <addr> <conns> <duration> <mode> [inflight]
+//   go run . <addr> <conns> <duration> <mode> [batchSize] [inflight]
 //
 // Modes:
-//   personal  - each client sends "push_me", receives personal push back
-//   group     - N clients join group, each sends "group_msg", all receive
-//   broadcast - each client sends "broadcast_msg", all clients receive
-//
-// Requires the integration logic server:
-//   cd examples/integration && go run main.go
+//   personal  - each client sends batched "push_me", receives push back
+//   group     - N clients join group, batched "group_msg", all receive
+//   broadcast - each client sends batched "broadcast_msg", all receive
 package main
 
 import (
@@ -30,14 +27,13 @@ import (
 var (
 	totalSent int64
 	totalRecv int64
-	totalPush int64
 )
 
 var drainBufPool = sync.Pool{
-	New: func() interface{} { return make([]byte, 1024*1024) },
+	New: func() interface{} { return make([]byte, 4*1024*1024) },
 }
 
-func buildFrame(route string, payload map[string]string) []byte {
+func buildSingleFrame(route string, payload map[string]string) []byte {
 	msg := &protobuf.Message{
 		Route:   route,
 		Payload: payload,
@@ -49,7 +45,16 @@ func buildFrame(route string, payload map[string]string) []byte {
 	return frame
 }
 
-func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInflight int64, mode string, clientID int) {
+func buildBatchFrame(route string, payload map[string]string, batchSize int) []byte {
+	single := buildSingleFrame(route, payload)
+	batch := make([]byte, len(single)*batchSize)
+	for i := 0; i < batchSize; i++ {
+		copy(batch[i*len(single):], single)
+	}
+	return batch
+}
+
+func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInflight int64, mode string, clientID int, batchSize int) {
 	defer wg.Done()
 
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -63,18 +68,16 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	defer conn.Close()
 
 	// Login
-	loginFrame := buildFrame(protobuf.RouteLogin, map[string]string{
-		"userId": fmt.Sprintf("user_%d_%d_%d", mode[0], clientID, rand.Int63()),
+	loginFrame := buildSingleFrame(protobuf.RouteLogin, map[string]string{
+		"userId": fmt.Sprintf("u_%d_%d_%d", mode[0], clientID, rand.Int63()),
 	})
 	conn.Write(loginFrame)
-
-	// Wait for login response (large buffer to catch any buffered data)
 	deadline := time.Now().Add(2 * time.Second)
 	conn.SetReadDeadline(deadline)
-	loginBuf := make([]byte, 65536)
+	buf := make([]byte, 65536)
 	totalRead := 0
 	for totalRead < 4 {
-		n, err := conn.Read(loginBuf[totalRead:])
+		n, err := conn.Read(buf[totalRead:])
 		if err != nil || n == 0 {
 			return
 		}
@@ -82,28 +85,25 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	}
 	conn.SetReadDeadline(time.Time{})
 
-	// Mode-specific setup: join group with non-blocking drain
+	// Mode-specific setup
 	switch mode {
 	case "group":
-		joinFrame := buildFrame("join_group", map[string]string{"groupID": "bench_group"})
+		joinFrame := buildSingleFrame("join_group", map[string]string{"groupID": "bench_group"})
 		conn.Write(joinFrame)
-		// Non-blocking drain of join ack + any buffered data
 		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		drainBuf := make([]byte, 65536)
-		conn.Read(drainBuf)
+		conn.Read(buf)
 		conn.SetReadDeadline(time.Time{})
-		// Extra wait for gateway to process JoinGroup
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	var sendFrame []byte
 	switch mode {
 	case "group":
-		sendFrame = buildFrame("group_msg", map[string]string{"groupID": "bench_group", "message": "hello"})
+		sendFrame = buildBatchFrame("group_msg", map[string]string{"groupID": "bench_group", "message": "hello"}, batchSize)
 	case "broadcast":
-		sendFrame = buildFrame("broadcast_msg", map[string]string{"message": "hello all"})
+		sendFrame = buildBatchFrame("broadcast_msg", map[string]string{"message": "hello all"}, batchSize)
 	default:
-		sendFrame = buildFrame("push_me", map[string]string{})
+		sendFrame = buildBatchFrame("push_me", map[string]string{}, batchSize)
 	}
 
 	var inflight int64
@@ -112,18 +112,18 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
-		buf := drainBufPool.Get().([]byte)
-		defer drainBufPool.Put(buf)
+		recvBuf := drainBufPool.Get().([]byte)
+		defer drainBufPool.Put(recvBuf)
 		var head, tail int
 		for {
-			n, err := conn.Read(buf[tail:])
+			n, err := conn.Read(recvBuf[tail:])
 			if err != nil {
 				return
 			}
 			tail += n
 			count := 0
 			for head+4 <= tail {
-				fl := int(binary.BigEndian.Uint32(buf[head : head+4]))
+				fl := int(binary.BigEndian.Uint32(recvBuf[head : head+4]))
 				if fl == 0 || fl > 16*1024*1024 {
 					return
 				}
@@ -139,7 +139,7 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 				atomic.AddInt64(&inflight, -int64(count))
 			}
 			if head > 0 && head < tail {
-				copy(buf, buf[head:tail])
+				copy(recvBuf, recvBuf[head:tail])
 				tail -= head
 				head = 0
 			} else if head >= tail {
@@ -167,15 +167,15 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 			<-recvDone
 			return
 		}
-		atomic.AddInt64(&totalSent, 1)
-		atomic.AddInt64(&inflight, 1)
+		atomic.AddInt64(&totalSent, int64(batchSize))
+		atomic.AddInt64(&inflight, int64(batchSize))
 	}
 }
 
 func main() {
 	if len(os.Args) < 4 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <addr> <conns> <duration> [mode] [inflight]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  mode: personal | group | broadcast (default: personal)\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s <addr> <conns> <duration> [mode] [batchSize] [inflight]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  mode: personal | group | broadcast\n")
 		os.Exit(1)
 	}
 
@@ -188,13 +188,17 @@ func main() {
 	if len(os.Args) >= 5 {
 		mode = os.Args[4]
 	}
-	inflight := int64(5000)
+	batchSize := 16
 	if len(os.Args) >= 6 {
-		fmt.Sscanf(os.Args[5], "%d", &inflight)
+		fmt.Sscanf(os.Args[5], "%d", &batchSize)
+	}
+	inflight := int64(5000)
+	if len(os.Args) >= 7 {
+		fmt.Sscanf(os.Args[6], "%d", &inflight)
 	}
 
-	fmt.Printf("Push Bench: addr=%s conns=%d duration=%ds mode=%s inflight=%d\n",
-		addr, conns, duration, mode, inflight)
+	fmt.Printf("Push Bench: addr=%s conns=%d duration=%ds mode=%s batchSize=%d inflight=%d\n",
+		addr, conns, duration, mode, batchSize, inflight)
 	fmt.Printf("CPU cores: %d\n", runtime.NumCPU())
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
@@ -203,7 +207,7 @@ func main() {
 
 	for i := 0; i < conns; i++ {
 		wg.Add(1)
-		go runPushConn(addr, &wg, stopCh, inflight, mode, i)
+		go runPushConn(addr, &wg, stopCh, inflight, mode, i, batchSize)
 		time.Sleep(time.Microsecond * 20)
 	}
 
@@ -243,7 +247,7 @@ func main() {
 				wg.Wait()
 
 				totalElapsed := time.Since(startTime).Seconds()
-				fmt.Printf("\n=== Final Results (%s) ===\n", mode)
+				fmt.Printf("\n=== Final Results (%s, batchSize=%d) ===\n", mode, batchSize)
 				fmt.Printf("Total Sent: %d\n", atomic.LoadInt64(&totalSent))
 				fmt.Printf("Total Recv: %d\n", atomic.LoadInt64(&totalRecv))
 				fmt.Printf("Duration: %.2fs\n", totalElapsed)
