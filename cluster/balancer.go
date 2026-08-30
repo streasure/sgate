@@ -46,6 +46,9 @@ type Balancer struct {
 	failureThreshold int
 	recoverInterval  time.Duration
 	stopChan         chan struct{}
+	// HealthCheckFunc probes node liveness: returns true if healthy.
+	// Injected by the gateway layer; nil means no probe (legacy behavior).
+	healthCheckFunc func(id, addr string) bool
 }
 
 // NewBalancer 创建负载均衡器
@@ -278,12 +281,22 @@ func (b *Balancer) recoverLoop() {
 			return
 		case <-ticker.C:
 			b.mu.RLock()
+			healthFn := b.healthCheckFunc
 			for _, n := range b.nodes {
 				if !n.IsHealthy() {
-					// 探活：交给上层 grpc 主动健康检查触发；这里仅置回半开状态
-					n.failures.Store(0)
-					n.healthy.Store(1)
-					tlog.Info("balancer: node set to half-open (probe)", "id", n.ID)
+					if healthFn != nil {
+						// Real probe: only recover if node is actually reachable.
+						if healthFn(n.ID, n.Address) {
+							n.failures.Store(0)
+							n.healthy.Store(1)
+							tlog.Info("balancer: node recovered (probe success)", "id", n.ID)
+						}
+					} else {
+						// Legacy: unconditionally set half-open
+						n.failures.Store(0)
+						n.healthy.Store(1)
+						tlog.Info("balancer: node set to half-open (no probe)", "id", n.ID)
+					}
 				}
 			}
 			b.mu.RUnlock()
@@ -293,6 +306,13 @@ func (b *Balancer) recoverLoop() {
 
 // Stop 停止 balancer
 func (b *Balancer) Stop() { close(b.stopChan) }
+
+// SetHealthCheckFunc injects a probe function for recoverLoop to use.
+func (b *Balancer) SetHealthCheckFunc(fn func(id, addr string) bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.healthCheckFunc = fn
+}
 
 // Stats 返回节点统计
 func (b *Balancer) Stats() []map[string]interface{} {

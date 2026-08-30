@@ -382,6 +382,19 @@ func (g *Gateway) StartServices() {
 	if g.serviceDiscovery != nil {
 		g.logicClientPool.SetDiscovery(g.serviceDiscovery)
 	}
+	if g.balancer != nil {
+		g.logicClientPool.SetBalancer(g.balancer)
+		g.balancer.SetHealthCheckFunc(func(id, addr string) bool {
+			pool := g.logicClientPool
+			pool.mu.RLock()
+			client, ok := pool.clients[id]
+			pool.mu.RUnlock()
+			if !ok || client == nil {
+				return false
+			}
+			return client.IsConnected()
+		})
+	}
 
 	// Static connection pre-warm (no discovery)
 	if g.serviceDiscovery == nil {

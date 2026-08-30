@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/streasure/util/nacos"
+	"github.com/streasure/sgate/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
@@ -444,6 +445,7 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 		closing:           false,
 		closed:            make(chan struct{}),
 		shardCount:        runtime.NumCPU() * 8,
+		messageQueue:      NewStreamMessageQueue(),
 	}
 }
 
@@ -457,6 +459,7 @@ func NewLogicClientWithConfig(gateway GatewayInterface, reconnectConfig Reconnec
 		closing:           false,
 		closed:            make(chan struct{}),
 		shardCount:        runtime.NumCPU() * 8,
+		messageQueue:      NewStreamMessageQueue(),
 	}
 }
 
@@ -667,6 +670,11 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		lc.streamManager.shards[i].lc = lc
 		go lc.streamManager.shards[i].startSendLoop()
 		go lc.streamManager.shards[i].receiveMessages(lc, i)
+	}
+
+	// Flush buffered messages from disconnect period
+	if lc.messageQueue != nil {
+		go lc.messageQueue.Flush(lc)
 	}
 
 	if lc.reconnectManager == nil {
@@ -1453,9 +1461,11 @@ func StartGRPCServer(gateway GatewayInterface, port string, maxMsgSize int, wind
 
 type LogicClientPool struct {
 	clients   map[string]*LogicClient
+	ordered   []string // deterministic round-robin: ordered list of service IDs
 	mu        sync.RWMutex
 	gateway   GatewayInterface
 	discovery *nacos.Discovery
+	balancer  *cluster.Balancer
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
 	rrIndex   uint64
@@ -1487,6 +1497,10 @@ func (pool *LogicClientPool) updateFastClient() {
 func (pool *LogicClientPool) SetDiscovery(discovery *nacos.Discovery) {
 	pool.discovery = discovery
 	discovery.OnServiceChange(pool.handleServiceChange)
+}
+
+func (pool *LogicClientPool) SetBalancer(balancer *cluster.Balancer) {
+	pool.balancer = balancer
 }
 
 func (pool *LogicClientPool) handleServiceChange(event nacos.ServiceEvent) {
@@ -1541,8 +1555,15 @@ func (pool *LogicClientPool) handleServiceRegister(event nacos.ServiceEvent) {
 
 	pool.mu.Lock()
 	pool.clients[event.Service.ServiceID] = client
+	if !containsString(pool.ordered, event.Service.ServiceID) {
+		pool.ordered = append(pool.ordered, event.Service.ServiceID)
+	}
 	pool.updateFastClient()
 	pool.mu.Unlock()
+
+	if pool.balancer != nil {
+		pool.balancer.AddNode(event.Service.ServiceID, event.Service.Address, 1)
+	}
 
 	tlog.Info("logic client added to pool",
 		"serviceID", event.Service.ServiceID,
@@ -1564,8 +1585,12 @@ func (pool *LogicClientPool) handleServiceDeregister(event nacos.ServiceEvent) {
 			// gRPC 连接已断开，安全清理
 			pool.mu.Lock()
 			delete(pool.clients, event.Service.ServiceID)
+			pool.ordered = removeString(pool.ordered, event.Service.ServiceID)
 			pool.updateFastClient()
 			pool.mu.Unlock()
+			if pool.balancer != nil {
+				pool.balancer.RemoveNode(event.Service.ServiceID)
+			}
 			go client.Close()
 			tlog.Warn("logic service offline and connection already disconnected, cleaning up",
 				"serviceID", event.Service.ServiceID,
@@ -1608,22 +1633,15 @@ func (pool *LogicClientPool) SendMessageByServiceID(serviceID string, msg *proto
 
 func (pool *LogicClientPool) RoundRobinSendMessage(msg *protobuf.Message) error {
 	pool.mu.RLock()
-	n := len(pool.clients)
+	n := len(pool.ordered)
 	if n == 0 {
 		pool.mu.RUnlock()
 		return ErrNotConnected
 	}
 
 	idx := atomic.AddUint64(&pool.rrIndex, 1) % uint64(n)
-	i := uint64(0)
-	var client *LogicClient
-	for _, c := range pool.clients {
-		if i == idx {
-			client = c
-			break
-		}
-		i++
-	}
+	serviceID := pool.ordered[idx]
+	client := pool.clients[serviceID]
 	pool.mu.RUnlock()
 
 	if client == nil || !client.IsConnected() {
@@ -1643,6 +1661,7 @@ func (pool *LogicClientPool) Close() {
 		client.Close()
 		delete(pool.clients, id)
 	}
+	pool.ordered = pool.ordered[:0]
 }
 
 func (pool *LogicClientPool) ClientCount() int {
@@ -1685,11 +1704,18 @@ func (pool *LogicClientPool) RemoveService(serviceID string) {
 	client, exists := pool.clients[serviceID]
 	if exists {
 		delete(pool.clients, serviceID)
+		pool.ordered = removeString(pool.ordered, serviceID)
+		pool.updateFastClient()
 	}
 	pool.mu.Unlock()
 
-	if exists && client != nil {
-		go client.Close()
+	if exists {
+		if pool.balancer != nil {
+			pool.balancer.RemoveNode(serviceID)
+		}
+		if client != nil {
+			go client.Close()
+		}
 	}
 }
 
@@ -1708,6 +1734,10 @@ func (pool *LogicClientPool) AddStaticService(address string) {
 
 	pool.mu.Lock()
 	pool.clients[serviceID] = client
+	if !containsString(pool.ordered, serviceID) {
+		pool.ordered = append(pool.ordered, serviceID)
+	}
+	pool.updateFastClient()
 	pool.mu.Unlock()
 
 	go func() {
@@ -1743,4 +1773,22 @@ func splitRoutes(s string) []string {
 		}
 	}
 	return result
+}
+
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(slice []string, s string) []string {
+	for i, v := range slice {
+		if v == s {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
 }
