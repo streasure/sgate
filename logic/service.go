@@ -193,6 +193,10 @@ func (s *Service) initRegistry() {
 }
 
 func (s *Service) Stop() {
+	if s.server != nil {
+		s.server.Stop()
+	}
+
 	if s.registry != nil {
 		s.registry.Destroy()
 	}

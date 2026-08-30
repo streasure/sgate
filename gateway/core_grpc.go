@@ -406,12 +406,20 @@ func (s *StreamShard) SendMessage(msg *protobuf.Message) (err error) {
 	if s.closed.Load() {
 		return ErrNotConnected
 	}
-	select {
-	case s.sendCh <- msg:
-		return nil
-	default:
-		return ErrNotConnected
-	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("send on closed channel: %v", r)
+			}
+		}()
+		select {
+		case s.sendCh <- msg:
+			err = nil
+		default:
+			err = ErrNotConnected
+		}
+	}()
+	return
 }
 
 type LogicClient struct {
@@ -762,9 +770,9 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 
 	// 退出时 flush 残留数据
 	defer func() {
-		if wc.count > 0 {
+		if wc != nil && wc.count > 0 {
 			pushed := wc.flush()
-			if pushed > 0 {
+			if pushed > 0 && lc.gateway != nil {
 				lc.gateway.AddPushedToClient(pushed)
 			}
 		}

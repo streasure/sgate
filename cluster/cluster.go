@@ -188,11 +188,15 @@ func (c *Cluster) GetNodeID() string {
 func (c *Cluster) Stop() {
 	c.stopOnce.Do(func() {
 		close(c.stopChan)
+		if c.discovery != nil {
+			c.discovery.Destroy()
+		}
+		if c.registry != nil {
+			c.registry.Destroy()
+		}
+		c.isLeader.Store(0)
+		tlog.Info("cluster stopped", "nodeID", c.nodeID)
 	})
-	c.discovery.Destroy()
-	c.registry.Destroy()
-	c.isLeader.Store(0)
-	tlog.Info("cluster stopped", "nodeID", c.nodeID)
 }
 
 // localIP 获取本机出网 IP（UDP dial 不发实际包，失败回退 127.0.0.1）

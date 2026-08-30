@@ -63,7 +63,7 @@ type Gateway struct {
 	connectionManager  *ConnectionManager
 	stopChan           chan struct{}
 	closeOnce          sync.Once
-	transportType      map[string]string
+	transportType      sync.Map
 	ctx                context.Context
 	tlsConfig          *tls.Config
 	clusterID          string
@@ -143,7 +143,7 @@ type Gateway struct {
 }
 
 func (g *Gateway) SetTransportType(port string, transportType string) {
-	g.transportType[port] = transportType
+	g.transportType.Store(port, transportType)
 }
 
 // AddPushedToClient 增加已推送到客户端的消息计数（接收方向：logic->sgate->client）
@@ -359,7 +359,7 @@ func (g *Gateway) StartServices() {
 	if connIdleTimeout <= 0 {
 		connIdleTimeout = 30 * time.Second
 	}
-	g.connectionManager.StartConnectionChecker(connCheckInterval, connIdleTimeout)
+	g.connectionManager.StartConnectionChecker(connIdleTimeout, connCheckInterval)
 
 	if g.configCenter != nil {
 		g.startConfigCenterWatcher()
@@ -678,12 +678,15 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 
 	localAddr := c.LocalAddr().String()
 	isWS := false
-	for port, t := range g.transportType {
+	g.transportType.Range(func(key, value interface{}) bool {
+		port := key.(string)
+		t := value.(string)
 		if strings.HasSuffix(localAddr, ":"+port) && t == "websocket" {
 			isWS = true
-			break
+			return false
 		}
-	}
+		return true
+	})
 
 	if isWS {
 		wsConn := NewWebSocketConnection(c)
@@ -1262,6 +1265,10 @@ func (g *Gateway) Close() {
 
 		if g.logicClientPool != nil {
 			g.logicClientPool.Close()
+		}
+
+		if g.logicClient != nil {
+			g.logicClient.Close()
 		}
 
 		if g.grpcServer != nil {

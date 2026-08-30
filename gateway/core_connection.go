@@ -45,6 +45,34 @@ func (c *Connection) ID() string {
 	return c.id
 }
 
+// SetUserUUID thread-safe setter for UserUUID
+func (c *Connection) SetUserUUID(uuid string) {
+	c.mu.Lock()
+	c.UserUUID = uuid
+	c.mu.Unlock()
+}
+
+// GetUserUUID thread-safe getter for UserUUID
+func (c *Connection) GetUserUUID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.UserUUID
+}
+
+// SetServerID thread-safe setter for ServerID
+func (c *Connection) SetServerID(sid string) {
+	c.mu.Lock()
+	c.ServerID = sid
+	c.mu.Unlock()
+}
+
+// GetServerID thread-safe getter for ServerID
+func (c *Connection) GetServerID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ServerID
+}
+
 // SetWS 标记连接为 WebSocket（线程安全）
 func (c *Connection) SetWS(v bool) {
 	c.mu.Lock()
@@ -1101,8 +1129,8 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 			// 序列化消息
 			responseData, err := proto.Marshal(timeoutMessage)
 			if err == nil {
-				// 发送超时通知（不检查错误，因为连接可能已关闭）
-				conn.Conn.Write(responseData)
+				// 使用 Send (AsyncWrite) 而非直接 Write，避免在非 event-loop goroutine 中调用 gnet Write
+				conn.Send(responseData)
 			}
 
 			// 关闭连接

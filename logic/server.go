@@ -93,7 +93,12 @@ func newStreamConn(stream protobuf.GatewayService_StreamMessagesServer, sendChSi
 
 // Send 将消息引用推入 sendCh（无序列化、无分配）。
 // 序列化延迟到 flushLoop 组批时用 appendMessageFast 直写完成。
-func (sc *streamConn) Send(msg *protobuf.Message) error {
+func (sc *streamConn) Send(msg *protobuf.Message) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("send on closed channel: %v", r)
+		}
+	}()
 	item := reverseItem{
 		connID: msg.ConnectionId,
 		route:  msg.Route,
@@ -192,6 +197,7 @@ type Server struct {
 	routes       sync.Map
 	connections  sync.Map
 	onDisconnect []DisconnectCallback
+	mu           sync.Mutex // protects onDisconnect
 
 	serverID   string
 	groupMu    sync.RWMutex
@@ -215,6 +221,7 @@ type Server struct {
 	streamChSize        int
 	dispatchWorkerCount int
 	passthrough         bool
+	connIDCounter       atomic.Uint64
 }
 
 type dispatchItem struct {
@@ -340,6 +347,14 @@ func WithServerPassthrough() ServerOption {
 	return func(s *Server) { s.passthrough = true }
 }
 
+// Stop gracefully shuts down dispatch workers by closing channels and waiting.
+func (s *Server) Stop() {
+	for _, ch := range s.dispatchChs {
+		close(ch)
+	}
+	s.dispatchWg.Wait()
+}
+
 func (s *Server) GetServerID() string {
 	return s.serverID
 }
@@ -349,11 +364,13 @@ func (s *Server) serverGroupID() string {
 }
 
 func (s *Server) OnDisconnect(cb DisconnectCallback) {
+	s.mu.Lock()
 	s.onDisconnect = append(s.onDisconnect, cb)
+	s.mu.Unlock()
 }
 
 func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesServer) error {
-	connectionID := fmt.Sprintf("conn_%d", time.Now().UnixNano())
+	connectionID := fmt.Sprintf("conn_%s_%d", s.serverID, s.connIDCounter.Add(1))
 
 	conn := newStreamConn(stream, s.streamChSize)
 	s.connections.Store(connectionID, conn)
@@ -373,7 +390,11 @@ func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesSer
 			s.leaveAllGroups(connectionID)
 			s.cleanupUserByConnection(connectionID)
 			tlog.Info("stream connection closed", "connectionID", connectionID, "serverID", s.serverID)
-			for _, cb := range s.onDisconnect {
+			s.mu.Lock()
+			callbacks := make([]DisconnectCallback, len(s.onDisconnect))
+			copy(callbacks, s.onDisconnect)
+			s.mu.Unlock()
+			for _, cb := range callbacks {
 				go cb(connectionID)
 			}
 			return err
@@ -774,13 +795,21 @@ func (s *Server) DeleteGroup(groupID string) {
 }
 
 func (s *Server) SendToGroup(groupID string, msg *protobuf.Message) {
-	if msg.Payload == nil {
-		msg.Payload = make(map[string]string)
+	pushMsg := &protobuf.Message{
+		Route:   protobuf.RouteServerSendToGroup,
+		Payload: make(map[string]string),
+		Timestamp: time.Now().UnixMilli(),
 	}
-	msg.Payload["groupID"] = groupID
-	msg.Route = protobuf.RouteServerSendToGroup
-	msg.Timestamp = time.Now().UnixMilli()
-	s.PushToServer(msg)
+	pushMsg.Payload["groupID"] = groupID
+	if msg.Route != "" {
+		pushMsg.Payload["route"] = msg.Route
+	}
+	if msg.Payload != nil {
+		for k, v := range msg.Payload {
+			pushMsg.Payload[k] = v
+		}
+	}
+	s.PushToServer(pushMsg)
 }
 
 func (s *Server) GetGroupInfo(groupID string) {

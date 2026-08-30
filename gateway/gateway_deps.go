@@ -92,7 +92,6 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 	gw := &Gateway{
 		connectionManager: NewConnectionManager(),
 		stopChan:          make(chan struct{}),
-		transportType:     make(map[string]string),
 		protection:        protection,
 		grpcCfg:           grpcCfg,
 		streamCfg:         streamCfg,
