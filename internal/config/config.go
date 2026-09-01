@@ -230,7 +230,6 @@ type ProtectionConfig struct {
 	MaxFrameBufSize    int     `yaml:"maxFrameBufSize"`
 	MaxWSFrameSize     int     `yaml:"maxWSFrameSize"`
 	MaxWSBufferSize    int     `yaml:"maxWSBufferSize"`
-	MemoryThreshold    float64 `yaml:"memoryThreshold"`
 	CPUThreshold       float64 `yaml:"cpuThreshold"`
 	DropOnOverload     bool    `yaml:"dropOnOverload"`
 	CheckIntervalMs    int     `yaml:"checkIntervalMs"`
@@ -249,9 +248,13 @@ type Transport struct {
 	Type     string `yaml:"type"`
 }
 
-func LoadConfig() (*Config, error) {
+func LoadConfig(configFiles ...string) (*Config, error) {
 	var file *os.File
-	for _, name := range []string{"config/config.yaml", "../config/config.yaml", "../../config/config.yaml"} {
+	candidates := configFiles
+	if len(candidates) == 0 {
+		candidates = []string{"config/config.yaml", "../config/config.yaml", "../../config/config.yaml"}
+	}
+	for _, name := range candidates {
 		candidate, err := os.Open(filepath.Clean(name))
 		if err == nil {
 			file = candidate
@@ -310,7 +313,6 @@ func loadDefaultConfig() *Config {
 			MaxFrameBufSize:    DefaultMaxFrameSize,
 			MaxWSFrameSize:     DefaultMaxWSFrameSize,
 			MaxWSBufferSize:    DefaultMaxWSFrameSize,
-			MemoryThreshold:    90.0,
 			CPUThreshold:       90.0,
 			DropOnOverload:     true,
 			CheckIntervalMs:    DefaultOverloadCheckIntervalMs,

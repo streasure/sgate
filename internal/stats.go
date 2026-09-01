@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/util/monitor"
+	"github.com/streasure/util/prometheus"
 	tlog "github.com/streasure/treasure-slog"
 )
 
@@ -65,8 +65,8 @@ func (r *messageRateTracker) rate() float64 {
 	return float64(last.count-first.count) / duration
 }
 
-func (g *Gateway) Stats() monitor.Stats {
-	var s monitor.Stats
+func (g *Gateway) Stats() prometheus.Stats {
+	var s prometheus.Stats
 
 	s.ConnectionsTotal = uint64(g.connectionsTotal.Load())
 	s.ConnectionsActive = g.connectionsActive.Load()
@@ -85,6 +85,7 @@ func (g *Gateway) Stats() monitor.Stats {
 	s.MessagesDroppedCircuit = g.messagesDroppedCircuit.Load()
 	s.MessagesDroppedIntegrity = g.messagesDroppedIntegrity.Load()
 	s.MessagesDroppedFilterChain = g.messagesDroppedFilterChain.Load()
+	s.MessagesDroppedAuth = g.messagesDroppedAuth.Load()
 	s.MessagesProcessed = g.messagesProcessed.Load()
 	s.MessagesFailed = g.messagesFailed.Load()
 
@@ -153,6 +154,7 @@ type statsPayload struct {
 	DroppedCircuit        int64   `json:"droppedCircuit"`
 	DroppedIntegrity      int64   `json:"droppedIntegrity"`
 	DroppedFilterChain    int64   `json:"droppedFilterChain"`
+	DroppedAuth           int64   `json:"droppedAuth"`
 	DroppedTotal          int64   `json:"droppedTotal"`
 	PushedToClient        int64   `json:"pushedToClient"`
 	PushDroppedNoConn     int64   `json:"pushDroppedNoConn"`
@@ -187,6 +189,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 		dropCircuit := g.messagesDroppedCircuit.Load()
 		dropIntegrity := g.messagesDroppedIntegrity.Load()
 		dropFilterChain := g.messagesDroppedFilterChain.Load()
+		dropAuth := g.messagesDroppedAuth.Load()
 		stats := statsPayload{
 			Received:              g.messagesReceived.Load(),
 			Forwarded:             g.messagesForwarded.Load(),
@@ -200,7 +203,8 @@ func (g *Gateway) StartStatsServer(addr string) {
 			DroppedCircuit:        dropCircuit,
 			DroppedIntegrity:      dropIntegrity,
 			DroppedFilterChain:    dropFilterChain,
-			DroppedTotal:          dropOverload + dropFull + dropNoLogic + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain,
+			DroppedAuth:           dropAuth,
+			DroppedTotal:          dropOverload + dropFull + dropNoLogic + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth,
 			PushedToClient:        g.messagesPushedToClient.Load(),
 			PushDroppedNoConn:     g.messagesPushDroppedNoConn.Load(),
 			Overloaded:            overloaded,

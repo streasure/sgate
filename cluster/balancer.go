@@ -159,10 +159,6 @@ func (b *Balancer) RecordFailure(id string) {
 	}
 }
 
-// AcquireConn / ReleaseConn 活跃连接计数（用于 leastConn）
-func (n *BalancerNode) AcquireConn() { n.connCount.Add(1) }
-func (n *BalancerNode) ReleaseConn() { n.connCount.Add(-1) }
-
 func (n *BalancerNode) IsHealthy() bool { return n.healthy.Load() == 1 }
 
 // 健康节点列表

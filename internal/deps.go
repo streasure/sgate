@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/streasure/util/nacos"
@@ -116,14 +115,6 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		cluster:           deps.ClusterNode,
 		alertWebhook:      deps.AlertWebhook,
 
-		minBufferSize:    4096,
-		maxBufferSize:    65536,
-		defaultBufferSize: 16384,
-		bufferPool: &sync.Pool{
-			New: func() interface{} {
-				return make([]byte, 16384)
-			},
-		},
 		configUpdateChan:  make(chan *config.Config),
 		overloadProtector: NewOverloadProtector(protection),
 		logicClient:       NewLogicClient(GatewayInterface(nil)),

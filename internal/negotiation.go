@@ -98,23 +98,6 @@ func (vn *VersionNegotiation) ProcessHandshake(connectionID string, handshake *p
 	return negotiatedVersion, nil
 }
 
-// GetClientVersion 获取客户端协议版本
-// 参数:
-//
-//	connectionID: 连接ID
-//
-// 返回值:
-//
-//	string: 客户端协议版本
-//	bool: 是否存在
-func (vn *VersionNegotiation) GetClientVersion(connectionID string) (string, bool) {
-	vn.mutex.RLock()
-	defer vn.mutex.RUnlock()
-
-	version, exists := vn.clientVersions[connectionID]
-	return version, exists
-}
-
 // RemoveClientVersion 移除客户端版本映射
 // 参数:
 //
@@ -171,14 +154,6 @@ func (vn *VersionNegotiation) isVersionSupported(version string) bool {
 		}
 	}
 	return false
-}
-
-// GetSupportedVersions 获取支持的版本列表
-// 返回值:
-//
-//	[]string: 支持的版本列表
-func (vn *VersionNegotiation) GetSupportedVersions() []string {
-	return vn.supportedVersions
 }
 
 // GenerateHandshakeResponse 生成握手响应

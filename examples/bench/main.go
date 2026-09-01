@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -79,6 +80,80 @@ func (bc *benchConn) close() {
 	bc.conn.Close()
 }
 
+// authenticate 发送 handshake + login 使连接通过认证
+func (bc *benchConn) authenticate(clientID int) error {
+	hs := &protobuf.Handshake{
+		ProtocolVersion: "1.0",
+		ClientType:      "bench",
+		Timestamp:       time.Now().UnixMilli(),
+	}
+	hsData, _ := proto.Marshal(hs)
+	handshake := &protobuf.Message{
+		Route:   protobuf.RouteHandshake,
+		Payload: map[string]string{"serverId": "bench_server", "handshake_data": base64.StdEncoding.EncodeToString(hsData)},
+	}
+	handshakeData, _ := proto.Marshal(handshake)
+	handshakeFrame := make([]byte, 4+len(handshakeData))
+	binary.BigEndian.PutUint32(handshakeFrame[:4], uint32(len(handshakeData)))
+	copy(handshakeFrame[4:], handshakeData)
+	if _, err := bc.conn.Write(handshakeFrame); err != nil {
+		return err
+	}
+
+	// Read handshake response
+	bc.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 65536)
+	totalRead := 0
+	for totalRead < 4 {
+		n, err := bc.conn.Read(buf[totalRead:])
+		if err != nil {
+			return fmt.Errorf("handshake read: %w", err)
+		}
+		totalRead += n
+	}
+	fl := binary.BigEndian.Uint32(buf[:4])
+	for totalRead < 4+int(fl) {
+		n, err := bc.conn.Read(buf[totalRead:])
+		if err != nil {
+			return fmt.Errorf("handshake body: %w", err)
+		}
+		totalRead += n
+	}
+	bc.conn.SetReadDeadline(time.Time{})
+
+	loginMsg := &protobuf.Message{
+		Route:   protobuf.RouteLogin,
+		Payload: map[string]string{"userId": fmt.Sprintf("bench_%d", clientID)},
+	}
+	loginData, _ := proto.Marshal(loginMsg)
+	loginFrame := make([]byte, 4+len(loginData))
+	binary.BigEndian.PutUint32(loginFrame[:4], uint32(len(loginData)))
+	copy(loginFrame[4:], loginData)
+	if _, err := bc.conn.Write(loginFrame); err != nil {
+		return err
+	}
+
+	bc.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	totalRead = 0
+	for totalRead < 4 {
+		n, err := bc.conn.Read(buf[totalRead:])
+		if err != nil {
+			return fmt.Errorf("login read: %w", err)
+		}
+		totalRead += n
+	}
+	fl = binary.BigEndian.Uint32(buf[:4])
+	for totalRead < 4+int(fl) {
+		n, err := bc.conn.Read(buf[totalRead:])
+		if err != nil {
+			return fmt.Errorf("login body: %w", err)
+		}
+		totalRead += n
+	}
+	bc.conn.SetReadDeadline(time.Time{})
+	return nil
+}
+
 // statsResp sgate /stats 返回结构
 type statsResp struct {
 	Received          int64   `json:"received"`
@@ -112,7 +187,7 @@ func queryStats(statsAddr string) (*statsResp, error) {
 	return &s, nil
 }
 
-func runDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInflight int64) {
+func runDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInflight int64, clientID int) {
 	defer wg.Done()
 
 	bc, err := newBenchConn(addr)
@@ -120,6 +195,10 @@ func runDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInf
 		return
 	}
 	defer bc.close()
+
+	if err := bc.authenticate(clientID); err != nil {
+		return
+	}
 
 	var inflight int64
 	var lastRecvTime time.Time
@@ -244,7 +323,7 @@ func main() {
 
 	for i := 0; i < conns; i++ {
 		wg.Add(1)
-		go runDuplexConn(addr, &wg, stopCh, inflight)
+		go runDuplexConn(addr, &wg, stopCh, inflight, i)
 		time.Sleep(time.Microsecond * 20)
 	}
 

@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,8 +46,6 @@ func (s LogicConnectionState) String() string {
 		return "Unknown"
 	}
 }
-
-type LogicConnectionStateCallback func(oldState, newState LogicConnectionState)
 
 var (
 	ErrNotConnected      = errors.New("not connected to logic server")
@@ -438,7 +435,6 @@ type LogicClient struct {
 	healthChecker     *HealthChecker
 	reconnectManager  *ReconnectManager
 	messageQueue      *StreamMessageQueue
-	stateCallbacks    []LogicConnectionStateCallback
 	gateway           GatewayInterface
 	closing           bool
 	closed            chan struct{}
@@ -459,26 +455,6 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 	}
 }
 
-func NewLogicClientWithConfig(gateway GatewayInterface, reconnectConfig ReconnectConfig, healthCheckConfig HealthCheckConfig) *LogicClient {
-	return &LogicClient{
-		state:             int32(StateDisconnected),
-		reconnectConfig:   reconnectConfig,
-		healthCheckConfig: healthCheckConfig,
-		streamManager:     NewStreamManager(0, 0),
-		gateway:           gateway,
-		closing:           false,
-		closed:            make(chan struct{}),
-		shardCount:        runtime.NumCPU() * 8,
-		messageQueue:      NewStreamMessageQueue(),
-	}
-}
-
-func (lc *LogicClient) RegisterStateCallback(callback LogicConnectionStateCallback) {
-	lc.mu.Lock()
-	defer lc.mu.Unlock()
-	lc.stateCallbacks = append(lc.stateCallbacks, callback)
-}
-
 func (lc *LogicClient) getState() LogicConnectionState {
 	return LogicConnectionState(atomic.LoadInt32(&lc.state))
 }
@@ -493,20 +469,10 @@ func (lc *LogicClient) setState(newState LogicConnectionState) {
 }
 
 func (lc *LogicClient) notifyStateChange(oldState, newState LogicConnectionState) {
-	lc.mu.RLock()
-	callbacks := make([]LogicConnectionStateCallback, len(lc.stateCallbacks))
-	copy(callbacks, lc.stateCallbacks)
-	lc.mu.RUnlock()
-	for _, callback := range callbacks {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					tlog.Error("notifyStateChange callback panic recovered", "error", r)
-				}
-			}()
-			callback(oldState, newState)
-		}()
-	}
+	tlog.Info("logic connection state changed",
+		"oldState", oldState.String(),
+		"newState", newState.String(),
+	)
 }
 
 func (lc *LogicClient) Connect(address string) error {
@@ -829,25 +795,25 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 					lc.gateway.AddPushDroppedNoConn(int64(msg.Cmd))
 				}
 			} else {
-				// multi-conn 路径：逐条解析 connID，加入 coalescer（不再逐条 flush）
-				var dropped int64
-				for len(data) >= 6 {
-					connIDLen := int(binary.BigEndian.Uint16(data[:2]))
-					if connIDLen == 0 || len(data) < 2+connIDLen+4 {
-						break
-					}
-					connID := string(data[2 : 2+connIDLen])
-					payloadLen := int(binary.BigEndian.Uint32(data[2+connIDLen : 6+connIDLen]))
-					if len(data) < 6+connIDLen+payloadLen {
-						break
-					}
-					payload := data[6+connIDLen : 6+connIDLen+payloadLen]
-					data = data[6+connIDLen+payloadLen:]
-
-					if !wc.addMulti(connID, payload) {
-						dropped++
-					}
+			// multi-conn 路径：逐条解析 connID，加入 coalescer（不再逐条 flush）
+			var dropped int64
+			for len(data) >= 6 {
+				connIDLen := int(binary.BigEndian.Uint16(data[:2]))
+				if connIDLen == 0 || len(data) < 2+connIDLen+4 {
+					break
 				}
+				connID := string(data[2 : 2+connIDLen])
+				payloadLen := int(binary.BigEndian.Uint32(data[2+connIDLen : 6+connIDLen]))
+				if len(data) < 6+connIDLen+payloadLen {
+					break
+				}
+				payload := data[6+connIDLen : 6+connIDLen+payloadLen]
+				data = data[6+connIDLen+payloadLen:]
+
+				if !wc.addMulti(connID, payload) {
+					dropped++
+				}
+			}
 				if dropped > 0 {
 					lc.gateway.AddPushDroppedNoConn(dropped)
 				}
@@ -891,6 +857,11 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 			lc.gateway.AddPushDroppedNoConn(1)
 			return
 		}
+		// login 响应: 逻辑服务器返回 UserUuid，网关提取并更新连接的认证状态
+		if msg.Route == protobuf.RouteLogin && msg.UserUuid != "" {
+			conn.SetUserUUID(msg.UserUuid)
+			tlog.Debug("login response updated connection userUUID", "connectionID", msg.ConnectionId, "userUUID", msg.UserUuid)
+		}
 		// 注意: 不能使用 pooled buffer，因为 gnet Writev 可能异步传递 slice 引用
 		responseData, err := proto.Marshal(msg)
 		if err == nil {
@@ -900,7 +871,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		return
 	}
 
-	// server.* 路由：部分指令不需要 ConnectionId（broadcast）
+	// server.* 路由：以下指令不需要 ConnectionId（按 Payload 中的 key 定位目标）
 	if route == protobuf.RouteServerBroadcast {
 		pushMsg := &protobuf.Message{
 			Route:   "broadcast",
@@ -920,6 +891,67 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 			if responseData != nil {
 				lc.gateway.GetConnectionManager().SendToUser(userUUID, responseData)
 			}
+		}
+		return
+	}
+
+	if route == protobuf.RouteServerSendToGroup {
+		groupID := msg.Payload["groupID"]
+		originalRoute := msg.Payload["route"]
+		if groupID != "" {
+			sendMsg := &protobuf.Message{
+				Route:   originalRoute,
+				Payload: msg.Payload,
+			}
+			lc.gateway.GetConnectionManager().SendToGroup(groupID, sendMsg)
+		}
+		return
+	}
+
+	if route == protobuf.RouteServerJoinGroupByUser {
+		groupID := msg.Payload["groupID"]
+		serverID := msg.Payload["serverID"]
+		userUUID := msg.Payload["userUUID"]
+		if groupID != "" && serverID != "" && userUUID != "" {
+			lc.gateway.GetConnectionManager().AddUserToGroup(groupID, serverID, userUUID)
+		}
+		return
+	}
+
+	if route == protobuf.RouteServerLeaveGroupByUser {
+		groupID := msg.Payload["groupID"]
+		serverID := msg.Payload["serverID"]
+		userUUID := msg.Payload["userUUID"]
+		if groupID != "" && serverID != "" && userUUID != "" {
+			lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, serverID, userUUID)
+		}
+		return
+	}
+
+	if route == protobuf.RouteServerCreateGroup {
+		groupID := msg.Payload["groupID"]
+		groupName := msg.Payload["groupName"]
+		if groupID != "" {
+			lc.gateway.GetConnectionManager().CreateGroup(groupID, groupName)
+		}
+		return
+	}
+
+	if route == protobuf.RouteServerDeleteGroup {
+		groupID := msg.Payload["groupID"]
+		if groupID != "" {
+			lc.gateway.GetConnectionManager().DeleteGroup(groupID)
+		}
+		return
+	}
+
+	if route == protobuf.RouteServerGetGroupInfo {
+		groupID := msg.Payload["groupID"]
+		if groupID != "" {
+			memberCount := lc.gateway.GetConnectionManager().GetGroupMemberCount(groupID)
+			groupName := lc.gateway.GetConnectionManager().GetGroupName(groupID)
+			users := lc.gateway.GetConnectionManager().GetGroupUsers(groupID)
+			tlog.Debug("group info requested", "groupID", groupID, "groupName", groupName, "memberCount", memberCount, "users", users)
 		}
 		return
 	}
@@ -955,7 +987,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 				serverID := conn.ServerID
 				userUUID := conn.UserUUID
 				lc.gateway.GetConnectionManager().AddUserToGroup(groupID, serverID, userUUID)
-				tlog.Debug("connection joined group by logic server", "connectionID", connID, "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
+				tlog.Debug("connection joined group by logic server", "connectionID", connID, "groupID", groupID)
 			}
 		}
 		conn := lc.gateway.GetConnectionManager().GetConnection(connID)
@@ -973,54 +1005,6 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 				userUUID := conn.UserUUID
 				lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, serverID, userUUID)
 			}
-		}
-	} else if route == protobuf.RouteServerJoinGroupByUser {
-		groupID := msg.Payload["groupID"]
-		serverID := msg.Payload["serverID"]
-		userUUID := msg.Payload["userUUID"]
-		if groupID != "" && serverID != "" && userUUID != "" {
-			lc.gateway.GetConnectionManager().AddUserToGroup(groupID, serverID, userUUID)
-			tlog.Debug("user joined group by user key", "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
-		}
-	} else if route == protobuf.RouteServerLeaveGroupByUser {
-		groupID := msg.Payload["groupID"]
-		serverID := msg.Payload["serverID"]
-		userUUID := msg.Payload["userUUID"]
-		if groupID != "" && serverID != "" && userUUID != "" {
-			lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, serverID, userUUID)
-			tlog.Debug("user left group by user key", "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
-		}
-	} else if route == protobuf.RouteServerCreateGroup {
-		groupID := msg.Payload["groupID"]
-		groupName := msg.Payload["groupName"]
-		if groupID != "" {
-			lc.gateway.GetConnectionManager().CreateGroup(groupID, groupName)
-			tlog.Debug("group created by logic server", "groupID", groupID, "groupName", groupName)
-		}
-	} else if route == protobuf.RouteServerDeleteGroup {
-		groupID := msg.Payload["groupID"]
-		if groupID != "" {
-			lc.gateway.GetConnectionManager().DeleteGroup(groupID)
-			tlog.Debug("group deleted by logic server", "groupID", groupID)
-		}
-	} else if route == protobuf.RouteServerSendToGroup {
-		groupID := msg.Payload["groupID"]
-		originalRoute := msg.Payload["route"]
-		if groupID != "" {
-			sendMsg := &protobuf.Message{
-				Route:   originalRoute,
-				Payload: msg.Payload,
-			}
-			lc.gateway.GetConnectionManager().SendToGroup(groupID, sendMsg)
-			tlog.Debug("message sent to group", "groupID", groupID, "route", originalRoute)
-		}
-	} else if route == protobuf.RouteServerGetGroupInfo {
-		groupID := msg.Payload["groupID"]
-		if groupID != "" {
-			memberCount := lc.gateway.GetConnectionManager().GetGroupMemberCount(groupID)
-			groupName := lc.gateway.GetConnectionManager().GetGroupName(groupID)
-			users := lc.gateway.GetConnectionManager().GetGroupUsers(groupID)
-			tlog.Debug("group info requested", "groupID", groupID, "groupName", groupName, "memberCount", memberCount, "users", users)
 		}
 	} else {
 		responseData, err := proto.Marshal(msg)
@@ -1439,10 +1423,10 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protobuf.Message) (*p
 
 func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protobuf.Message, callback func(interface{}), ctx map[string]interface{}) {
 	if msg.Route == "" {
-		callback(NewErrorMessage("error", "Missing route", "", ""))
+		callback(newErrorResponse("error", "Missing route", "", ""))
 		return
 	}
-	callback(NewErrorMessage("error", "Gateway does not handle routes locally, forward to logic server", "", ""))
+	callback(newErrorResponse("error", "Gateway does not handle routes locally, forward to logic server", "", ""))
 }
 
 func StartGRPCServer(gateway GatewayInterface, port string, maxMsgSize int, windowSize int) (*grpc.Server, error) {
@@ -1640,17 +1624,6 @@ func (pool *LogicClientPool) SendMessage(msg *protobuf.Message) error {
 	return pool.RoundRobinSendMessage(msg)
 }
 
-func (pool *LogicClientPool) SendMessageByServiceID(serviceID string, msg *protobuf.Message) error {
-	pool.mu.RLock()
-	client, ok := pool.clients[serviceID]
-	pool.mu.RUnlock()
-
-	if !ok {
-		return fmt.Errorf("service %s not found in pool", serviceID)
-	}
-	return client.SendMessage(msg)
-}
-
 func (pool *LogicClientPool) RoundRobinSendMessage(msg *protobuf.Message) error {
 	pool.mu.RLock()
 	n := len(pool.ordered)
@@ -1690,35 +1663,6 @@ func (pool *LogicClientPool) ClientCount() int {
 	return len(pool.clients)
 }
 
-func (pool *LogicClientPool) ConnectedCount() int {
-	pool.mu.RLock()
-	defer pool.mu.RUnlock()
-
-	count := 0
-	for _, client := range pool.clients {
-		if client.IsConnected() {
-			count++
-		}
-	}
-	return count
-}
-
-func (pool *LogicClientPool) GetClientStatus() []map[string]interface{} {
-	pool.mu.RLock()
-	defer pool.mu.RUnlock()
-
-	status := make([]map[string]interface{}, 0, len(pool.clients))
-	for id, client := range pool.clients {
-		status = append(status, map[string]interface{}{
-			"serviceID": id,
-			"address":   client.address,
-			"state":     client.getState().String(),
-			"connected": client.IsConnected(),
-		})
-	}
-	return status
-}
-
 func (pool *LogicClientPool) RemoveService(serviceID string) {
 	pool.mu.Lock()
 	client, exists := pool.clients[serviceID]
@@ -1739,35 +1683,6 @@ func (pool *LogicClientPool) RemoveService(serviceID string) {
 	}
 }
 
-func (pool *LogicClientPool) AddStaticService(address string) {
-	serviceID := "static_" + address
-	pool.mu.RLock()
-	_, exists := pool.clients[serviceID]
-	pool.mu.RUnlock()
-
-	if exists {
-		return
-	}
-
-	client := NewLogicClient(pool.gateway)
-	client.shardCount = runtime.NumCPU()
-
-	pool.mu.Lock()
-	pool.clients[serviceID] = client
-	if !containsString(pool.ordered, serviceID) {
-		pool.ordered = append(pool.ordered, serviceID)
-	}
-	pool.updateFastClient()
-	pool.mu.Unlock()
-
-	go func() {
-		tlog.Info("connecting to static logic service", "address", address)
-		if err := client.Connect(address); err != nil {
-			tlog.Error("failed to connect to static logic service", "address", address, "error", err)
-		}
-	}()
-}
-
 func (pool *LogicClientPool) IsConnected() bool {
 	// Fast path: single client, no lock needed
 	if c := pool.fastClient.Load(); c != nil {
@@ -1782,17 +1697,6 @@ func (pool *LogicClientPool) IsConnected() bool {
 		}
 	}
 	return false
-}
-
-func splitRoutes(s string) []string {
-	var result []string
-	for _, r := range strings.Split(s, ",") {
-		r = strings.TrimSpace(r)
-		if r != "" {
-			result = append(result, r)
-		}
-	}
-	return result
 }
 
 func containsString(slice []string, s string) bool {

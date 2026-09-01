@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/obs"
-	"github.com/streasure/sgate/protobuf"
 )
 
 var (
@@ -165,44 +164,4 @@ func (g *Gateway) ServeHealthHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(response)
-}
-
-func (g *Gateway) HandleHealthCheck(connectionID string, payload map[string]string) (*protobuf.Message, error) {
-	checkType := payload["type"]
-	if checkType == "" {
-		checkType = "health"
-	}
-
-	var response map[string]string
-
-	switch checkType {
-	case "health":
-		status := g.HealthCheck()
-		response = map[string]string{
-			"status":    status.Status,
-			"version":   status.Version,
-			"uptime":    status.Uptime.String(),
-			"timestamp": status.Timestamp.Format(time.RFC3339),
-		}
-	case "ready":
-		status := g.ReadinessCheck()
-		response = map[string]string{
-			"ready":     "true",
-			"timestamp": status.Timestamp.Format(time.RFC3339),
-		}
-		if !status.Ready {
-			response["ready"] = "false"
-			response["reason"] = status.Reason
-		}
-	case "live":
-		status := g.LivenessCheck()
-		response = map[string]string{
-			"alive":     "true",
-			"timestamp": status.Timestamp.Format(time.RFC3339),
-		}
-	default:
-		return nil, fmt.Errorf("unknown health check type")
-	}
-
-	return NewResponseMessage("health", response), nil
 }

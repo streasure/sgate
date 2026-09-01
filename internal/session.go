@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,25 +25,41 @@ import (
 //   LastActive: 最后活跃时间
 //   Status: 连接状态 (0=active, 1=closing, 2=closed)
 
+// SessionState represents the FSM state of a connection.
+type SessionState int32
+
+const (
+	StateAuth    SessionState = iota // awaiting handshake + login
+	StateForward                      // authenticated, forwarding traffic
+	StateClosed                       // closed, no more I/O
+)
+
 type Connection struct {
 	id         string
 	UserUUID   string
 	ServerID   string
 	Conn       gnet.Conn
-	RemoteAddr string
 	CreatedAt  int64
 	LastActive int64
 	// activitySeq 用于在高吞吐连接上降低时间戳更新频率。
 	// LastActive 仅用于空闲连接回收，不需要每条消息都刷新。
 	activitySeq atomic.Uint32
-	Status     int8
 	Groups     map[string]struct{}
 	IsWS       bool
 	mu         sync.Mutex
+	// FSM state (CAS only)
+	state int32 // atomic: SessionState
 }
 
 func (c *Connection) ID() string {
 	return c.id
+}
+
+// IsAuthenticated 检查连接是否已完成认证（必须有真实的 serverID 和 userUUID）
+func (c *Connection) IsAuthenticated() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ServerID != "" && c.UserUUID != "" && !strings.HasPrefix(c.UserUUID, "temp_")
 }
 
 // SetUserUUID thread-safe setter for UserUUID
@@ -85,6 +102,31 @@ func (c *Connection) IsWebSocket() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.IsWS
+}
+
+// --- FSM methods ---
+
+// GetState returns the current session state (lock-free).
+func (c *Connection) GetState() SessionState {
+	return SessionState(atomic.LoadInt32(&c.state))
+}
+
+// SetState atomically transitions the session state.
+// Returns true if the transition was successful.
+func (c *Connection) SetState(from, to SessionState) bool {
+	return atomic.CompareAndSwapInt32(&c.state, int32(from), int32(to))
+}
+
+// CloseState transitions to StateClosed exactly once (CAS).
+// Returns true if this goroutine performed the close.
+func (c *Connection) CloseState() bool {
+	return atomic.CompareAndSwapInt32(&c.state, int32(StateAuth), int32(StateClosed)) ||
+		atomic.CompareAndSwapInt32(&c.state, int32(StateForward), int32(StateClosed))
+}
+
+// IsClosed returns true if the session is in the Closed state.
+func (c *Connection) IsClosed() bool {
+	return c.GetState() == StateClosed
 }
 
 // noopAsyncCallback 空回调，用于 AsyncWrite/AsyncWritev
@@ -209,11 +251,9 @@ type ConnectionManager struct {
 	activeConnections     atomic.Int64
 	closedConnections     atomic.Int64
 	connectionTimeouts    atomic.Int64
-	connectionErrors      atomic.Int64
 	totalConnectionTime   atomic.Int64
 	totalMessages         atomic.Int64
 	failedMessages        atomic.Int64
-	totalMessageLatency   atomic.Int64
 }
 
 // connectionPool 连接对象池
@@ -242,9 +282,7 @@ func getConnection(connectionID string, conn gnet.Conn, userUUID, remoteAddr str
 	c.id = connectionID
 	c.UserUUID = userUUID
 	c.Conn = conn
-	c.RemoteAddr = remoteAddr
 	c.CreatedAt = time.Now().UnixMilli()
-	c.Status = 0
 	atomic.StoreInt64(&c.LastActive, time.Now().UnixMilli())
 	c.activitySeq.Store(0)
 	return c
@@ -255,9 +293,7 @@ func putConnection(c *Connection) {
 	c.id = ""
 	c.UserUUID = ""
 	c.Conn = nil
-	c.RemoteAddr = ""
 	c.CreatedAt = 0
-	c.Status = 0
 	atomic.StoreInt64(&c.LastActive, 0)
 	c.activitySeq.Store(0)
 	c.Groups = nil
@@ -609,28 +645,6 @@ func (cm *ConnectionManager) GetConnectionCountByServerID(serverID string) int {
 	return count
 }
 
-func (cm *ConnectionManager) SendToServerUser(serverID, userUUID string, message interface{}) bool {
-	conn := cm.GetConnectionByServerUser(serverID, userUUID)
-	if conn == nil {
-		return false
-	}
-	return cm.SendToConnection(conn.id, message)
-}
-
-func (cm *ConnectionManager) SendToServer(serverID string, message interface{}) int {
-	conns := cm.GetConnectionsByServerID(serverID)
-	if len(conns) == 0 {
-		return 0
-	}
-	success := 0
-	for _, conn := range conns {
-		if cm.SendToConnection(conn.id, message) {
-			success++
-		}
-	}
-	return success
-}
-
 // SendToConnection 发送消息到指定连接
 // 功能: 向指定的连接发送消息，并处理连接关闭的情况
 // 参数:
@@ -644,13 +658,6 @@ func (cm *ConnectionManager) SendToServer(serverID string, message interface{}) 
 func (cm *ConnectionManager) SendToConnection(connectionID string, message interface{}) bool {
 	conn := cm.GetConnection(connectionID)
 	if conn == nil {
-		cm.totalMessages.Add(1)
-		cm.failedMessages.Add(1)
-		return false
-	}
-
-	if conn.Status == 2 {
-		cm.RemoveConnection(connectionID)
 		cm.totalMessages.Add(1)
 		cm.failedMessages.Add(1)
 		return false
@@ -1007,26 +1014,6 @@ func (cm *ConnectionManager) GetGroupUsers(groupID string) []string {
 	return userUUIDs
 }
 
-func (cm *ConnectionManager) GetGroupUsersByServer(groupID, serverID string) []string {
-	cm.groupMutex.RLock()
-	defer cm.groupMutex.RUnlock()
-
-	groupInfo, ok := cm.groups.Load(groupID)
-	if !ok {
-		return []string{}
-	}
-
-	info := groupInfo.(*GroupInfo)
-	userUUIDs := make([]string, 0)
-	for key := range info.Members {
-		if key.serverID == serverID {
-			userUUIDs = append(userUUIDs, key.userUUID)
-		}
-	}
-
-	return userUUIDs
-}
-
 func (cm *ConnectionManager) GetGroupName(groupID string) string {
 	cm.groupMutex.RLock()
 	defer cm.groupMutex.RUnlock()
@@ -1168,23 +1155,15 @@ func (cm *ConnectionManager) GetConnectionStats() map[string]interface{} {
 	}
 
 	totalMsg := cm.totalMessages.Load()
-	totalMsgLat := cm.totalMessageLatency.Load()
-	var avgMsgLat int64
-	if totalMsg > 0 {
-		avgMsgLat = totalMsgLat / totalMsg
-	}
 
 	return map[string]interface{}{
 		"totalConnections":    totalConn,
 		"activeConnections":   cm.activeConnections.Load(),
 		"closedConnections":   closedConn,
 		"connectionTimeouts":  cm.connectionTimeouts.Load(),
-		"connectionErrors":    cm.connectionErrors.Load(),
 		"avgConnectionTime":   avgConnTime,
 		"totalConnectionTime": totalConnTime,
 		"totalMessages":       totalMsg,
 		"failedMessages":      cm.failedMessages.Load(),
-		"avgMessageLatency":   avgMsgLat,
-		"totalMessageLatency": totalMsgLat,
 	}
 }

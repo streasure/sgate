@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"github.com/streasure/sgate/cluster"
 	"github.com/streasure/sgate/internal/config"
 	tlog "github.com/streasure/treasure-slog"
 	"gopkg.in/yaml.v3"
@@ -33,17 +32,4 @@ func (g *Gateway) startConfigCenterWatcher() {
 				"type", g.configCenter.Type())
 		}
 	}()
-}
-
-// AlertOnError 当错误率/延迟突增时触发告警
-func (g *Gateway) AlertOnError(title, content string) {
-	if g.alertWebhook == nil {
-		return
-	}
-	go g.alertWebhook.Send(g.ctx, cluster.AlertEvent{
-		Level:   cluster.AlertError,
-		Title:   title,
-		Content: content,
-		Source:  "sgate-" + g.clusterID,
-	})
 }

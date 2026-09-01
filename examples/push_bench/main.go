@@ -10,6 +10,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -67,18 +68,56 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	tcpConn.SetWriteBuffer(8 * 1024 * 1024)
 	defer conn.Close()
 
-	// Login
-	loginFrame := buildSingleFrame(protobuf.RouteLogin, map[string]string{
-		"userId": fmt.Sprintf("u_%d_%d_%d", mode[0], clientID, rand.Int63()),
+	// Handshake: set serverId + handshake_data (requires Timestamp)
+	hs := &protobuf.Handshake{
+		ProtocolVersion: "1.0",
+		ClientType:      "push_bench",
+		Timestamp:       time.Now().UnixMilli(),
+	}
+	hsData, _ := proto.Marshal(hs)
+	handshakeFrame := buildSingleFrame(protobuf.RouteHandshake, map[string]string{
+		"serverId":       fmt.Sprintf("bench_server_%d", clientID),
+		"handshake_data": base64.StdEncoding.EncodeToString(hsData),
 	})
-	conn.Write(loginFrame)
-	deadline := time.Now().Add(2 * time.Second)
-	conn.SetReadDeadline(deadline)
+	conn.Write(handshakeFrame)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 65536)
 	totalRead := 0
 	for totalRead < 4 {
 		n, err := conn.Read(buf[totalRead:])
+		if err != nil {
+			return
+		}
+		totalRead += n
+	}
+	fl := binary.BigEndian.Uint32(buf[:4])
+	for totalRead < 4+int(fl) {
+		n, err := conn.Read(buf[totalRead:])
+		if err != nil {
+			return
+		}
+		totalRead += n
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	// Login: set userUUID
+	loginFrame := buildSingleFrame(protobuf.RouteLogin, map[string]string{
+		"userId": fmt.Sprintf("u_%d_%d_%d", mode[0], clientID, rand.Int63()),
+	})
+	conn.Write(loginFrame)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	totalRead = 0
+	for totalRead < 4 {
+		n, err := conn.Read(buf[totalRead:])
 		if err != nil || n == 0 {
+			return
+		}
+		totalRead += n
+	}
+	fl = binary.BigEndian.Uint32(buf[:4])
+	for totalRead < 4+int(fl) {
+		n, err := conn.Read(buf[totalRead:])
+		if err != nil {
 			return
 		}
 		totalRead += n
@@ -90,10 +129,11 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	case "group":
 		joinFrame := buildSingleFrame("join_group", map[string]string{"groupID": "bench_group"})
 		conn.Write(joinFrame)
-		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		conn.Read(buf)
 		conn.SetReadDeadline(time.Time{})
-		time.Sleep(50 * time.Millisecond)
+		// PushToServer is async — wait for gateway to process server.join_group
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	var sendFrame []byte

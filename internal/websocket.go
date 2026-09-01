@@ -76,42 +76,6 @@ func NewWebSocketConnection(conn gnet.Conn) *WebSocketConnection {
 	return wsConn
 }
 
-func (g *Gateway) HandleWebSocket(c gnet.Conn, data []byte) (action gnet.Action) {
-	var wsConn *WebSocketConnection
-	connCtx := c.Context()
-
-	if connCtx != nil {
-		if wsc, ok := connCtx.(*WebSocketConnection); ok {
-			wsConn = wsc
-		} else if id, ok := connCtx.(string); ok {
-			wsConn = NewWebSocketConnection(c)
-			wsConn.ConnectionID = id
-			c.SetContext(wsConn)
-			g.wsConnections.Store(wsConn, true)
-		}
-	}
-
-	if wsConn == nil {
-		wsConn = NewWebSocketConnection(c)
-		tempUserUUID := "temp_" + generateConnectionID()
-		connectionID := g.connectionManager.AddConnection(c, tempUserUUID)
-		wsConn.ConnectionID = connectionID
-		c.SetContext(wsConn)
-		g.wsConnections.Store(wsConn, true)
-	}
-
-	switch atomic.LoadInt32(&wsConn.State) {
-	case int32(WSStateHandshake):
-		return g.handleWebSocketHandshake(wsConn, data)
-	case int32(WSStateOpen):
-		return g.handleWebSocketMessage(wsConn, data)
-	case int32(WSStateClosing), int32(WSStateClosed):
-		return gnet.Close
-	default:
-		return gnet.Close
-	}
-}
-
 func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []byte) (action gnet.Action) {
 	lines := strings.Split(string(data), "\r\n")
 	if len(lines) < 2 {
@@ -299,14 +263,14 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	message := &protobuf.Message{}
 	if err := proto.Unmarshal(payload, message); err != nil {
 		tlog.Error("WebSocket message unmarshal failed", "error", err)
-		errorMsg := NewErrorMessage("error", "Invalid message format", err.Error(), string(payload))
+		errorMsg := newErrorResponse("error", "Invalid message format", err.Error(), string(payload))
 		responseData, _ := proto.Marshal(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
 	route := message.Route
 	if route == "" {
-		errorMsg := NewErrorMessage("error", "Invalid message format: missing route", "", "")
+		errorMsg := newErrorResponse("error", "Invalid message format: missing route", "", "")
 		responseData, _ := proto.Marshal(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
@@ -352,7 +316,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	// C5: 入方向消息完整性校验（默认关闭以保证压测吞吐）。
 	if g.protection.VerifyInbound {
 		if err := g.messageIntegrity.ProcessMessage(message); err != nil {
-			errorMsg := NewErrorMessage("error", "Message integrity check failed", err.Error(), "")
+			errorMsg := newErrorResponse("error", "Message integrity check failed", err.Error(), "")
 			responseData, _ := proto.Marshal(errorMsg)
 			return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 		}
@@ -379,6 +343,18 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	if route == protobuf.RouteHandshake {
 		g.handleHandshake(wsConn.Conn, connectionID, message)
 		return nil
+	}
+
+	// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
+	if route != protobuf.RouteLogin {
+		conn := g.connectionManager.GetConnection(connectionID)
+		if conn != nil && !conn.IsAuthenticated() {
+			errorMsg := newErrorResponse("error", "unauthorized", "connection not authenticated, handshake+login required", "")
+			responseData, _ := proto.Marshal(errorMsg)
+			g.messagesDroppedAuth.Add(1)
+			g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
+			return fmt.Errorf("unauthenticated connection")
+		}
 	}
 
 	// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
@@ -437,7 +413,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			if g.degradation != nil {
 				g.degradation.RecordResult(protoMsg.Route, true)
 			}
-			errorMsg := NewErrorMessage("error", "Failed to send message to logic server", err.Error(), "")
+			errorMsg := newErrorResponse("error", "Failed to send message to logic server", err.Error(), "")
 			responseData, _ := proto.Marshal(errorMsg)
 			return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 		}
@@ -452,7 +428,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			g.degradation.RecordResult(protoMsg.Route, false)
 		}
 	} else {
-		errorMsg := NewErrorMessage("error", "Logic server not connected", "", "")
+		errorMsg := newErrorResponse("error", "Logic server not connected", "", "")
 		responseData, _ := proto.Marshal(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}

@@ -17,7 +17,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cast"
 	"github.com/streasure/util/component"
-	"github.com/streasure/util/monitor"
+	"github.com/streasure/util/prometheus"
 	"github.com/streasure/util/nacos"
 	"github.com/streasure/sgate/cluster"
 	"github.com/streasure/sgate/obs"
@@ -45,18 +45,20 @@ var (
 	}
 )
 
-func extractRouteFast(data []byte) string {
-	return protobuf.ExtractRouteFast(data)
-}
-
-func extractCmdFast(data []byte) int32 {
-	_, cmd := protobuf.ExtractRouteAndCmd(data)
-	return cmd
-}
-
-// extractRouteAndCmd delegates to protobuf.ExtractRouteAndCmd (shared with logic server).
 func extractRouteAndCmd(data []byte) (string, int32) {
 	return protobuf.ExtractRouteAndCmd(data)
+}
+
+func newErrorResponse(route, message, details, data string) *protobuf.ErrorResponse {
+	return &protobuf.ErrorResponse{
+		Route: route,
+		Error: &protobuf.ErrorData{
+			Message: message,
+			Code:    details,
+			Details: data,
+		},
+		Timestamp: time.Now().UnixMilli(),
+	}
 }
 
 type Gateway struct {
@@ -68,10 +70,6 @@ type Gateway struct {
 	tlsConfig          *tls.Config
 	clusterID          string
 	isLeader           bool
-	bufferPool         *sync.Pool
-	minBufferSize      int
-	maxBufferSize      int
-	defaultBufferSize  int
 	cfg                atomic.Value
 	wsConnections      sync.Map
 	configPath         string
@@ -84,7 +82,7 @@ type Gateway struct {
 	serviceDiscovery   *nacos.Discovery
 	overloadProtector  *OverloadProtector
 	grpcServer         *grpc.Server
-	promExporter       *monitor.Exporter // Prometheus 指标导出器（enabled=false 时为 nil）
+	promExporter       *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为 nil）
 	statsServer        *http.Server
 	msgRate            *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
 	zone               string
@@ -98,6 +96,7 @@ type Gateway struct {
 	waf                *security.WAF
 	cluster            *cluster.Cluster
 	latencyTracker     *obs.LatencyTracker
+	engine             *gnet.Engine // stored on boot for graceful shutdown
 
 	// 企业级扩展组件
 	filterChain   *types.FilterChain        // SPI 过滤器链
@@ -131,6 +130,7 @@ type Gateway struct {
 	messagesDroppedCircuit     atomic.Int64 // 熔断器拦截
 	messagesDroppedIntegrity   atomic.Int64 // 完整性校验失败
 	messagesDroppedFilterChain atomic.Int64 // filter chain 中止
+	messagesDroppedAuth        atomic.Int64 // 认证拦截（缺少 serverID 或 userUUID）
 
 	// Prometheus 看板扩展计数器（Grafana dashboard 引用）
 	circuitBreakerTripped  atomic.Int64
@@ -154,30 +154,6 @@ func (g *Gateway) AddPushedToClient(n int64) {
 // AddPushDroppedNoConn 增加因无连接而丢弃的推送计数
 func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
-}
-
-func (g *Gateway) GetBuffer(size int) []byte {
-	buf := g.bufferPool.Get().([]byte)
-	if cap(buf) < size {
-		newSize := cap(buf) * 2
-		if newSize < size {
-			newSize = size
-		}
-		if newSize > g.maxBufferSize {
-			newSize = g.maxBufferSize
-		}
-		newBuf := make([]byte, newSize)
-		g.bufferPool.Put(buf)
-		return newBuf
-	}
-	return buf[:cap(buf)]
-}
-
-func (g *Gateway) PutBuffer(buf []byte) {
-	if cap(buf) >= g.minBufferSize && cap(buf) <= g.maxBufferSize {
-		buf = buf[:cap(buf)]
-		g.bufferPool.Put(buf)
-	}
 }
 
 var protobufMessagePool = sync.Pool{
@@ -442,7 +418,7 @@ func (g *Gateway) StartServices() {
 
 	// Prometheus
 	if cfg.Monitoring.Prometheus.Enabled {
-		g.promExporter = monitor.NewExporter(monitor.ExporterConfig{
+		g.promExporter = prometheus.NewExporter(prometheus.ExporterConfig{
 			Enabled: true,
 			Addr:    cfg.Monitoring.Prometheus.Addr,
 			Path:    cfg.Monitoring.Prometheus.Path,
@@ -663,9 +639,7 @@ func PutConnContext(ctx *ConnContext) {
 
 type ConnContext struct {
 	ConnectionID string
-	UserUUID     string
 	FrameBuf     []byte
-	FrameOff     int
 }
 
 func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
@@ -791,7 +765,6 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	maxFrameBuf := g.protection.MaxFrameBufSize
 	if len(ctx.FrameBuf)+len(data) > maxFrameBuf {
 		ctx.FrameBuf = nil
-		ctx.FrameOff = 0
 		return gnet.Close
 	}
 
@@ -809,7 +782,6 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
 		if frameLen == 0 || frameLen > uint32(maxFrame) {
 			ctx.FrameBuf = nil
-			ctx.FrameOff = 0
 			return gnet.Close
 		}
 		totalLen := 4 + int(frameLen)
@@ -824,7 +796,6 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 		} else {
 			ctx.FrameBuf = nil
 		}
-		ctx.FrameOff = 0
 
 		if ret := g.handleTCPRequest(c, frameData); ret == gnet.Close {
 			return gnet.Close
@@ -865,7 +836,6 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[offset : offset+4])
 		if frameLen == 0 || frameLen > uint32(maxFrame) {
 			ctx.FrameBuf = nil
-			ctx.FrameOff = 0
 			return gnet.Close
 		}
 		totalLen := 4 + int(frameLen)
@@ -873,12 +843,12 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 			break // incomplete frame, wait for more data
 		}
 
-		// Quick handshake check on first frame only.
+		// Quick handshake/login check on first frame only.
+		// Both need individual handling: handshake for version negotiation, login for auth completion.
 		if batchCount == 0 {
 			frameData := ctx.FrameBuf[offset+4 : offset+totalLen]
-			route := extractRouteFast(frameData)
-			if route == protobuf.RouteHandshake {
-				// Fall back to per-frame handler for handshake
+			route := protobuf.ExtractRouteFast(frameData)
+			if route == protobuf.RouteHandshake || route == protobuf.RouteLogin {
 				rest := ctx.FrameBuf[offset+totalLen:]
 				if len(rest) > 0 {
 					tail := make([]byte, len(rest))
@@ -887,7 +857,6 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 				} else {
 					ctx.FrameBuf = nil
 				}
-				ctx.FrameOff = 0
 				return g.handleTCPRequest(c, frameData)
 			}
 		}
@@ -898,6 +867,16 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 
 	if batchCount == 0 {
 		return
+	}
+
+	// 认证守卫: 批量消息必须已完成认证（serverID + userUUID）
+	conn := g.connectionManager.GetConnection(ctx.ConnectionID)
+	if conn != nil && !conn.IsAuthenticated() {
+		errorResp := newErrorResponse(protobuf.RouteError, "unauthorized", "connection not authenticated, handshake required", "")
+		respData, _ := proto.Marshal(errorResp)
+		writeFrame(c, respData)
+		g.messagesDroppedAuth.Add(1)
+		return gnet.Close
 	}
 
 	g.messagesReceived.Add(int64(batchCount))
@@ -917,7 +896,6 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		copy(tail, ctx.FrameBuf[offset:])
 		ctx.FrameBuf = tail
 	}
-	ctx.FrameOff = 0
 
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(int64(batchCount))
@@ -996,15 +974,32 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	}
 
 	logicClient := g.getLogicClient()
-	if logicClient != nil {
-		route, cmd := extractRouteAndCmd(data)
-		if route == protobuf.RouteHandshake {
-			message := GetProtobufMessage()
-			defer PutProtobufMessage(message)
-			if err := proto.Unmarshal(data, message); err != nil {
-				return
+	if logicClient == nil {
+		g.messagesDroppedNoLogicNotConnected.Add(1)
+		return
+	}
+
+	route, cmd := extractRouteAndCmd(data)
+	if route == protobuf.RouteHandshake {
+		message := GetProtobufMessage()
+		defer PutProtobufMessage(message)
+		if err := proto.Unmarshal(data, message); err != nil {
+			return
+		}
+		return g.handleHandshake(c, connectionID, message)
+	}
+
+		// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
+		// 登录消息必须放行，因为它是完成认证的必要步骤
+		if route != protobuf.RouteLogin {
+			conn := g.connectionManager.GetConnection(connectionID)
+			if conn != nil && !conn.IsAuthenticated() {
+				errorResp := newErrorResponse(protobuf.RouteError, "unauthorized", "connection not authenticated, handshake+login required", "")
+				respData, _ := proto.Marshal(errorResp)
+				writeFrame(c, respData)
+				g.messagesDroppedAuth.Add(1)
+				return gnet.Close
 			}
-			return g.handleHandshake(c, connectionID, message)
 		}
 
 		// IP 白名单/黑名单检查
@@ -1130,10 +1125,6 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 			}
 		}
 		return
-	}
-
-	g.messagesDroppedNoLogicNotConnected.Add(1)
-	return
 }
 
 // getRemoteIP 从 gnet.Conn 获取客户端 IP
@@ -1211,11 +1202,8 @@ func writeMsgFrame(c gnet.Conn, msg *protobuf.Message) {
 }
 
 func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
+	g.engine = &engine
 	return
-}
-
-func (g *Gateway) GetVersion() string {
-	return "1.0.0"
 }
 
 func (g *Gateway) GetConnectionManager() *ConnectionManager {
@@ -1254,6 +1242,26 @@ func (g *Gateway) OnShutdown(engine gnet.Engine) {
 func (g *Gateway) Close() {
 	g.closeOnce.Do(func() {
 		close(g.stopChan)
+
+		// Phase 1: Stop accepting new connections (engine.Stop)
+		if g.engine != nil {
+			g.engine.Stop(context.Background())
+		}
+
+		// Phase 2: Drain in-flight messages (max 2min)
+		drainTimeout := 2 * time.Minute
+		drainDone := make(chan struct{})
+		go func() {
+			g.drainConnections(drainTimeout)
+			close(drainDone)
+		}()
+
+		select {
+		case <-drainDone:
+			tlog.Info("connection drain completed")
+		case <-time.After(drainTimeout):
+			tlog.Warn("connection drain timed out, forcing close")
+		}
 
 		if g.serviceDiscovery != nil {
 			g.serviceDiscovery.Destroy()
@@ -1299,4 +1307,28 @@ func (g *Gateway) Close() {
 
 		tlog.Info("gateway closed")
 	})
+}
+
+// drainConnections waits for all connections to finish in-flight work.
+// It transitions each connection to StateClosed and waits for the
+// connection manager to clean up.
+func (g *Gateway) drainConnections(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+
+	// Transition all Forward connections to Closed (reject new messages)
+	g.connectionManager.connections.Range(func(key, value interface{}) bool {
+		conn := value.(*Connection)
+		if conn.GetState() == StateForward {
+			conn.SetState(StateForward, StateClosed)
+		}
+		return true
+	})
+
+	// Wait for connection count to drop to 0 or timeout
+	for time.Now().Before(deadline) {
+		if g.connectionManager.GetConnectionCount() == 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

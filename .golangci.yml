@@ -1,0 +1,115 @@
+## https://golangci-lint.run/
+run:
+  timeout: 3m
+  tests: false
+  allow-parallel-runners: true
+  go: "1.22"
+
+issues:
+  exclude-dirs:
+    - protobuf
+    - bin
+    - examples
+    - vendor
+  exclude-dirs-use-default: true
+
+output:
+  sort-results: true
+
+linters:
+  disable-all: true
+  fast: true
+  enable:
+    # Defaults
+    - errcheck
+    - govet
+    - gosimple
+    - ineffassign
+    - staticcheck
+    - unused
+
+    # Extra
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errchkjson
+    - errorlint
+    - goconst
+    - gocritic
+    - gosec
+    - misspell
+    - prealloc
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+  presets:
+    - bugs
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: false
+    disable-default-exclusions: false
+
+  govet:
+    enable:
+      - appends
+      - assign
+      - atomic
+      - atomicalign
+      - bools
+      - buildtag
+      - cgocall
+      - composites
+      - copylocks
+      - deepequalerrors
+      - defers
+      - directive
+      - errorsas
+      - findcall
+      - httpresponse
+      - ifaceassert
+      - loopclosure
+      - lostcancel
+      - nilfunc
+      - nilness
+      - printf
+      - reflectvaluecompare
+      - shadow
+      - shift
+      - sigchanyzer
+      - sortslice
+      - stdmethods
+      - stringintconv
+      - structtag
+      - testinggoroutine
+      - tests
+      - unmarshal
+      - unreachable
+      - unsafeptr
+      - unusedresult
+      - unusedwrite
+
+  gosimple:
+    checks: ["all"]
+
+  staticcheck:
+    checks: ["all"]
+
+  goconst:
+    match-constant: true
+    min-len: 4
+    min-occurrences: 4
+    ignore-tests: true
+
+  gocritic:
+    disabled-checks:
+      - assignOp
+
+  misspell:
+    mode: default
+
+  gosec:
+    exclude-generated: true
+    excludes:
+      - G404

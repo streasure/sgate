@@ -6,8 +6,8 @@ import (
 	"github.com/panjf2000/gnet/v2"
 )
 
-// BuildFilterContext 从原始请求构造过滤器上下文
-func (g *Gateway) BuildFilterContext(c gnet.Conn, data []byte, connectionID, route string, cmd int32) *types.FilterContext {
+// buildFilterContext 从原始请求构造过滤器上下文
+func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID, route string, cmd int32) *types.FilterContext {
 	fc := &types.FilterContext{
 		Ctx:          g.ctx,
 		ConnectionID: connectionID,
@@ -16,9 +16,6 @@ func (g *Gateway) BuildFilterContext(c gnet.Conn, data []byte, connectionID, rou
 		Cmd:          cmd,
 		Data:         data,
 		Metadata:     make(map[string]string),
-	}
-	if ctx, ok := c.Context().(*ConnContext); ok && ctx != nil {
-		fc.UserUUID = ctx.UserUUID
 	}
 	return fc
 }
@@ -29,7 +26,7 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, ro
 	if g.filterChain == nil {
 		return nil, true
 	}
-	fcx := g.BuildFilterContext(c, data, connectionID, route, cmd)
+	fcx := g.buildFilterContext(c, data, connectionID, route, cmd)
 	for phase := types.PhasePreAuth; phase <= types.PhaseForward; phase++ {
 		if !g.filterChain.RunByPhase(phase, fcx) {
 			g.messagesDroppedFilterChain.Add(1)

@@ -207,22 +207,9 @@ const (
 	RouteTest               = "test"
 	RouteTestResult         = "testResult"
 	RouteEcho               = "echo"
-	RouteGetConnections     = "getConnections"
-	RouteGame               = "game"
-	RouteServerPush         = "server.push"
-	RouteServerAnnouncement = "server.announcement"
-	RouteServerAnnounce     = "server.announce"
-	RouteServerChat         = "server.chat"
 
 	// RouteBatch 是反向链路（logic->sgate）批量消息的伪路由。
 	// logic 将多条已序列化的 Message 以长度前缀方式打包进一个 Message.Data，
 	// 通过单次 stream.Send 发送，sgate 收到后解包逐条分发，降低 gRPC 调用开销。
 	RouteBatch = "_batch"
-)
-
-const (
-	CmdPushNotify   int32 = int32(Cmd_CMD_PUSH_NOTIFY)
-	CmdAnnouncement int32 = int32(Cmd_CMD_ANNOUNCEMENT)
-	CmdChatMsg      int32 = int32(Cmd_CMD_CHAT_MSG)
-	CmdKickNotify   int32 = int32(Cmd_CMD_KICK_NOTIFY)
 )

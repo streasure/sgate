@@ -98,19 +98,6 @@ func (fc *FilterChain) LoadByName(name string, cfg map[string]interface{}) error
 	return nil
 }
 
-// UnloadByName 按名称卸载过滤器
-func (fc *FilterChain) UnloadByName(name string) bool {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	for i, f := range fc.filters {
-		if f.Name() == name {
-			fc.filters = append(fc.filters[:i], fc.filters[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
 // AddFilter 直接添加已构造的过滤器
 func (fc *FilterChain) AddFilter(f Filter) {
 	fc.mu.Lock()
@@ -118,20 +105,6 @@ func (fc *FilterChain) AddFilter(f Filter) {
 	fc.filters = append(fc.filters, f)
 	fc.sortFiltersLocked()
 }
-
-// List 列出已加载过滤器
-func (fc *FilterChain) List() []string {
-	fc.mu.RLock()
-	defer fc.mu.RUnlock()
-	names := make([]string, 0, len(fc.filters))
-	for _, f := range fc.filters {
-		names = append(names, f.Name())
-	}
-	return names
-}
-
-func (fc *FilterChain) Enable()  { fc.enabled.Store(1) }
-func (fc *FilterChain) Disable() { fc.enabled.Store(0) }
 
 // RunByPhase 执行指定阶段的过滤器，返回 false 表示链被中止
 func (fc *FilterChain) RunByPhase(phase FilterPhase, fcx *FilterContext) bool {

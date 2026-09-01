@@ -141,7 +141,7 @@ func (sc *streamConn) flushLoop() {
 			mcCount = 0
 		}
 		for _, item := range items {
-			if item.route == protobuf.RouteBatch || (len(item.route) >= 7 && item.route[:7] == "server.") {
+			if item.route == protobuf.RouteBatch || (len(item.route) >= 7 && item.route[:7] == "server.") || item.route == protobuf.RouteLogin {
 				flushMultiConn()
 				_ = sc.stream.Send(item.msg)
 			} else {
