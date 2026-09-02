@@ -13,6 +13,7 @@ import (
 	"github.com/streasure/sgate/protobuf"
 	tlog "github.com/streasure/treasure-slog"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -73,19 +74,21 @@ type reverseItem struct {
 }
 
 type streamConn struct {
-	stream protobuf.GatewayService_StreamMessagesServer
-	sendCh chan reverseItem
-	done   chan struct{}
+	stream    protobuf.GatewayService_StreamMessagesServer
+	sendCh    chan reverseItem
+	done      chan struct{}
+	gatewayID string
 }
 
-func newStreamConn(stream protobuf.GatewayService_StreamMessagesServer, sendChSize int) *streamConn {
+func newStreamConn(stream protobuf.GatewayService_StreamMessagesServer, sendChSize int, gatewayID string) *streamConn {
 	if sendChSize <= 0 {
 		sendChSize = 1048576
 	}
 	sc := &streamConn{
 		stream: stream,
 		sendCh: make(chan reverseItem, sendChSize),
-		done:   make(chan struct{}),
+		done:      make(chan struct{}),
+		gatewayID: gatewayID,
 	}
 	go sc.flushLoop()
 	return sc
@@ -379,14 +382,22 @@ func (s *Server) OnDisconnect(cb DisconnectCallback) {
 func (s *Server) StreamMessages(stream protobuf.GatewayService_StreamMessagesServer) error {
 	connectionID := fmt.Sprintf("conn_%s_%d", s.serverID, s.connIDCounter.Add(1))
 
-	conn := newStreamConn(stream, s.streamChSize)
+	gatewayID := ""
+	if values := metadata.ValueFromIncomingContext(stream.Context(), "sgate-gateway-id"); len(values) > 0 {
+		gatewayID = values[0]
+	}
+	// Legacy clients without metadata retain per-stream behavior.
+	if gatewayID == "" {
+		gatewayID = connectionID
+	}
+	conn := newStreamConn(stream, s.streamChSize, gatewayID)
 	s.connections.Store(connectionID, conn)
 
 	if s.serverID != "" {
 		s.JoinGroup(s.serverGroupID(), connectionID)
 	}
 
-	tlog.Info("new stream connection", "connectionID", connectionID, "serverID", s.serverID)
+	tlog.Info("new stream connection", "connectionID", connectionID, "gatewayID", gatewayID, "serverID", s.serverID)
 
 	for {
 		msg, err := stream.Recv()
@@ -567,6 +578,33 @@ func (s *Server) PushToServer(msg *protobuf.Message, exclude ...string) int {
 	return count
 }
 
+// PushToEachGateway sends a control command once per Gateway instance rather
+// than once per stream shard. Each target Gateway then fans the command out to
+// its local connections. Streams without an identity intentionally remain
+// independent for backward compatibility.
+func (s *Server) PushToEachGateway(msg *protobuf.Message) int {
+	if s.serverID == "" {
+		return 0
+	}
+	if msg.Timestamp == 0 {
+		msg.Timestamp = time.Now().UnixMilli()
+	}
+	sentGateways := make(map[string]struct{})
+	count := 0
+	s.connections.Range(func(_, value interface{}) bool {
+		conn := value.(*streamConn)
+		if _, alreadySent := sentGateways[conn.gatewayID]; alreadySent {
+			return true
+		}
+		if err := conn.Send(msg); err == nil {
+			sentGateways[conn.gatewayID] = struct{}{}
+			count++
+		}
+		return true
+	})
+	return count
+}
+
 // Broadcast 向所有客户端广播消息。
 // 通过 server.broadcast 指令让 Gateway 的 ConnectionManager.Broadcast 执行推送。
 // Logic 不直接操作 streamConn，只通过 Gateway 侧的推送机制。
@@ -588,7 +626,7 @@ func (s *Server) Broadcast(msg *protobuf.Message, exclude ...string) int {
 	}
 	pushMsg.Timestamp = time.Now().UnixMilli()
 
-	s.PushToServer(pushMsg)
+	s.PushToEachGateway(pushMsg)
 	return 0
 }
 
@@ -678,7 +716,7 @@ func (s *Server) PushToGroup(groupID string, msg *protobuf.Message, exclude ...s
 	}
 	pushMsg.Timestamp = time.Now().UnixMilli()
 
-	s.PushToServer(pushMsg)
+	s.PushToEachGateway(pushMsg)
 	return 0
 }
 
@@ -816,7 +854,7 @@ func (s *Server) SendToGroup(groupID string, msg *protobuf.Message) {
 			pushMsg.Payload[k] = v
 		}
 	}
-	s.PushToServer(pushMsg)
+	s.PushToEachGateway(pushMsg)
 }
 
 func (s *Server) GetGroupInfo(groupID string) {

@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -608,6 +609,9 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 				return
 			}
 
+			if lc.gateway != nil {
+				ctx = metadata.AppendToOutgoingContext(ctx, "sgate-gateway-id", lc.gateway.GetGatewayID())
+			}
 			stream, err := client.StreamMessages(ctx)
 			if err != nil {
 				errOnce.Do(func() { firstErr = err })
@@ -1341,6 +1345,7 @@ type GatewayInterface interface {
 	GetConnectionManager() *ConnectionManager
 	GetGRPCConfig() config.GRPCConfig
 	GetStreamConfig() config.StreamConfig
+	GetGatewayID() string
 	AddPushedToClient(n int64)
 	AddPushDroppedNoConn(n int64)
 }

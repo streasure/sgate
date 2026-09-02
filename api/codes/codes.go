@@ -8,6 +8,7 @@ var (
 	ErrSessionNotFound = errors.New("session not found")
 	ErrForceCloseConn  = errors.New("force close connection")
 	ErrStreamBusy      = errors.New("server stream is busy")
+	ErrServerBusy      = errors.New("server overload, try again later")
 
 	// Protocol-level error codes
 	ErrRateLimit      = errors.New("rate limit exceeded")

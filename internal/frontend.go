@@ -69,6 +69,7 @@ type Gateway struct {
 	ctx                context.Context
 	tlsConfig          *tls.Config
 	clusterID          string
+	gatewayID          string
 	isLeader           bool
 	cfg                atomic.Value
 	wsConnections      sync.Map
@@ -900,6 +901,9 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(int64(batchCount))
 		g.messagesDroppedOverload.Add(int64(batchCount))
+		errorResp := newErrorResponse(protobuf.RouteError, "server overload", "cpu threshold exceeded", "")
+		respData, _ := proto.Marshal(errorResp)
+		writeFrame(c, respData)
 		return
 	}
 
@@ -955,6 +959,9 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
+		errorResp := newErrorResponse(protobuf.RouteError, "server overload", "cpu threshold exceeded", "")
+		respData, _ := proto.Marshal(errorResp)
+		writeFrame(c, respData)
 		return
 	}
 
@@ -1216,6 +1223,11 @@ func (g *Gateway) GetGRPCConfig() config.GRPCConfig {
 
 func (g *Gateway) GetStreamConfig() config.StreamConfig {
 	return g.streamCfg
+}
+
+// GetGatewayID returns the stable identity advertised with every backend stream.
+func (g *Gateway) GetGatewayID() string {
+	return g.gatewayID
 }
 
 func (g *Gateway) logMetrics() {

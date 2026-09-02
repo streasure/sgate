@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/streasure/util/nacos"
@@ -120,6 +122,7 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		logicClient:       NewLogicClient(GatewayInterface(nil)),
 		msgRate:           newMessageRateTracker(60 * time.Second),
 		clusterID:         "sgate-cluster",
+		gatewayID:         gatewayInstanceID(deps.Config),
 		isLeader:          false,
 	}
 
@@ -127,4 +130,15 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 	gw.ctx = context.Background()
 
 	return gw
+}
+
+func gatewayInstanceID(cfg config.Config) string {
+	if cfg.Cluster.NodeID != "" {
+		return cfg.Cluster.NodeID
+	}
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "sgate"
+	}
+	return fmt.Sprintf("%s-%d-%d", hostname, os.Getpid(), cfg.GRPC.Port)
 }

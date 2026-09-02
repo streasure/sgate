@@ -710,65 +710,37 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 //
 //	message: 消息内容
 func (cm *ConnectionManager) Broadcast(message interface{}) {
-	var responseData []byte
-	var marshalErr error
-
-	switch msg := message.(type) {
-	case *protobuf.Message:
-		responseData, marshalErr = proto.Marshal(msg)
-	case *protobuf.ErrorResponse:
-		responseData, marshalErr = proto.Marshal(msg)
-	case map[string]string:
-		protoMsg := &protobuf.Message{
-			Route:   "broadcast",
-			Payload: msg,
-		}
-		responseData, marshalErr = proto.Marshal(protoMsg)
-	case string:
-		protoMsg := &protobuf.Message{
-			Route: "broadcast",
-			Payload: map[string]string{
-				"data": msg,
-			},
-		}
-		responseData, marshalErr = proto.Marshal(protoMsg)
-	default:
-		tlog.Error("不支持的消息类型", "type", message)
-		return
-	}
-
+	responseData, marshalErr := marshalPushMessage(message)
 	if marshalErr != nil {
 		tlog.Error("序列化广播消息失败", "error", marshalErr)
 		return
 	}
 
-	var connections []*Connection
-	cm.connections.Range(func(key, value interface{}) bool {
-		connections = append(connections, value.(*Connection))
+	var sent int64
+	cm.connections.Range(func(_, value interface{}) bool {
+		if value.(*Connection).Send(responseData) == nil {
+			sent++
+		}
 		return true
 	})
+	cm.totalMessages.Add(sent)
+}
 
-	if len(connections) == 0 {
-		return
+func marshalPushMessage(message interface{}) ([]byte, error) {
+	switch msg := message.(type) {
+	case []byte:
+		return msg, nil
+	case *protobuf.Message:
+		return proto.Marshal(msg)
+	case *protobuf.ErrorResponse:
+		return proto.Marshal(msg)
+	case map[string]string:
+		return proto.Marshal(&protobuf.Message{Route: "broadcast", Payload: msg})
+	case string:
+		return proto.Marshal(&protobuf.Message{Route: "broadcast", Payload: map[string]string{"data": msg}})
+	default:
+		return nil, fmt.Errorf("unsupported push message type %T", message)
 	}
-
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, 200)
-
-	for _, c := range connections {
-		wg.Add(1)
-		semaphore <- struct{}{}
-		go func(conn *Connection) {
-			defer func() {
-				wg.Done()
-				<-semaphore
-			}()
-			conn.Send(responseData)
-		}(c)
-	}
-
-	wg.Wait()
-	cm.totalMessages.Add(int64(len(connections)))
 }
 
 // GetConnectionCount 获取连接数

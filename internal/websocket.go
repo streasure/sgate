@@ -257,6 +257,9 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
+		errorResp := newErrorResponse(protobuf.RouteError, "server overload", "cpu threshold exceeded", "")
+		respData, _ := proto.Marshal(errorResp)
+		g.sendWebSocketMessage(wsConn, WSOpBinary, respData)
 		return nil
 	}
 
