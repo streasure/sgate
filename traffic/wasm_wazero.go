@@ -23,7 +23,7 @@ import (
 	"os"
 	"sync"
 
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 	waz "github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 )

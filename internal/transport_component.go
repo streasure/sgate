@@ -6,7 +6,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/streasure/util/component"
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // TransportComponent owns all client-facing gnet listeners.

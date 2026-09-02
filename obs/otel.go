@@ -12,7 +12,7 @@ import (
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // OTelSpan OpenTelemetry 风格 span

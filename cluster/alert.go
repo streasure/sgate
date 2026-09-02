@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // AlertLevel 告警级别

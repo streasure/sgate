@@ -5,7 +5,7 @@ import (
 	"github.com/streasure/sgate/traffic"
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // TrafficComponent manages the lifecycle of all traffic sub-modules:

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/protobuf"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // VersionNegotiation 版本协商管理器

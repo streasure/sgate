@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/streasure/util/prometheus"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 type rateSample struct {

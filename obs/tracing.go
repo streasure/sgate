@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/util"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // TraceSpan 追踪 span

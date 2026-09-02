@@ -7,7 +7,7 @@ import (
 	"github.com/streasure/sgate/obs"
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // ObservabilityComponent manages the lifecycle of all observability sub-modules:

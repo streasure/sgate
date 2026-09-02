@@ -2,6 +2,8 @@ module github.com/streasure/sgate
 
 go 1.22.5
 
+replace github.com/streasure/util => E:\util
+
 require (
 	github.com/panjf2000/gnet/v2 v2.9.7
 	github.com/shirou/gopsutil/v3 v3.24.5

@@ -5,7 +5,7 @@ import (
 	_ "net/http/pprof"
 	"sync"
 
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // pprofServer 全局 pprof 服务器（独立 goroutine，独立 listener）

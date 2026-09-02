@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/streasure/util/nacos"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/proto"

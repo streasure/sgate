@@ -12,7 +12,7 @@ import (
 
 	"github.com/streasure/util/nacos"
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // Cluster 集群管理器（基于 util/nacos）

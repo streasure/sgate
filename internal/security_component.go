@@ -7,7 +7,7 @@ import (
 	"github.com/streasure/sgate/security"
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // SecurityComponent manages the lifecycle of all security sub-modules:

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"

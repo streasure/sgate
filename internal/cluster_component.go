@@ -8,7 +8,7 @@ import (
 	"github.com/streasure/util/nacos"
 	clusterPkg "github.com/streasure/sgate/cluster"
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // ClusterComponent manages the lifecycle of all cluster sub-modules:

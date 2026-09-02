@@ -32,7 +32,7 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/util/component"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 func main() {

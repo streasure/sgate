@@ -26,7 +26,7 @@ import (
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/protobuf"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )

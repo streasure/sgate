@@ -2,7 +2,7 @@ package gateway
 
 import (
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 	"gopkg.in/yaml.v3"
 )
 

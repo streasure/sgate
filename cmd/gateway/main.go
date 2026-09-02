@@ -12,7 +12,7 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/util/component"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 var (
@@ -43,14 +43,12 @@ func main() {
 		}
 	}()
 
-	if _, err := tlog.New("config/tlog.yaml"); err != nil {
-		if _, err := tlog.New("../config/tlog.yaml"); err != nil {
-			if _, err := tlog.New("../../config/tlog.yaml"); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
-				os.Exit(1)
-			}
-		}
+	logComp := tlog.NewLogComponent()
+	if err := logComp.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
+		os.Exit(1)
 	}
+	defer logComp.Destroy()
 
 	tlog.Info("gateway starting...",
 		"version", gateway.BuildVersion,
@@ -143,7 +141,6 @@ func main() {
 	}
 
 	tlog.Info("gateway stopped")
-	tlog.Sync()
 }
 
 func pprofAddrFromEnv() string {

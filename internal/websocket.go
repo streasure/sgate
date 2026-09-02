@@ -13,7 +13,7 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/streasure/sgate/protobuf"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
 

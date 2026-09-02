@@ -14,7 +14,7 @@ import (
 	"github.com/streasure/util/nacos"
 	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
-	tlog "github.com/streasure/treasure-slog"
+	"github.com/streasure/util/tlog"
 )
 
 // ConfigCenter 配置中心接口
