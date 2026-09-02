@@ -743,6 +743,74 @@ func marshalPushMessage(message interface{}) ([]byte, error) {
 	}
 }
 
+// BroadcastBytes 向所有连接广播已帧化的消息（含4字节长度前缀），
+// 避免每个连接重复分配 header 和调用 proto.Marshal。
+func (cm *ConnectionManager) BroadcastBytes(data []byte) {
+	framed := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(framed[:4], uint32(len(data)))
+	copy(framed[4:], data)
+
+	var sent int64
+	cm.connections.Range(func(_, value interface{}) bool {
+		conn := value.(*Connection)
+		if conn.IsWS {
+			if conn.Send(data) == nil {
+				sent++
+			}
+		} else {
+			// 直接发送帧化数据，跳过 Send() 中的 header 分配
+			if conn.Conn != nil {
+				conn.touch()
+				if conn.Conn.AsyncWrite(framed, noopAsyncCallback) == nil {
+					sent++
+				}
+			}
+		}
+		return true
+	})
+	cm.totalMessages.Add(sent)
+}
+
+// SendToGroupBytes 向推送组所有成员发送已序列化的消息，避免每个成员重复 proto.Marshal。
+func (cm *ConnectionManager) SendToGroupBytes(groupID string, data []byte) bool {
+	cm.groupMutex.RLock()
+	groupInfo, ok := cm.groups.Load(groupID)
+	if !ok {
+		cm.groupMutex.RUnlock()
+		return false
+	}
+
+	keys := make([]serverUserKey, 0, len(groupInfo.(*GroupInfo).Members))
+	for key := range groupInfo.(*GroupInfo).Members {
+		keys = append(keys, key)
+	}
+	cm.groupMutex.RUnlock()
+
+	// 预帧化：所有 TCP 连接共享同一份 [4字节 len][payload]
+	framed := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(framed[:4], uint32(len(data)))
+	copy(framed[4:], data)
+
+	success := false
+	for _, key := range keys {
+		conn := cm.GetConnectionByServerUser(key.serverID, key.userUUID)
+		if conn == nil {
+			continue
+		}
+		if conn.IsWS {
+			if conn.Send(data) == nil {
+				success = true
+			}
+		} else if conn.Conn != nil {
+			conn.touch()
+			if conn.Conn.AsyncWrite(framed, noopAsyncCallback) == nil {
+				success = true
+			}
+		}
+	}
+	return success
+}
+
 // GetConnectionCount 获取连接数
 // 功能: 获取当前连接管理器中的连接数量
 // 返回值:

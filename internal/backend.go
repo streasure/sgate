@@ -877,11 +877,14 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 
 	// server.* 路由：以下指令不需要 ConnectionId（按 Payload 中的 key 定位目标）
 	if route == protobuf.RouteServerBroadcast {
+		// 预序列化：避免 Broadcast 内部为每个连接重复 proto.Marshal
 		pushMsg := &protobuf.Message{
 			Route:   "broadcast",
 			Payload: msg.Payload,
 		}
-		lc.gateway.GetConnectionManager().Broadcast(pushMsg)
+		if data, err := proto.Marshal(pushMsg); err == nil {
+			lc.gateway.GetConnectionManager().BroadcastBytes(data)
+		}
 		return
 	}
 
@@ -901,13 +904,15 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 
 	if route == protobuf.RouteServerSendToGroup {
 		groupID := msg.Payload["groupID"]
-		originalRoute := msg.Payload["route"]
 		if groupID != "" {
+			// 预序列化：避免 SendToGroup 内部为每个成员重复 proto.Marshal
 			sendMsg := &protobuf.Message{
-				Route:   originalRoute,
+				Route:   msg.Payload["route"],
 				Payload: msg.Payload,
 			}
-			lc.gateway.GetConnectionManager().SendToGroup(groupID, sendMsg)
+			if data, err := proto.Marshal(sendMsg); err == nil {
+				lc.gateway.GetConnectionManager().SendToGroupBytes(groupID, data)
+			}
 		}
 		return
 	}

@@ -578,6 +578,11 @@ func (s *Server) PushToServer(msg *protobuf.Message, exclude ...string) int {
 	return count
 }
 
+// sentGatewaysPool 复用 PushToEachGateway 的去重 map，避免每次广播/组推送分配新 map。
+var sentGatewaysPool = sync.Pool{
+	New: func() interface{} { return make(map[string]struct{}, 16) },
+}
+
 // PushToEachGateway sends a control command once per Gateway instance rather
 // than once per stream shard. Each target Gateway then fans the command out to
 // its local connections. Streams without an identity intentionally remain
@@ -589,7 +594,7 @@ func (s *Server) PushToEachGateway(msg *protobuf.Message) int {
 	if msg.Timestamp == 0 {
 		msg.Timestamp = time.Now().UnixMilli()
 	}
-	sentGateways := make(map[string]struct{})
+	sentGateways := sentGatewaysPool.Get().(map[string]struct{})
 	count := 0
 	s.connections.Range(func(_, value interface{}) bool {
 		conn := value.(*streamConn)
@@ -602,6 +607,11 @@ func (s *Server) PushToEachGateway(msg *protobuf.Message) int {
 		}
 		return true
 	})
+	// 清空并归还 map 到池
+	for k := range sentGateways {
+		delete(sentGateways, k)
+	}
+	sentGatewaysPool.Put(sentGateways)
 	return count
 }
 
