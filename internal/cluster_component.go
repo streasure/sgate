@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	clusterPkg "github.com/streasure/sgate/internal/cluster"
+	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/nacos"
-	clusterPkg "github.com/streasure/sgate/cluster"
-	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/tlog"
 )
 

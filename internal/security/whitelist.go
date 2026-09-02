@@ -11,9 +11,9 @@ import (
 //   mu: 互斥锁
 
 type WhitelistBlacklist struct {
-	whitelist        map[string]bool
-	blacklist        map[string]bool
-	mu               sync.RWMutex
+	whitelist map[string]bool
+	blacklist map[string]bool
+	mu        sync.RWMutex
 }
 
 // NewWhitelistBlacklist 创建白名单和黑名单管理器
@@ -22,12 +22,10 @@ type WhitelistBlacklist struct {
 //	*WhitelistBlacklist: 白名单和黑名单管理器实例
 func NewWhitelistBlacklist() *WhitelistBlacklist {
 	return &WhitelistBlacklist{
-		whitelist:       make(map[string]bool),
-		blacklist:       make(map[string]bool),
+		whitelist: make(map[string]bool),
+		blacklist: make(map[string]bool),
 	}
 }
-
-
 
 // IsInWhitelist 检查是否在白名单中
 // 参数:

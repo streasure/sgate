@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/streasure/sgate/types"
-	"github.com/streasure/sgate/util"
+	"github.com/streasure/util/gatewayutil"
 )
 
 // WasmRuntime WebAssembly 插件运行时抽象
@@ -68,9 +68,9 @@ func NewWasmFilter(moduleName, funcName string) (*WasmFilter, error) {
 	}, nil
 }
 
-func (w *WasmFilter) Name() string       { return "wasm-filter" }
+func (w *WasmFilter) Name() string             { return "wasm-filter" }
 func (w *WasmFilter) Phase() types.FilterPhase { return types.PhasePostAuth }
-func (w *WasmFilter) Priority() int      { return 250 }
+func (w *WasmFilter) Priority() int            { return 250 }
 
 // Process 把请求交给 WASM 插件处理
 // 返回码：0 = 放行；非 0 = 中止
@@ -150,6 +150,6 @@ var ErrWasmRuntimeNotEnabled = fmt.Errorf("wasm runtime not enabled (build with 
 
 func init() {
 	types.RegisterFilter("wasm-filter", func(cfg map[string]interface{}) (types.Filter, error) {
-		return NewWasmFilter(util.GetString(cfg, "module"), util.GetString(cfg, "function"))
+		return NewWasmFilter(gatewayutil.GetString(cfg, "module"), gatewayutil.GetString(cfg, "function"))
 	})
 }

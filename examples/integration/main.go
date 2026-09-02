@@ -2,22 +2,24 @@
 // covering all push patterns: personal push, group push, and broadcast.
 //
 // Architecture:
-//   Client ──TCP──▶ sgate(:48080) ──gRPC──▶ logic(:50052)
+//
+//	Client ──TCP──▶ sgate(:48080) ──gRPC──▶ logic(:50052)
 //
 // Push patterns (logic → sgate → client):
-//   1. Personal push:  PushToConnection(connID, msg)
-//   2. Group push:     JoinGroupByUser + SendToGroup
-//   3. Broadcast:      Broadcast(msg)
+//  1. Personal push:  PushToConnection(connID, msg)
+//  2. Group push:     JoinGroupByUser + SendToGroup
+//  3. Broadcast:      Broadcast(msg)
 //
 // Run:
-//   # Start sgate (gateway)
-//   cd examples/high_concurrency_gateway && go run main.go
 //
-//   # Start this logic server
-//   cd examples/integration && go run main.go
+//	# Start sgate (gateway)
+//	cd examples/high_concurrency_gateway && go run main.go
 //
-//   # Run bench (duplex baseline)
-//   cd examples/bench && go run main.go 127.0.0.1:48080 100 10 16 5000
+//	# Start this logic server
+//	cd examples/integration && go run main.go
+//
+//	# Run bench (duplex baseline)
+//	cd examples/bench && go run main.go 127.0.0.1:48080 100 10 16 5000
 package main
 
 import (
@@ -26,8 +28,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
 	"github.com/streasure/sgate/logic"
-	"github.com/streasure/sgate/protobuf"
 	"github.com/streasure/util/tlog"
 )
 
@@ -63,19 +66,19 @@ func main() {
 	//    Client sends "ping", server responds "pong".
 	//    Used by bench tool for QPS measurement.
 	// =========================================================================
-	svc.RegisterRoute(protobuf.RoutePing, func(msg *protobuf.Message) *protobuf.Message {
-		return &protobuf.Message{
+	svc.RegisterRoute(sgate.RoutePing, func(msg *commonstruct.Message) *commonstruct.Message {
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RoutePong,
+			Route:        sgate.RoutePong,
 			Payload:      map[string]string{"ts": strconv.FormatInt(time.Now().UnixMilli(), 10)},
 			Timestamp:    time.Now().UnixMilli(),
 		}
 	})
 
 	// BurstRoute: every request triggers a push response (for duplex bench).
-	svc.RegisterBurstRoute(protobuf.RouteTest, func(msg *protobuf.Message, push func(*protobuf.Message)) {
-		push(&protobuf.Message{
-			Route:     protobuf.RouteTestResult,
+	svc.RegisterBurstRoute(sgate.RouteTest, func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
+		push(&commonstruct.Message{
+			Route:     sgate.RouteTestResult,
 			Timestamp: time.Now().UnixMilli(),
 		})
 	})
@@ -85,7 +88,7 @@ func main() {
 	//    After login, userUUID → connectionID is registered.
 	//    This enables PushToConnection (personal push) and group operations.
 	// =========================================================================
-	svc.RegisterRoute(protobuf.RouteLogin, func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(sgate.RouteLogin, func(msg *commonstruct.Message) *commonstruct.Message {
 		userID := msg.GetPayload()["userId"]
 		if userID == "" {
 			userID = msg.ConnectionId
@@ -95,10 +98,10 @@ func main() {
 		// Register user → connection mapping (required for push operations)
 		svc.RegisterUser(userUUID, msg.ConnectionId)
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			UserUuid:     userUUID,
-			Route:        protobuf.RouteLogin,
+			Route:        sgate.RouteLogin,
 			Payload:      map[string]string{"code": "200", "userId": userID, "userUUID": userUUID},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -112,8 +115,8 @@ func main() {
 	//
 	//    Flow: client → sgate → logic(push callback) → sgate → client
 	// =========================================================================
-	svc.RegisterBurstRoute("push_me", func(msg *protobuf.Message, push func(*protobuf.Message)) {
-		push(&protobuf.Message{
+	svc.RegisterBurstRoute("push_me", func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
+		push(&commonstruct.Message{
 			Route: "personal_notification",
 			Payload: map[string]string{
 				"type":    "personal_push",
@@ -131,10 +134,10 @@ func main() {
 	//
 	//    Flow: client_A → sgate → logic(PushToServer) → sgate.gateway.SendToUser → client_B
 	// =========================================================================
-	svc.RegisterRoute("send_msg", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute("send_msg", func(msg *commonstruct.Message) *commonstruct.Message {
 		targetUUID := msg.GetPayload()["targetUUID"]
 		if targetUUID == "" {
-			return &protobuf.Message{
+			return &commonstruct.Message{
 				ConnectionId: msg.ConnectionId,
 				Route:        "send_msg_ack",
 				Payload:      map[string]string{"code": "400", "message": "missing targetUUID"},
@@ -144,8 +147,8 @@ func main() {
 
 		// PushToServer sends a server-side command to the gateway.
 		// The gateway handles "server.send_to_user" by looking up the user's connection.
-		svc.Server().PushToServer(&protobuf.Message{
-			Route: protobuf.RouteServerSendToUser,
+		svc.Server().PushToServer(&commonstruct.Message{
+			Route: sgate.RouteServerSendToUser,
 			Payload: map[string]string{
 				"userUUID": targetUUID,
 				"route":    "direct_message",
@@ -155,7 +158,7 @@ func main() {
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "send_msg_ack",
 			Payload:      map[string]string{"code": "200", "message": "delivered"},
@@ -176,7 +179,7 @@ func main() {
 	//    Flow (join):  client → sgate → logic → sgate.gateway.JoinGroupByUser
 	//    Flow (push):  client → sgate → logic → sgate.gateway.SendToGroup → all group members
 	// =========================================================================
-	svc.RegisterRoute("join_group", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute("join_group", func(msg *commonstruct.Message) *commonstruct.Message {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
@@ -185,14 +188,14 @@ func main() {
 		// Use server.join_group: gateway looks up the connection by msg.ConnectionId,
 		// extracts serverID/userUUID from the connection, and adds to the group.
 		// This is the correct approach for single-gateway setups.
-		svc.Server().PushToServer(&protobuf.Message{
+		svc.Server().PushToServer(&commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteServerJoinGroup,
+			Route:        sgate.RouteServerJoinGroup,
 			Payload:      map[string]string{"groupID": groupID},
 			Timestamp:    time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "join_group_ack",
 			Payload:      map[string]string{"code": "200", "groupID": groupID},
@@ -200,20 +203,20 @@ func main() {
 		}
 	})
 
-	svc.RegisterRoute("leave_group", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute("leave_group", func(msg *commonstruct.Message) *commonstruct.Message {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
-		svc.Server().PushToServer(&protobuf.Message{
+		svc.Server().PushToServer(&commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteServerLeaveGroup,
+			Route:        sgate.RouteServerLeaveGroup,
 			Payload:      map[string]string{"groupID": groupID},
 			Timestamp:    time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "leave_group_ack",
 			Payload:      map[string]string{"code": "200", "groupID": groupID},
@@ -221,14 +224,14 @@ func main() {
 		}
 	})
 
-	svc.RegisterRoute("group_msg", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute("group_msg", func(msg *commonstruct.Message) *commonstruct.Message {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
 		// SendToGroup pushes a message to all members of the specified group.
-		svc.Server().SendToGroup(groupID, &protobuf.Message{
+		svc.Server().SendToGroup(groupID, &commonstruct.Message{
 			Route: "group_broadcast",
 			Payload: map[string]string{
 				"message": msg.GetPayload()["message"],
@@ -238,7 +241,7 @@ func main() {
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "group_msg_ack",
 			Payload:      map[string]string{"code": "200", "message": "sent to group"},
@@ -255,8 +258,8 @@ func main() {
 	//    Broadcast sends via ALL gateways (PushToServer → each gateway's Broadcast).
 	//    Use exclude list to skip specific connectionIDs.
 	// =========================================================================
-	svc.RegisterRoute("broadcast_msg", func(msg *protobuf.Message) *protobuf.Message {
-		svc.Server().Broadcast(&protobuf.Message{
+	svc.RegisterRoute("broadcast_msg", func(msg *commonstruct.Message) *commonstruct.Message {
+		svc.Server().Broadcast(&commonstruct.Message{
 			Route: "global_broadcast",
 			Payload: map[string]string{
 				"message": msg.GetPayload()["message"],
@@ -265,7 +268,7 @@ func main() {
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "broadcast_msg_ack",
 			Payload:      map[string]string{"code": "200", "message": "broadcast sent"},
@@ -278,13 +281,13 @@ func main() {
 	//    For scenarios needing massive push throughput (e.g. game state sync),
 	//    register a burst handler that pushes to multiple targets per request.
 	// =========================================================================
-	svc.RegisterBurstRoute("batch_push", func(msg *protobuf.Message, push func(*protobuf.Message)) {
+	svc.RegisterBurstRoute("batch_push", func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
 		targetCount := 1
 		if n, err := strconv.Atoi(msg.GetPayload()["count"]); err == nil && n > 0 {
 			targetCount = n
 		}
 		for i := 0; i < targetCount; i++ {
-			push(&protobuf.Message{
+			push(&commonstruct.Message{
 				Route: "batch_push_item",
 				Payload: map[string]string{
 					"index": strconv.Itoa(i),

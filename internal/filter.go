@@ -1,9 +1,9 @@
 package gateway
 
 import (
-	"github.com/streasure/sgate/types"
-	"github.com/streasure/sgate/protobuf"
 	"github.com/panjf2000/gnet/v2"
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/sgate/types"
 )
 
 // buildFilterContext 从原始请求构造过滤器上下文
@@ -22,7 +22,7 @@ func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID, rou
 
 // applyForwardFilters 在转发前运行全部过滤器
 // 返回 false 表示请求被中止，调用方应丢弃该请求
-func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, route string, cmd int32) (*protobuf.Message, bool) {
+func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, route string, cmd int32) (*commonstruct.Message, bool) {
 	if g.filterChain == nil {
 		return nil, true
 	}
@@ -41,7 +41,7 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, ro
 		g.trafficMirror.Mirror(fcx)
 	}
 	// 构造转发消息（允许过滤器修改 metadata）
-	msg := &protobuf.Message{
+	msg := &commonstruct.Message{
 		ConnectionId: connectionID,
 		Route:        route,
 		Data:         append([]byte(nil), data...),

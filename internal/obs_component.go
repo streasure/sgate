@@ -3,10 +3,10 @@ package gateway
 import (
 	"time"
 
-	"github.com/streasure/util/component"
-	"github.com/streasure/sgate/obs"
-	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/obs"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 )
 
@@ -27,9 +27,9 @@ type ObservabilityComponent struct {
 
 func NewObservabilityComponent(otelCfg config.OTelTracerConfig, pprofAddr string, fc *types.FilterChain) *ObservabilityComponent {
 	return &ObservabilityComponent{
-		otelCfg:      otelCfg,
-		pprofAddr:    pprofAddr,
-		FilterChain:  fc,
+		otelCfg:     otelCfg,
+		pprofAddr:   pprofAddr,
+		FilterChain: fc,
 	}
 }
 

@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/streasure/sgate/obs"
+	"github.com/streasure/sgate/internal/obs"
 )
 
 var (

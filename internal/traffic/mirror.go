@@ -4,10 +4,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/streasure/util/tlog"
-	"github.com/streasure/sgate/types"
-	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/tlog"
 )
 
 // TrafficMirror 流量镜像器
@@ -27,7 +27,7 @@ func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 	tm := &TrafficMirror{
 		percent:    cfg.Percent,
 		targetAddr: cfg.TargetAddr,
-		queue:      make(chan *types.FilterContext, util.MaxInt(cfg.QueueSize, 1024)),
+		queue:      make(chan *types.FilterContext, gatewayutil.MaxInt(cfg.QueueSize, 1024)),
 	}
 	if cfg.Enabled {
 		tm.enabled.Store(1)
@@ -48,9 +48,9 @@ type MirrorFilter struct {
 	TM *TrafficMirror
 }
 
-func (mf *MirrorFilter) Name() string       { return "traffic-mirror" }
+func (mf *MirrorFilter) Name() string             { return "traffic-mirror" }
 func (mf *MirrorFilter) Phase() types.FilterPhase { return types.PhasePostAuth }
-func (mf *MirrorFilter) Priority() int      { return 300 }
+func (mf *MirrorFilter) Priority() int            { return 300 }
 
 func (mf *MirrorFilter) Process(fc *types.FilterContext) (bool, error) {
 	if mf.TM == nil || mf.TM.enabled.Load() == 0 {
@@ -66,7 +66,7 @@ func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
 		return
 	}
 	// 按 connectionID 哈希采样（实际可换成更精确的随机）
-	h := util.SimpleHash(fc.ConnectionID) % 100
+	h := gatewayutil.SimpleHash(fc.ConnectionID) % 100
 	if int(h) >= tm.percent {
 		return
 	}
@@ -78,7 +78,7 @@ func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
 		Cmd:          fc.Cmd,
 		Data:         append([]byte(nil), fc.Data...),
 		UserUUID:     fc.UserUUID,
-		Metadata:     util.CopyMap(fc.Metadata),
+		Metadata:     gatewayutil.CopyMap(fc.Metadata),
 	}
 	clone.Mirrored = true
 	select {
@@ -113,10 +113,10 @@ func (tm *TrafficMirror) Stats() (forwarded, dropped int64) {
 func init() {
 	types.RegisterFilter("traffic-mirror", func(cfg map[string]interface{}) (types.Filter, error) {
 		c := config.TrafficMirrorConfig{
-			Percent:    util.GetInt(cfg, "percent"),
-			TargetAddr: util.GetString(cfg, "targetAddr"),
-			QueueSize:  util.GetInt(cfg, "queueSize"),
-			Workers:    util.GetInt(cfg, "workers"),
+			Percent:    gatewayutil.GetInt(cfg, "percent"),
+			TargetAddr: gatewayutil.GetString(cfg, "targetAddr"),
+			QueueSize:  gatewayutil.GetInt(cfg, "queueSize"),
+			Workers:    gatewayutil.GetInt(cfg, "workers"),
 		}
 		tm := NewTrafficMirror(c)
 		return &MirrorFilter{TM: tm}, nil

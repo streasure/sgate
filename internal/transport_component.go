@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/util/component"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 )
 

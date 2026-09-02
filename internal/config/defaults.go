@@ -174,6 +174,9 @@ const (
 // --- 监控接入 ---
 
 const (
+	// DefaultPprofAddr pprof 调试端点监听地址。配置为空可关闭。
+	DefaultPprofAddr = ":6060"
+
 	// DefaultPrometheusAddr sgate Prometheus 指标端点监听地址
 	// 使用方法：在 config.yaml 的 monitoring.prometheus.addr 字段覆盖
 	// 注意：默认 :9100 是为了让出 Prometheus 自身默认的 :9090，

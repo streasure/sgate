@@ -6,9 +6,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/streasure/sgate/types"
-	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/gatewayutil"
 )
 
 // CanaryFilter 灰度发布过滤器
@@ -36,9 +36,9 @@ func NewCanaryFilter(cfg config.CanaryConfig) *CanaryFilter {
 	return f
 }
 
-func (f *CanaryFilter) Name() string       { return "canary" }
+func (f *CanaryFilter) Name() string             { return "canary" }
 func (f *CanaryFilter) Phase() types.FilterPhase { return types.PhasePostAuth }
-func (f *CanaryFilter) Priority() int      { return 200 }
+func (f *CanaryFilter) Priority() int            { return 200 }
 
 // Process 判断是否命中灰度
 func (f *CanaryFilter) Process(fc *types.FilterContext) (bool, error) {
@@ -104,8 +104,8 @@ func (f *CanaryFilter) UpdateConfig(cfg config.CanaryConfig) {
 func init() {
 	types.RegisterFilter("canary", func(cfg map[string]interface{}) (types.Filter, error) {
 		c := config.CanaryConfig{
-			Percent:     util.GetInt(cfg, "percent"),
-			TargetRoute: util.GetString(cfg, "targetRoute"),
+			Percent:     gatewayutil.GetInt(cfg, "percent"),
+			TargetRoute: gatewayutil.GetString(cfg, "targetRoute"),
 		}
 		if v, ok := cfg["headers"]; ok {
 			if mp, ok := v.(map[string]interface{}); ok {

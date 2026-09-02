@@ -6,7 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/protobuf"
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -15,16 +16,16 @@ type Context struct {
 	ConnectionID string
 	UserUUID     string
 	Server       *Server
-	Msg          *protobuf.Message
+	Msg          *commonstruct.Message
 }
 
 type ProtoHandler func(ctx *Context, req proto.Message) proto.Message
 
-type RouteHandler func(msg *protobuf.Message) *protobuf.Message
+type RouteHandler func(msg *commonstruct.Message) *commonstruct.Message
 
 // BurstRouteHandler 允许单次触发推送多条响应消息，用于压测反向链路吞吐量。
 // push 回调可被调用任意次数，每次调用发送一条消息回客户端。
-type BurstRouteHandler func(msg *protobuf.Message, push func(*protobuf.Message))
+type BurstRouteHandler func(msg *commonstruct.Message, push func(*commonstruct.Message))
 
 type cmdEntry struct {
 	reqType  reflect.Type
@@ -56,11 +57,11 @@ func (d *Dispatcher) Handle(cmd int32, reqProto proto.Message, respCmd int32, ha
 }
 
 func (d *Dispatcher) HandleFromProto(reqProto proto.Message, handler ProtoHandler) *Dispatcher {
-	cmdVal, respCmdVal := protobuf.CmdFromProto(d.route, reqProto)
+	cmdVal, respCmdVal := sgate.CmdFromProto(d.route, reqProto)
 	return d.Handle(cmdVal, reqProto, respCmdVal, handler)
 }
 
-func (d *Dispatcher) dispatch(ctx *Context, msg *protobuf.Message, callback func(*protobuf.Message)) {
+func (d *Dispatcher) dispatch(ctx *Context, msg *commonstruct.Message, callback func(*commonstruct.Message)) {
 	val, ok := d.handlers.Load(msg.Cmd)
 	if !ok {
 		callback(errorReply(msg.ConnectionId, msg.Cmd, "Cmd not found in dispatcher", "404",
@@ -88,7 +89,7 @@ func (d *Dispatcher) dispatch(ctx *Context, msg *protobuf.Message, callback func
 		return
 	}
 
-	callback(&protobuf.Message{
+	callback(&commonstruct.Message{
 		ConnectionId: msg.ConnectionId,
 		UserUuid:     msg.UserUuid,
 		Route:        msg.Route,
@@ -99,6 +100,7 @@ func (d *Dispatcher) dispatch(ctx *Context, msg *protobuf.Message, callback func
 
 type protoEntry struct {
 	reqType reflect.Type
+	reqCmd  int32
 	handler ProtoHandler
 	respCmd int32
 	reqPool sync.Pool
@@ -109,10 +111,12 @@ func (s *Server) RegisterProto(route string, cmd int32, reqProto proto.Message, 
 	rt := reflect.TypeOf(reqProto).Elem()
 	s.routes.Store(key, &protoEntry{
 		reqType: rt,
+		reqCmd:  cmd,
 		handler: handler,
 		respCmd: respCmd,
 		reqPool: sync.Pool{New: func() interface{} { return reflect.New(rt).Interface() }},
 	})
+	s.cmdRoutes.Store(cmd, key)
 	tlog.Info("proto registered", "route", route, "cmd", cmd, "reqType", rt.Name())
 }
 
@@ -123,11 +127,13 @@ func (s *Server) RegisterDispatcher(d *Dispatcher) {
 
 func (s *Server) RegisterRoute(route string, handler RouteHandler) {
 	s.routes.Store(route, handler)
+	s.cmdRoutes.Store(sgate.CmdForRoute(route), route)
 	tlog.Info("route registered", "route", route)
 }
 
 func (s *Server) RegisterBurstRoute(route string, handler BurstRouteHandler) {
 	s.routes.Store(route, handler)
+	s.cmdRoutes.Store(sgate.CmdForRoute(route), route)
 	tlog.Info("burst route registered", "route", route)
 }
 
@@ -138,10 +144,16 @@ func routeKey(route string, cmd int32) string {
 	return fmt.Sprintf("%s:%d", route, cmd)
 }
 
-func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.Message)) {
+func (s *Server) dispatchMessage(msg *commonstruct.Message, callback func(*commonstruct.Message)) {
 	if msg.Route == "" {
-		callback(errorReply(msg.ConnectionId, 0, "Missing route", "400"))
-		return
+		// MessageFrame requests carry only cmd and body. Resolve the route from
+		// the command registry before decoding the business protobuf.
+		if key, ok := s.cmdRoutes.Load(msg.Cmd); ok {
+			msg.Route = key.(string)
+		} else {
+			callback(errorReply(msg.ConnectionId, msg.Cmd, "Missing route", "400"))
+			return
+		}
 	}
 
 	val, ok := s.routes.Load(msg.Route)
@@ -188,7 +200,7 @@ func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.
 			return
 		}
 
-		callback(&protobuf.Message{
+		callback(&commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			UserUuid:     msg.UserUuid,
 			Route:        msg.Route,
@@ -206,7 +218,7 @@ func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.
 		// 将 gRPC Send 调用数降低约 256 倍。
 		// BURST_COUNT>1 时，相同 Route+Timestamp 的消息会在 flushLoop 的 marshal 缓存中命中，
 		// 避免重复 Marshal。
-		entry(msg, func(response *protobuf.Message) {
+		entry(msg, func(response *commonstruct.Message) {
 			if response == nil {
 				return
 			}
@@ -221,7 +233,7 @@ func (s *Server) dispatchMessage(msg *protobuf.Message, callback func(*protobuf.
 	}
 }
 
-func errorReply(connID string, cmd int32, message, code string, kv ...string) *protobuf.Message {
+func errorReply(connID string, cmd int32, message, code string, kv ...string) *commonstruct.Message {
 	payload := map[string]string{
 		"message": message,
 		"code":    code,
@@ -229,9 +241,9 @@ func errorReply(connID string, cmd int32, message, code string, kv ...string) *p
 	for i := 0; i+1 < len(kv); i += 2 {
 		payload[kv[i]] = kv[i+1]
 	}
-	return &protobuf.Message{
+	return &commonstruct.Message{
 		ConnectionId: connID,
-		Route:        protobuf.RouteError,
+		Route:        sgate.RouteError,
 		Cmd:          cmd,
 		Payload:      payload,
 		Timestamp:    time.Now().UnixMilli(),

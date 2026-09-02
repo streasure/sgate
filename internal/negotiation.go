@@ -5,7 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/protobuf"
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
 	"github.com/streasure/util/tlog"
 )
 
@@ -59,7 +60,7 @@ func NewVersionNegotiation(supportedVersions []string, handshakeTimeout time.Dur
 //
 //	string: 协商后的协议版本
 //	error: 错误信息
-func (vn *VersionNegotiation) ProcessHandshake(connectionID string, handshake *protobuf.Handshake) (string, error) {
+func (vn *VersionNegotiation) ProcessHandshake(connectionID string, handshake *commonstruct.Handshake) (string, error) {
 	// 验证握手消息
 	if handshake == nil {
 		return "", fmt.Errorf("handshake message is nil")
@@ -164,14 +165,14 @@ func (vn *VersionNegotiation) isVersionSupported(version string) bool {
 //
 // 返回值:
 //
-//	*protobuf.Message: 握手响应消息
-func (vn *VersionNegotiation) GenerateHandshakeResponse(negotiatedVersion string) *protobuf.Message {
+//	*commonstruct.Message: 握手响应消息
+func (vn *VersionNegotiation) GenerateHandshakeResponse(negotiatedVersion string) *commonstruct.Message {
 	payload := make(map[string]string)
 	payload["negotiated_version"] = negotiatedVersion
 	payload["supported_versions"] = fmt.Sprintf("%v", vn.supportedVersions)
 
-	return &protobuf.Message{
-		Route:           protobuf.RouteHandshakeResponse,
+	return &commonstruct.Message{
+		Route:           sgate.RouteHandshakeResponse,
 		Payload:         payload,
 		ProtocolVersion: negotiatedVersion,
 		Timestamp:       time.Now().UnixMilli(),

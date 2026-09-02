@@ -68,7 +68,7 @@ func main() {
 
 	// ── 5. 创建生命周期组件 ──────────────────────────────────────────
 	secComp := gateway.NewSecurityComponent(cfg.Security, cfg.WAF, cfg.JWTAuth, fc)
-	obsComp := gateway.NewObservabilityComponent(cfg.OTelTracer, pprofAddrFromEnv(), fc)
+	obsComp := gateway.NewObservabilityComponent(cfg.OTelTracer, pprofAddrFromEnv(cfg.Monitoring.PprofAddr), fc)
 	traComp := gateway.NewTrafficComponent(cfg.Canary, cfg.TrafficMirror, cfg.Degradation, fc)
 	clsComp := gateway.NewClusterComponent(*cfg, cfg.GRPC.Port, nil)
 	trnComp := gateway.NewTransportComponent(nil, cfg.Transports)
@@ -143,9 +143,9 @@ func main() {
 	tlog.Info("gateway stopped")
 }
 
-func pprofAddrFromEnv() string {
+func pprofAddrFromEnv(defaultAddr string) string {
 	if addr := os.Getenv("SGATE_PPROF_ADDR"); addr != "" {
 		return addr
 	}
-	return ":6060"
+	return defaultAddr
 }

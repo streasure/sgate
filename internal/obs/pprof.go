@@ -2,7 +2,7 @@ package obs
 
 import (
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
 	"sync"
 
 	"github.com/streasure/util/tlog"
@@ -28,7 +28,17 @@ func StartPProfServer(addr string) {
 	}
 	pprofOnce.Do(func() {
 		mux := http.NewServeMux()
-		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+		mux.HandleFunc("/debug/pprof", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/debug/pprof/", http.StatusMovedPermanently)
+		})
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		for _, name := range []string{"allocs", "block", "goroutine", "heap", "mutex", "threadcreate"} {
+			mux.Handle("/debug/pprof/"+name, pprof.Handler(name))
+		}
 		pprofServer = &http.Server{Addr: addr, Handler: mux}
 		go func() {
 			tlog.Info("pprof server started", "addr", addr)

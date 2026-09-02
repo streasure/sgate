@@ -14,8 +14,8 @@ type LogSanitizer struct {
 }
 
 type sanitizerPattern struct {
-	re      *regexp.Regexp
-	mask    string
+	re       *regexp.Regexp
+	mask     string
 	keepHead int
 	keepTail int
 }

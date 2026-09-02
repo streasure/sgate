@@ -52,9 +52,9 @@ type EBPFAcceleratorFilter struct {
 	hook KernelHook
 }
 
-func (f *EBPFAcceleratorFilter) Name() string       { return "ebpf-accelerator" }
+func (f *EBPFAcceleratorFilter) Name() string             { return "ebpf-accelerator" }
 func (f *EBPFAcceleratorFilter) Phase() types.FilterPhase { return types.PhasePreAuth }
-func (f *EBPFAcceleratorFilter) Priority() int      { return 10 } // 最先执行
+func (f *EBPFAcceleratorFilter) Priority() int            { return 10 } // 最先执行
 
 func (f *EBPFAcceleratorFilter) Process(fc *types.FilterContext) (bool, error) {
 	if f.hook == nil {

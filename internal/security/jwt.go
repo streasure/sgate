@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/types"
-	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/gatewayutil"
 )
 
 // JWTAuthFilter JWT 鉴权过滤器
@@ -54,9 +54,9 @@ func NewJWTAuthFilter(cfg config.JWTAuthConfig) *JWTAuthFilter {
 	return f
 }
 
-func (f *JWTAuthFilter) Name() string       { return "jwt-auth" }
+func (f *JWTAuthFilter) Name() string             { return "jwt-auth" }
 func (f *JWTAuthFilter) Phase() types.FilterPhase { return types.PhaseAuth }
-func (f *JWTAuthFilter) Priority() int      { return 100 }
+func (f *JWTAuthFilter) Priority() int            { return 100 }
 
 // Process 鉴权处理：从元数据取 token，校验签名+过期+撤销
 func (f *JWTAuthFilter) Process(fc *types.FilterContext) (bool, error) {
@@ -175,9 +175,9 @@ func (f *JWTAuthFilter) Issue(claims JWTClaims) (string, error) {
 func init() {
 	types.RegisterFilter("jwt-auth", func(cfg map[string]interface{}) (types.Filter, error) {
 		c := config.JWTAuthConfig{
-			Secret:      util.GetString(cfg, "secret"),
-			Issuer:      util.GetString(cfg, "issuer"),
-			HeaderField: util.GetString(cfg, "headerField"),
+			Secret:      gatewayutil.GetString(cfg, "secret"),
+			Issuer:      gatewayutil.GetString(cfg, "issuer"),
+			HeaderField: gatewayutil.GetString(cfg, "headerField"),
 		}
 		// SkipRoutes
 		if v, ok := cfg["skipRoutes"]; ok {

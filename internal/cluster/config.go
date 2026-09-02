@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/util/nacos"
-	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/nacos"
 	"github.com/streasure/util/tlog"
 )
 
@@ -48,13 +48,13 @@ func newNacosConfigCenter(cfg config.ConfigCenterConfig) *nacosConfigCenter {
 	inner := nacos.NewConfigCenter(nacos.ConfigCenterConfig{
 		Enabled: true,
 		Nacos: nacos.Config{
-			Endpoint:   cfg.Endpoint,
-			Namespace:  cfg.Namespace,
-			DataID:     cfg.DataID,
-			Group:      cfg.Group,
-			Username:   cfg.Username,
-			Password:   cfg.Password,
-			APIVersion: cfg.APIVersion,
+			Endpoint:     cfg.Endpoint,
+			Namespace:    cfg.Namespace,
+			DataID:       cfg.DataID,
+			Group:        cfg.Group,
+			Username:     cfg.Username,
+			Password:     cfg.Password,
+			APIVersion:   cfg.APIVersion,
 			PollInterval: cfg.PollInterval,
 		},
 	})
@@ -219,7 +219,7 @@ func (c *httpConfigCenter) Watch(ctx context.Context) (<-chan []byte, error) {
 }
 
 func (c *httpConfigCenter) watchLoop(ctx context.Context) {
-	interval := util.ParseDurationDefault(c.cfg.PollInterval, 5*time.Second)
+	interval := gatewayutil.ParseDurationDefault(c.cfg.PollInterval, 5*time.Second)
 	if interval < time.Second {
 		interval = time.Second
 	}

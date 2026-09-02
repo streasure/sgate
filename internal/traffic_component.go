@@ -1,10 +1,10 @@
 package gateway
 
 import (
-	"github.com/streasure/util/component"
-	"github.com/streasure/sgate/traffic"
-	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/traffic"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 )
 
@@ -13,14 +13,14 @@ import (
 type TrafficComponent struct {
 	component.BaseComponent
 
-	canaryCfg        config.CanaryConfig
-	mirrorCfg        config.TrafficMirrorConfig
-	degradationCfg   config.DegradationConfig
-	filterChain      *types.FilterChain
+	canaryCfg      config.CanaryConfig
+	mirrorCfg      config.TrafficMirrorConfig
+	degradationCfg config.DegradationConfig
+	filterChain    *types.FilterChain
 
-	CanaryFilter     *traffic.CanaryFilter
-	TrafficMirror    *traffic.TrafficMirror
-	Degradation      *traffic.DegradationManager
+	CanaryFilter  *traffic.CanaryFilter
+	TrafficMirror *traffic.TrafficMirror
+	Degradation   *traffic.DegradationManager
 }
 
 func NewTrafficComponent(canaryCfg config.CanaryConfig, mirrorCfg config.TrafficMirrorConfig, degradationCfg config.DegradationConfig, fc *types.FilterChain) *TrafficComponent {

@@ -29,17 +29,17 @@ import (
 type OverloadProtector struct {
 	cpuThreshold   float64
 	dropOnOverload bool
-	overloadFlag    atomic.Int32
-	checkInterval   time.Duration
-	stopChan        chan struct{}
-	proc            *process.Process
-	memPercent      atomic.Pointer[float64] // 保留用于监控展示
-	cpuPercent      atomic.Pointer[float64]
-	heapThreshold   uint64 // 仅用于 memPercent 展示，不参与过载判断
-	totalDropped    atomic.Int64
-	lastLogTime     atomic.Int64
+	overloadFlag   atomic.Int32
+	checkInterval  time.Duration
+	stopChan       chan struct{}
+	proc           *process.Process
+	memPercent     atomic.Pointer[float64] // 保留用于监控展示
+	cpuPercent     atomic.Pointer[float64]
+	heapThreshold  uint64 // 仅用于 memPercent 展示，不参与过载判断
+	totalDropped   atomic.Int64
+	lastLogTime    atomic.Int64
 	// CPU 增量计算基线
-	lastCPUTime    float64 // 上次 process.Times() 的 User+System 总和（秒）
+	lastCPUTime   float64 // 上次 process.Times() 的 User+System 总和（秒）
 	lastCheckTime time.Time
 }
 
@@ -111,10 +111,10 @@ func NewOverloadProtector(cfg config.ProtectionConfig) *OverloadProtector {
 	op := &OverloadProtector{
 		cpuThreshold:   cpuThreshold,
 		dropOnOverload: cfg.DropOnOverload,
-		checkInterval:   checkInterval,
-		stopChan:        make(chan struct{}),
-		proc:            proc,
-		heapThreshold:   heapThreshold,
+		checkInterval:  checkInterval,
+		stopChan:       make(chan struct{}),
+		proc:           proc,
+		heapThreshold:  heapThreshold,
 	}
 
 	// 初始化 CPU 基线：读取当前 process.Times()，供后续增量计算

@@ -2,14 +2,17 @@ module github.com/streasure/sgate
 
 go 1.22.5
 
-replace github.com/streasure/util => E:\util
+replace (
+	github.com/streasure/protocol => E:\protocol
+)
 
 require (
 	github.com/panjf2000/gnet/v2 v2.9.7
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cast v1.10.0
+	github.com/streasure/protocol v0.0.0
 	github.com/streasure/treasure-slog v1.0.15
-	github.com/streasure/util v1.0.3
+	github.com/streasure/util v1.0.5
 	github.com/tetratelabs/wazero v1.8.0
 	google.golang.org/grpc v1.64.0
 	google.golang.org/protobuf v1.33.0

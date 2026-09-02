@@ -6,22 +6,22 @@ import (
 	"os"
 	"time"
 
-	"github.com/streasure/util/nacos"
-	"github.com/streasure/sgate/cluster"
-	"github.com/streasure/sgate/obs"
-	"github.com/streasure/sgate/security"
-	"github.com/streasure/sgate/traffic"
-	"github.com/streasure/sgate/types"
+	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/obs"
+	"github.com/streasure/sgate/internal/security"
+	"github.com/streasure/sgate/internal/traffic"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/nacos"
 )
 
 // GatewayDeps holds all external dependencies for Gateway construction.
 // Each dependency is owned by its respective Component and passed here
 // for Gateway to reference during request processing.
 type GatewayDeps struct {
-	Config           config.Config
-	FilterChain      *types.FilterChain
-	LogSanitizer     *obs.LogSanitizer
+	Config       config.Config
+	FilterChain  *types.FilterChain
+	LogSanitizer *obs.LogSanitizer
 
 	// Security
 	WhitelistBlacklist *security.WhitelistBlacklist
@@ -98,24 +98,24 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		streamCfg:         streamCfg,
 
 		// From components
-		filterChain:       deps.FilterChain,
-		logSanitizer:      deps.LogSanitizer,
+		filterChain:        deps.FilterChain,
+		logSanitizer:       deps.LogSanitizer,
 		whitelistBlacklist: deps.WhitelistBlacklist,
-		waf:               deps.WAF,
-		rateLimiter:       deps.RateLimiter,
-		jwtAuth:           deps.JWTAuth,
-		circuitBreakerMgr: deps.CircuitBreakerMgr,
-		tracer:            deps.Tracer,
-		otelTracer:        deps.OTelTracer,
-		latencyTracker:    deps.LatencyTracker,
-		canaryFilter:      deps.CanaryFilter,
-		trafficMirror:     deps.TrafficMirror,
-		degradation:       deps.Degradation,
-		serviceDiscovery:  deps.Discovery,
-		balancer:          deps.Balancer,
-		configCenter:      deps.ConfigCenter,
-		cluster:           deps.ClusterNode,
-		alertWebhook:      deps.AlertWebhook,
+		waf:                deps.WAF,
+		rateLimiter:        deps.RateLimiter,
+		jwtAuth:            deps.JWTAuth,
+		circuitBreakerMgr:  deps.CircuitBreakerMgr,
+		tracer:             deps.Tracer,
+		otelTracer:         deps.OTelTracer,
+		latencyTracker:     deps.LatencyTracker,
+		canaryFilter:       deps.CanaryFilter,
+		trafficMirror:      deps.TrafficMirror,
+		degradation:        deps.Degradation,
+		serviceDiscovery:   deps.Discovery,
+		balancer:           deps.Balancer,
+		configCenter:       deps.ConfigCenter,
+		cluster:            deps.ClusterNode,
+		alertWebhook:       deps.AlertWebhook,
 
 		configUpdateChan:  make(chan *config.Config),
 		overloadProtector: NewOverloadProtector(protection),

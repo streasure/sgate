@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/util"
+	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -24,8 +24,8 @@ type TraceSpan struct {
 
 // TraceEvent 追踪事件
 type TraceEvent struct {
-	Timestamp time.Time         // 时间戳
-	Name      string            // 事件名称
+	Timestamp  time.Time         // 时间戳
+	Name       string            // 事件名称
 	Attributes map[string]string // 事件属性
 }
 
@@ -35,7 +35,7 @@ type Tracer struct {
 	mutex           sync.RWMutex            // 互斥锁
 	cleanupInterval time.Duration           // 清理间隔
 	sampleRate      float64                 // 采样率
-	stopCh          chan struct{}            // 停止信号
+	stopCh          chan struct{}           // 停止信号
 	maxTraceAge     time.Duration           // 追踪最大保留时间
 }
 
@@ -72,7 +72,7 @@ func NewTracer(cleanupInterval time.Duration) *Tracer {
 func (t *Tracer) StartSpan(traceID, spanName, parentSpanID string) *TraceSpan {
 	span := &TraceSpan{
 		TraceID:      traceID,
-		SpanID:       util.GenerateConnectionID(),
+		SpanID:       gatewayutil.GenerateConnectionID(),
 		ParentSpanID: parentSpanID,
 		Name:         spanName,
 		StartTime:    time.Now(),
@@ -102,7 +102,7 @@ func (t *Tracer) EndSpan(span *TraceSpan) {
 	span.EndTime = time.Now()
 	span.Duration = span.EndTime.Sub(span.StartTime)
 
-	tlog.Debug("Span completed", 
+	tlog.Debug("Span completed",
 		"traceID", span.TraceID,
 		"spanID", span.SpanID,
 		"name", span.Name,
@@ -222,8 +222,8 @@ func (t *Tracer) GetStats() map[string]int {
 	defer t.mutex.RUnlock()
 
 	stats := map[string]int{
-		"totalTraces": 0,
-		"totalSpans":  0,
+		"totalTraces":  0,
+		"totalSpans":   0,
 		"activeTraces": 0,
 	}
 
@@ -247,5 +247,5 @@ func (t *Tracer) GetStats() map[string]int {
 // 返回值:
 //   string: 追踪ID
 func GenerateTraceID() string {
-	return fmt.Sprintf("trace_%s", util.GenerateConnectionID())
+	return fmt.Sprintf("trace_%s", gatewayutil.GenerateConnectionID())
 }

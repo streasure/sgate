@@ -1,5 +1,4 @@
 //go:build ebpf
-
 // +build ebpf
 
 // 启用：go build -tags ebpf
@@ -35,12 +34,12 @@ import (
 
 // CiliumEBPFHook cilium/ebpf 实现
 type CiliumEBPFHook struct {
-	mu          sync.Mutex
-	collection  *ebpf.Collection
-	xdpLink     link.Link
-	tcLink      link.Link
-	blacklistMap *ebpf.Map
-	rateLimitMap *ebpf.Map
+	mu               sync.Mutex
+	collection       *ebpf.Collection
+	xdpLink          link.Link
+	tcLink           link.Link
+	blacklistMap     *ebpf.Map
+	rateLimitMap     *ebpf.Map
 	tcpRetransmitMap *ebpf.Map
 }
 

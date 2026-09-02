@@ -16,16 +16,17 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cast"
-	"github.com/streasure/util/component"
-	"github.com/streasure/util/prometheus"
-	"github.com/streasure/util/nacos"
-	"github.com/streasure/sgate/cluster"
-	"github.com/streasure/sgate/obs"
-	"github.com/streasure/sgate/security"
-	"github.com/streasure/sgate/traffic"
-	"github.com/streasure/sgate/types"
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/protobuf"
+	"github.com/streasure/sgate/internal/obs"
+	"github.com/streasure/sgate/internal/security"
+	"github.com/streasure/sgate/internal/traffic"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/component"
+	"github.com/streasure/util/nacos"
+	"github.com/streasure/util/prometheus"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
@@ -33,7 +34,7 @@ import (
 
 type LogicClientProvider interface {
 	IsConnected() bool
-	SendMessage(msg *protobuf.Message) error
+	SendMessage(msg *commonstruct.Message) error
 }
 
 var (
@@ -46,13 +47,13 @@ var (
 )
 
 func extractRouteAndCmd(data []byte) (string, int32) {
-	return protobuf.ExtractRouteAndCmd(data)
+	return sgate.ExtractRouteAndCmd(data)
 }
 
-func newErrorResponse(route, message, details, data string) *protobuf.ErrorResponse {
-	return &protobuf.ErrorResponse{
+func newErrorResponse(route, message, details, data string) *commonstruct.ErrorResponse {
+	return &commonstruct.ErrorResponse{
 		Route: route,
-		Error: &protobuf.ErrorData{
+		Error: &commonstruct.ErrorData{
 			Message: message,
 			Code:    details,
 			Details: data,
@@ -100,30 +101,30 @@ type Gateway struct {
 	engine             *gnet.Engine // stored on boot for graceful shutdown
 
 	// 企业级扩展组件
-	filterChain   *types.FilterChain        // SPI 过滤器链
-	jwtAuth       *security.JWTAuthFilter   // JWT 鉴权
-	balancer      *cluster.Balancer         // 负载均衡 + 故障节点摘除
+	filterChain   *types.FilterChain          // SPI 过滤器链
+	jwtAuth       *security.JWTAuthFilter     // JWT 鉴权
+	balancer      *cluster.Balancer           // 负载均衡 + 故障节点摘除
 	degradation   *traffic.DegradationManager // 降级管理
-	configCenter  cluster.ConfigCenter      // 配置中心（Nacos/Apollo/etcd/Consul）
-	otelTracer    *obs.OTelTracer           // 分布式追踪导出
-	alertWebhook  *cluster.AlertWebhook     // 告警 webhook（企业微信/钉钉）
-	canaryFilter  *traffic.CanaryFilter     // 灰度发布
-	trafficMirror *traffic.TrafficMirror    // 流量镜像
-	logSanitizer  *obs.LogSanitizer         // 日志脱敏
+	configCenter  cluster.ConfigCenter        // 配置中心（Nacos/Apollo/etcd/Consul）
+	otelTracer    *obs.OTelTracer             // 分布式追踪导出
+	alertWebhook  *cluster.AlertWebhook       // 告警 webhook（企业微信/钉钉）
+	canaryFilter  *traffic.CanaryFilter       // 灰度发布
+	trafficMirror *traffic.TrafficMirror      // 流量镜像
+	logSanitizer  *obs.LogSanitizer           // 日志脱敏
 
 	// 转发统计计数器（用于极限压测时观测 sgate 转发能力）
-	connectionsTotal                    atomic.Int64
-	connectionsActive                   atomic.Int64
-	messagesForwarded                   atomic.Int64
-	messagesDroppedOverload             atomic.Int64
-	messagesDroppedFull                 atomic.Int64
-	messagesDroppedNoLogic              atomic.Int64
-	messagesDroppedNoLogicNotConnected  atomic.Int64
-	messagesReceived                    atomic.Int64
-	messagesPushedToClient              atomic.Int64
-	messagesPushDroppedNoConn           atomic.Int64
-	messagesProcessed                   atomic.Int64
-	messagesFailed                      atomic.Int64
+	connectionsTotal                   atomic.Int64
+	connectionsActive                  atomic.Int64
+	messagesForwarded                  atomic.Int64
+	messagesDroppedOverload            atomic.Int64
+	messagesDroppedFull                atomic.Int64
+	messagesDroppedNoLogic             atomic.Int64
+	messagesDroppedNoLogicNotConnected atomic.Int64
+	messagesReceived                   atomic.Int64
+	messagesPushedToClient             atomic.Int64
+	messagesPushDroppedNoConn          atomic.Int64
+	messagesProcessed                  atomic.Int64
+	messagesFailed                     atomic.Int64
 	// 细分丢弃原因（与过载保护区分，便于排障）
 	messagesDroppedBlacklist   atomic.Int64 // 黑名单/白名单拦截
 	messagesDroppedRateLimit   atomic.Int64 // 限流拦截
@@ -159,7 +160,7 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 
 var protobufMessagePool = sync.Pool{
 	New: func() interface{} {
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			Payload: make(map[string]string, 32),
 		}
 	},
@@ -169,14 +170,14 @@ const preallocatedProtobufMessages = 64
 
 func init() {
 	for i := 0; i < preallocatedProtobufMessages; i++ {
-		protobufMessagePool.Put(&protobuf.Message{
+		protobufMessagePool.Put(&commonstruct.Message{
 			Payload: make(map[string]string, 32),
 		})
 	}
 }
 
-func GetProtobufMessage() *protobuf.Message {
-	msg := protobufMessagePool.Get().(*protobuf.Message)
+func GetProtobufMessage() *commonstruct.Message {
+	msg := protobufMessagePool.Get().(*commonstruct.Message)
 	msg.ConnectionId = ""
 	msg.UserUuid = ""
 	msg.Route = ""
@@ -193,7 +194,7 @@ func GetProtobufMessage() *protobuf.Message {
 	return msg
 }
 
-func PutProtobufMessage(msg *protobuf.Message) {
+func PutProtobufMessage(msg *commonstruct.Message) {
 	if msg == nil {
 		return
 	}
@@ -848,8 +849,16 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		// Both need individual handling: handshake for version negotiation, login for auth completion.
 		if batchCount == 0 {
 			frameData := ctx.FrameBuf[offset+4 : offset+totalLen]
-			route := protobuf.ExtractRouteFast(frameData)
-			if route == protobuf.RouteHandshake || route == protobuf.RouteLogin {
+			msg, ok := decodeClientMessage(frameData)
+			if !ok {
+				ctx.FrameBuf = nil
+				return gnet.Close
+			}
+			route := msg.Route
+			if route == "" {
+				route = sgate.RouteForCmd(msg.Cmd)
+			}
+			if route == sgate.RouteHandshake || route == sgate.RouteLogin {
 				rest := ctx.FrameBuf[offset+totalLen:]
 				if len(rest) > 0 {
 					tail := make([]byte, len(rest))
@@ -873,7 +882,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 	// 认证守卫: 批量消息必须已完成认证（serverID + userUUID）
 	conn := g.connectionManager.GetConnection(ctx.ConnectionID)
 	if conn != nil && !conn.IsAuthenticated() {
-		errorResp := newErrorResponse(protobuf.RouteError, "unauthorized", "connection not authenticated, handshake required", "")
+		errorResp := newErrorResponse(sgate.RouteError, "unauthorized", "connection not authenticated, handshake required", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		g.messagesDroppedAuth.Add(1)
@@ -901,7 +910,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(int64(batchCount))
 		g.messagesDroppedOverload.Add(int64(batchCount))
-		errorResp := newErrorResponse(protobuf.RouteError, "server overload", "cpu threshold exceeded", "")
+		errorResp := newErrorResponse(sgate.RouteError, "server overload", "cpu threshold exceeded", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		return
@@ -913,9 +922,9 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		return
 	}
 
-	batchMsg := &protobuf.Message{
+	batchMsg := &commonstruct.Message{
 		ConnectionId: ctx.ConnectionID,
-		Route:        protobuf.RouteBatch,
+		Route:        sgate.RouteBatch,
 		Data:         batchData,
 		Cmd:          int32(batchCount),
 	}
@@ -959,7 +968,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
-		errorResp := newErrorResponse(protobuf.RouteError, "server overload", "cpu threshold exceeded", "")
+		errorResp := newErrorResponse(sgate.RouteError, "server overload", "cpu threshold exceeded", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		return
@@ -986,152 +995,155 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		return
 	}
 
-	route, cmd := extractRouteAndCmd(data)
-	if route == protobuf.RouteHandshake {
-		message := GetProtobufMessage()
-		defer PutProtobufMessage(message)
-		if err := proto.Unmarshal(data, message); err != nil {
-			return
-		}
+	message, ok := decodeClientMessage(data)
+	if !ok {
+		return gnet.Close
+	}
+	route, cmd := message.Route, message.Cmd
+	if route == "" {
+		route = sgate.RouteForCmd(cmd)
+	}
+	if route == sgate.RouteHandshake {
 		return g.handleHandshake(c, connectionID, message)
 	}
 
-		// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
-		// 登录消息必须放行，因为它是完成认证的必要步骤
-		if route != protobuf.RouteLogin {
-			conn := g.connectionManager.GetConnection(connectionID)
-			if conn != nil && !conn.IsAuthenticated() {
-				errorResp := newErrorResponse(protobuf.RouteError, "unauthorized", "connection not authenticated, handshake+login required", "")
-				respData, _ := proto.Marshal(errorResp)
-				writeFrame(c, respData)
-				g.messagesDroppedAuth.Add(1)
-				return gnet.Close
-			}
+	// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
+	// 登录消息必须放行，因为它是完成认证的必要步骤
+	if route != sgate.RouteLogin {
+		conn := g.connectionManager.GetConnection(connectionID)
+		if conn != nil && !conn.IsAuthenticated() {
+			errorResp := newErrorResponse(sgate.RouteError, "unauthorized", "connection not authenticated, handshake+login required", "")
+			respData, _ := proto.Marshal(errorResp)
+			writeFrame(c, respData)
+			g.messagesDroppedAuth.Add(1)
+			return gnet.Close
 		}
+	}
 
-		// IP 白名单/黑名单检查
-		if g.whitelistBlacklist != nil {
-			remoteIP := getRemoteIP(c)
-			if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
-				g.messagesDroppedBlacklist.Add(1)
-				return
-			}
-			// 白名单非空时，仅放行白名单 IP
-			whitelist := g.whitelistBlacklist.GetWhitelist()
-			if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
-				g.messagesDroppedBlacklist.Add(1)
-				return
-			}
-		}
-
-		// 限流检查（按 IP 维度）
-		if g.rateLimiter != nil {
-			remoteIP := getRemoteIP(c)
-			if !g.rateLimiter.Allow("ip", remoteIP) {
-				g.messagesDroppedRateLimit.Add(1)
-				return
-			}
-			if !g.rateLimiter.Allow("route", route) {
-				g.messagesDroppedRateLimit.Add(1)
-				return
-			}
-		}
-
-		// WAF 检查（SQL 注入/XSS/大 payload）
-		if g.waf != nil {
-			if !g.waf.Inspect(data) {
-				g.messagesDroppedWAF.Add(1)
-				return
-			}
-		}
-
-		// 熔断器检查（按 route 维度，自动创建）
-		if g.circuitBreakerMgr != nil {
-			breaker := g.getOrCreateBreaker(route)
-			if !breaker.Allow() {
-				g.messagesDroppedCircuit.Add(1)
-				return
-			}
-		}
-
-		// 入方向消息完整性校验
-		if g.protection.VerifyInbound {
-			verifyMsg := GetProtobufMessage()
-			if uerr := proto.Unmarshal(data, verifyMsg); uerr == nil {
-				if verr := g.messageIntegrity.ProcessMessage(verifyMsg); verr != nil {
-					PutProtobufMessage(verifyMsg)
-					g.messagesDroppedIntegrity.Add(1)
-					return
-				}
-			}
-			PutProtobufMessage(verifyMsg)
-		}
-
-		// Tracer: 采样追踪转发延迟
-		var span *obs.TraceSpan
-		if g.tracer != nil {
-			traceID := obs.GenerateTraceID()
-			span = g.tracer.StartSpan(traceID, "forward", "")
-			g.tracer.AddAttribute(span, "route", route)
-			g.tracer.AddAttribute(span, "connectionID", connectionID)
-		}
-
-		// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
-		// 过滤器可修改 route/data/userUUID，或中止请求
-		protoMsg, ok := g.applyForwardFilters(c, data, connectionID, route, cmd)
-		if !ok {
-			if span != nil && g.tracer != nil {
-				g.tracer.EndSpan(span)
-			}
+	// IP 白名单/黑名单检查
+	if g.whitelistBlacklist != nil {
+		remoteIP := getRemoteIP(c)
+		if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
+			g.messagesDroppedBlacklist.Add(1)
 			return
 		}
-		if protoMsg == nil {
-			// 兼容 filter chain 未启用场景：构造默认消息
-			protoMsg = &protobuf.Message{
-				ConnectionId: connectionID,
-				Route:        route,
-				Data:         append([]byte(nil), data...),
-			}
-			if cmd > 0 {
-				protoMsg.Cmd = cmd
-			}
-		} else if cmd > 0 && protoMsg.Cmd == 0 {
-			protoMsg.Cmd = cmd
+		// 白名单非空时，仅放行白名单 IP
+		whitelist := g.whitelistBlacklist.GetWhitelist()
+		if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
+			g.messagesDroppedBlacklist.Add(1)
+			return
 		}
+	}
 
-		if err := logicClient.SendMessage(protoMsg); err != nil {
-			g.messagesDroppedFull.Add(1)
-			if g.circuitBreakerMgr != nil {
-				breaker := g.getOrCreateBreaker(route)
-				breaker.RecordFailure()
-			}
-			if g.balancer != nil {
-				g.balancer.RecordFailure(protoMsg.Route)
-			}
-			if g.degradation != nil {
-				g.degradation.RecordResult(protoMsg.Route, true)
-			}
-		} else {
-			g.messagesForwarded.Add(1)
-			if g.circuitBreakerMgr != nil {
-				breaker := g.getOrCreateBreaker(route)
-				breaker.RecordSuccess()
-			}
-			if g.balancer != nil {
-				g.balancer.RecordSuccess(protoMsg.Route)
-			}
-			if g.degradation != nil {
-				g.degradation.RecordResult(protoMsg.Route, false)
+	// 限流检查（按 IP 维度）
+	if g.rateLimiter != nil {
+		remoteIP := getRemoteIP(c)
+		if !g.rateLimiter.Allow("ip", remoteIP) {
+			g.messagesDroppedRateLimit.Add(1)
+			return
+		}
+		if !g.rateLimiter.Allow("route", route) {
+			g.messagesDroppedRateLimit.Add(1)
+			return
+		}
+	}
+
+	// WAF 检查（SQL 注入/XSS/大 payload）
+	if g.waf != nil {
+		if !g.waf.Inspect(data) {
+			g.messagesDroppedWAF.Add(1)
+			return
+		}
+	}
+
+	// 熔断器检查（按 route 维度，自动创建）
+	if g.circuitBreakerMgr != nil {
+		breaker := g.getOrCreateBreaker(route)
+		if !breaker.Allow() {
+			g.messagesDroppedCircuit.Add(1)
+			return
+		}
+	}
+
+	// 入方向消息完整性校验
+	if g.protection.VerifyInbound {
+		verifyMsg := GetProtobufMessage()
+		if uerr := proto.Unmarshal(data, verifyMsg); uerr == nil {
+			if verr := g.messageIntegrity.ProcessMessage(verifyMsg); verr != nil {
+				PutProtobufMessage(verifyMsg)
+				g.messagesDroppedIntegrity.Add(1)
+				return
 			}
 		}
+		PutProtobufMessage(verifyMsg)
+	}
 
+	// Tracer: 采样追踪转发延迟
+	var span *obs.TraceSpan
+	if g.tracer != nil {
+		traceID := obs.GenerateTraceID()
+		span = g.tracer.StartSpan(traceID, "forward", "")
+		g.tracer.AddAttribute(span, "route", route)
+		g.tracer.AddAttribute(span, "connectionID", connectionID)
+	}
+
+	// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
+	// 过滤器可修改 route/data/userUUID，或中止请求
+	protoMsg, filterOK := g.applyForwardFilters(c, message.Data, connectionID, route, cmd)
+	if !filterOK {
 		if span != nil && g.tracer != nil {
 			g.tracer.EndSpan(span)
-			if g.latencyTracker != nil {
-				g.latencyTracker.Record(span.Duration)
-			}
 		}
 		return
+	}
+	if protoMsg == nil {
+		// 兼容 filter chain 未启用场景：构造默认消息
+		protoMsg = &commonstruct.Message{
+			ConnectionId: connectionID,
+			Route:        route,
+			Data:         append([]byte(nil), message.Data...),
+			Sequence:     message.Sequence,
+		}
+		if cmd > 0 {
+			protoMsg.Cmd = cmd
+		}
+	} else if cmd > 0 && protoMsg.Cmd == 0 {
+		protoMsg.Cmd = cmd
+	}
+
+	if err := logicClient.SendMessage(protoMsg); err != nil {
+		g.messagesDroppedFull.Add(1)
+		if g.circuitBreakerMgr != nil {
+			breaker := g.getOrCreateBreaker(route)
+			breaker.RecordFailure()
+		}
+		if g.balancer != nil {
+			g.balancer.RecordFailure(protoMsg.Route)
+		}
+		if g.degradation != nil {
+			g.degradation.RecordResult(protoMsg.Route, true)
+		}
+	} else {
+		g.messagesForwarded.Add(1)
+		if g.circuitBreakerMgr != nil {
+			breaker := g.getOrCreateBreaker(route)
+			breaker.RecordSuccess()
+		}
+		if g.balancer != nil {
+			g.balancer.RecordSuccess(protoMsg.Route)
+		}
+		if g.degradation != nil {
+			g.degradation.RecordResult(protoMsg.Route, false)
+		}
+	}
+
+	if span != nil && g.tracer != nil {
+		g.tracer.EndSpan(span)
+		if g.latencyTracker != nil {
+			g.latencyTracker.Record(span.Duration)
+		}
+	}
+	return
 }
 
 // getRemoteIP 从 gnet.Conn 获取客户端 IP
@@ -1159,7 +1171,7 @@ func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 	return g.circuitBreakerMgr.GetCircuitBreaker(route, 5, 3, timeout)
 }
 
-func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *protobuf.Message) gnet.Action {
+func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *commonstruct.Message) gnet.Action {
 	handshakeDataStr := message.Payload["handshake_data"]
 	var handshakeBytes []byte
 
@@ -1170,7 +1182,7 @@ func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *pro
 		handshakeBytes = []byte(handshakeDataStr)
 	}
 
-	handshake := &protobuf.Handshake{}
+	handshake := &commonstruct.Handshake{}
 	if err := proto.Unmarshal(handshakeBytes, handshake); err != nil {
 		return gnet.None
 	}
@@ -1198,13 +1210,13 @@ func writeFrame(c gnet.Conn, data []byte) {
 	frameHeaderPool.Put(headerPtr)
 }
 
-func writeErrorFrame(c gnet.Conn, errMsg *protobuf.ErrorResponse) {
-	data, _ := proto.Marshal(errMsg)
+func writeErrorFrame(c gnet.Conn, errMsg *commonstruct.ErrorResponse) {
+	data := marshalClientError(errMsg)
 	writeFrame(c, data)
 }
 
-func writeMsgFrame(c gnet.Conn, msg *protobuf.Message) {
-	data, _ := proto.Marshal(msg)
+func writeMsgFrame(c gnet.Conn, msg *commonstruct.Message) {
+	data, _ := marshalClientMessage(msg)
 	writeFrame(c, data)
 }
 

@@ -41,11 +41,11 @@ func (lt *LatencyTracker) Record(d time.Duration) {
 
 // LatencyStats 延迟统计
 type LatencyStats struct {
-	P50  time.Duration `json:"p50"`
-	P95  time.Duration `json:"p95"`
-	P99  time.Duration `json:"p99"`
-	Max  time.Duration `json:"max"`
-	Cnt  int           `json:"count"`
+	P50 time.Duration `json:"p50"`
+	P95 time.Duration `json:"p95"`
+	P99 time.Duration `json:"p99"`
+	Max time.Duration `json:"max"`
+	Cnt int           `json:"count"`
 }
 
 // GetStats 计算延迟分位数

@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/sgate/types"
-	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -51,7 +51,7 @@ func NewOTelTracer(cfg config.OTelTracerConfig) *OTelTracer {
 		serviceName:   cfg.ServiceName,
 		localEndpoint: map[string]string{"serviceName": cfg.ServiceName},
 		httpClient:    &http.Client{Timeout: 3 * time.Second},
-		queue:         make(chan *OTelSpan, util.MaxInt(cfg.QueueSize, 1024)),
+		queue:         make(chan *OTelSpan, gatewayutil.MaxInt(cfg.QueueSize, 1024)),
 		stopCh:        make(chan struct{}),
 	}
 	if cfg.SampleRate > 0 {
@@ -115,7 +115,7 @@ func (t *OTelTracer) shouldSample(traceID string) bool {
 		return true
 	}
 	// 简单采样：traceID 哈希取模
-	h := util.SimpleHash(traceID)
+	h := gatewayutil.SimpleHash(traceID)
 	return h%uint32(sr) == 0
 }
 
@@ -185,9 +185,9 @@ type OTelSpanFilter struct {
 	Tracer *OTelTracer
 }
 
-func (f *OTelSpanFilter) Name() string       { return "otel-tracer" }
+func (f *OTelSpanFilter) Name() string             { return "otel-tracer" }
 func (f *OTelSpanFilter) Phase() types.FilterPhase { return types.PhaseForward }
-func (f *OTelSpanFilter) Priority() int           { return 50 }
+func (f *OTelSpanFilter) Priority() int            { return 50 }
 
 func (f *OTelSpanFilter) Process(fc *types.FilterContext) (bool, error) {
 	if f.Tracer == nil {
@@ -229,11 +229,11 @@ func extractTraceID(headers map[string]string) string {
 func init() {
 	types.RegisterFilter("otel-tracer", func(cfg map[string]interface{}) (types.Filter, error) {
 		c := config.OTelTracerConfig{
-			Endpoint:    util.GetString(cfg, "endpoint"),
-			ServiceName: util.GetString(cfg, "serviceName"),
-			SampleRate:  util.GetInt(cfg, "sampleRate"),
-			QueueSize:   util.GetInt(cfg, "queueSize"),
-			Workers:     util.GetInt(cfg, "workers"),
+			Endpoint:    gatewayutil.GetString(cfg, "endpoint"),
+			ServiceName: gatewayutil.GetString(cfg, "serviceName"),
+			SampleRate:  gatewayutil.GetInt(cfg, "sampleRate"),
+			QueueSize:   gatewayutil.GetInt(cfg, "queueSize"),
+			Workers:     gatewayutil.GetInt(cfg, "workers"),
 		}
 		if c.ServiceName == "" {
 			c.ServiceName = "sgate"

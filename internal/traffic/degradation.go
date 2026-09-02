@@ -5,10 +5,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/util/tlog"
-	"github.com/streasure/sgate/types"
-	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/tlog"
 )
 
 // DegradationManager 降级管理器
@@ -45,7 +45,7 @@ func NewDegradationManager(rules []config.DegradationRuleConfig) *DegradationMan
 			windowSize:     rc.WindowSize,
 			recentErrors:   make([]bool, rc.WindowSize),
 			fallbackData:   []byte(rc.FallbackData),
-			coolDown:       util.ParseDurationDefault(rc.CoolDown, 30*time.Second),
+			coolDown:       gatewayutil.ParseDurationDefault(rc.CoolDown, 30*time.Second),
 		}
 		if r.errorThreshold <= 0 {
 			r.errorThreshold = 0.5
@@ -59,9 +59,9 @@ func NewDegradationManager(rules []config.DegradationRuleConfig) *DegradationMan
 	return m
 }
 
-func (m *DegradationManager) Name() string       { return "degradation" }
+func (m *DegradationManager) Name() string             { return "degradation" }
 func (m *DegradationManager) Phase() types.FilterPhase { return types.PhaseForward }
-func (m *DegradationManager) Priority() int      { return 500 }
+func (m *DegradationManager) Priority() int            { return 500 }
 
 // Process 检查是否应降级（返回兜底而非转发）
 func (m *DegradationManager) Process(fc *types.FilterContext) (bool, error) {
@@ -147,7 +147,7 @@ func (m *DegradationManager) AddRule(rc config.DegradationRuleConfig) {
 		windowSize:     rc.WindowSize,
 		recentErrors:   make([]bool, rc.WindowSize),
 		fallbackData:   []byte(rc.FallbackData),
-		coolDown:       util.ParseDurationDefault(rc.CoolDown, 30*time.Second),
+		coolDown:       gatewayutil.ParseDurationDefault(rc.CoolDown, 30*time.Second),
 	}
 }
 
@@ -159,11 +159,11 @@ func init() {
 				for _, x := range arr {
 					if mp, ok := x.(map[string]interface{}); ok {
 						rules = append(rules, config.DegradationRuleConfig{
-							Route:          util.GetString(mp, "route"),
-							ErrorThreshold: util.GetFloat(mp, "errorThreshold"),
-							WindowSize:     util.GetInt(mp, "windowSize"),
-							FallbackData:   util.GetString(mp, "fallbackData"),
-							CoolDown:       util.GetString(mp, "coolDown"),
+							Route:          gatewayutil.GetString(mp, "route"),
+							ErrorThreshold: gatewayutil.GetFloat(mp, "errorThreshold"),
+							WindowSize:     gatewayutil.GetInt(mp, "windowSize"),
+							FallbackData:   gatewayutil.GetString(mp, "fallbackData"),
+							CoolDown:       gatewayutil.GetString(mp, "coolDown"),
 						})
 					}
 				}

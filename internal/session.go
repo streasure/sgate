@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/sgate/protobuf"
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -30,8 +31,8 @@ type SessionState int32
 
 const (
 	StateAuth    SessionState = iota // awaiting handshake + login
-	StateForward                      // authenticated, forwarding traffic
-	StateClosed                       // closed, no more I/O
+	StateForward                     // authenticated, forwarding traffic
+	StateClosed                      // closed, no more I/O
 )
 
 type Connection struct {
@@ -44,9 +45,9 @@ type Connection struct {
 	// activitySeq 用于在高吞吐连接上降低时间戳更新频率。
 	// LastActive 仅用于空闲连接回收，不需要每条消息都刷新。
 	activitySeq atomic.Uint32
-	Groups     map[string]struct{}
-	IsWS       bool
-	mu         sync.Mutex
+	Groups      map[string]struct{}
+	IsWS        bool
+	mu          sync.Mutex
 	// FSM state (CAS only)
 	state int32 // atomic: SessionState
 }
@@ -375,8 +376,8 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 	}
 
 	// 发送下线通知
-	kickMessage := &protobuf.Message{
-		Route: protobuf.RouteServerKick,
+	kickMessage := &commonstruct.Message{
+		Route: sgate.RouteServerKick,
 		Payload: map[string]string{
 			"reason":  reason,
 			"message": message,
@@ -668,17 +669,17 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 
 	switch msg := message.(type) {
 	case []byte:
-		responseData = msg
-	case *protobuf.Message:
-		responseData, err = proto.Marshal(msg)
-	case *protobuf.ErrorResponse:
-		responseData, err = proto.Marshal(msg)
+		responseData = marshalClientBytes(msg)
+	case *commonstruct.Message:
+		responseData, err = marshalClientMessage(msg)
+	case *commonstruct.ErrorResponse:
+		responseData = marshalClientError(msg)
 	case map[string]string:
-		protoMsg := &protobuf.Message{
+		protoMsg := &commonstruct.Message{
 			Route:   "message",
 			Payload: msg,
 		}
-		responseData, err = proto.Marshal(protoMsg)
+		responseData, err = marshalClientMessage(protoMsg)
 	default:
 		cm.totalMessages.Add(1)
 		cm.failedMessages.Add(1)
@@ -729,15 +730,15 @@ func (cm *ConnectionManager) Broadcast(message interface{}) {
 func marshalPushMessage(message interface{}) ([]byte, error) {
 	switch msg := message.(type) {
 	case []byte:
-		return msg, nil
-	case *protobuf.Message:
-		return proto.Marshal(msg)
-	case *protobuf.ErrorResponse:
-		return proto.Marshal(msg)
+		return marshalClientBytes(msg), nil
+	case *commonstruct.Message:
+		return marshalClientMessage(msg)
+	case *commonstruct.ErrorResponse:
+		return marshalClientError(msg), nil
 	case map[string]string:
-		return proto.Marshal(&protobuf.Message{Route: "broadcast", Payload: msg})
+		return marshalClientMessage(&commonstruct.Message{Route: "broadcast", Payload: msg})
 	case string:
-		return proto.Marshal(&protobuf.Message{Route: "broadcast", Payload: map[string]string{"data": msg}})
+		return marshalClientMessage(&commonstruct.Message{Route: "broadcast", Payload: map[string]string{"data": msg}})
 	default:
 		return nil, fmt.Errorf("unsupported push message type %T", message)
 	}
@@ -1146,7 +1147,7 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 		conn := cm.GetConnection(connectionID)
 		if conn != nil {
 			// 发送超时通知
-			timeoutMessage := &protobuf.Message{
+			timeoutMessage := &commonstruct.Message{
 				Route: "timeout",
 				Payload: map[string]string{
 					"reason":  "inactive",

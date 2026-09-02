@@ -6,11 +6,11 @@
 //
 // Push patterns (logic → sgate → client):
 //
-//	1. Personal push:  PushToConnection(connID, msg)        // push to specific connection
-//	2. Personal push:  PushToServer + server.send_to_user    // push by userUUID
-//	3. Personal push:  burst route push callback             // push to requesting client (most efficient)
-//	4. Group push:     JoinGroupByUser + SendToGroup         // push to group members
-//	5. Broadcast:      Broadcast(msg)                        // push to all connected clients
+//  1. Personal push:  PushToConnection(connID, msg)        // push to specific connection
+//  2. Personal push:  PushToServer + server.send_to_user    // push by userUUID
+//  3. Personal push:  burst route push callback             // push to requesting client (most efficient)
+//  4. Group push:     JoinGroupByUser + SendToGroup         // push to group members
+//  5. Broadcast:      Broadcast(msg)                        // push to all connected clients
 //
 // Run:
 //
@@ -39,8 +39,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
 	"github.com/streasure/sgate/logic"
-	"github.com/streasure/sgate/protobuf"
 	"github.com/streasure/util/tlog"
 )
 
@@ -86,10 +87,10 @@ func main() {
 
 	// ── Ping/Pong: 基准心跳 ─────────────────────────────────────────
 	// 客户端发 "ping"，服务端回 "pong"，用于连通性检测和基准压测
-	svc.RegisterRoute(protobuf.RoutePing, func(msg *protobuf.Message) *protobuf.Message {
-		return &protobuf.Message{
+	svc.RegisterRoute(sgate.RoutePing, func(msg *commonstruct.Message) *commonstruct.Message {
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RoutePong,
+			Route:        sgate.RoutePong,
 			Payload:      map[string]string{"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10)},
 			Timestamp:    time.Now().UnixMilli(),
 		}
@@ -97,16 +98,16 @@ func main() {
 
 	// ── BurstRoute: 每次请求触发推送（duplex 压测用）────────────────
 	// push 回调直接写入 gRPC stream，是最高效的推送路径
-	svc.RegisterBurstRoute(protobuf.RouteTest, func(msg *protobuf.Message, push func(*protobuf.Message)) {
-		push(&protobuf.Message{
-			Route:     protobuf.RouteTestResult,
+	svc.RegisterBurstRoute(sgate.RouteTest, func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
+		push(&commonstruct.Message{
+			Route:     sgate.RouteTestResult,
 			Timestamp: time.Now().UnixMilli(),
 		})
 	})
 
 	// ── Login: 用户登录（必须） ──────────────────────────────────────
 	// 注册 userUUID → connectionID 映射，使所有推送功能可用
-	svc.RegisterRoute(protobuf.RouteLogin, func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute(sgate.RouteLogin, func(msg *commonstruct.Message) *commonstruct.Message {
 		userID := msg.GetPayload()["userId"]
 		if userID == "" {
 			userID = msg.ConnectionId
@@ -116,20 +117,20 @@ func main() {
 		// ★ 关键: RegisterUser 注册映射，否则 PushToConnection/PushToGroup 不工作
 		svc.RegisterUser(userUUID, msg.ConnectionId)
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			UserUuid:     userUUID,
-			Route:        protobuf.RouteLogin,
+			Route:        sgate.RouteLogin,
 			Payload:      map[string]string{"code": "200", "userId": userID, "userUUID": userUUID},
 			Timestamp:    time.Now().UnixMilli(),
 		}
 	})
 
 	// ── Echo: 回显测试 ──────────────────────────────────────────────
-	svc.RegisterRoute(protobuf.RouteEcho, func(msg *protobuf.Message) *protobuf.Message {
-		return &protobuf.Message{
+	svc.RegisterRoute(sgate.RouteEcho, func(msg *commonstruct.Message) *commonstruct.Message {
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteEcho,
+			Route:        sgate.RouteEcho,
 			Payload: map[string]string{
 				"echo":      msg.GetPayload()["message"],
 				"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
@@ -143,8 +144,8 @@ func main() {
 	// ══════════════════════════════════════════════════════════════════
 	// 使用 burst route 的 push 回调，最高效路径（直接写 stream）
 	// Flow: client → sgate → logic(push callback) → sgate → client
-	svc.RegisterBurstRoute("push_me", func(msg *protobuf.Message, push func(*protobuf.Message)) {
-		push(&protobuf.Message{
+	svc.RegisterBurstRoute("push_me", func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
+		push(&commonstruct.Message{
 			Route: "personal_notification",
 			Payload: map[string]string{
 				"type":    "personal_push",
@@ -160,10 +161,10 @@ func main() {
 	// ══════════════════════════════════════════════════════════════════
 	// 使用 PushToServer + server.send_to_user 路由
 	// Flow: client_A → sgate → logic(PushToServer) → sgate.gateway.SendToUser → client_B
-	svc.RegisterRoute("send_msg", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute("send_msg", func(msg *commonstruct.Message) *commonstruct.Message {
 		targetUUID := msg.GetPayload()["targetUUID"]
 		if targetUUID == "" {
-			return &protobuf.Message{
+			return &commonstruct.Message{
 				ConnectionId: msg.ConnectionId,
 				Route:        "send_msg_ack",
 				Payload:      map[string]string{"code": "400", "message": "missing targetUUID"},
@@ -171,8 +172,8 @@ func main() {
 			}
 		}
 
-		svc.Server().PushToServer(&protobuf.Message{
-			Route: protobuf.RouteServerSendToUser,
+		svc.Server().PushToServer(&commonstruct.Message{
+			Route: sgate.RouteServerSendToUser,
 			Payload: map[string]string{
 				"userUUID": targetUUID,
 				"route":    "direct_message",
@@ -182,7 +183,7 @@ func main() {
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "send_msg_ack",
 			Payload:      map[string]string{"code": "200", "message": "delivered"},
@@ -196,21 +197,21 @@ func main() {
 	// 组是 Gateway 本地的，每个 Gateway 维护自己的组成员列表
 	// JoinGroup/LeaveGroup 通过 PushToServer 发送到 Gateway，异步生效
 
-	svc.RegisterRoute("join_group", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute("join_group", func(msg *commonstruct.Message) *commonstruct.Message {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
 		// server.join_group: Gateway 根据 ConnectionId 查找连接，自动加入组
-		svc.Server().PushToServer(&protobuf.Message{
+		svc.Server().PushToServer(&commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteServerJoinGroup,
+			Route:        sgate.RouteServerJoinGroup,
 			Payload:      map[string]string{"groupID": groupID},
 			Timestamp:    time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "join_group_ack",
 			Payload:      map[string]string{"code": "200", "groupID": groupID},
@@ -218,20 +219,20 @@ func main() {
 		}
 	})
 
-	svc.RegisterRoute("leave_group", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute("leave_group", func(msg *commonstruct.Message) *commonstruct.Message {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
-		svc.Server().PushToServer(&protobuf.Message{
+		svc.Server().PushToServer(&commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
-			Route:        protobuf.RouteServerLeaveGroup,
+			Route:        sgate.RouteServerLeaveGroup,
 			Payload:      map[string]string{"groupID": groupID},
 			Timestamp:    time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "leave_group_ack",
 			Payload:      map[string]string{"code": "200"},
@@ -245,13 +246,13 @@ func main() {
 	// SendToGroup 路由到 Gateway 的 ConnectionManager.SendToGroup
 	// 组成员需先通过 server.join_group 加入
 	// Flow: client → sgate → logic → sgate.gateway.SendToGroup → all group members
-	svc.RegisterRoute("group_msg", func(msg *protobuf.Message) *protobuf.Message {
+	svc.RegisterRoute("group_msg", func(msg *commonstruct.Message) *commonstruct.Message {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
-		svc.Server().SendToGroup(groupID, &protobuf.Message{
+		svc.Server().SendToGroup(groupID, &commonstruct.Message{
 			Route: "group_broadcast",
 			Payload: map[string]string{
 				"message": msg.GetPayload()["message"],
@@ -261,7 +262,7 @@ func main() {
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "group_msg_ack",
 			Payload:      map[string]string{"code": "200", "message": "sent to group"},
@@ -274,8 +275,8 @@ func main() {
 	// ══════════════════════════════════════════════════════════════════
 	// Broadcast 推送到所有连接的客户端
 	// Flow: client → sgate → logic(Broadcast) → sgate.gateway.Broadcast → all clients
-	svc.RegisterRoute("broadcast_msg", func(msg *protobuf.Message) *protobuf.Message {
-		svc.Server().Broadcast(&protobuf.Message{
+	svc.RegisterRoute("broadcast_msg", func(msg *commonstruct.Message) *commonstruct.Message {
+		svc.Server().Broadcast(&commonstruct.Message{
 			Route: "global_broadcast",
 			Payload: map[string]string{
 				"message": msg.GetPayload()["message"],
@@ -284,7 +285,7 @@ func main() {
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &protobuf.Message{
+		return &commonstruct.Message{
 			ConnectionId: msg.ConnectionId,
 			Route:        "broadcast_msg_ack",
 			Payload:      map[string]string{"code": "200", "message": "broadcast sent"},
@@ -297,13 +298,13 @@ func main() {
 	// ══════════════════════════════════════════════════════════════════
 	// 高吞吐场景：每次请求推送多条消息（如游戏状态同步）
 	// burst route 的 push 回调可多次调用，每条消息独立序列化
-	svc.RegisterBurstRoute("batch_push", func(msg *protobuf.Message, push func(*protobuf.Message)) {
+	svc.RegisterBurstRoute("batch_push", func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
 		targetCount := 1
 		if n, err := strconv.Atoi(msg.GetPayload()["count"]); err == nil && n > 0 {
 			targetCount = n
 		}
 		for i := 0; i < targetCount; i++ {
-			push(&protobuf.Message{
+			push(&commonstruct.Message{
 				Route: "batch_push_item",
 				Payload: map[string]string{
 					"index": strconv.Itoa(i),

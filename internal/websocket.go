@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/sgate/protobuf"
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
 	"github.com/streasure/util/tlog"
-	"google.golang.org/protobuf/proto"
 )
 
 type WSOpCode byte
@@ -257,24 +257,24 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
-		errorResp := newErrorResponse(protobuf.RouteError, "server overload", "cpu threshold exceeded", "")
-		respData, _ := proto.Marshal(errorResp)
+		errorResp := newErrorResponse(sgate.RouteError, "server overload", "cpu threshold exceeded", "")
+		respData := marshalClientError(errorResp)
 		g.sendWebSocketMessage(wsConn, WSOpBinary, respData)
 		return nil
 	}
 
-	message := &protobuf.Message{}
-	if err := proto.Unmarshal(payload, message); err != nil {
-		tlog.Error("WebSocket message unmarshal failed", "error", err)
-		errorMsg := newErrorResponse("error", "Invalid message format", err.Error(), string(payload))
-		responseData, _ := proto.Marshal(errorMsg)
+	message, ok := decodeClientMessage(payload)
+	if !ok {
+		tlog.Error("WebSocket message unmarshal failed")
+		errorMsg := newErrorResponse("error", "Invalid message format", "invalid message frame", string(payload))
+		responseData := marshalClientError(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
 	route := message.Route
-	if route == "" {
+	if route == "" && message.Cmd == 0 {
 		errorMsg := newErrorResponse("error", "Invalid message format: missing route", "", "")
-		responseData, _ := proto.Marshal(errorMsg)
+		responseData := marshalClientError(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
@@ -320,7 +320,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	if g.protection.VerifyInbound {
 		if err := g.messageIntegrity.ProcessMessage(message); err != nil {
 			errorMsg := newErrorResponse("error", "Message integrity check failed", err.Error(), "")
-			responseData, _ := proto.Marshal(errorMsg)
+			responseData := marshalClientError(errorMsg)
 			return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 		}
 	}
@@ -343,17 +343,17 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		tlog.Debug("received user UUID", "connectionID", connectionID, "userUUID", message.UserUuid)
 	}
 
-	if route == protobuf.RouteHandshake {
+	if route == sgate.RouteHandshake {
 		g.handleHandshake(wsConn.Conn, connectionID, message)
 		return nil
 	}
 
 	// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
-	if route != protobuf.RouteLogin {
+	if route != sgate.RouteLogin {
 		conn := g.connectionManager.GetConnection(connectionID)
 		if conn != nil && !conn.IsAuthenticated() {
 			errorMsg := newErrorResponse("error", "unauthorized", "connection not authenticated, handshake+login required", "")
-			responseData, _ := proto.Marshal(errorMsg)
+			responseData := marshalClientError(errorMsg)
 			g.messagesDroppedAuth.Add(1)
 			g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 			return fmt.Errorf("unauthenticated connection")
@@ -367,7 +367,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return nil
 	}
 	if protoMsg == nil {
-		protoMsg = &protobuf.Message{
+		protoMsg = &commonstruct.Message{
 			ConnectionId: connectionID,
 			UserUuid:     message.UserUuid,
 			Route:        route,
@@ -417,7 +417,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 				g.degradation.RecordResult(protoMsg.Route, true)
 			}
 			errorMsg := newErrorResponse("error", "Failed to send message to logic server", err.Error(), "")
-			responseData, _ := proto.Marshal(errorMsg)
+			responseData := marshalClientError(errorMsg)
 			return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 		}
 		g.messagesForwarded.Add(1)
@@ -432,7 +432,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		}
 	} else {
 		errorMsg := newErrorResponse("error", "Logic server not connected", "", "")
-		responseData, _ := proto.Marshal(errorMsg)
+		responseData := marshalClientError(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 

@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/sgate/util"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -58,7 +58,7 @@ func NewBalancer(cfg config.BalancerConfig) *Balancer {
 		algorithm:        BalancerAlgorithm(cfg.Algorithm),
 		ringMap:          make(map[uint32]*BalancerNode),
 		failureThreshold: cfg.FailureThreshold,
-		recoverInterval:  util.ParseDurationDefault(cfg.RecoverInterval, 30*time.Second),
+		recoverInterval:  gatewayutil.ParseDurationDefault(cfg.RecoverInterval, 30*time.Second),
 		stopChan:         make(chan struct{}),
 	}
 	if b.algorithm == "" {

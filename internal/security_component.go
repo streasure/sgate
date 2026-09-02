@@ -3,10 +3,10 @@ package gateway
 import (
 	"time"
 
-	"github.com/streasure/util/component"
-	"github.com/streasure/sgate/security"
-	"github.com/streasure/sgate/types"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/security"
+	"github.com/streasure/sgate/types"
+	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 )
 

@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/util/nacos"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/nacos"
 	"github.com/streasure/util/tlog"
 )
 
@@ -24,16 +24,16 @@ import (
 // 选举正确性：所有节点看到相同的实例列表（Nacos 最终一致），
 // 排序结果一致 → 收敛到同一个 Leader，无需分布式锁竞争。
 type Cluster struct {
-	registry  *nacos.Registry
-	discovery *nacos.Discovery
-	cfg       config.ClusterConfig
-	zone      string
-	nodeID    string
+	registry      *nacos.Registry
+	discovery     *nacos.Discovery
+	cfg           config.ClusterConfig
+	zone          string
+	nodeID        string
 	advertiseAddr string
-	isLeader  atomic.Int32
-	stopChan  chan struct{}
-	stopOnce  sync.Once
-	ttl       time.Duration
+	isLeader      atomic.Int32
+	stopChan      chan struct{}
+	stopOnce      sync.Once
+	ttl           time.Duration
 	renewInterval time.Duration
 }
 

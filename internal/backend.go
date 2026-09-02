@@ -12,10 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/util/nacos"
-	"github.com/streasure/sgate/cluster"
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/protobuf"
+	"github.com/streasure/util/nacos"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -92,9 +93,9 @@ var DefaultHealthCheckConfig = HealthCheckConfig{
 }
 
 type StreamShard struct {
-	stream protobuf.GatewayService_StreamMessagesClient
+	stream sgate.GatewayService_StreamMessagesClient
 	mu     sync.Mutex
-	sendCh chan *protobuf.Message
+	sendCh chan *commonstruct.Message
 	ctx    context.Context
 	cancel context.CancelFunc
 	index  int
@@ -120,7 +121,7 @@ func NewStreamManager(shardCount int, sendChannelSize int) *StreamManager {
 	}
 	for i := range sm.shards {
 		sm.shards[i] = &StreamShard{
-			sendCh: make(chan *protobuf.Message, sendChannelSize),
+			sendCh: make(chan *commonstruct.Message, sendChannelSize),
 			index:  i,
 		}
 	}
@@ -147,7 +148,7 @@ type writeCoalescer struct {
 // bufPtr 持有指向池化 buffer 的指针，在 flush 后通过 AsyncWrite callback 归还。
 type coalescedEntry struct {
 	conn   *Connection
-	data   []byte // [4字节 len][payload] 重复格式，底层数组来自 coalescerBufPool
+	data   []byte  // [4字节 len][payload] 重复格式，底层数组来自 coalescerBufPool
 	bufPtr *[]byte // 指向 coalescerBufPool 中获取的 buffer，用于归还
 }
 
@@ -161,7 +162,7 @@ var coalescerBufPool = sync.Pool{
 }
 
 const (
-	coalesceFlushCount    = 50000                 // 累积 5 万条消息后 flush，减少 event-loop 入队次数
+	coalesceFlushCount    = 50000                // 累积 5 万条消息后 flush，减少 event-loop 入队次数
 	coalesceFlushInterval = 5 * time.Millisecond // 5ms 超时 flush，限制推送延迟
 	coalescerMaxBufCap    = 1 << 20              // 1MB：归还到池的 buffer 容量上限，避免持有过大 buffer
 )
@@ -293,7 +294,7 @@ func (s *StreamShard) startSendLoop() {
 		}
 	}()
 	const maxBatchCount = 256
-	batch := make([]*protobuf.Message, 0, maxBatchCount)
+	batch := make([]*commonstruct.Message, 0, maxBatchCount)
 	for {
 		msg, ok := <-s.sendCh
 		if !ok {
@@ -304,7 +305,7 @@ func (s *StreamShard) startSendLoop() {
 		// to avoid double-batching overhead. These messages already contain
 		// multiple frames packed into Data with ConnectionId on the outer message.
 		// This is the hot path for high-throughput forwarding (gnet-level batching).
-		if msg.Route == protobuf.RouteBatch {
+		if msg.Route == sgate.RouteBatch {
 			s.mu.Lock()
 			stream := s.stream
 			s.mu.Unlock()
@@ -372,8 +373,8 @@ func (s *StreamShard) startSendLoop() {
 				count++
 			}
 			if count > 0 {
-				batchMsg := &protobuf.Message{
-					Route: protobuf.RouteBatch,
+				batchMsg := &commonstruct.Message{
+					Route: sgate.RouteBatch,
 					Data:  buf,
 					Cmd:   int32(count),
 				}
@@ -393,7 +394,8 @@ func (s *StreamShard) startSendLoop() {
 
 // safeStreamSend wraps stream.Send() to recover from panics caused by
 // concurrent close operations on the gRPC stream.
-func safeStreamSend(stream protobuf.GatewayService_StreamMessagesClient, msg *protobuf.Message) (err error) {	defer func() {
+func safeStreamSend(stream sgate.GatewayService_StreamMessagesClient, msg *commonstruct.Message) (err error) {
+	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("stream send panic: %v", r)
 		}
@@ -401,7 +403,7 @@ func safeStreamSend(stream protobuf.GatewayService_StreamMessagesClient, msg *pr
 	return stream.Send(msg)
 }
 
-func (s *StreamShard) SendMessage(msg *protobuf.Message) (err error) {
+func (s *StreamShard) SendMessage(msg *commonstruct.Message) (err error) {
 	// Fast path: check closed flag atomically, skip defer/recover overhead
 	if s.closed.Load() {
 		return ErrNotConnected
@@ -423,7 +425,7 @@ func (s *StreamShard) SendMessage(msg *protobuf.Message) (err error) {
 }
 
 type LogicClient struct {
-	client            protobuf.GatewayServiceClient
+	client            sgate.GatewayServiceClient
 	conn              *grpc.ClientConn
 	mu                sync.RWMutex
 	state             int32
@@ -555,7 +557,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	lc.mu.Lock()
 	lc.conn = conn
-	lc.client = protobuf.NewGatewayServiceClient(conn)
+	lc.client = sgate.NewGatewayServiceClient(conn)
 	lc.mu.Unlock()
 
 	lc.mu.Lock()
@@ -790,7 +792,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		//     → 只需一次 GetConnection，所有 payload 发送到同一连接
 		//   multi-conn (msg.ConnectionId 为空): Data = [2字节 connIDLen][connID][4字节 payloadLen][payload] 重复
 		//     → 每条消息单独查找连接
-		if lc.gateway != nil && msg.Route == protobuf.RouteBatch {
+		if lc.gateway != nil && msg.Route == sgate.RouteBatch {
 			data := msg.Data
 
 			if msg.ConnectionId != "" {
@@ -799,25 +801,25 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 					lc.gateway.AddPushDroppedNoConn(int64(msg.Cmd))
 				}
 			} else {
-			// multi-conn 路径：逐条解析 connID，加入 coalescer（不再逐条 flush）
-			var dropped int64
-			for len(data) >= 6 {
-				connIDLen := int(binary.BigEndian.Uint16(data[:2]))
-				if connIDLen == 0 || len(data) < 2+connIDLen+4 {
-					break
-				}
-				connID := string(data[2 : 2+connIDLen])
-				payloadLen := int(binary.BigEndian.Uint32(data[2+connIDLen : 6+connIDLen]))
-				if len(data) < 6+connIDLen+payloadLen {
-					break
-				}
-				payload := data[6+connIDLen : 6+connIDLen+payloadLen]
-				data = data[6+connIDLen+payloadLen:]
+				// multi-conn 路径：逐条解析 connID，加入 coalescer（不再逐条 flush）
+				var dropped int64
+				for len(data) >= 6 {
+					connIDLen := int(binary.BigEndian.Uint16(data[:2]))
+					if connIDLen == 0 || len(data) < 2+connIDLen+4 {
+						break
+					}
+					connID := string(data[2 : 2+connIDLen])
+					payloadLen := int(binary.BigEndian.Uint32(data[2+connIDLen : 6+connIDLen]))
+					if len(data) < 6+connIDLen+payloadLen {
+						break
+					}
+					payload := data[6+connIDLen : 6+connIDLen+payloadLen]
+					data = data[6+connIDLen+payloadLen:]
 
-				if !wc.addMulti(connID, payload) {
-					dropped++
+					if !wc.addMulti(connID, payload) {
+						dropped++
+					}
 				}
-			}
 				if dropped > 0 {
 					lc.gateway.AddPushDroppedNoConn(dropped)
 				}
@@ -845,7 +847,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 }
 
 // handleReceivedMessage 处理单条来自 logic 的消息（正向转发或 server.* 路由）
-func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
+func (lc *LogicClient) handleReceivedMessage(msg *commonstruct.Message) {
 	if lc.gateway == nil {
 		return
 	}
@@ -862,12 +864,12 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 			return
 		}
 		// login 响应: 逻辑服务器返回 UserUuid，网关提取并更新连接的认证状态
-		if msg.Route == protobuf.RouteLogin && msg.UserUuid != "" {
+		if msg.Route == sgate.RouteLogin && msg.UserUuid != "" {
 			conn.SetUserUUID(msg.UserUuid)
 			tlog.Debug("login response updated connection userUUID", "connectionID", msg.ConnectionId, "userUUID", msg.UserUuid)
 		}
 		// 注意: 不能使用 pooled buffer，因为 gnet Writev 可能异步传递 slice 引用
-		responseData, err := proto.Marshal(msg)
+		responseData, err := marshalClientMessage(msg)
 		if err == nil {
 			conn.Send(responseData)
 			lc.gateway.AddPushedToClient(1)
@@ -876,22 +878,22 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 	}
 
 	// server.* 路由：以下指令不需要 ConnectionId（按 Payload 中的 key 定位目标）
-	if route == protobuf.RouteServerBroadcast {
+	if route == sgate.RouteServerBroadcast {
 		// 预序列化：避免 Broadcast 内部为每个连接重复 proto.Marshal
-		pushMsg := &protobuf.Message{
+		pushMsg := &commonstruct.Message{
 			Route:   "broadcast",
 			Payload: msg.Payload,
 		}
-		if data, err := proto.Marshal(pushMsg); err == nil {
+		if data, err := marshalClientMessage(pushMsg); err == nil {
 			lc.gateway.GetConnectionManager().BroadcastBytes(data)
 		}
 		return
 	}
 
-	if route == protobuf.RouteServerSendToUser {
+	if route == sgate.RouteServerSendToUser {
 		userUUID := msg.Payload["userUUID"]
 		if userUUID != "" {
-			responseData, _ := proto.Marshal(&protobuf.Message{
+			responseData, _ := marshalClientMessage(&commonstruct.Message{
 				Route:   msg.Payload["route"],
 				Payload: msg.Payload,
 			})
@@ -902,22 +904,22 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		return
 	}
 
-	if route == protobuf.RouteServerSendToGroup {
+	if route == sgate.RouteServerSendToGroup {
 		groupID := msg.Payload["groupID"]
 		if groupID != "" {
 			// 预序列化：避免 SendToGroup 内部为每个成员重复 proto.Marshal
-			sendMsg := &protobuf.Message{
+			sendMsg := &commonstruct.Message{
 				Route:   msg.Payload["route"],
 				Payload: msg.Payload,
 			}
-			if data, err := proto.Marshal(sendMsg); err == nil {
+			if data, err := marshalClientMessage(sendMsg); err == nil {
 				lc.gateway.GetConnectionManager().SendToGroupBytes(groupID, data)
 			}
 		}
 		return
 	}
 
-	if route == protobuf.RouteServerJoinGroupByUser {
+	if route == sgate.RouteServerJoinGroupByUser {
 		groupID := msg.Payload["groupID"]
 		serverID := msg.Payload["serverID"]
 		userUUID := msg.Payload["userUUID"]
@@ -927,7 +929,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		return
 	}
 
-	if route == protobuf.RouteServerLeaveGroupByUser {
+	if route == sgate.RouteServerLeaveGroupByUser {
 		groupID := msg.Payload["groupID"]
 		serverID := msg.Payload["serverID"]
 		userUUID := msg.Payload["userUUID"]
@@ -937,7 +939,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		return
 	}
 
-	if route == protobuf.RouteServerCreateGroup {
+	if route == sgate.RouteServerCreateGroup {
 		groupID := msg.Payload["groupID"]
 		groupName := msg.Payload["groupName"]
 		if groupID != "" {
@@ -946,7 +948,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		return
 	}
 
-	if route == protobuf.RouteServerDeleteGroup {
+	if route == sgate.RouteServerDeleteGroup {
 		groupID := msg.Payload["groupID"]
 		if groupID != "" {
 			lc.gateway.GetConnectionManager().DeleteGroup(groupID)
@@ -954,7 +956,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		return
 	}
 
-	if route == protobuf.RouteServerGetGroupInfo {
+	if route == sgate.RouteServerGetGroupInfo {
 		groupID := msg.Payload["groupID"]
 		if groupID != "" {
 			memberCount := lc.gateway.GetConnectionManager().GetGroupMemberCount(groupID)
@@ -975,19 +977,19 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		return
 	}
 
-	if route == protobuf.RouteServerKick {
+	if route == sgate.RouteServerKick {
 		reason := ""
 		if msg.Payload != nil {
 			reason = msg.Payload["reason"]
 		}
-		responseData, _ := proto.Marshal(msg)
+		responseData, _ := marshalClientMessage(msg)
 		conn.Send(responseData)
 		tlog.Info("kicking connection by logic server", "connectionID", msg.ConnectionId, "reason", reason)
 		lc.gateway.GetConnectionManager().RemoveConnection(msg.ConnectionId)
 		if conn.Conn != nil {
 			conn.Conn.Close()
 		}
-	} else if route == protobuf.RouteServerJoinGroup {
+	} else if route == sgate.RouteServerJoinGroup {
 		groupID := msg.Payload["groupID"]
 		connID := msg.ConnectionId
 		if groupID != "" && connID != "" {
@@ -1001,10 +1003,10 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 		}
 		conn := lc.gateway.GetConnectionManager().GetConnection(connID)
 		if conn != nil {
-			responseData, _ := proto.Marshal(msg)
+			responseData, _ := marshalClientMessage(msg)
 			conn.Send(responseData)
 		}
-	} else if route == protobuf.RouteServerLeaveGroup {
+	} else if route == sgate.RouteServerLeaveGroup {
 		groupID := msg.Payload["groupID"]
 		connID := msg.ConnectionId
 		if groupID != "" && connID != "" {
@@ -1016,7 +1018,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *protobuf.Message) {
 			}
 		}
 	} else {
-		responseData, err := proto.Marshal(msg)
+		responseData, err := marshalClientMessage(msg)
 		if err == nil {
 			conn.Send(responseData)
 		}
@@ -1056,7 +1058,7 @@ func (lc *LogicClient) handleDisconnection() {
 	}
 }
 
-func (lc *LogicClient) SendMessage(msg *protobuf.Message) error {
+func (lc *LogicClient) SendMessage(msg *commonstruct.Message) error {
 	// Fast path: check state atomically without lock
 	if lc.getState() != StateConnected {
 		lc.mu.RLock()
@@ -1083,7 +1085,7 @@ func (lc *LogicClient) SendMessage(msg *protobuf.Message) error {
 	return nil
 }
 
-func (lc *LogicClient) SendMessageDirect(msg *protobuf.Message) error {
+func (lc *LogicClient) SendMessageDirect(msg *commonstruct.Message) error {
 	lc.mu.RLock()
 	state := lc.getState()
 	closing := lc.closing
@@ -1170,8 +1172,8 @@ func (hc *HealthChecker) doCheck() {
 		return
 	}
 
-	pingMsg := &protobuf.Message{
-		Route:   protobuf.RoutePing,
+	pingMsg := &commonstruct.Message{
+		Route:   sgate.RoutePing,
 		Payload: map[string]string{"type": "health_check"},
 	}
 
@@ -1279,7 +1281,7 @@ func (rm *ReconnectManager) doReconnect() {
 }
 
 type StreamMessageQueue struct {
-	queue   []*protobuf.Message
+	queue   []*commonstruct.Message
 	mu      sync.Mutex
 	cond    *sync.Cond
 	maxSize int
@@ -1287,14 +1289,14 @@ type StreamMessageQueue struct {
 
 func NewStreamMessageQueue() *StreamMessageQueue {
 	mq := &StreamMessageQueue{
-		queue:   make([]*protobuf.Message, 0),
+		queue:   make([]*commonstruct.Message, 0),
 		maxSize: 100000,
 	}
 	mq.cond = sync.NewCond(&mq.mu)
 	return mq
 }
 
-func (mq *StreamMessageQueue) Enqueue(msg *protobuf.Message) {
+func (mq *StreamMessageQueue) Enqueue(msg *commonstruct.Message) {
 	mq.mu.Lock()
 	if len(mq.queue) >= mq.maxSize {
 		mq.queue = mq.queue[1:]
@@ -1304,7 +1306,7 @@ func (mq *StreamMessageQueue) Enqueue(msg *protobuf.Message) {
 	mq.mu.Unlock()
 }
 
-func (mq *StreamMessageQueue) Dequeue() (*protobuf.Message, bool) {
+func (mq *StreamMessageQueue) Dequeue() (*commonstruct.Message, bool) {
 	mq.mu.Lock()
 	if len(mq.queue) == 0 {
 		mq.mu.Unlock()
@@ -1356,7 +1358,7 @@ type GatewayInterface interface {
 }
 
 type GRPCServer struct {
-	protobuf.UnimplementedGatewayServiceServer
+	sgate.UnimplementedGatewayServiceServer
 	gateway GatewayInterface
 	mu      sync.Mutex
 }
@@ -1367,7 +1369,7 @@ func NewGRPCServer(gateway GatewayInterface) *GRPCServer {
 	}
 }
 
-func (s *GRPCServer) StreamMessages(stream protobuf.GatewayService_StreamMessagesServer) error {
+func (s *GRPCServer) StreamMessages(stream sgate.GatewayService_StreamMessagesServer) error {
 	connectionID := generateConnectionID()
 
 	ctx := map[string]interface{}{
@@ -1382,11 +1384,11 @@ func (s *GRPCServer) StreamMessages(stream protobuf.GatewayService_StreamMessage
 		}
 
 		s.handleGRPCMessage(connectionID, msg, func(response interface{}) {
-			if protoMsg, ok := response.(*protobuf.Message); ok {
+			if protoMsg, ok := response.(*commonstruct.Message); ok {
 				stream.Send(protoMsg)
-			} else if errorMsg, ok := response.(*protobuf.ErrorResponse); ok {
-				responseMsg := &protobuf.Message{
-					Route: protobuf.RouteError,
+			} else if errorMsg, ok := response.(*commonstruct.ErrorResponse); ok {
+				responseMsg := &commonstruct.Message{
+					Route: sgate.RouteError,
 					Payload: map[string]string{
 						"message": errorMsg.Error.Message,
 						"code":    errorMsg.Error.Code,
@@ -1399,7 +1401,7 @@ func (s *GRPCServer) StreamMessages(stream protobuf.GatewayService_StreamMessage
 	}
 }
 
-func (s *GRPCServer) SendMessage(ctx context.Context, msg *protobuf.Message) (*protobuf.Message, error) {
+func (s *GRPCServer) SendMessage(ctx context.Context, msg *commonstruct.Message) (*commonstruct.Message, error) {
 	connectionID := generateConnectionID()
 
 	grpcCtx := map[string]interface{}{
@@ -1407,17 +1409,17 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protobuf.Message) (*p
 		"context":       ctx,
 	}
 
-	var response *protobuf.Message
+	var response *commonstruct.Message
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	s.handleGRPCMessage(connectionID, msg, func(resp interface{}) {
 		defer wg.Done()
-		if protoMsg, ok := resp.(*protobuf.Message); ok {
+		if protoMsg, ok := resp.(*commonstruct.Message); ok {
 			response = protoMsg
-		} else if errorMsg, ok := resp.(*protobuf.ErrorResponse); ok {
-			response = &protobuf.Message{
-				Route: protobuf.RouteError,
+		} else if errorMsg, ok := resp.(*commonstruct.ErrorResponse); ok {
+			response = &commonstruct.Message{
+				Route: sgate.RouteError,
 				Payload: map[string]string{
 					"message": errorMsg.Error.Message,
 					"code":    errorMsg.Error.Code,
@@ -1431,7 +1433,7 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protobuf.Message) (*p
 	return response, nil
 }
 
-func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protobuf.Message, callback func(interface{}), ctx map[string]interface{}) {
+func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *commonstruct.Message, callback func(interface{}), ctx map[string]interface{}) {
 	if msg.Route == "" {
 		callback(newErrorResponse("error", "Missing route", "", ""))
 		return
@@ -1454,7 +1456,7 @@ func StartGRPCServer(gateway GatewayInterface, port string, maxMsgSize int, wind
 		grpc.InitialConnWindowSize(int32(windowSize)),
 	)
 	tlog.Info("registering GatewayService")
-	protobuf.RegisterGatewayServiceServer(server, NewGRPCServer(gateway))
+	sgate.RegisterGatewayServiceServer(server, NewGRPCServer(gateway))
 
 	tlog.Info("listening on port", "port", port)
 	listener, err := net.Listen("tcp", port)
@@ -1626,7 +1628,7 @@ func (pool *LogicClientPool) handleServiceDeregister(event nacos.ServiceEvent) {
 	)
 }
 
-func (pool *LogicClientPool) SendMessage(msg *protobuf.Message) error {
+func (pool *LogicClientPool) SendMessage(msg *commonstruct.Message) error {
 	// Fast path: single client, no lock needed
 	if c := pool.fastClient.Load(); c != nil {
 		return c.SendMessage(msg)
@@ -1634,7 +1636,7 @@ func (pool *LogicClientPool) SendMessage(msg *protobuf.Message) error {
 	return pool.RoundRobinSendMessage(msg)
 }
 
-func (pool *LogicClientPool) RoundRobinSendMessage(msg *protobuf.Message) error {
+func (pool *LogicClientPool) RoundRobinSendMessage(msg *commonstruct.Message) error {
 	pool.mu.RLock()
 	n := len(pool.ordered)
 	if n == 0 {

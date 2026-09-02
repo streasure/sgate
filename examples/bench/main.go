@@ -14,7 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/sgate/protobuf"
+	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/sgate"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -32,11 +33,15 @@ var drainBufPool = sync.Pool{
 }
 
 func buildSendFrame() {
-	msg := &protobuf.Message{
-		Route:   protobuf.RouteTest,
+	body := &commonstruct.Message{
+		Route:   sgate.RouteTest,
 		Payload: map[string]string{"data": "1"},
 	}
-	data, _ := proto.Marshal(msg)
+	bodyData, _ := proto.Marshal(body)
+	data, _ := proto.Marshal(&commonstruct.MessageFrame{
+		Cmd:  sgate.CmdForRoute(sgate.RouteTest),
+		Body: bodyData,
+	})
 	frame := make([]byte, 4+len(data))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
 	copy(frame[4:], data)
@@ -72,7 +77,7 @@ func newBenchConn(addr string) (*benchConn, error) {
 	tcpConn := conn.(*net.TCPConn)
 	tcpConn.SetNoDelay(true)
 	tcpConn.SetReadBuffer(64 * 1024 * 1024) // 64MB kernel recv buffer
-	tcpConn.SetWriteBuffer(8 * 1024 * 1024)  // 8MB kernel send buffer
+	tcpConn.SetWriteBuffer(8 * 1024 * 1024) // 8MB kernel send buffer
 	return &benchConn{conn: tcpConn}, nil
 }
 
@@ -82,17 +87,21 @@ func (bc *benchConn) close() {
 
 // authenticate 发送 handshake + login 使连接通过认证
 func (bc *benchConn) authenticate(clientID int) error {
-	hs := &protobuf.Handshake{
+	hs := &commonstruct.Handshake{
 		ProtocolVersion: "1.0",
 		ClientType:      "bench",
 		Timestamp:       time.Now().UnixMilli(),
 	}
 	hsData, _ := proto.Marshal(hs)
-	handshake := &protobuf.Message{
-		Route:   protobuf.RouteHandshake,
+	body := &commonstruct.Message{
+		Route:   sgate.RouteHandshake,
 		Payload: map[string]string{"serverId": "bench_server", "handshake_data": base64.StdEncoding.EncodeToString(hsData)},
 	}
-	handshakeData, _ := proto.Marshal(handshake)
+	bodyData, _ := proto.Marshal(body)
+	handshakeData, _ := proto.Marshal(&commonstruct.MessageFrame{
+		Cmd:  sgate.CmdForRoute(sgate.RouteHandshake),
+		Body: bodyData,
+	})
 	handshakeFrame := make([]byte, 4+len(handshakeData))
 	binary.BigEndian.PutUint32(handshakeFrame[:4], uint32(len(handshakeData)))
 	copy(handshakeFrame[4:], handshakeData)
@@ -121,11 +130,15 @@ func (bc *benchConn) authenticate(clientID int) error {
 	}
 	bc.conn.SetReadDeadline(time.Time{})
 
-	loginMsg := &protobuf.Message{
-		Route:   protobuf.RouteLogin,
+	loginBody := &commonstruct.Message{
+		Route:   sgate.RouteLogin,
 		Payload: map[string]string{"userId": fmt.Sprintf("bench_%d", clientID)},
 	}
-	loginData, _ := proto.Marshal(loginMsg)
+	loginBodyData, _ := proto.Marshal(loginBody)
+	loginData, _ := proto.Marshal(&commonstruct.MessageFrame{
+		Cmd:  sgate.CmdForRoute(sgate.RouteLogin),
+		Body: loginBodyData,
+	})
 	loginFrame := make([]byte, 4+len(loginData))
 	binary.BigEndian.PutUint32(loginFrame[:4], uint32(len(loginData)))
 	copy(loginFrame[4:], loginData)
