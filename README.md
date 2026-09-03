@@ -1,30 +1,139 @@
 # sgate - 高性能游戏网关
 
-sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/WebSocket 多协议接入，通过 gRPC 与逻辑服通信，具备**千万级 QPS** 双向转发能力。
+sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/WebSocket 多协议接入，通过 gRPC 双向流与逻辑服通信，具备**百万级 QPS** 双向转发能力。
 
 ## 架构概览
 
 ```
-客户端 (TCP/UDP/WS) ──→ sgate Gateway ──(gRPC)──→ Logic Server
-         ↑                    │
-         └──(gRPC 反向推送)───┘     Nacos (配置中心/服务发现/集群选举)
+客户端 (TCP/UDP/WS)
+    │
+    │  MessageFrame{cmd, seq_id, body=StreamData}
+    ▼
+┌─────────────────────────────────────────────────┐
+│                  sgate Gateway                   │
+│                                                  │
+│  OnTraffic ──► decodeClientMessage ──► filter ──►│──► gRPC StreamData ──► Logic Server
+│  OnTraffic ◄── marshalClientMessage ◄── push  ◄──│◄── gRPC StreamData ◄── Logic Server
+│                                                  │
+│  ConnectionManager: session映射/组管理/广播       │
+│  OverloadProtector: CPU/内存过载保护             │
+│  Security: IP黑名单/限流/熔断/WAF/JWT            │
+└─────────────────────────────────────────────────┘
+         │
+    Nacos (配置中心 / 服务发现 / 集群选举)
+```
+
+## 协议设计
+
+### 客户端 ↔ Gateway：MessageFrame
+
+客户端与 Gateway 之间使用 `MessageFrame` 作为线路协议：
+
+```protobuf
+message MessageFrame {
+    int32 cmd    = 1;   // 指令号（由 enums/cmd.proto 定义或 CmdForRoute 生成）
+    int64 seq_id = 2;   // 序列号（请求-响应配对）
+    bytes body   = 99;  // 业务载荷（序列化的 StreamData）
+}
+```
+
+- 固定3个字段， protowire 零拷贝解析
+- `body` 内部是 `StreamData` 的序列化字节，Gateway 解析后转发给 Logic
+
+### Gateway ↔ Logic：StreamData (onData 双向流)
+
+Gateway 与 Logic 之间使用 `GatewayStream.onData` 双向 gRPC 流：
+
+```protobuf
+service GatewayStream {
+    rpc onData(stream StreamData) returns (stream StreamData);
+}
+
+message StreamData {
+    string session_id = 1;   // 连接会话 ID
+    string user_key   = 2;   // 用户唯一标识（登录后填充）
+    int32  cmd        = 3;   // 指令号
+    int64  seq_id     = 4;   // 序列号
+    bytes  data       = 5;   // 业务载荷
+    string client_ip  = 6;   // 客户端 IP
+    string route      = 7;   // 路由键（内部控制用）
+    int64  timestamp  = 8;   // 时间戳
+    map<string, string> payload = 9;   // 键值对载荷
+    string checksum           = 10;  // 校验和
+    string protocol_version   = 11;  // 协议版本
+}
+```
+
+### 数据流
+
+```
+正向（客户端→逻辑服）:
+  客户端发送: [4字节长度][MessageFrame{cmd, seq_id, body=StreamData{...}}]
+  Gateway解码: ExtractMessageFrame → 提取 cmd/seq_id/body
+  Gateway转发: StreamData{session_id, user_key, cmd, seq_id, data=body, client_ip}
+  Logic处理: 按 cmd 路由到注册的 handler
+
+反向（逻辑服→客户端）:
+  Logic推送: StreamData{session_id, user_key, route, data, ...}
+  Gateway编码: marshalClientMessage → [4字节长度][MessageFrame{cmd, seq_id, body}]
+  Gateway发送: 按 session_id 查找连接，写入 gnet 事件循环
 ```
 
 ## 核心特性
 
-- **高性能**: 基于 gnet 事件驱动网络框架，写合并（write coalescing）+ 批量刷新，单节点 2.8M+ 双向 QPS
-- **多协议支持**: TCP、UDP、WebSocket
-- **服务发现**: 基于 Nacos 的自动服务发现与注册，支持 zone 隔离（委托 `util/nacos`）
+- **高性能**: 基于 gnet v2 事件驱动网络框架，写合并（write coalescing）+ 批量刷新
+- **多协议**: TCP、UDP、WebSocket
+- **服务发现**: Nacos 自动注册/发现，支持 zone 隔离
 - **集群部署**: 多节点水平扩展，Leader 选举与自动容灾
 - **安全防护**: IP 白名单/黑名单、多维限流、熔断器、WAF、TLS、消息完整性校验
-- **监控面板**: `/stats` JSON + `/metrics` Prometheus + `/health` `/ready` `/live` K8s 探针
-- **配置热更新**: 限流阈值/白名单/黑名单/过载保护参数无需重启
-- **推送模式**: 个人推送、组推送（100 人组 = 127M msg/sec）、全服广播
+- **监控**: `/stats` JSON + `/metrics` Prometheus + `/health` `/ready` `/live` K8s 探针
+- **推送模式**: 个人推送、组推送、全服广播
+
+## 指令号定义
+
+```protobuf
+// enums/cmd.proto
+enum Cmd {
+    CMD_UNSPECIFIED       = 0;
+    CMD_USER_INFO         = 1;
+    CMD_MESSAGE           = 2;
+    CMD_ERROR_RESPONSE    = 3;
+    CMD_HANDSHAKE         = 11;
+    CMD_STREAM_DATA       = 14;
+
+    // 逻辑层 (1,000,000+)
+    CMD_LOGIN_REQ         = 1000001;
+    CMD_LOGIN_ACK         = 1000002;
+    CMD_LOGOUT_REQ        = 1000003;
+    CMD_LOGOUT_ACK        = 1000004;
+    CMD_PUSH_NOTIFY       = 1000006;
+    CMD_KICK_NOTIFY       = 1000009;
+}
+```
+
+### 路由常量（gateway/routes.go）
+
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `RouteHandshake` | `"handshake"` | 握手（Gateway 内部处理） |
+| `RouteLogin` | `"login"` | 登录（Gateway 放行 + Logic 处理） |
+| `RoutePing` | `"ping"` | 心跳请求 |
+| `RoutePong` | `"pong"` | 心跳响应 |
+| `RouteBatch` | `"_batch"` | 批量消息封包 |
+| `RouteServerKick` | `"server.kick"` | 踢下线 |
+| `RouteServerJoinGroup` | `"server.join_group"` | 加入组 |
+| `RouteServerLeaveGroup` | `"server.leave_group"` | 离开组 |
+| `RouteServerSendToGroup` | `"server.send_to_group"` | 组推送 |
+| `RouteServerBroadcast` | `"server.broadcast"` | 全服广播 |
+| `RouteServerSendToUser` | `"server.send_to_user"` | 跨用户推送 |
 
 ## 依赖
 
 ```
-github.com/streasure/util v1.0.1
+github.com/streasure/util v1.0.5
+github.com/streasure/protocol (本地 replace)
+google.golang.org/grpc v1.64.0
+google.golang.org/protobuf v1.33.0
 ```
 
 ## 快速开始
@@ -35,7 +144,7 @@ github.com/streasure/util v1.0.1
 $env:CGO_ENABLED=0
 
 # Gateway
-go build -o gw.exe ./examples/high_concurrency_gateway/
+go build -o gw.exe ./cmd/gateway/
 
 # Logic Server
 go build -o logic.exe ./examples/logic_server/
@@ -48,23 +157,23 @@ go build -o push_bench.exe ./examples/push_bench/
 ### 2. 启动
 
 ```bash
-# 终端 1: 启动 Logic Server
+# 终端 1: 启动 Logic Server（监听 :50052）
 ./logic.exe
 
-# 终端 2: 启动 Gateway
+# 终端 2: 启动 Gateway（TCP :48080, gRPC :50051, metrics :9100）
 ./gw.exe
 ```
 
 ### 3. 压测
 
 ```bash
-# 双向压测（duplex）：100 连接，10 秒，batch=16
+# 双向压测: 100 连接, 10 秒, batch=16
 ./bench.exe 127.0.0.1:48080 100 10 16
 
 # 推送压测
-./push_bench.exe 127.0.0.1:48080 100 10 personal 16 5000
-./push_bench.exe 127.0.0.1:48080 100 10 group 16 5000
-./push_bench.exe 127.0.0.1:48080 100 10 broadcast 16 5000
+./push_bench.exe 127.0.0.1:48080 100 10 personal 16 8192
+./push_bench.exe 127.0.0.1:48080 100 10 group 16 8192
+./push_bench.exe 127.0.0.1:48080 100 10 broadcast 16 8192
 ```
 
 ## 压测结果
@@ -75,44 +184,234 @@ go build -o push_bench.exe ./examples/push_bench/
 
 | 指标 | 数值 |
 |------|------|
-| 正向 QPS (client→sgate→logic) | **2.92M** |
-| 推送 QPS (logic→sgate→client) | **2.82M** |
+| 正向 QPS (client→gateway→logic) | **2.25M** |
+| 推送 QPS (logic→gateway→client) | **2.17M** |
 | 正向丢弃 | **0** |
+| 推送丢弃 | **0** |
 | 结果 | **BIDIRECTIONAL SUCCESS** |
 
 ### 推送压测（100 连接, 10s, batchSize=16）
 
 | 模式 | 发送 QPS | 接收 QPS | 有效吞吐 | 说明 |
 |------|----------|----------|----------|------|
-| Personal push | 1.43M | 1.38M | 1.38M/sec | 每次请求推 1 个客户端 |
-| Group push (100人) | 1.32M | 1.27M | **127M/sec** | 每次请求推整个组 |
-| Broadcast (100人) | 1.41M | 1.36M | **136M/sec** | 每次请求推所有客户端 |
+| Personal push | 1.17M | 1.08M | 1.08M/sec | 每次请求推 1 个客户端 |
+| Group push (100人) | 280K | 198K | **19.8M/sec** | 每次请求推整个组 |
+| Broadcast (100人) | 386K | 366K | **36.6M/sec** | 每次请求推所有客户端 |
 
-## 项目接入指南
+## 实现原理
 
-### 1. 项目接入（go.mod）
+### 1. 网络层：gnet 事件驱动
 
-```go
-module your-project
+Gateway 使用 gnet v2 作为网络框架，所有 TCP 连接运行在单个事件循环中：
 
-go 1.22.5
-
-require (
-    github.com/streasure/sgate v1.0.0
-    github.com/streasure/util v1.0.1
-)
+```
+OnTraffic(conn, inBuf)
+  ├── 解析 [4字节长度][MessageFrame] 帧
+  ├── 首帧拦截: handshake/login 个别处理
+  ├── 批量收集: 多帧打包为 RouteBatch
+  ├── 认证守卫: 未认证连接拒绝转发
+  ├── 过滤器链: IP黑名单 → 限流 → WAF → 熔断 → 完整性校验
+  └── 转发: logicClient.SendMessage(batchMsg)
 ```
 
-### 2. Logic Server 接入
+**关键优化**：
+- 写合并（write coalescing）：多条推送消息合并为单次系统调用
+- 零拷贝帧解析：`ExtractMessageFrame` 使用 protowire 直接扫描字节，不反序列化整个 MessageFrame
+- 批量转发：多条客户端消息打包为单个 `RouteBatch`，减少 gRPC 调用次数
+
+### 2. 协议层：MessageFrame + StreamData
+
+```
+客户端发送 (wire bytes):
+  [00 00 00 1B] [MessageFrame{cmd=1000001, seq_id=1, body=LoginReq{...}}]
+   ↑ 4字节长度     ↑ protobuf 序列化
+
+Gateway 解码:
+  ExtractMessageFrame(data) → (cmd=1000001, seqID=1, body=LoginReq_bytes)
+  → StreamData{Route: RouteForCmd(cmd), Cmd: cmd, SeqId: seqID, Data: body}
+
+Gateway 转发 (gRPC stream):
+  StreamData{
+    SessionId: "conn_abc123",
+    UserKey:   "uuid_12345",      // 登录后填充
+    Cmd:       1000001,
+    SeqId:     1,
+    Data:      LoginReq_bytes,
+    ClientIp:  "192.168.1.100",
+  }
+
+Logic 处理:
+  按 cmd 查找 cmdRoutes → 调用注册的 handler → 返回 StreamData
+
+Gateway 编码回包:
+  marshalClientMessage(response) → [4字节长度][MessageFrame{cmd, seq_id, body}]
+```
+
+### 3. 登录流程
+
+```
+客户端                    Gateway                     Logic
+  │                         │                           │
+  │── MessageFrame ────────►│                           │
+  │   {cmd=1, body=         │                           │
+  │    Handshake{...}}      │                           │
+  │                         │── 版本协商 ──►            │
+  │◄── HandshakeResponse ──│                            │
+  │                         │                           │
+  │── MessageFrame ────────►│                           │
+  │   {cmd=2, body=         │                           │
+  │    StreamData{          │                           │
+  │      Route:"login",     │── StreamData ────────────►│
+  │      Payload:{userId}}  │                           │── 注册 user→conn 映射
+  │                         │                           │── 返回 LoginAck
+  │                         │◄── StreamData ────────────│
+  │◄── MessageFrame ───────│  {UserKey:"uuid_xxx"}     │
+  │   {cmd=2, body=         │                           │
+  │    LoginAck{code:200}}  │                           │
+```
+
+### 4. 心跳流程
+
+```
+客户端                    Gateway                     Logic
+  │                         │                           │
+  │── MessageFrame ────────►│                           │
+  │   {cmd=CmdForRoute(     │── StreamData ────────────►│
+  │    "ping"), body=        │                           │── 返回 Pong
+  │    StreamData{           │◄── StreamData ────────────│
+  │      Route:"ping"}}     │                           │
+  │◄── MessageFrame ───────│  {Route:"pong",            │
+  │   {cmd=respCmd, body=   │   Timestamp:...}          │
+  │    StreamData{           │                           │
+  │      Route:"pong"}}     │                           │
+```
+
+### 5. 推送模式
+
+#### 个人推送（Burst Route）
+```
+Logic 调用 push 回调:
+  push(&StreamData{Route:"notify", Payload:{...}})
+  → flushLoop 序列化 → stream.Send()
+  → Gateway 收到 → 按 SessionId 查找连接 → Writev 合并写入
+```
+
+#### 组推送
+```
+Logic 调用 SendToGroup:
+  PushToServer(&StreamData{Route:"server.send_to_group", Payload:{groupID:"xxx"}})
+  → Gateway ConnectionManager.SendToGroup()
+  → 遍历组内所有连接 → 逐条 Writev
+```
+
+#### 全服广播
+```
+Logic 调用 Broadcast:
+  PushToServer(&StreamData{Route:"server.broadcast"})
+  → Gateway ConnectionManager.Broadcast()
+  → 遍历所有活跃连接 → 逐条 Writev
+```
+
+### 6. 性能优化
+
+| 优化项 | 实现 |
+|--------|------|
+| **批量转发** | 多帧合并为 RouteBatch，单次 gRPC 发送 |
+| **写合并** | gnet Writev 多缓冲区单次系统调用 |
+| **零拷贝解析** | ExtractMessageFrame 直接扫描 protowire 字节 |
+| **连接池复用** | StreamManager 多分片 gRPC 流，消除锁竞争 |
+| **序列化优化** | appendMessageFast 手写 protowire 编码，跳过反射 |
+| **对象池** | sync.Pool 复用 StreamData、FrameBuf、序列化缓冲区 |
+| **内存池** | FrameBuf 按需分配，避免固定大缓冲区浪费 |
+
+## 项目结构
+
+```
+sgate/
+├── cmd/gateway/              # Gateway 主入口
+├── examples/
+│   ├── bench/                # 双向压测客户端
+│   ├── push_bench/           # 推送压测（personal/group/broadcast）
+│   ├── logic_server/         # 逻辑服示例（完整路由注册）
+│   └── integration/          # 完整接入示例
+├── internal/
+│   ├── frontend.go           # TCP/WS 流量处理、帧解析、认证、过滤、转发
+│   ├── backend.go            # LogicClient、StreamManager、gRPC 流管理
+│   ├── session.go            # 连接 FSM、组管理、广播、推送
+│   ├── frame.go              # MessageFrame 编解码
+│   ├── filter.go             # 过滤器链
+│   ├── integrity.go          # 消息完整性校验
+│   ├── negotiation.go        # 版本协商
+│   ├── overload.go           # 过载保护
+│   ├── stats.go              # 统计数据
+│   ├── config/               # 配置解析
+│   ├── obs/                  # 可观测性（pprof/prometheus/tracing）
+│   ├── security/             # 安全组件（IP/限流/熔断/WAF/JWT）
+│   ├── traffic/              # 流量组件（灰度/镜像/降级）
+│   └── cluster/              # 集群组件（Nacos/告警）
+├── logic/                    # Logic Server SDK
+│   ├── server.go             # 推送/组管理/广播
+│   ├── handler.go            # RouteHandler/BurstRouteHandler/Dispatcher
+│   └── service.go            # gRPC 服务 + Nacos 注册
+├── api/                      # 导出路由常量
+├── types/                    # FilterContext 等公共类型
+└── config/                   # 配置文件 & Grafana/Prometheus
+
+protocol/                     # 协议定义（独立仓库）
+├── gateway/
+│   ├── gateway.proto         # MessageFrame + Login/Heartbeat + StreamData + GatewayStream
+│   └── routes.go             # 路由常量 + CmdForRoute + ExtractMessageFrame
+├── commonstruct/             # Message + ErrorResponse + Handshake + Acknowledgement
+├── enums/                    # CMD 枚举号 + PushType/CompressionType
+└── logic/                    # 前后端交互协议（LoginReq/Ack, PushNotify 等）
+```
+
+## 配置
+
+```yaml
+# config/config.yaml
+port: 8081                    # HTTP 管理端口
+logLevel: info
+zone: "default"
+
+transports:
+  - protocol: tcp
+    port: 48080               # TCP 监听端口
+  - protocol: websocket
+    port: 48082               # WebSocket 监听端口
+
+grpc:
+  port: 50051                 # gRPC 服务端口
+  logicAddr: "localhost:50052" # Logic Server 地址
+  windowSize: 67108864        # gRPC 窗口大小
+
+monitoring:
+  pprofAddr: ":6060"          # pprof 地址
+  prometheus:
+    enabled: true
+    addr: ":9100"
+    path: "/metrics"
+    prefix: "app"
+
+configCenter:
+  enabled: true
+  type: "nacos"
+  endpoint: "http://127.0.0.1:8080"
+  namingEndpoint: "http://127.0.0.1:56000"
+
+cluster:
+  enabled: true
+```
+
+## Logic Server 接入示例
 
 ```go
 package main
 
 import (
-    "os"
     "time"
     "github.com/streasure/sgate/logic"
-    "github.com/streasure/sgate/protobuf"
+    "github.com/streasure/protocol/gateway"
 )
 
 func main() {
@@ -120,345 +419,72 @@ func main() {
         logic.WithServiceID("logic-1"),
         logic.WithAdvertiseAddr("localhost:50052"),
         logic.WithListenPort("50052"),
-        logic.WithNacosEndpoint("http://127.0.0.1:8080"),
-        logic.WithNacosNamingEndpoint("http://127.0.0.1:56000"),
-        logic.WithNacosNamespace("public"),
-        logic.WithNacosGroup("DEFAULT_GROUP"),
-        logic.WithNacosAuth("nacos", "nacos"),
-        logic.WithNacosAPIVersion("v3"),
-        logic.WithServiceName("logic"),
     )
 
-    // 登录注册（必须）：注册 userUUID → connectionID 映射
-    svc.RegisterRoute(protobuf.RouteLogin, func(msg *protobuf.Message) *protobuf.Message {
-        userUUID := "uuid_" + msg.GetPayload()["userId"]
-        svc.RegisterUser(userUUID, msg.ConnectionId)
-        return &protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        protobuf.RouteLogin,
-            Payload:      map[string]string{"code": "200", "userUUID": userUUID},
-            Timestamp:    time.Now().UnixMilli(),
+    // 登录（必须）：注册 userUUID → connectionID 映射
+    svc.RegisterRoute(gateway.RouteLogin, func(msg *gateway.StreamData) *gateway.StreamData {
+        userID := msg.GetPayload()["userId"]
+        userUUID := "uuid_" + userID
+        svc.RegisterUser(userUUID, msg.SessionId)
+        return &gateway.StreamData{
+            SessionId: msg.SessionId,
+            UserKey:   userUUID,
+            Route:     gateway.RouteLogin,
+            Payload:   map[string]string{"code": "200", "userId": userID},
+            Timestamp: time.Now().UnixMilli(),
         }
     })
 
-    // 双向请求-响应（duplex）
-    svc.RegisterBurstRoute(protobuf.RouteTest, func(msg *protobuf.Message, push func(*protobuf.Message)) {
-        push(&protobuf.Message{
-            Route:     protobuf.RouteTestResult,
+    // 心跳
+    svc.RegisterRoute(gateway.RoutePing, func(msg *gateway.StreamData) *gateway.StreamData {
+        return &gateway.StreamData{
+            SessionId: msg.SessionId,
+            Route:     gateway.RoutePong,
+            Payload:   map[string]string{"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10)},
+            Timestamp: time.Now().UnixMilli(),
+        }
+    })
+
+    // 个人推送（burst route，最高效）
+    svc.RegisterBurstRoute("push_me", func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
+        push(&gateway.StreamData{
+            Route:     "personal_notification",
+            Payload:   map[string]string{"message": "Hello!"},
             Timestamp: time.Now().UnixMilli(),
         })
-    })
-
-    // 个人推送（push to self）
-    svc.RegisterBurstRoute("push_me", func(msg *protobuf.Message, push func(*protobuf.Message)) {
-        push(&protobuf.Message{
-            Route: "personal_notification",
-            Payload: map[string]string{
-                "message": "Hello from server!",
-            },
-            Timestamp: time.Now().UnixMilli(),
-        })
-    })
-
-    // 个人推送（push to another user）
-    svc.RegisterRoute("send_msg", func(msg *protobuf.Message) *protobuf.Message {
-        targetUUID := msg.GetPayload()["targetUUID"]
-        svc.Server().PushToServer(&protobuf.Message{
-            Route: protobuf.RouteServerSendToUser,
-            Payload: map[string]string{
-                "userUUID": targetUUID,
-                "route":    "direct_message",
-                "message":  msg.GetPayload()["message"],
-                "from":     msg.UserUuid,
-            },
-            Timestamp: time.Now().UnixMilli(),
-        })
-        return &protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        "send_msg_ack",
-            Payload:      map[string]string{"code": "200"},
-            Timestamp:    time.Now().UnixMilli(),
-        }
-    })
-
-    // 组管理：加入组
-    svc.RegisterRoute("join_group", func(msg *protobuf.Message) *protobuf.Message {
-        groupID := msg.GetPayload()["groupID"]
-        svc.Server().PushToServer(&protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        protobuf.RouteServerJoinGroup,
-            Payload:      map[string]string{"groupID": groupID},
-            Timestamp:    time.Now().UnixMilli(),
-        })
-        return &protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        "join_group_ack",
-            Payload:      map[string]string{"code": "200", "groupID": groupID},
-            Timestamp:    time.Now().UnixMilli(),
-        }
-    })
-
-    // 组管理：离开组
-    svc.RegisterRoute("leave_group", func(msg *protobuf.Message) *protobuf.Message {
-        groupID := msg.GetPayload()["groupID"]
-        svc.Server().PushToServer(&protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        protobuf.RouteServerLeaveGroup,
-            Payload:      map[string]string{"groupID": groupID},
-            Timestamp:    time.Now().UnixMilli(),
-        })
-        return &protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        "leave_group_ack",
-            Payload:      map[string]string{"code": "200"},
-            Timestamp:    time.Now().UnixMilli(),
-        }
     })
 
     // 组推送
-    svc.RegisterRoute("group_msg", func(msg *protobuf.Message) *protobuf.Message {
+    svc.RegisterRoute("group_msg", func(msg *gateway.StreamData) *gateway.StreamData {
         groupID := msg.GetPayload()["groupID"]
-        svc.Server().SendToGroup(groupID, &protobuf.Message{
-            Route: "group_broadcast",
-            Payload: map[string]string{
-                "message": msg.GetPayload()["message"],
-                "from":    msg.UserUuid,
-            },
+        svc.Server().SendToGroup(groupID, &gateway.StreamData{
+            Route:     "group_broadcast",
+            Payload:   map[string]string{"message": msg.GetPayload()["message"]},
             Timestamp: time.Now().UnixMilli(),
         })
-        return &protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        "group_msg_ack",
-            Payload:      map[string]string{"code": "200"},
-            Timestamp:    time.Now().UnixMilli(),
+        return &gateway.StreamData{
+            SessionId: msg.SessionId,
+            Route:     "group_msg_ack",
+            Payload:   map[string]string{"code": "200"},
+            Timestamp: time.Now().UnixMilli(),
         }
     })
 
     // 全服广播
-    svc.RegisterRoute("broadcast_msg", func(msg *protobuf.Message) *protobuf.Message {
-        svc.Server().Broadcast(&protobuf.Message{
-            Route: "global_broadcast",
-            Payload: map[string]string{
-                "message": msg.GetPayload()["message"],
-                "from":    msg.UserUuid,
-            },
+    svc.RegisterRoute("broadcast_msg", func(msg *gateway.StreamData) *gateway.StreamData {
+        svc.Server().Broadcast(&gateway.StreamData{
+            Route:     "global_broadcast",
+            Payload:   map[string]string{"message": msg.GetPayload()["message"]},
             Timestamp: time.Now().UnixMilli(),
         })
-        return &protobuf.Message{
-            ConnectionId: msg.ConnectionId,
-            Route:        "broadcast_msg_ack",
-            Payload:      map[string]string{"code": "200"},
-            Timestamp:    time.Now().UnixMilli(),
+        return &gateway.StreamData{
+            SessionId: msg.SessionId,
+            Route:     "broadcast_msg_ack",
+            Payload:   map[string]string{"code": "200"},
+            Timestamp: time.Now().UnixMilli(),
         }
     })
 
     svc.Run()
 }
 ```
-
-### 3. Logic Server API 参考
-
-```go
-// ===== 用户注册（推送前提） =====
-svc.RegisterUser(userUUID, connectionID)     // 登录时注册
-svc.UnregisterUser(userUUID)                 // 登出时注销
-
-// ===== 个人推送 =====
-// 方式1: burst route push 回调（最高效，推荐）
-svc.RegisterBurstRoute("route", func(msg *protobuf.Message, push func(*protobuf.Message)) {
-    push(&protobuf.Message{Route: "notify", Payload: map[string]string{...}})
-})
-
-// 方式2: PushToServer + server.send_to_user
-svc.Server().PushToServer(&protobuf.Message{
-    Route:   protobuf.RouteServerSendToUser,
-    Payload: map[string]string{"userUUID": target, "route": "msg", "data": "..."},
-})
-
-// ===== 组管理 =====
-svc.Server().PushToServer(&protobuf.Message{
-    ConnectionId: connID,
-    Route:        protobuf.RouteServerJoinGroup,
-    Payload:      map[string]string{"groupID": "room_1"},
-})
-svc.Server().PushToServer(&protobuf.Message{
-    ConnectionId: connID,
-    Route:        protobuf.RouteServerLeaveGroup,
-    Payload:      map[string]string{"groupID": "room_1"},
-})
-
-// ===== 组推送 =====
-svc.Server().SendToGroup("room_1", &protobuf.Message{
-    Route:   "group_event",
-    Payload: map[string]string{"data": "..."},
-})
-
-// ===== 全服广播 =====
-svc.Server().Broadcast(&protobuf.Message{
-    Route:   "announcement",
-    Payload: map[string]string{"text": "hello"},
-})
-```
-
-### 4. Gateway 启动示例
-
-```go
-package main
-
-import (
-    "os"
-    "os/signal"
-    "runtime"
-    "syscall"
-
-    "github.com/streasure/sgate/gateway"
-    "github.com/streasure/sgate/types"
-    "github.com/streasure/sgate/internal/config"
-    "github.com/streasure/util/component"
-    tlog "github.com/streasure/treasure-slog"
-)
-
-func main() {
-    runtime.GOMAXPROCS(runtime.NumCPU())
-
-    cfg, _ := config.LoadConfig()
-
-    fc := types.NewFilterChain()
-    secComp := gateway.NewSecurityComponent(cfg.Security, cfg.WAF, cfg.JWTAuth, fc)
-    obsComp := gateway.NewObservabilityComponent(cfg.OTelTracer, ":6060", fc)
-    traComp := gateway.NewTrafficComponent(cfg.Canary, cfg.TrafficMirror, cfg.Degradation, fc)
-    clsComp := gateway.NewClusterComponent(*cfg, cfg.GRPC.Port, nil)
-    trnComp := gateway.NewTransportComponent(nil, cfg.Transports)
-
-    for _, c := range []component.Component{secComp, obsComp, traComp, clsComp} {
-        c.Init()
-        c.Start()
-    }
-
-    gw := gateway.NewGatewayWithDeps(gateway.GatewayDeps{
-        Config:             *cfg,
-        FilterChain:        fc,
-        LogSanitizer:       obsComp.LogSanitizer,
-        WhitelistBlacklist: secComp.WhitelistBlacklist,
-        WAF:                secComp.WAF,
-        RateLimiter:        secComp.RateLimiter,
-        JWTAuth:            secComp.JWTAuth,
-        CircuitBreakerMgr:  secComp.CircuitBreakerMgr,
-        Tracer:             obsComp.Tracer,
-        OTelTracer:         obsComp.OTelTracer,
-        LatencyTracker:     obsComp.LatencyTracker,
-        CanaryFilter:       traComp.CanaryFilter,
-        TrafficMirror:      traComp.TrafficMirror,
-        Degradation:        traComp.Degradation,
-        Discovery:          clsComp.Discovery,
-        Balancer:           clsComp.Balancer,
-        ConfigCenter:       clsComp.ConfigCenter,
-        ClusterNode:        clsComp.Cluster,
-        AlertWebhook:       clsComp.AlertWebhook,
-    })
-
-    trnComp.SetGateway(gw)
-    gw.StartServices()
-    trnComp.StartTransports()
-
-    sigCh := make(chan os.Signal, 1)
-    signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-    <-sigCh
-
-    trnComp.Destroy()
-    gw.Close()
-    for i := len([]component.Component{clsComp, traComp, obsComp, secComp}) - 1; i >= 0; i-- {
-        comps := []component.Component{secComp, obsComp, traComp, clsComp}
-        comps[i].Destroy()
-    }
-}
-```
-
-### 5. 关键注意事项
-
-| 要点 | 说明 |
-|------|------|
-| **用户注册** | 登录 handler 中必须调用 `svc.RegisterUser(userUUID, connID)`，否则推送无法路由 |
-| **组操作** | `JoinGroup`/`LeaveGroup` 通过 `PushToServer` 发送到 Gateway，异步生效 |
-| **个人推送** | 推荐 burst route 的 `push` 回调（最高效路径）；跨用户用 `RouteServerSendToUser` |
-| **组推送** | `SendToGroup` 路由到 Gateway 的 `ConnectionManager.SendToGroup`，组成员需先通过 `RouteServerJoinGroup` 加入 |
-| **广播** | `Broadcast` 路由到 Gateway 的 `ConnectionManager.Broadcast`，推送所有连接 |
-| **PushToServer** | 直接写入 gRPC stream，所有 Gateway 连接收到后按 Route 分发 |
-
-## 项目结构
-
-```
-sgate/
-├── examples/
-│   ├── bench/                         # 压测客户端（duplex 模式）
-│   ├── push_bench/                    # 推送压测（personal/group/broadcast）
-│   ├── integration/                   # 完整接入示例（所有推送模式）
-│   ├── logic_server/                  # 逻辑服示例（完整路由）
-│   └── high_concurrency_gateway/      # Gateway 启动入口
-│       ├── main.go                    # 主入口 + 信号处理
-│       ├── gc_tune.go                 # GC 调优
-│       ├── priority_windows.go        # Windows 进程优先级
-│       └── config/config.yaml         # 网关配置
-├── gateway/                           # Gateway 核心
-│   ├── core_gateway.go                # 主逻辑、OnTraffic、转发路径
-│   ├── core_grpc.go                   # gRPC 客户端/服务端、消息分发、写合并
-│   ├── core_connection.go             # 连接管理、Broadcast、推送组
-│   ├── core_stats.go                  # Stats()
-│   └── *_component.go                 # 生命周期组件
-├── cluster/                           # 集群管理
-├── logic/                             # 逻辑服 SDK
-│   ├── server.go                      # Server: 推送/组管理/广播
-│   └── service.go                     # Service: gRPC + Nacos 注册
-├── protobuf/                          # Proto 定义 & 路由常量
-└── internal/config/                   # 配置解析
-```
-
-## 运行模式
-
-### 单节点模式（压测/开发）
-
-```yaml
-# config.yaml
-discovery:
-  enabled: false          # 关闭 Nacos 发现，直连 localhost:50052
-grpc:
-  logicAddr: "localhost:50052"
-cluster:
-  enabled: false
-configCenter:
-  enabled: false
-```
-
-### 生产模式（Nacos 服务发现）
-
-```yaml
-# config.yaml
-discovery:
-  enabled: true
-  serviceName: "logic"
-grpc:
-  logicAddr: ""           # 由 Nacos 发现自动填充
-cluster:
-  enabled: true
-configCenter:
-  enabled: true
-  endpoint: "http://nacos-server:8080"
-  namespace: "production"
-```
-
-## 环境变量
-
-Logic Server 支持以下环境变量（优先于默认值）：
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `LOGIC_SERVICE_ID` | `logic-1` | 服务实例 ID |
-| `LOGIC_ADVERTISE_ADDR` | `localhost:50052` | 对外暴露地址 |
-| `LOGIC_PORT` | `50052` | gRPC 监听端口 |
-| `NACOS_ENDPOINT` | `""` | Nacos 控制台地址 |
-| `NACOS_NAMESPACE` | `public` | Nacos 命名空间 |
-| `GRPC_WINDOW_SIZE` | `67108864` | gRPC 窗口大小 |
-| `GRPC_MAX_MSG_SIZE` | `4194304` | gRPC 最大消息大小 |
-| `LOGIC_STREAM_CH_SIZE` | `1048576` | 流发送通道大小 |
-| `LOGIC_DISPATCH_WORKERS` | `24` | 消费者协程数 |
-| `LOGIC_PASSTHROUGH` | `false` | 透传模式 |

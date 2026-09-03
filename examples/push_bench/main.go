@@ -12,7 +12,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -23,8 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -79,45 +77,14 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	tcpConn.SetWriteBuffer(8 * 1024 * 1024)
 	defer conn.Close()
 
-	// Handshake: set serverId + handshake_data (requires Timestamp)
-	hs := &commonstruct.Handshake{
-		ProtocolVersion: "1.0",
-		ClientType:      "push_bench",
-		Timestamp:       time.Now().UnixMilli(),
-	}
-	hsData, _ := proto.Marshal(hs)
-	handshakeFrame := buildSingleFrame(gateway.RouteHandshake, map[string]string{
-		"serverId":       fmt.Sprintf("bench_server_%d", clientID),
-		"handshake_data": base64.StdEncoding.EncodeToString(hsData),
-	})
-	conn.Write(handshakeFrame)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// Login is the first client message; logic owns its validation.
 	buf := make([]byte, 65536)
-	totalRead := 0
-	for totalRead < 4 {
-		n, err := conn.Read(buf[totalRead:])
-		if err != nil {
-			return
-		}
-		totalRead += n
-	}
-	fl := binary.BigEndian.Uint32(buf[:4])
-	for totalRead < 4+int(fl) {
-		n, err := conn.Read(buf[totalRead:])
-		if err != nil {
-			return
-		}
-		totalRead += n
-	}
-	conn.SetReadDeadline(time.Time{})
-
-	// Login: set userUUID
 	loginFrame := buildSingleFrame(gateway.RouteLogin, map[string]string{
 		"userId": fmt.Sprintf("u_%d_%d_%d", mode[0], clientID, rand.Int63()),
 	})
 	conn.Write(loginFrame)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	totalRead = 0
+	totalRead := 0
 	for totalRead < 4 {
 		n, err := conn.Read(buf[totalRead:])
 		if err != nil || n == 0 {
@@ -125,7 +92,7 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 		}
 		totalRead += n
 	}
-	fl = binary.BigEndian.Uint32(buf[:4])
+	fl := binary.BigEndian.Uint32(buf[:4])
 	for totalRead < 4+int(fl) {
 		n, err := conn.Read(buf[totalRead:])
 		if err != nil {

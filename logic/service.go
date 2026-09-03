@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/util/nacos"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"

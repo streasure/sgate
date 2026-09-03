@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -17,7 +16,8 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cast"
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/gateway"
+	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
@@ -34,7 +34,7 @@ import (
 
 type LogicClientProvider interface {
 	IsConnected() bool
-	SendMessage(msg *gateway.StreamData) error
+	SendMessage(msg *protoGw.StreamData) error
 }
 
 var (
@@ -63,34 +63,33 @@ func newErrorResponse(route, message, details, data string) *commonstruct.ErrorR
 }
 
 type Gateway struct {
-	connectionManager  *ConnectionManager
-	stopChan           chan struct{}
-	closeOnce          sync.Once
-	transportType      sync.Map
-	ctx                context.Context
-	tlsConfig          *tls.Config
-	clusterID          string
-	gatewayID          string
-	isLeader           bool
-	cfg                atomic.Value
-	wsConnections      sync.Map
-	configPath         string
-	configUpdateChan   chan *config.Config
-	messageIntegrity   *MessageIntegrity
-	versionNegotiation *VersionNegotiation
-	tracer             *obs.Tracer
-	logicClient        *LogicClient
-	logicClientPool    *LogicClientPool
-	serviceDiscovery   *nacos.Discovery
-	overloadProtector  *OverloadProtector
-	grpcServer         *grpc.Server
-	promExporter       *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为 nil）
-	statsServer        *http.Server
-	msgRate            *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
-	zone               string
-	protection         config.ProtectionConfig
-	grpcCfg            config.GRPCConfig
-	streamCfg          config.StreamConfig
+	connectionManager *ConnectionManager
+	stopChan          chan struct{}
+	closeOnce         sync.Once
+	transportType     sync.Map
+	ctx               context.Context
+	tlsConfig         *tls.Config
+	clusterID         string
+	gatewayID         string
+	isLeader          bool
+	cfg               atomic.Value
+	wsConnections     sync.Map
+	configPath        string
+	configUpdateChan  chan *config.Config
+	messageIntegrity  *MessageIntegrity
+	tracer            *obs.Tracer
+	logicClient       *LogicClient
+	logicClientPool   *LogicClientPool
+	serviceDiscovery  *nacos.Discovery
+	overloadProtector *OverloadProtector
+	grpcServer        *grpc.Server
+	promExporter      *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为 nil）
+	statsServer       *http.Server
+	msgRate           *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
+	zone              string
+	protection        config.ProtectionConfig
+	grpcCfg           config.GRPCConfig
+	streamCfg         config.StreamConfig
 	// 安全防护组件
 	whitelistBlacklist *security.WhitelistBlacklist
 	circuitBreakerMgr  *security.CircuitBreakerManager
@@ -160,7 +159,7 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 
 var protobufMessagePool = sync.Pool{
 	New: func() interface{} {
-		return &gateway.StreamData{
+		return &protoGw.StreamData{
 			Payload: make(map[string]string, 32),
 		}
 	},
@@ -170,14 +169,14 @@ const preallocatedProtobufMessages = 64
 
 func init() {
 	for i := 0; i < preallocatedProtobufMessages; i++ {
-		protobufMessagePool.Put(&gateway.StreamData{
+		protobufMessagePool.Put(&protoGw.StreamData{
 			Payload: make(map[string]string, 32),
 		})
 	}
 }
 
-func GetProtobufMessage() *gateway.StreamData {
-	msg := protobufMessagePool.Get().(*gateway.StreamData)
+func GetProtobufMessage() *protoGw.StreamData {
+	msg := protobufMessagePool.Get().(*protoGw.StreamData)
 	msg.SessionId = ""
 	msg.UserKey = ""
 	msg.Route = ""
@@ -194,7 +193,7 @@ func GetProtobufMessage() *gateway.StreamData {
 	return msg
 }
 
-func PutProtobufMessage(msg *gateway.StreamData) {
+func PutProtobufMessage(msg *protoGw.StreamData) {
 	if msg == nil {
 		return
 	}
@@ -327,7 +326,6 @@ func (g *Gateway) StartServices() {
 	g.overloadProtector.Start()
 	go g.wsHeartbeatChecker()
 	g.messageIntegrity = NewMessageIntegrity(30000)
-	g.versionNegotiation = NewVersionNegotiation([]string{"1.0.0", "1.1.0", "2.0.0"}, 10*time.Second)
 
 	connCheckInterval, _ := time.ParseDuration(g.protection.ConnCheckInterval)
 	if connCheckInterval <= 0 {
@@ -712,7 +710,6 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 
 	if connectionID != "" {
 		g.connectionManager.RemoveConnection(connectionID)
-		g.versionNegotiation.RemoveClientVersion(connectionID)
 		g.connectionsActive.Add(-1)
 		tlog.Debug("connection closed", "connectionID", connectionID, "error", err)
 	}
@@ -845,32 +842,6 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 			break // incomplete frame, wait for more data
 		}
 
-		// Quick handshake/login check on first frame only.
-		// Both need individual handling: handshake for version negotiation, login for auth completion.
-		if batchCount == 0 {
-			frameData := ctx.FrameBuf[offset+4 : offset+totalLen]
-			msg, ok := decodeClientMessage(frameData)
-			if !ok {
-				ctx.FrameBuf = nil
-				return gnet.Close
-			}
-			route := msg.Route
-			if route == "" {
-				route = gateway.RouteForCmd(msg.Cmd)
-			}
-			if route == gateway.RouteHandshake || route == gateway.RouteLogin {
-				rest := ctx.FrameBuf[offset+totalLen:]
-				if len(rest) > 0 {
-					tail := make([]byte, len(rest))
-					copy(tail, rest)
-					ctx.FrameBuf = tail
-				} else {
-					ctx.FrameBuf = nil
-				}
-				return g.handleTCPRequest(c, frameData)
-			}
-		}
-
 		offset += totalLen
 		batchCount++
 	}
@@ -879,14 +850,17 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		return
 	}
 
-	// 认证守卫: 批量消息必须已完成认证（serverID + userUUID）
 	conn := g.connectionManager.GetConnection(ctx.ConnectionID)
 	if conn != nil && !conn.IsAuthenticated() {
-		errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated, handshake required", "")
-		respData, _ := proto.Marshal(errorResp)
-		writeFrame(c, respData)
-		g.messagesDroppedAuth.Add(1)
-		return gnet.Close
+		firstLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
+		firstCmd, _, _, ok := gateway.ExtractMessageFrame(ctx.FrameBuf[4 : 4+firstLen])
+		if !ok || !g.isPreAuthCommand(firstCmd) {
+			errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated", "")
+			respData, _ := proto.Marshal(errorResp)
+			writeFrame(c, respData)
+			g.messagesDroppedAuth.Add(int64(batchCount))
+			return gnet.Close
+		}
 	}
 
 	g.messagesReceived.Add(int64(batchCount))
@@ -922,7 +896,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		return
 	}
 
-	batchMsg := &gateway.StreamData{
+	batchMsg := &protoGw.StreamData{
 		SessionId: ctx.ConnectionID,
 		Route:     gateway.RouteBatch,
 		Data:      batchData,
@@ -944,6 +918,15 @@ func (g *Gateway) isLogicConnected() bool {
 	}
 	if g.logicClient != nil && g.logicClient.IsConnected() {
 		return true
+	}
+	return false
+}
+
+func (g *Gateway) isPreAuthCommand(cmd int32) bool {
+	for _, allowed := range g.protection.PreAuthCommands {
+		if cmd == allowed {
+			return true
+		}
 	}
 	return false
 }
@@ -1003,21 +986,13 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if route == "" {
 		route = gateway.RouteForCmd(cmd)
 	}
-	if route == gateway.RouteHandshake {
-		return g.handleHandshake(c, connectionID, message)
-	}
-
-	// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
-	// 登录消息必须放行，因为它是完成认证的必要步骤
-	if route != gateway.RouteLogin {
-		conn := g.connectionManager.GetConnection(connectionID)
-		if conn != nil && !conn.IsAuthenticated() {
-			errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated, handshake+login required", "")
-			respData, _ := proto.Marshal(errorResp)
-			writeFrame(c, respData)
-			g.messagesDroppedAuth.Add(1)
-			return gnet.Close
-		}
+	conn := g.connectionManager.GetConnection(connectionID)
+	if conn != nil && !conn.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
+		errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated", "")
+		respData, _ := proto.Marshal(errorResp)
+		writeFrame(c, respData)
+		g.messagesDroppedAuth.Add(1)
+		return gnet.Close
 	}
 
 	// IP 白名单/黑名单检查
@@ -1098,7 +1073,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	}
 	if protoMsg == nil {
 		// 兼容 filter chain 未启用场景：构造默认消息
-		protoMsg = &gateway.StreamData{
+		protoMsg = &protoGw.StreamData{
 			SessionId: connectionID,
 			Route:     route,
 			Data:      append([]byte(nil), message.Data...),
@@ -1171,38 +1146,6 @@ func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 	return g.circuitBreakerMgr.GetCircuitBreaker(route, 5, 3, timeout)
 }
 
-func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *gateway.StreamData) gnet.Action {
-	handshakeDataStr := message.Payload["handshake_data"]
-	var handshakeBytes []byte
-
-	decoded, err := base64.StdEncoding.DecodeString(handshakeDataStr)
-	if err == nil {
-		handshakeBytes = decoded
-	} else {
-		handshakeBytes = []byte(handshakeDataStr)
-	}
-
-	handshake := &commonstruct.Handshake{}
-	if err := proto.Unmarshal(handshakeBytes, handshake); err != nil {
-		return gnet.None
-	}
-
-	negotiatedVersion, err := g.versionNegotiation.ProcessHandshake(connectionID, handshake)
-	if err != nil {
-		return gnet.None
-	}
-
-	response := g.versionNegotiation.GenerateHandshakeResponse(negotiatedVersion)
-	g.messageIntegrity.PrepareMessage(response)
-	writeMsgFrame(c, response)
-
-	if serverID := message.Payload["serverId"]; serverID != "" {
-		g.connectionManager.SetConnectionServerID(connectionID, serverID)
-	}
-
-	return gnet.None
-}
-
 func writeFrame(c gnet.Conn, data []byte) {
 	headerPtr := frameHeaderPool.Get().(*[]byte)
 	binary.BigEndian.PutUint32(*headerPtr, uint32(len(data)))
@@ -1215,7 +1158,7 @@ func writeErrorFrame(c gnet.Conn, errMsg *commonstruct.ErrorResponse) {
 	writeFrame(c, data)
 }
 
-func writeMsgFrame(c gnet.Conn, msg *gateway.StreamData) {
+func writeMsgFrame(c gnet.Conn, msg *protoGw.StreamData) {
 	data, _ := marshalClientMessage(msg)
 	writeFrame(c, data)
 }

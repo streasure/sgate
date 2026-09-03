@@ -39,7 +39,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/sgate/logic"
 	"github.com/streasure/util/tlog"
 )

@@ -13,7 +13,8 @@ import (
 	"time"
 
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/gateway"
+	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/nacos"
@@ -93,9 +94,9 @@ var DefaultHealthCheckConfig = HealthCheckConfig{
 }
 
 type StreamShard struct {
-	stream gateway.GatewayStream_OnDataClient
+	stream protoGw.GatewayStream_OnDataClient
 	mu     sync.Mutex
-	sendCh chan *gateway.StreamData
+	sendCh chan *protoGw.StreamData
 	ctx    context.Context
 	cancel context.CancelFunc
 	index  int
@@ -121,7 +122,7 @@ func NewStreamManager(shardCount int, sendChannelSize int) *StreamManager {
 	}
 	for i := range sm.shards {
 		sm.shards[i] = &StreamShard{
-			sendCh: make(chan *gateway.StreamData, sendChannelSize),
+			sendCh: make(chan *protoGw.StreamData, sendChannelSize),
 			index:  i,
 		}
 	}
@@ -294,7 +295,7 @@ func (s *StreamShard) startSendLoop() {
 		}
 	}()
 	const maxBatchCount = 256
-	batch := make([]*gateway.StreamData, 0, maxBatchCount)
+	batch := make([]*protoGw.StreamData, 0, maxBatchCount)
 	for {
 		msg, ok := <-s.sendCh
 		if !ok {
@@ -373,7 +374,7 @@ func (s *StreamShard) startSendLoop() {
 				count++
 			}
 			if count > 0 {
-				batchMsg := &gateway.StreamData{
+				batchMsg := &protoGw.StreamData{
 					Route: gateway.RouteBatch,
 					Data:  buf,
 					Cmd:   int32(count),
@@ -394,7 +395,7 @@ func (s *StreamShard) startSendLoop() {
 
 // safeStreamSend wraps stream.Send() to recover from panics caused by
 // concurrent close operations on the gRPC stream.
-func safeStreamSend(stream gateway.GatewayStream_OnDataClient, msg *gateway.StreamData) (err error) {
+func safeStreamSend(stream protoGw.GatewayStream_OnDataClient, msg *protoGw.StreamData) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("stream send panic: %v", r)
@@ -403,7 +404,7 @@ func safeStreamSend(stream gateway.GatewayStream_OnDataClient, msg *gateway.Stre
 	return stream.Send(msg)
 }
 
-func (s *StreamShard) SendMessage(msg *gateway.StreamData) (err error) {
+func (s *StreamShard) SendMessage(msg *protoGw.StreamData) (err error) {
 	// Fast path: check closed flag atomically, skip defer/recover overhead
 	if s.closed.Load() {
 		return ErrNotConnected
@@ -425,7 +426,7 @@ func (s *StreamShard) SendMessage(msg *gateway.StreamData) (err error) {
 }
 
 type LogicClient struct {
-	client            gateway.GatewayStreamClient
+	client            protoGw.GatewayStreamClient
 	conn              *grpc.ClientConn
 	mu                sync.RWMutex
 	state             int32
@@ -557,7 +558,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	lc.mu.Lock()
 	lc.conn = conn
-	lc.client = gateway.NewGatewayStreamClient(conn)
+	lc.client = protoGw.NewGatewayStreamClient(conn)
 	lc.mu.Unlock()
 
 	lc.mu.Lock()
@@ -847,7 +848,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 }
 
 // handleReceivedMessage 处理单条来自 logic 的消息（正向转发或 server.* 路由）
-func (lc *LogicClient) handleReceivedMessage(msg *gateway.StreamData) {
+func (lc *LogicClient) handleReceivedMessage(msg *protoGw.StreamData) {
 	if lc.gateway == nil {
 		return
 	}
@@ -863,10 +864,11 @@ func (lc *LogicClient) handleReceivedMessage(msg *gateway.StreamData) {
 			lc.gateway.AddPushDroppedNoConn(1)
 			return
 		}
-		// login 响应: 逻辑服务器返回 UserUuid，网关提取并更新连接的认证状态
-		if msg.Route == gateway.RouteLogin && msg.UserKey != "" {
+		// Authentication is owned by logic. Any successful response carrying a
+		// user key promotes the connection without naming a login route here.
+		if msg.UserKey != "" {
 			conn.SetUserUUID(msg.UserKey)
-			tlog.Debug("login response updated connection userUUID", "connectionID", msg.SessionId, "userUUID", msg.UserKey)
+			tlog.Debug("logic response updated connection userUUID", "connectionID", msg.SessionId, "userUUID", msg.UserKey)
 		}
 		// 注意: 不能使用 pooled buffer，因为 gnet Writev 可能异步传递 slice 引用
 		responseData, err := marshalClientMessage(msg)
@@ -880,7 +882,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *gateway.StreamData) {
 	// server.* 路由：以下指令不需要 ConnectionId（按 Payload 中的 key 定位目标）
 	if route == gateway.RouteServerBroadcast {
 		// 预序列化：避免 Broadcast 内部为每个连接重复 proto.Marshal
-		pushMsg := &gateway.StreamData{
+		pushMsg := &protoGw.StreamData{
 			Route:   "broadcast",
 			Payload: msg.Payload,
 		}
@@ -893,7 +895,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *gateway.StreamData) {
 	if route == gateway.RouteServerSendToUser {
 		userUUID := msg.Payload["userUUID"]
 		if userUUID != "" {
-			responseData, _ := marshalClientMessage(&gateway.StreamData{
+			responseData, _ := marshalClientMessage(&protoGw.StreamData{
 				Route:   msg.Payload["route"],
 				Payload: msg.Payload,
 			})
@@ -908,7 +910,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *gateway.StreamData) {
 		groupID := msg.Payload["groupID"]
 		if groupID != "" {
 			// 预序列化：避免 SendToGroup 内部为每个成员重复 proto.Marshal
-			sendMsg := &gateway.StreamData{
+			sendMsg := &protoGw.StreamData{
 				Route:   msg.Payload["route"],
 				Payload: msg.Payload,
 			}
@@ -1058,7 +1060,7 @@ func (lc *LogicClient) handleDisconnection() {
 	}
 }
 
-func (lc *LogicClient) SendMessage(msg *gateway.StreamData) error {
+func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 	// Fast path: check state atomically without lock
 	if lc.getState() != StateConnected {
 		lc.mu.RLock()
@@ -1085,7 +1087,7 @@ func (lc *LogicClient) SendMessage(msg *gateway.StreamData) error {
 	return nil
 }
 
-func (lc *LogicClient) SendMessageDirect(msg *gateway.StreamData) error {
+func (lc *LogicClient) SendMessageDirect(msg *protoGw.StreamData) error {
 	lc.mu.RLock()
 	state := lc.getState()
 	closing := lc.closing
@@ -1172,7 +1174,7 @@ func (hc *HealthChecker) doCheck() {
 		return
 	}
 
-	pingMsg := &gateway.StreamData{
+	pingMsg := &protoGw.StreamData{
 		Route:   gateway.RoutePing,
 		Payload: map[string]string{"type": "health_check"},
 	}
@@ -1281,7 +1283,7 @@ func (rm *ReconnectManager) doReconnect() {
 }
 
 type StreamMessageQueue struct {
-	queue   []*gateway.StreamData
+	queue   []*protoGw.StreamData
 	mu      sync.Mutex
 	cond    *sync.Cond
 	maxSize int
@@ -1289,14 +1291,14 @@ type StreamMessageQueue struct {
 
 func NewStreamMessageQueue() *StreamMessageQueue {
 	mq := &StreamMessageQueue{
-		queue:   make([]*gateway.StreamData, 0),
+		queue:   make([]*protoGw.StreamData, 0),
 		maxSize: 100000,
 	}
 	mq.cond = sync.NewCond(&mq.mu)
 	return mq
 }
 
-func (mq *StreamMessageQueue) Enqueue(msg *gateway.StreamData) {
+func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) {
 	mq.mu.Lock()
 	if len(mq.queue) >= mq.maxSize {
 		mq.queue = mq.queue[1:]
@@ -1306,7 +1308,7 @@ func (mq *StreamMessageQueue) Enqueue(msg *gateway.StreamData) {
 	mq.mu.Unlock()
 }
 
-func (mq *StreamMessageQueue) Dequeue() (*gateway.StreamData, bool) {
+func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 	mq.mu.Lock()
 	if len(mq.queue) == 0 {
 		mq.mu.Unlock()
@@ -1358,7 +1360,7 @@ type GatewayInterface interface {
 }
 
 type GRPCServer struct {
-	gateway.UnimplementedGatewayStreamServer
+	protoGw.UnimplementedGatewayStreamServer
 	gateway GatewayInterface
 	mu      sync.Mutex
 }
@@ -1369,7 +1371,7 @@ func NewGRPCServer(gateway GatewayInterface) *GRPCServer {
 	}
 }
 
-func (s *GRPCServer) OnData(stream gateway.GatewayStream_OnDataServer) error {
+func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 	connectionID := generateConnectionID()
 
 	ctx := map[string]interface{}{
@@ -1384,10 +1386,10 @@ func (s *GRPCServer) OnData(stream gateway.GatewayStream_OnDataServer) error {
 		}
 
 		s.handleGRPCMessage(connectionID, msg, func(response interface{}) {
-			if protoMsg, ok := response.(*gateway.StreamData); ok {
+			if protoMsg, ok := response.(*protoGw.StreamData); ok {
 				stream.Send(protoMsg)
 			} else if errorMsg, ok := response.(*commonstruct.ErrorResponse); ok {
-				responseMsg := &gateway.StreamData{
+				responseMsg := &protoGw.StreamData{
 					Route: gateway.RouteError,
 					Payload: map[string]string{
 						"message": errorMsg.Error.Message,
@@ -1401,7 +1403,7 @@ func (s *GRPCServer) OnData(stream gateway.GatewayStream_OnDataServer) error {
 	}
 }
 
-func (s *GRPCServer) SendMessage(ctx context.Context, msg *gateway.StreamData) (*gateway.StreamData, error) {
+func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (*protoGw.StreamData, error) {
 	connectionID := generateConnectionID()
 
 	grpcCtx := map[string]interface{}{
@@ -1409,16 +1411,16 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *gateway.StreamData) (
 		"context":       ctx,
 	}
 
-	var response *gateway.StreamData
+	var response *protoGw.StreamData
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	s.handleGRPCMessage(connectionID, msg, func(resp interface{}) {
 		defer wg.Done()
-		if protoMsg, ok := resp.(*gateway.StreamData); ok {
+		if protoMsg, ok := resp.(*protoGw.StreamData); ok {
 			response = protoMsg
 		} else if errorMsg, ok := resp.(*commonstruct.ErrorResponse); ok {
-			response = &gateway.StreamData{
+			response = &protoGw.StreamData{
 				Route: gateway.RouteError,
 				Payload: map[string]string{
 					"message": errorMsg.Error.Message,
@@ -1433,7 +1435,7 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *gateway.StreamData) (
 	return response, nil
 }
 
-func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *gateway.StreamData, callback func(interface{}), ctx map[string]interface{}) {
+func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamData, callback func(interface{}), ctx map[string]interface{}) {
 	if msg.Route == "" {
 		callback(newErrorResponse("error", "Missing route", "", ""))
 		return
@@ -1456,7 +1458,7 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 		grpc.InitialConnWindowSize(int32(windowSize)),
 	)
 	tlog.Info("registering GatewayService")
-	gateway.RegisterGatewayStreamServer(server, NewGRPCServer(gw))
+	protoGw.RegisterGatewayStreamServer(server, NewGRPCServer(gw))
 
 	tlog.Info("listening on port", "port", port)
 	listener, err := net.Listen("tcp", port)
@@ -1628,7 +1630,7 @@ func (pool *LogicClientPool) handleServiceDeregister(event nacos.ServiceEvent) {
 	)
 }
 
-func (pool *LogicClientPool) SendMessage(msg *gateway.StreamData) error {
+func (pool *LogicClientPool) SendMessage(msg *protoGw.StreamData) error {
 	// Fast path: single client, no lock needed
 	if c := pool.fastClient.Load(); c != nil {
 		return c.SendMessage(msg)
@@ -1636,7 +1638,7 @@ func (pool *LogicClientPool) SendMessage(msg *gateway.StreamData) error {
 	return pool.RoundRobinSendMessage(msg)
 }
 
-func (pool *LogicClientPool) RoundRobinSendMessage(msg *gateway.StreamData) error {
+func (pool *LogicClientPool) RoundRobinSendMessage(msg *protoGw.StreamData) error {
 	pool.mu.RLock()
 	n := len(pool.ordered)
 	if n == 0 {

@@ -10,7 +10,8 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/gateway"
+	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -30,7 +31,7 @@ import (
 type SessionState int32
 
 const (
-	StateAuth    SessionState = iota // awaiting handshake + login
+	StateAuth    SessionState = iota // awaiting logic authentication
 	StateForward                     // authenticated, forwarding traffic
 	StateClosed                      // closed, no more I/O
 )
@@ -56,11 +57,11 @@ func (c *Connection) ID() string {
 	return c.id
 }
 
-// IsAuthenticated 检查连接是否已完成认证（必须有真实的 serverID 和 userUUID）
+// IsAuthenticated reports whether logic has assigned a stable user key.
 func (c *Connection) IsAuthenticated() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.ServerID != "" && c.UserUUID != "" && !strings.HasPrefix(c.UserUUID, "temp_")
+	return c.UserUUID != "" && !strings.HasPrefix(c.UserUUID, "temp_")
 }
 
 // SetUserUUID thread-safe setter for UserUUID
@@ -376,7 +377,7 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 	}
 
 	// 发送下线通知
-	kickMessage := &gateway.StreamData{
+	kickMessage := &protoGw.StreamData{
 		Route: gateway.RouteServerKick,
 		Payload: map[string]string{
 			"reason":  reason,
@@ -670,12 +671,12 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 	switch msg := message.(type) {
 	case []byte:
 		responseData = marshalClientBytes(msg)
-	case *gateway.StreamData:
+	case *protoGw.StreamData:
 		responseData, err = marshalClientMessage(msg)
 	case *commonstruct.ErrorResponse:
 		responseData = marshalClientError(msg)
 	case map[string]string:
-		protoMsg := &gateway.StreamData{
+		protoMsg := &protoGw.StreamData{
 			Route:   "message",
 			Payload: msg,
 		}
@@ -731,14 +732,14 @@ func marshalPushMessage(message interface{}) ([]byte, error) {
 	switch msg := message.(type) {
 	case []byte:
 		return marshalClientBytes(msg), nil
-	case *gateway.StreamData:
+	case *protoGw.StreamData:
 		return marshalClientMessage(msg)
 	case *commonstruct.ErrorResponse:
 		return marshalClientError(msg), nil
 	case map[string]string:
-		return marshalClientMessage(&gateway.StreamData{Route: "broadcast", Payload: msg})
+		return marshalClientMessage(&protoGw.StreamData{Route: "broadcast", Payload: msg})
 	case string:
-		return marshalClientMessage(&gateway.StreamData{Route: "broadcast", Payload: map[string]string{"data": msg}})
+		return marshalClientMessage(&protoGw.StreamData{Route: "broadcast", Payload: map[string]string{"data": msg}})
 	default:
 		return nil, fmt.Errorf("unsupported push message type %T", message)
 	}
@@ -1147,7 +1148,7 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 		conn := cm.GetConnection(connectionID)
 		if conn != nil {
 			// 发送超时通知
-			timeoutMessage := &gateway.StreamData{
+			timeoutMessage := &protoGw.StreamData{
 				Route: "timeout",
 				Payload: map[string]string{
 					"reason":  "inactive",

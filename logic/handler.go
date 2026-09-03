@@ -3,10 +3,11 @@ package logic
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -56,7 +57,9 @@ func (d *Dispatcher) Handle(cmd int32, reqProto proto.Message, respCmd int32, ha
 }
 
 func (d *Dispatcher) HandleFromProto(reqProto proto.Message, handler ProtoHandler) *Dispatcher {
-	cmdVal, respCmdVal := gateway.CmdFromProto(d.route, reqProto)
+	name := proto.MessageName(reqProto)
+	parts := strings.Split(string(name), ".")
+	cmdVal, respCmdVal := gateway.CmdFromProto(d.route, parts[len(parts)-1])
 	return d.Handle(cmdVal, reqProto, respCmdVal, handler)
 }
 

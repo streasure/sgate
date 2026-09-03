@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -14,8 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -85,51 +83,9 @@ func (bc *benchConn) close() {
 	bc.conn.Close()
 }
 
-// authenticate 发送 handshake + login 使连接通过认证
+// authenticate sends the logic-owned login request directly after connection setup.
 func (bc *benchConn) authenticate(clientID int) error {
-	hs := &commonstruct.Handshake{
-		ProtocolVersion: "1.0",
-		ClientType:      "bench",
-		Timestamp:       time.Now().UnixMilli(),
-	}
-	hsData, _ := proto.Marshal(hs)
-	body := &gateway.StreamData{
-		Route:   gateway.RouteHandshake,
-		Payload: map[string]string{"serverId": "bench_server", "handshake_data": base64.StdEncoding.EncodeToString(hsData)},
-	}
-	bodyData, _ := proto.Marshal(body)
-	handshakeData, _ := proto.Marshal(&gateway.MessageFrame{
-		Cmd:  gateway.CmdForRoute(gateway.RouteHandshake),
-		Body: bodyData,
-	})
-	handshakeFrame := make([]byte, 4+len(handshakeData))
-	binary.BigEndian.PutUint32(handshakeFrame[:4], uint32(len(handshakeData)))
-	copy(handshakeFrame[4:], handshakeData)
-	if _, err := bc.conn.Write(handshakeFrame); err != nil {
-		return err
-	}
-
-	// Read handshake response
-	bc.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 65536)
-	totalRead := 0
-	for totalRead < 4 {
-		n, err := bc.conn.Read(buf[totalRead:])
-		if err != nil {
-			return fmt.Errorf("handshake read: %w", err)
-		}
-		totalRead += n
-	}
-	fl := binary.BigEndian.Uint32(buf[:4])
-	for totalRead < 4+int(fl) {
-		n, err := bc.conn.Read(buf[totalRead:])
-		if err != nil {
-			return fmt.Errorf("handshake body: %w", err)
-		}
-		totalRead += n
-	}
-	bc.conn.SetReadDeadline(time.Time{})
-
 	loginBody := &gateway.StreamData{
 		Route:   gateway.RouteLogin,
 		Payload: map[string]string{"userId": fmt.Sprintf("bench_%d", clientID)},
@@ -147,7 +103,7 @@ func (bc *benchConn) authenticate(clientID int) error {
 	}
 
 	bc.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	totalRead = 0
+	totalRead := 0
 	for totalRead < 4 {
 		n, err := bc.conn.Read(buf[totalRead:])
 		if err != nil {
@@ -155,7 +111,7 @@ func (bc *benchConn) authenticate(clientID int) error {
 		}
 		totalRead += n
 	}
-	fl = binary.BigEndian.Uint32(buf[:4])
+	fl := binary.BigEndian.Uint32(buf[:4])
 	for totalRead < 4+int(fl) {
 		n, err := bc.conn.Read(buf[totalRead:])
 		if err != nil {

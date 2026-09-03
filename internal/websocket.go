@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/protocol/gateway"
+	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/util/tlog"
 )
 
@@ -342,21 +343,13 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		tlog.Debug("received user UUID", "connectionID", connectionID, "userUUID", message.UserKey)
 	}
 
-	if route == gateway.RouteHandshake {
-		g.handleHandshake(wsConn.Conn, connectionID, message)
-		return nil
-	}
-
-	// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
-	if route != gateway.RouteLogin {
-		conn := g.connectionManager.GetConnection(connectionID)
-		if conn != nil && !conn.IsAuthenticated() {
-			errorMsg := newErrorResponse("error", "unauthorized", "connection not authenticated, handshake+login required", "")
-			responseData := marshalClientError(errorMsg)
-			g.messagesDroppedAuth.Add(1)
-			g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
-			return fmt.Errorf("unauthenticated connection")
-		}
+	conn := g.connectionManager.GetConnection(connectionID)
+	if conn != nil && !conn.IsAuthenticated() && !g.isPreAuthCommand(message.Cmd) {
+		errorMsg := newErrorResponse("error", "unauthorized", "connection not authenticated", "")
+		responseData := marshalClientError(errorMsg)
+		g.messagesDroppedAuth.Add(1)
+		g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
+		return fmt.Errorf("connection is not authenticated")
 	}
 
 	// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
@@ -366,7 +359,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return nil
 	}
 	if protoMsg == nil {
-		protoMsg = &gateway.StreamData{
+		protoMsg = &protoGw.StreamData{
 			SessionId: connectionID,
 			UserKey:   message.UserKey,
 			Route:     route,

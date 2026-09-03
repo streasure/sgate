@@ -241,6 +241,9 @@ type ProtectionConfig struct {
 	// VerifyInbound 是否对入方向消息执行完整性校验（checksum/timestamp/重放）。
 	// 默认 true：对带 checksum 的入站消息做完整校验，未携带 checksum 的消息零开销直通。
 	VerifyInbound bool `yaml:"verifyInbound"`
+	// PreAuthCommands are the only client commands accepted before logic
+	// authenticates the connection by returning StreamData.user_key.
+	PreAuthCommands []int32 `yaml:"preAuthCommands"`
 }
 
 type Transport struct {
@@ -322,6 +325,7 @@ func loadDefaultConfig() *Config {
 			ConnCheckInterval:  DefaultConnCheckInterval,
 			ConnIdleTimeout:    DefaultConnIdleTimeout,
 			VerifyInbound:      false,
+			PreAuthCommands:    []int32{2},
 		},
 		Security: SecurityConfig{
 			Enabled: true,

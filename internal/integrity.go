@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/gateway"
+	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -55,7 +55,7 @@ func (mi *MessageIntegrity) cleanupCache() {
 // GenerateChecksum 生成消息校验和
 func (mi *MessageIntegrity) GenerateChecksum(msg proto.Message) string {
 	switch m := msg.(type) {
-	case *gateway.StreamData:
+	case *protoGw.StreamData:
 		return mi.generateMessageChecksum(m)
 	default:
 		data, err := proto.Marshal(msg)
@@ -68,7 +68,7 @@ func (mi *MessageIntegrity) GenerateChecksum(msg proto.Message) string {
 	}
 }
 
-func (mi *MessageIntegrity) generateMessageChecksum(msg *gateway.StreamData) string {
+func (mi *MessageIntegrity) generateMessageChecksum(msg *protoGw.StreamData) string {
 	var buf strings.Builder
 	buf.WriteString(msg.SessionId)
 	buf.WriteString("|")
@@ -105,16 +105,13 @@ func (mi *MessageIntegrity) generateMessageChecksum(msg *gateway.StreamData) str
 func (mi *MessageIntegrity) ValidateChecksum(msg proto.Message, expectedChecksum string) bool {
 	var savedChecksum string
 	switch m := msg.(type) {
-	case *gateway.StreamData:
+	case *protoGw.StreamData:
 		savedChecksum = m.Checksum
 		m.Checksum = ""
 	case *commonstruct.ErrorResponse:
 		savedChecksum = m.Checksum
 		m.Checksum = ""
 	case *commonstruct.Acknowledgement:
-		savedChecksum = m.Checksum
-		m.Checksum = ""
-	case *commonstruct.Handshake:
 		savedChecksum = m.Checksum
 		m.Checksum = ""
 	}
@@ -122,13 +119,11 @@ func (mi *MessageIntegrity) ValidateChecksum(msg proto.Message, expectedChecksum
 	actualChecksum := mi.GenerateChecksum(msg)
 
 	switch m := msg.(type) {
-	case *gateway.StreamData:
+	case *protoGw.StreamData:
 		m.Checksum = savedChecksum
 	case *commonstruct.ErrorResponse:
 		m.Checksum = savedChecksum
 	case *commonstruct.Acknowledgement:
-		m.Checksum = savedChecksum
-	case *commonstruct.Handshake:
 		m.Checksum = savedChecksum
 	}
 
@@ -175,7 +170,7 @@ func (mi *MessageIntegrity) MarkProcessed(msgID string) {
 // ProcessMessage 处理消息完整性
 // 注意: 当消息未携带 checksum（空字符串）时跳过校验，视为「不要求完整性保护」，
 // 这样可兼容未签名的压测流量与历史客户端；签名消息会被完整校验。
-func (mi *MessageIntegrity) ProcessMessage(msg *gateway.StreamData) error {
+func (mi *MessageIntegrity) ProcessMessage(msg *protoGw.StreamData) error {
 	if msg.Checksum == "" {
 		return nil
 	}
@@ -205,7 +200,7 @@ func (mi *MessageIntegrity) ProcessMessage(msg *gateway.StreamData) error {
 }
 
 // PrepareMessage 准备消息（添加时间戳和校验和）
-func (mi *MessageIntegrity) PrepareMessage(msg *gateway.StreamData) {
+func (mi *MessageIntegrity) PrepareMessage(msg *protoGw.StreamData) {
 	// 设置时间戳
 	msg.Timestamp = time.Now().UnixMilli()
 
@@ -305,42 +300,4 @@ func (mi *MessageIntegrity) PrepareAcknowledgement(ack *commonstruct.Acknowledge
 	if ack.ProtocolVersion == "" {
 		ack.ProtocolVersion = "1.0.0"
 	}
-}
-
-// ProcessHandshake 处理握手消息的完整性
-func (mi *MessageIntegrity) ProcessHandshake(handshake *commonstruct.Handshake) error {
-	// 生成握手ID
-	handshakeID := handshake.DeviceId + "-" + fmt.Sprint(handshake.Timestamp)
-
-	// 检查是否重放
-	if mi.CheckReplay(handshakeID) {
-		return fmt.Errorf("replay attack detected")
-	}
-
-	// 验证时间戳
-	if !mi.ValidateTimestamp(handshake.Timestamp) {
-		return fmt.Errorf("invalid timestamp")
-	}
-
-	// 验证校验和
-	if !mi.ValidateChecksum(handshake, handshake.Checksum) {
-		return fmt.Errorf("invalid checksum")
-	}
-
-	// 标记握手已处理
-	mi.MarkProcessed(handshakeID)
-
-	return nil
-}
-
-// PrepareHandshake 准备握手消息
-func (mi *MessageIntegrity) PrepareHandshake(handshake *commonstruct.Handshake) {
-	// 设置时间戳
-	handshake.Timestamp = time.Now().UnixMilli()
-
-	// 清空校验和
-	handshake.Checksum = ""
-
-	// 生成并设置校验和
-	handshake.Checksum = mi.GenerateChecksum(handshake)
 }
