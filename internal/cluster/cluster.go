@@ -63,8 +63,9 @@ func NewCluster(cfg config.ClusterConfig, nacosCfg nacos.Config, zone string, ad
 			Weight:      1,
 			Zone:        zone,
 			Metadata: map[string]string{
-				"nodeID": nodeID,
-				"zone":   zone,
+				"nodeID":   nodeID,
+				"serverId": nodeID,
+				"zone":     zone,
 			},
 		},
 		HeartbeatInterval: ttl / 3,

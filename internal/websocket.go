@@ -336,6 +336,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
 		conn.SetWS(true)
 	}
+	if message.Cmd == gateway.CmdLoginGate {
+		g.handleLoginGate(wsConn.Conn, connectionID, message)
+		return nil
+	}
 
 	if message.UserKey != "" {
 		oldUserUUID := "temp_" + connectionID
@@ -344,7 +348,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	}
 
 	conn := g.connectionManager.GetConnection(connectionID)
-	if conn != nil && !conn.IsAuthenticated() && !g.isPreAuthCommand(message.Cmd) {
+	if conn == nil || !conn.IsBound() {
+		return fmt.Errorf("connection is not bound to a logic server")
+	}
+	if !conn.IsAuthenticated() && !g.isPreAuthCommand(message.Cmd) {
 		errorMsg := newErrorResponse("error", "unauthorized", "connection not authenticated", "")
 		responseData := marshalClientError(errorMsg)
 		g.messagesDroppedAuth.Add(1)
@@ -395,7 +402,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		}
 	}
 
-	logicClient := g.getLogicClient()
+	logicClient := g.GetLogicClient(conn.GetServerID())
 	if logicClient != nil {
 		if err := logicClient.SendMessage(protoMsg); err != nil {
 			g.messagesDroppedFull.Add(1)

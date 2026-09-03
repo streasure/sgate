@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/gateway"
 	"google.golang.org/protobuf/proto"
 )
@@ -77,11 +78,18 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	tcpConn.SetWriteBuffer(8 * 1024 * 1024)
 	defer conn.Close()
 
-	// Login is the first client message; logic owns its validation.
+	// Login gate binds the session to logic-1 before business login.
 	buf := make([]byte, 65536)
-	loginFrame := buildSingleFrame(gateway.RouteLogin, map[string]string{
-		"userId": fmt.Sprintf("u_%d_%d_%d", mode[0], clientID, rand.Int63()),
-	})
+	userID := fmt.Sprintf("u_%d_%d_%d", mode[0], clientID, rand.Int63())
+	gateBody, _ := proto.Marshal(&protoLogic.LoginGateReq{ServerId: "logic-1", UserId: userID, Zone: "default"})
+	conn.Write(buildRawFrame(gateway.RouteLoginGate, gateway.CmdLoginGate, gateBody))
+	if !readOneFrame(conn, buf) {
+		return
+	}
+
+	// Login is the first business message; logic owns its validation.
+	loginBody, _ := proto.Marshal(&protoLogic.LoginReq{UserId: userID})
+	loginFrame := buildRawFrame(gateway.RouteLogin, gateway.CmdLogicLoginReq, loginBody)
 	conn.Write(loginFrame)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	totalRead := 0
@@ -188,6 +196,37 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 		atomic.AddInt64(&totalSent, int64(batchSize))
 		atomic.AddInt64(&inflight, int64(batchSize))
 	}
+}
+
+func readOneFrame(conn net.Conn, buf []byte) bool {
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	total := 0
+	for total < 4 {
+		n, err := conn.Read(buf[total:])
+		if err != nil || n == 0 {
+			return false
+		}
+		total += n
+	}
+	frameLen := binary.BigEndian.Uint32(buf[:4])
+	for total < 4+int(frameLen) {
+		n, err := conn.Read(buf[total:])
+		if err != nil {
+			return false
+		}
+		total += n
+	}
+	conn.SetReadDeadline(time.Time{})
+	return true
+}
+
+func buildRawFrame(route string, cmd int32, body []byte) []byte {
+	inner, _ := proto.Marshal(&gateway.StreamData{Route: route, Cmd: cmd, Data: body})
+	data, _ := proto.Marshal(&gateway.MessageFrame{Cmd: cmd, Body: inner})
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+	copy(frame[4:], data)
+	return frame
 }
 
 func main() {

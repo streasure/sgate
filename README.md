@@ -115,10 +115,10 @@ enum Cmd {
 
 | 常量 | 值 | 说明 |
 |------|-----|------|
-| `RouteHandshake` | `"handshake"` | 握手（Gateway 内部处理） |
-| `RouteLogin` | `"login"` | 登录（Gateway 放行 + Logic 处理） |
-| `RoutePing` | `"ping"` | 心跳请求 |
-| `RoutePong` | `"pong"` | 心跳响应 |
+| `RouteLoginGate` | `"login_gate"` | 选服并将 session 绑定到指定 logic server |
+| `RouteLogin` | `"login"` | Logic 业务登录 |
+| `RouteHeartbeat` | `"heartbeat"` | Logic 心跳 |
+| `RouteUserOffline` | `"user_offline"` | Gateway 通知 Logic 客户端异常断开 |
 | `RouteBatch` | `"_batch"` | 批量消息封包 |
 | `RouteServerKick` | `"server.kick"` | 踢下线 |
 | `RouteServerJoinGroup` | `"server.join_group"` | 加入组 |
@@ -207,7 +207,7 @@ Gateway 使用 gnet v2 作为网络框架，所有 TCP 连接运行在单个事�
 ```
 OnTraffic(conn, inBuf)
   ├── 解析 [4字节长度][MessageFrame] 帧
-  ├── 首帧拦截: handshake/login 个别处理
+  ├── 首帧拦截: LoginGateReq 选服并绑定 session
   ├── 批量收集: 多帧打包为 RouteBatch
   ├── 认证守卫: 未认证连接拒绝转发
   ├── 过滤器链: IP黑名单 → 限流 → WAF → 熔断 → 完整性校验
@@ -250,24 +250,21 @@ Gateway 编码回包:
 ### 3. 登录流程
 
 ```
-客户端                    Gateway                     Logic
+客户端                    Gateway                     Logic(logic-1)
   │                         │                           │
   │── MessageFrame ────────►│                           │
-  │   {cmd=1, body=         │                           │
-  │    Handshake{...}}      │                           │
-  │                         │── 版本协商 ──►            │
-  │◄── HandshakeResponse ──│                            │
+  │   {cmd=2000001,         │── 绑定 session→logic-1    │
+  │    LoginGateReq}        │                           │
+  │◄── LoginGateAck ───────│                            │
   │                         │                           │
   │── MessageFrame ────────►│                           │
-  │   {cmd=2, body=         │                           │
-  │    StreamData{          │                           │
-  │      Route:"login",     │── StreamData ────────────►│
-  │      Payload:{userId}}  │                           │── 注册 user→conn 映射
+  │   {cmd=1000001,         │── 固定 StreamData ───────►│
+  │    LoginReq}            │                           │── 注册 user→session 映射
   │                         │                           │── 返回 LoginAck
   │                         │◄── StreamData ────────────│
   │◄── MessageFrame ───────│  {UserKey:"uuid_xxx"}     │
-  │   {cmd=2, body=         │                           │
-  │    LoginAck{code:200}}  │                           │
+  │   {cmd=1000002,         │                           │
+  │    LoginAck}            │                           │
 ```
 
 ### 4. 心跳流程
@@ -276,11 +273,9 @@ Gateway 编码回包:
 客户端                    Gateway                     Logic
   │                         │                           │
   │── MessageFrame ────────►│                           │
-  │   {cmd=CmdForRoute(     │── StreamData ────────────►│
-  │    "ping"), body=        │                           │── 返回 Pong
-  │    StreamData{           │◄── StreamData ────────────│
-  │      Route:"ping"}}     │                           │
-  │◄── MessageFrame ───────│  {Route:"pong",            │
+  │   {cmd=1000010,         │── 绑定的 StreamData ──────►│
+  │    HeartbeatReq}        │                           │── 返回 HeartbeatAck
+  │◄── MessageFrame ───────│  {cmd=1000011}             │
   │   {cmd=respCmd, body=   │   Timestamp:...}          │
   │    StreamData{           │                           │
   │      Route:"pong"}}     │                           │
@@ -353,15 +348,16 @@ sgate/
 │   ├── server.go             # 推送/组管理/广播
 │   ├── handler.go            # RouteHandler/BurstRouteHandler/Dispatcher
 │   └── service.go            # gRPC 服务 + Nacos 注册
-├── api/                      # 导出路由常量
+├── gateway/                  # sgate 路由与帧解析逻辑
 ├── types/                    # FilterContext 等公共类型
 └── config/                   # 配置文件 & Grafana/Prometheus
 
 protocol/                     # 协议定义（独立仓库）
 ├── gateway/
-│   ├── gateway.proto         # MessageFrame + Login/Heartbeat + StreamData + GatewayStream
-│   └── routes.go             # 路由常量 + CmdForRoute + ExtractMessageFrame
-├── commonstruct/             # Message + ErrorResponse + Handshake + Acknowledgement
+│   ├── gateway.proto         # MessageFrame + StreamData + GatewayStream
+│   ├── gateway.pb.go
+│   └── gateway_grpc.pb.go
+├── commonstruct/             # 公共 protobuf 类型
 ├── enums/                    # CMD 枚举号 + PushType/CompressionType
 └── logic/                    # 前后端交互协议（LoginReq/Ack, PushNotify 等）
 ```
@@ -372,6 +368,7 @@ protocol/                     # 协议定义（独立仓库）
 # config/config.yaml
 port: 8081                    # HTTP 管理端口
 logLevel: info
+serverId: "gateway-1"
 zone: "default"
 
 transports:
@@ -384,6 +381,11 @@ grpc:
   port: 50051                 # gRPC 服务端口
   logicAddr: "localhost:50052" # Logic Server 地址
   windowSize: 67108864        # gRPC 窗口大小
+
+logicServers:
+  - serverId: "logic-1"
+    zone: "default"
+    address: "localhost:50052"
 
 monitoring:
   pprofAddr: ":6060"          # pprof 地址

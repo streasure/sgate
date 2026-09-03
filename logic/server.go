@@ -489,6 +489,20 @@ func (s *Server) OnData(stream gateway.GatewayStream_OnDataServer) error {
 					continue
 				}
 				innerMsg := msgPool.Get().(*gateway.StreamData)
+				// The client frame body contains the gateway StreamData envelope.
+				// Unwrap it here so business handlers receive only their protobuf
+				// payload, while the session identity remains authoritative.
+				var envelope gateway.StreamData
+				if err := proto.Unmarshal(body, &envelope); err == nil && envelope.Route != "" {
+					route = envelope.Route
+					if envelope.Cmd != 0 {
+						cmd = envelope.Cmd
+					}
+					body = envelope.Data
+					if envelope.UserKey != "" {
+						msg.UserKey = envelope.UserKey
+					}
+				}
 				innerMsg.Route = route
 				innerMsg.Cmd = cmd
 				innerMsg.SeqId = seqID
@@ -584,6 +598,17 @@ func (s *Server) cleanupUserByConnection(connectionID string) {
 	if userUUID, ok := s.connUserReverse.LoadAndDelete(connectionID); ok {
 		s.userConnections.Delete(userUUID.(string))
 	}
+}
+
+// Offline removes all user and push-group state for a client session. It is
+// called when sgate reports a TCP/WebSocket close without a business logout.
+func (s *Server) Offline(connectionID, userKey string) {
+	s.leaveAllGroups(connectionID)
+	if userKey != "" {
+		s.UnregisterUser(userKey)
+		return
+	}
+	s.cleanupUserByConnection(connectionID)
 }
 
 func (s *Server) PushToServer(msg *gateway.StreamData, exclude ...string) int {

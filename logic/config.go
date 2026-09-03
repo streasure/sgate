@@ -1,32 +1,50 @@
 package logic
 
-import "time"
+import (
+	"os"
+	"path/filepath"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
 
 // ServiceConfig logic server 配置
 // 服务注册基于 Nacos naming API
 type ServiceConfig struct {
-	ListenAddr    string
-	ListenPort    string
-	AdvertiseAddr string
-	ServiceID     string
-	ServiceName   string
-	Zone          string
+	ListenAddr    string `yaml:"listenAddr"`
+	ListenPort    string `yaml:"listenPort"`
+	AdvertiseAddr string `yaml:"advertiseAddr"`
+	ServiceID     string `yaml:"serverId"`
+	ServiceName   string `yaml:"serviceName"`
+	Zone          string `yaml:"zone"`
 	// Nacos 命名服务配置（服务注册）
-	NacosEndpoint       string // Nacos 控制台地址（用于登录认证）
-	NacosNamingEndpoint string // Nacos 主端口地址（用于实例注册/查询），为空则回退到 NacosEndpoint
-	NacosNamespace      string // 命名空间 ID
-	NacosGroup          string // 分组名
-	NacosUsername       string // 认证用户名
-	NacosPassword       string // 认证密码
-	NacosAPIVersion     string // API 版本：v3（默认）或 v1
-	HeartbeatInterval   time.Duration
-	HeartbeatTTL        time.Duration
-	GRPCWindowSize      int
-	GRPCMaxMessageSize  int
-	DispatchWorkers     int
-	DispatchChSize      int
-	StreamSendChSize    int
-	Passthrough         bool
+	NacosEndpoint       string        `yaml:"nacosEndpoint"`       // Nacos 控制台地址（用于登录认证）
+	NacosNamingEndpoint string        `yaml:"nacosNamingEndpoint"` // Nacos 主端口地址（用于实例注册/查询），为空则回退到 NacosEndpoint
+	NacosNamespace      string        `yaml:"nacosNamespace"`      // 命名空间 ID
+	NacosGroup          string        `yaml:"nacosGroup"`          // 分组名
+	NacosUsername       string        `yaml:"nacosUsername"`       // 认证用户名
+	NacosPassword       string        `yaml:"nacosPassword"`       // 认证密码
+	NacosAPIVersion     string        `yaml:"nacosApiVersion"`     // API 版本：v3（默认）或 v1
+	HeartbeatInterval   time.Duration `yaml:"heartbeatInterval"`
+	HeartbeatTTL        time.Duration `yaml:"heartbeatTTL"`
+	GRPCWindowSize      int           `yaml:"grpcWindowSize"`
+	GRPCMaxMessageSize  int           `yaml:"grpcMaxMessageSize"`
+	DispatchWorkers     int           `yaml:"dispatchWorkers"`
+	DispatchChSize      int           `yaml:"dispatchChSize"`
+	StreamSendChSize    int           `yaml:"streamSendChSize"`
+	Passthrough         bool          `yaml:"passthrough"`
+}
+
+func LoadConfig(name string) (ServiceConfig, error) {
+	cfg := defaultConfig()
+	data, err := os.ReadFile(filepath.Clean(name))
+	if err != nil {
+		return cfg, err
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 func defaultConfig() ServiceConfig {
@@ -55,6 +73,10 @@ func defaultConfig() ServiceConfig {
 }
 
 type ServiceOption func(*ServiceConfig)
+
+func WithConfig(cfg ServiceConfig) ServiceOption {
+	return func(c *ServiceConfig) { *c = cfg }
+}
 
 func WithListenPort(port string) ServiceOption {
 	return func(c *ServiceConfig) { c.ListenPort = port }

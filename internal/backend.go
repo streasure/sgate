@@ -443,6 +443,7 @@ type LogicClient struct {
 	closing           bool
 	closed            chan struct{}
 	shardCount        int
+	serverID          string
 }
 
 func NewLogicClient(gateway GatewayInterface) *LogicClient {
@@ -458,6 +459,8 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 		messageQueue:      NewStreamMessageQueue(),
 	}
 }
+
+func (lc *LogicClient) SetServerID(serverID string) { lc.serverID = serverID }
 
 func (lc *LogicClient) getState() LogicConnectionState {
 	return LogicConnectionState(atomic.LoadInt32(&lc.state))
@@ -867,7 +870,7 @@ func (lc *LogicClient) handleReceivedMessage(msg *protoGw.StreamData) {
 		// Authentication is owned by logic. Any successful response carrying a
 		// user key promotes the connection without naming a login route here.
 		if msg.UserKey != "" {
-			conn.SetUserUUID(msg.UserKey)
+			lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
 			tlog.Debug("logic response updated connection userUUID", "connectionID", msg.SessionId, "userUUID", msg.UserKey)
 		}
 		// 注意: 不能使用 pooled buffer，因为 gnet Writev 可能异步传递 slice 引用
@@ -987,9 +990,10 @@ func (lc *LogicClient) handleReceivedMessage(msg *protoGw.StreamData) {
 		responseData, _ := marshalClientMessage(msg)
 		conn.Send(responseData)
 		tlog.Info("kicking connection by logic server", "connectionID", msg.SessionId, "reason", reason)
-		lc.gateway.GetConnectionManager().RemoveConnection(msg.SessionId)
 		if conn.Conn != nil {
 			conn.Conn.Close()
+		} else {
+			lc.gateway.GetConnectionManager().RemoveConnection(msg.SessionId)
 		}
 	} else if route == gateway.RouteServerJoinGroup {
 		groupID := msg.Payload["groupID"]
@@ -1357,6 +1361,7 @@ type GatewayInterface interface {
 	GetGatewayID() string
 	AddPushedToClient(n int64)
 	AddPushDroppedNoConn(n int64)
+	GetLogicClient(serverID string) LogicClientProvider
 }
 
 type GRPCServer struct {
@@ -1492,6 +1497,30 @@ type LogicClientPool struct {
 	fastClient atomic.Pointer[LogicClient]
 }
 
+func (pool *LogicClientPool) RegisterClient(serverID string, client *LogicClient) {
+	if serverID == "" || client == nil {
+		return
+	}
+	client.SetServerID(serverID)
+	pool.mu.Lock()
+	pool.clients[serverID] = client
+	if !containsString(pool.ordered, serverID) {
+		pool.ordered = append(pool.ordered, serverID)
+	}
+	pool.updateFastClient()
+	pool.mu.Unlock()
+}
+
+func (pool *LogicClientPool) GetClient(serverID string) LogicClientProvider {
+	pool.mu.RLock()
+	client := pool.clients[serverID]
+	pool.mu.RUnlock()
+	if client == nil || !client.IsConnected() {
+		return nil
+	}
+	return client
+}
+
 func NewLogicClientPool(gateway GatewayInterface) *LogicClientPool {
 	return &LogicClientPool{
 		clients: make(map[string]*LogicClient),
@@ -1550,6 +1579,7 @@ func (pool *LogicClientPool) handleServiceRegister(event nacos.ServiceEvent) {
 	}
 
 	client := NewLogicClient(pool.gateway)
+	client.SetServerID(event.Service.ServiceID)
 	client.shardCount = runtime.NumCPU() * 8
 
 	go func() {
@@ -1636,6 +1666,21 @@ func (pool *LogicClientPool) SendMessage(msg *protoGw.StreamData) error {
 		return c.SendMessage(msg)
 	}
 	return pool.RoundRobinSendMessage(msg)
+}
+
+// SendMessageTo sends a session-bound message to exactly one logic server.
+// It never falls back to round-robin because that could cross server shards.
+func (pool *LogicClientPool) SendMessageTo(serverID string, msg *protoGw.StreamData) error {
+	if serverID == "" {
+		return ErrNotConnected
+	}
+	pool.mu.RLock()
+	client := pool.clients[serverID]
+	pool.mu.RUnlock()
+	if client == nil || !client.IsConnected() {
+		return ErrNotConnected
+	}
+	return client.SendMessage(msg)
 }
 
 func (pool *LogicClientPool) RoundRobinSendMessage(msg *protoGw.StreamData) error {

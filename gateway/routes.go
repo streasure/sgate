@@ -24,13 +24,23 @@ func RegisterGatewayStreamServer(s grpc.ServiceRegistrar, srv GatewayStreamServe
 }
 
 const (
-	CmdLogin int32 = 2
-	CmdError int32 = 3
+	CmdLogin         int32 = 2
+	CmdError         int32 = 3
+	CmdLoginGate     int32 = 2000001
+	CmdLoginGateAck  int32 = 2000002
+	CmdUserOffline   int32 = 1000012
+	CmdLogicLoginReq int32 = 1000001
+	CmdLogicLoginAck int32 = 1000002
+	CmdHeartbeatReq  int32 = 1000010
+	CmdHeartbeatAck  int32 = 1000011
 )
 
 const (
-	RouteLogin = "login"
-	RouteError = "error"
+	RouteLogin       = "login"
+	RouteLoginGate   = "login_gate"
+	RouteUserOffline = "user_offline"
+	RouteHeartbeat   = "heartbeat"
+	RouteError       = "error"
 
 	RouteServerKick             = "server.kick"
 	RouteServerJoinGroup        = "server.join_group"

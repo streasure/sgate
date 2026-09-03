@@ -39,12 +39,18 @@ import (
 	"strconv"
 	"time"
 
+	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/sgate/logic"
 	"github.com/streasure/util/tlog"
+	"google.golang.org/protobuf/proto"
 )
 
 func main() {
+	logicCfg, err := logic.LoadConfig("config/logic.yaml")
+	if err != nil {
+		logicCfg, _ = logic.LoadConfig("../../config/logic.yaml")
+	}
 	// ── 1. 日志初始化 ────────────────────────────────────────────────
 	// tlog 自动创建日志目录（基于 exe 所在目录解析相对路径）
 	if _, err := tlog.New("config/tlog.yaml"); err != nil {
@@ -63,6 +69,7 @@ func main() {
 
 	// ── 3. 创建 Logic Service ───────────────────────────────────────
 	svc := logic.NewService(
+		logic.WithConfig(logicCfg),
 		logic.WithServiceID(envOr("LOGIC_SERVICE_ID", "logic-1")),
 		logic.WithAdvertiseAddr(envOr("LOGIC_ADVERTISE_ADDR", "localhost:50052")),
 		logic.WithListenPort(envOr("LOGIC_PORT", "50052")),
@@ -73,6 +80,7 @@ func main() {
 		logic.WithNacosAuth(envOr("NACOS_USERNAME", "nacos"), envOr("NACOS_PASSWORD", "nacos")),
 		logic.WithNacosAPIVersion(envOr("NACOS_API_VERSION", "v3")),
 		logic.WithServiceName(envOr("LOGIC_SERVICE_NAME", "logic")),
+		logic.WithZone(envOr("LOGIC_ZONE", "default")),
 		logic.WithGRPCWindowSize(envInt("GRPC_WINDOW_SIZE", 67108864)),
 		logic.WithGRPCMaxMessageSize(envInt("GRPC_MAX_MSG_SIZE", 4194304)),
 		logic.WithStreamSendChSize(envInt("LOGIC_STREAM_CH_SIZE", 1048576)),
@@ -106,23 +114,27 @@ func main() {
 
 	// ── Login: 用户登录（必须） ──────────────────────────────────────
 	// 注册 userUUID → connectionID 映射，使所有推送功能可用
-	svc.RegisterRoute(gateway.RouteLogin, func(msg *gateway.StreamData) *gateway.StreamData {
-		userID := msg.GetPayload()["userId"]
+	svc.RegisterProto(gateway.RouteLogin, gateway.CmdLogicLoginReq, &protoLogic.LoginReq{}, gateway.CmdLogicLoginAck, func(ctx *logic.Context, req proto.Message) proto.Message {
+		login := req.(*protoLogic.LoginReq)
+		userID := login.UserId
 		if userID == "" {
-			userID = msg.SessionId
+			userID = ctx.ConnectionID
 		}
-		userUUID := "uuid_" + userID
+		userKey := "uuid_" + userID
+		svc.RegisterUser(userKey, ctx.ConnectionID)
+		return &protoLogic.LoginAck{UserKey: userKey, ServerTime: time.Now().UnixMilli()}
+	})
 
-		// ★ 关键: RegisterUser 注册映射，否则 PushToConnection/PushToGroup 不工作
-		svc.RegisterUser(userUUID, msg.SessionId)
+	svc.RegisterProto(gateway.RouteHeartbeat, gateway.CmdHeartbeatReq, &protoLogic.HeartbeatReq{}, gateway.CmdHeartbeatAck, func(ctx *logic.Context, req proto.Message) proto.Message {
+		heartbeat := req.(*protoLogic.HeartbeatReq)
+		return &protoLogic.HeartbeatAck{ServerTime: time.Now().UnixMilli(), RttMs: time.Now().UnixMilli() - heartbeat.ClientTime}
+	})
 
-		return &gateway.StreamData{
-			SessionId: msg.SessionId,
-			UserKey:   userUUID,
-			Route:     gateway.RouteLogin,
-			Payload:   map[string]string{"code": "200", "userId": userID, "userUUID": userUUID},
-			Timestamp: time.Now().UnixMilli(),
-		}
+	svc.RegisterProto(gateway.RouteUserOffline, gateway.CmdUserOffline, &protoLogic.UserOfflineNtf{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
+		n := req.(*protoLogic.UserOfflineNtf)
+		svc.Server().Offline(n.SessionId, n.UserKey)
+		tlog.Info("user offline notification", "sessionID", n.SessionId, "userKey", n.UserKey, "serverID", n.ServerId)
+		return nil
 	})
 
 	// ── Echo: 回显测试 ──────────────────────────────────────────────

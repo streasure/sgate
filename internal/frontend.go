@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"github.com/spf13/cast"
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
+	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
@@ -80,6 +80,7 @@ type Gateway struct {
 	tracer            *obs.Tracer
 	logicClient       *LogicClient
 	logicClientPool   *LogicClientPool
+	serverID          string
 	serviceDiscovery  *nacos.Discovery
 	overloadProtector *OverloadProtector
 	grpcServer        *grpc.Server
@@ -354,6 +355,19 @@ func (g *Gateway) StartServices() {
 
 	g.logicClient.gateway = g
 	g.logicClientPool = NewLogicClientPool(g)
+	for _, server := range cfg.LogicServers {
+		if server.ServerID == "" || server.Address == "" || (server.Zone != "" && server.Zone != cfg.Zone) {
+			continue
+		}
+		client := NewLogicClient(g)
+		client.SetServerID(server.ServerID)
+		g.logicClientPool.RegisterClient(server.ServerID, client)
+		go func(c *LogicClient, address string) {
+			if err := c.Connect(address); err != nil {
+				tlog.Error("failed to connect configured logic server", "serverID", c.serverID, "address", address, "error", err)
+			}
+		}(client, server.Address)
+	}
 
 	if g.serviceDiscovery != nil {
 		g.logicClientPool.SetDiscovery(g.serviceDiscovery)
@@ -370,35 +384,6 @@ func (g *Gateway) StartServices() {
 			}
 			return client.IsConnected()
 		})
-	}
-
-	// Static connection pre-warm (no discovery)
-	if g.serviceDiscovery == nil {
-		tlog.Info("service discovery disabled, using static logic server connection")
-		go func() {
-			address := g.grpcCfg.LogicAddr
-			if address == "" {
-				address = fmt.Sprintf("localhost:%d", g.grpcCfg.Port)
-			}
-			backoff := time.Second
-			for {
-				tlog.Info("pre-warming logic server connection", "address", address)
-				err := g.logicClient.Connect(address)
-				if err == nil {
-					tlog.Info("successfully connected to logic server (pre-warmed)")
-					return
-				}
-				if errors.Is(err, ErrConnectionClosing) {
-					return
-				}
-				tlog.Error("failed to connect to logic server, retrying", "error", err, "backoff", backoff)
-				time.Sleep(backoff)
-				backoff *= 2
-				if backoff > 30*time.Second {
-					backoff = 30 * time.Second
-				}
-			}
-		}()
 	}
 
 	// gRPC server
@@ -709,6 +694,9 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 	}
 
 	if connectionID != "" {
+		if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
+			g.notifyLogicOffline(conn)
+		}
 		g.connectionManager.RemoveConnection(connectionID)
 		g.connectionsActive.Add(-1)
 		tlog.Debug("connection closed", "connectionID", connectionID, "error", err)
@@ -841,6 +829,18 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		if offset+totalLen > len(ctx.FrameBuf) {
 			break // incomplete frame, wait for more data
 		}
+		if batchCount == 0 {
+			cmd, _, _, ok := gateway.ExtractMessageFrame(ctx.FrameBuf[offset+4 : offset+totalLen])
+			if !ok {
+				ctx.FrameBuf = nil
+				return gnet.Close
+			}
+			if cmd == gateway.CmdLoginGate {
+				frameData := append([]byte(nil), ctx.FrameBuf[offset+4:offset+totalLen]...)
+				ctx.FrameBuf = append(ctx.FrameBuf[:0], ctx.FrameBuf[offset+totalLen:]...)
+				return g.handleTCPRequest(c, frameData)
+			}
+		}
 
 		offset += totalLen
 		batchCount++
@@ -890,7 +890,11 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		return
 	}
 
-	logicClient := g.getLogicClient()
+	conn = g.connectionManager.GetConnection(ctx.ConnectionID)
+	if conn == nil || !conn.IsBound() {
+		return gnet.Close
+	}
+	logicClient := g.GetLogicClient(conn.GetServerID())
 	if logicClient == nil {
 		g.messagesDroppedNoLogicNotConnected.Add(int64(batchCount))
 		return
@@ -941,6 +945,61 @@ func (g *Gateway) getLogicClient() LogicClientProvider {
 	return nil
 }
 
+func (g *Gateway) GetLogicClient(serverID string) LogicClientProvider {
+	if g.logicClientPool == nil {
+		return nil
+	}
+	return g.logicClientPool.GetClient(serverID)
+}
+
+func (g *Gateway) validateLoginKey(_ string, _ string) bool {
+	// Reserved for the future login-server validation call.
+	return true
+}
+
+func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
+	req := new(protoLogic.LoginGateReq)
+	writeAck := func(code int32, text, serverID string) {
+		ack := &protoLogic.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
+		body, _ := proto.Marshal(ack)
+		writeMsgFrame(c, &protoGw.StreamData{Cmd: gateway.CmdLoginGateAck, Route: gateway.RouteLoginGate, Data: body, SeqId: message.SeqId})
+	}
+	if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
+		writeAck(400, "invalid login gate request", req.ServerId)
+		return gnet.None
+	}
+	if req.Zone != "" && req.Zone != g.zone {
+		writeAck(403, "zone mismatch", req.ServerId)
+		return gnet.None
+	}
+	if !g.validateLoginKey(req.UserId, req.LoginKey) {
+		writeAck(401, "invalid login key", req.ServerId)
+		return gnet.None
+	}
+	logicClient := g.GetLogicClient(req.ServerId)
+	if logicClient == nil || !logicClient.IsConnected() {
+		writeAck(503, "logic server unavailable", req.ServerId)
+		return gnet.None
+	}
+	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
+	writeAck(0, "ok", req.ServerId)
+	return gnet.None
+}
+
+func (g *Gateway) notifyLogicOffline(conn *Connection) {
+	serverID := conn.GetServerID()
+	if serverID == "" {
+		return
+	}
+	client := g.GetLogicClient(serverID)
+	if client == nil {
+		return
+	}
+	ntf := &protoLogic.UserOfflineNtf{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), ServerId: serverID, OfflineTime: time.Now().UnixMilli()}
+	body, _ := proto.Marshal(ntf)
+	_ = client.SendMessage(&protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: gateway.CmdUserOffline, Route: gateway.RouteUserOffline, Data: body})
+}
+
 func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
 	if len(data) == 0 {
 		return
@@ -973,26 +1032,32 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	}
 
 	logicClient := g.getLogicClient()
-	if logicClient == nil {
-		g.messagesDroppedNoLogicNotConnected.Add(1)
-		return
-	}
-
 	message, ok := decodeClientMessage(data)
 	if !ok {
 		return gnet.Close
 	}
 	route, cmd := message.Route, message.Cmd
+	if cmd == gateway.CmdLoginGate {
+		return g.handleLoginGate(c, connectionID, message)
+	}
 	if route == "" {
 		route = gateway.RouteForCmd(cmd)
 	}
 	conn := g.connectionManager.GetConnection(connectionID)
-	if conn != nil && !conn.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
+	if conn == nil || conn.GetServerID() == "" {
+		return gnet.Close
+	}
+	if !conn.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
 		errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		g.messagesDroppedAuth.Add(1)
 		return gnet.Close
+	}
+	logicClient = g.GetLogicClient(conn.GetServerID())
+	if logicClient == nil {
+		g.messagesDroppedNoLogicNotConnected.Add(1)
+		return
 	}
 
 	// IP 白名单/黑名单检查
@@ -1086,7 +1151,8 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		protoMsg.Cmd = cmd
 	}
 
-	if err := logicClient.SendMessage(protoMsg); err != nil {
+	logicClient = g.GetLogicClient(conn.GetServerID())
+	if logicClient == nil || logicClient.SendMessage(protoMsg) != nil {
 		g.messagesDroppedFull.Add(1)
 		if g.circuitBreakerMgr != nil {
 			breaker := g.getOrCreateBreaker(route)

@@ -195,6 +195,9 @@ func (s *Server) dispatchMessage(msg *gateway.StreamData, callback func(*gateway
 			Msg:          msg,
 		}, reqVal)
 		entry.reqPool.Put(reqVal)
+		if entry.respCmd == 0 || resp == nil {
+			return
+		}
 
 		respData, err := proto.Marshal(resp)
 		if err != nil {
@@ -204,7 +207,7 @@ func (s *Server) dispatchMessage(msg *gateway.StreamData, callback func(*gateway
 
 		callback(&gateway.StreamData{
 			SessionId: msg.SessionId,
-			UserKey:   msg.UserKey,
+			UserKey:   responseUserKey(resp, msg.UserKey),
 			Route:     msg.Route,
 			Cmd:       entry.respCmd,
 			Data:      respData,
@@ -233,6 +236,13 @@ func (s *Server) dispatchMessage(msg *gateway.StreamData, callback func(*gateway
 			callback(response)
 		})
 	}
+}
+
+func responseUserKey(resp proto.Message, fallback string) string {
+	if keyed, ok := resp.(interface{ GetUserKey() string }); ok && keyed.GetUserKey() != "" {
+		return keyed.GetUserKey()
+	}
+	return fallback
 }
 
 func errorReply(connID string, cmd int32, message, code string, kv ...string) *gateway.StreamData {

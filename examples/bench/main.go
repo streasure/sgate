@@ -13,16 +13,20 @@ import (
 	"sync/atomic"
 	"time"
 
+	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/gateway"
 	"google.golang.org/protobuf/proto"
 )
 
 var (
-	totalSent    int64
-	totalRecv    int64
-	totalDropped int64
-	sendFrame    []byte
-	batchSend    map[int][]byte
+	totalSent       int64
+	totalRecv       int64
+	totalDropped    int64
+	totalAuthFailed int64
+	sendFrame       []byte
+	batchSend       map[int][]byte
+	targetServerID  = "logic-1"
+	targetZone      = "default"
 )
 
 // drainBufPool 复用读取缓冲区，避免高并发下大量 4MB 分配导致 Go runtime heap 扩展失败
@@ -31,13 +35,11 @@ var drainBufPool = sync.Pool{
 }
 
 func buildSendFrame() {
-	body := &gateway.StreamData{
-		Route:   gateway.RouteTest,
-		Payload: map[string]string{"data": "1"},
-	}
+	heartbeat, _ := proto.Marshal(&protoLogic.HeartbeatReq{ClientTime: time.Now().UnixMilli()})
+	body := &gateway.StreamData{Route: gateway.RouteHeartbeat, Cmd: gateway.CmdHeartbeatReq, Data: heartbeat}
 	bodyData, _ := proto.Marshal(body)
 	data, _ := proto.Marshal(&gateway.MessageFrame{
-		Cmd:  gateway.CmdForRoute(gateway.RouteTest),
+		Cmd:  gateway.CmdHeartbeatReq,
 		Body: bodyData,
 	})
 	frame := make([]byte, 4+len(data))
@@ -86,18 +88,23 @@ func (bc *benchConn) close() {
 // authenticate sends the logic-owned login request directly after connection setup.
 func (bc *benchConn) authenticate(clientID int) error {
 	buf := make([]byte, 65536)
-	loginBody := &gateway.StreamData{
-		Route:   gateway.RouteLogin,
-		Payload: map[string]string{"userId": fmt.Sprintf("bench_%d", clientID)},
+	gateBody, _ := proto.Marshal(&protoLogic.LoginGateReq{ServerId: targetServerID, UserId: fmt.Sprintf("bench_%d", clientID), Zone: targetZone})
+	gateFrame := buildRawFrame(gateway.RouteLoginGate, gateway.CmdLoginGate, gateBody)
+	if _, err := bc.conn.Write(gateFrame); err != nil {
+		return err
 	}
-	loginBodyData, _ := proto.Marshal(loginBody)
-	loginData, _ := proto.Marshal(&gateway.MessageFrame{
-		Cmd:  gateway.CmdForRoute(gateway.RouteLogin),
-		Body: loginBodyData,
-	})
-	loginFrame := make([]byte, 4+len(loginData))
-	binary.BigEndian.PutUint32(loginFrame[:4], uint32(len(loginData)))
-	copy(loginFrame[4:], loginData)
+	gatePayload, err := readFrame(bc.conn, buf, "login gate")
+	if err != nil {
+		return err
+	}
+	var frame gateway.MessageFrame
+	var envelope gateway.StreamData
+	var gateAck protoLogic.LoginGateAck
+	if proto.Unmarshal(gatePayload, &frame) != nil || proto.Unmarshal(frame.Body, &envelope) != nil || proto.Unmarshal(envelope.Data, &gateAck) != nil || gateAck.Code != 0 {
+		return fmt.Errorf("login gate rejected: code=%d message=%s", gateAck.Code, gateAck.Message)
+	}
+	loginBody, _ := proto.Marshal(&protoLogic.LoginReq{UserId: fmt.Sprintf("bench_%d", clientID)})
+	loginFrame := buildRawFrame(gateway.RouteLogin, gateway.CmdLogicLoginReq, loginBody)
 	if _, err := bc.conn.Write(loginFrame); err != nil {
 		return err
 	}
@@ -121,6 +128,37 @@ func (bc *benchConn) authenticate(clientID int) error {
 	}
 	bc.conn.SetReadDeadline(time.Time{})
 	return nil
+}
+
+func readFrame(conn net.Conn, buf []byte, name string) ([]byte, error) {
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	total := 0
+	for total < 4 {
+		n, err := conn.Read(buf[total:])
+		if err != nil {
+			return nil, fmt.Errorf("%s read: %w", name, err)
+		}
+		total += n
+	}
+	frameLen := binary.BigEndian.Uint32(buf[:4])
+	for total < 4+int(frameLen) {
+		n, err := conn.Read(buf[total:])
+		if err != nil {
+			return nil, fmt.Errorf("%s body: %w", name, err)
+		}
+		total += n
+	}
+	conn.SetReadDeadline(time.Time{})
+	return buf[4 : 4+frameLen], nil
+}
+
+func buildRawFrame(route string, cmd int32, body []byte) []byte {
+	inner, _ := proto.Marshal(&gateway.StreamData{Route: route, Cmd: cmd, Data: body})
+	data, _ := proto.Marshal(&gateway.MessageFrame{Cmd: cmd, Body: inner})
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+	copy(frame[4:], data)
+	return frame
 }
 
 // statsResp sgate /stats 返回结构
@@ -161,11 +199,13 @@ func runDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInf
 
 	bc, err := newBenchConn(addr)
 	if err != nil {
+		atomic.AddInt64(&totalAuthFailed, 1)
 		return
 	}
 	defer bc.close()
 
 	if err := bc.authenticate(clientID); err != nil {
+		atomic.AddInt64(&totalAuthFailed, 1)
 		return
 	}
 
@@ -253,7 +293,7 @@ func runDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInf
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <addr> <conns> [duration] [batchSize] [inflight] [statsAddr] [ratePerConn]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s <addr> <conns> [duration] [batchSize] [inflight] [statsAddr] [ratePerConn] [serverId] [zone]\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -275,6 +315,12 @@ func main() {
 	statsAddr := "127.0.0.1:8081"
 	if len(os.Args) >= 7 {
 		statsAddr = os.Args[6]
+	}
+	if len(os.Args) >= 8 {
+		targetServerID = os.Args[7]
+	}
+	if len(os.Args) >= 9 {
+		targetZone = os.Args[8]
 	}
 
 	buildSendFrame()
@@ -326,8 +372,8 @@ func main() {
 				pushDropStr = fmt.Sprintf(" | PushDroppedNoConn: %d", stats.PushDroppedNoConn)
 			}
 
-			fmt.Printf("[%.0fs] SendQPS: %.0f | RecvQPS: %.0f | AvgRecvQPS: %.0f | Sent: %d | Recv: %d | Dropped: %d | Pending: %d%s%s\n",
-				elapsed, sendQPS, qps, avgQPS, curSent, curRecv, atomic.LoadInt64(&totalDropped), curSent-curRecv-atomic.LoadInt64(&totalDropped), pushedStr, pushDropStr)
+			fmt.Printf("[%.0fs] SendQPS: %.0f | RecvQPS: %.0f | AvgRecvQPS: %.0f | Sent: %d | Recv: %d | Dropped: %d | AuthFailed: %d | Pending: %d%s%s\n",
+				elapsed, sendQPS, qps, avgQPS, curSent, curRecv, atomic.LoadInt64(&totalDropped), atomic.LoadInt64(&totalAuthFailed), curSent-curRecv-atomic.LoadInt64(&totalDropped), pushedStr, pushDropStr)
 
 			lastRecv = curRecv
 			lastSent = curSent
@@ -342,6 +388,7 @@ func main() {
 				fmt.Printf("Total Sent: %d\n", atomic.LoadInt64(&totalSent))
 				fmt.Printf("Total Recv: %d\n", atomic.LoadInt64(&totalRecv))
 				fmt.Printf("Total Dropped (bench): %d\n", atomic.LoadInt64(&totalDropped))
+				fmt.Printf("Auth Failed: %d\n", atomic.LoadInt64(&totalAuthFailed))
 				fmt.Printf("Duration: %.2fs\n", totalElapsed)
 
 				finalQPS := float64(atomic.LoadInt64(&totalRecv)) / totalElapsed

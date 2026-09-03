@@ -96,6 +96,8 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		protection:        protection,
 		grpcCfg:           grpcCfg,
 		streamCfg:         streamCfg,
+		serverID:          deps.Config.ServerID,
+		zone:              deps.Config.Zone,
 
 		// From components
 		filterChain:        deps.FilterChain,

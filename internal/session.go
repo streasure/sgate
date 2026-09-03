@@ -64,6 +64,12 @@ func (c *Connection) IsAuthenticated() bool {
 	return c.UserUUID != "" && !strings.HasPrefix(c.UserUUID, "temp_")
 }
 
+func (c *Connection) IsBound() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ServerID != ""
+}
+
 // SetUserUUID thread-safe setter for UserUUID
 func (c *Connection) SetUserUUID(uuid string) {
 	c.mu.Lock()

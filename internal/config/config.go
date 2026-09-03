@@ -10,18 +10,20 @@ import (
 )
 
 type Config struct {
-	Port       int              `yaml:"port"`
-	LogLevel   string           `yaml:"logLevel"`
-	Zone       string           `yaml:"zone"`
-	Discovery  DiscoveryConfig  `yaml:"discovery"`
-	Transports []Transport      `yaml:"transports"`
-	GRPC       GRPCConfig       `yaml:"grpc"`
-	Stream     StreamConfig     `yaml:"stream"`
-	Protection ProtectionConfig `yaml:"protection"`
-	Security   SecurityConfig   `yaml:"security"`
-	WAF        WAFConfig        `yaml:"waf"`
-	TLS        TLSConfig        `yaml:"tls"`
-	Cluster    ClusterConfig    `yaml:"cluster"`
+	Port         int                 `yaml:"port"`
+	LogLevel     string              `yaml:"logLevel"`
+	ServerID     string              `yaml:"serverId"`
+	Zone         string              `yaml:"zone"`
+	Discovery    DiscoveryConfig     `yaml:"discovery"`
+	Transports   []Transport         `yaml:"transports"`
+	GRPC         GRPCConfig          `yaml:"grpc"`
+	LogicServers []LogicServerConfig `yaml:"logicServers"`
+	Stream       StreamConfig        `yaml:"stream"`
+	Protection   ProtectionConfig    `yaml:"protection"`
+	Security     SecurityConfig      `yaml:"security"`
+	WAF          WAFConfig           `yaml:"waf"`
+	TLS          TLSConfig           `yaml:"tls"`
+	Cluster      ClusterConfig       `yaml:"cluster"`
 	// 企业级网关扩展能力
 	Balancer      BalancerConfig      `yaml:"balancer"`
 	JWTAuth       JWTAuthConfig       `yaml:"jwtAuth"`
@@ -220,6 +222,24 @@ type GRPCConfig struct {
 	MaxMessageSize int    `yaml:"maxMessageSize"`
 }
 
+// LogicServerConfig is the authoritative static serverID-to-address mapping.
+// Discovery may add dynamic instances, but a login gate request is accepted
+// only for a known, connected server ID in the gateway's zone.
+type LogicServerConfig struct {
+	ServerID string `yaml:"serverId"`
+	Zone     string `yaml:"zone"`
+	Address  string `yaml:"address"`
+}
+
+func (c *Config) LogicServer(serverID string) (LogicServerConfig, bool) {
+	for _, server := range c.LogicServers {
+		if server.ServerID == serverID && (server.Zone == "" || server.Zone == c.Zone) {
+			return server, true
+		}
+	}
+	return LogicServerConfig{}, false
+}
+
 type StreamConfig struct {
 	ShardCount       int `yaml:"shardCount"`
 	SendChannelSize  int `yaml:"sendChannelSize"`
@@ -293,6 +313,7 @@ func loadDefaultConfig() *Config {
 	return &Config{
 		Port:     port,
 		LogLevel: logLevel,
+		ServerID: getEnvString("GATEWAY_SERVER_ID", "gateway-1"),
 		Discovery: DiscoveryConfig{
 			Enabled:           true,
 			ServiceName:       "logic",
@@ -325,7 +346,7 @@ func loadDefaultConfig() *Config {
 			ConnCheckInterval:  DefaultConnCheckInterval,
 			ConnIdleTimeout:    DefaultConnIdleTimeout,
 			VerifyInbound:      false,
-			PreAuthCommands:    []int32{2},
+			PreAuthCommands:    []int32{1000001},
 		},
 		Security: SecurityConfig{
 			Enabled: true,
