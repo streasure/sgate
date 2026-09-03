@@ -17,7 +17,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cast"
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
@@ -34,7 +34,7 @@ import (
 
 type LogicClientProvider interface {
 	IsConnected() bool
-	SendMessage(msg *commonstruct.Message) error
+	SendMessage(msg *gateway.StreamData) error
 }
 
 var (
@@ -47,7 +47,7 @@ var (
 )
 
 func extractRouteAndCmd(data []byte) (string, int32) {
-	return sgate.ExtractRouteAndCmd(data)
+	return gateway.ExtractRouteAndCmd(data)
 }
 
 func newErrorResponse(route, message, details, data string) *commonstruct.ErrorResponse {
@@ -160,7 +160,7 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 
 var protobufMessagePool = sync.Pool{
 	New: func() interface{} {
-		return &commonstruct.Message{
+		return &gateway.StreamData{
 			Payload: make(map[string]string, 32),
 		}
 	},
@@ -170,18 +170,18 @@ const preallocatedProtobufMessages = 64
 
 func init() {
 	for i := 0; i < preallocatedProtobufMessages; i++ {
-		protobufMessagePool.Put(&commonstruct.Message{
+		protobufMessagePool.Put(&gateway.StreamData{
 			Payload: make(map[string]string, 32),
 		})
 	}
 }
 
-func GetProtobufMessage() *commonstruct.Message {
-	msg := protobufMessagePool.Get().(*commonstruct.Message)
-	msg.ConnectionId = ""
-	msg.UserUuid = ""
+func GetProtobufMessage() *gateway.StreamData {
+	msg := protobufMessagePool.Get().(*gateway.StreamData)
+	msg.SessionId = ""
+	msg.UserKey = ""
 	msg.Route = ""
-	msg.Sequence = 0
+	msg.SeqId = 0
 	msg.Timestamp = 0
 	msg.ProtocolVersion = ""
 	if msg.Payload != nil {
@@ -194,14 +194,14 @@ func GetProtobufMessage() *commonstruct.Message {
 	return msg
 }
 
-func PutProtobufMessage(msg *commonstruct.Message) {
+func PutProtobufMessage(msg *gateway.StreamData) {
 	if msg == nil {
 		return
 	}
-	msg.ConnectionId = ""
-	msg.UserUuid = ""
+	msg.SessionId = ""
+	msg.UserKey = ""
 	msg.Route = ""
-	msg.Sequence = 0
+	msg.SeqId = 0
 	msg.Timestamp = 0
 	msg.ProtocolVersion = ""
 	msg.Cmd = 0
@@ -856,9 +856,9 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 			}
 			route := msg.Route
 			if route == "" {
-				route = sgate.RouteForCmd(msg.Cmd)
+				route = gateway.RouteForCmd(msg.Cmd)
 			}
-			if route == sgate.RouteHandshake || route == sgate.RouteLogin {
+			if route == gateway.RouteHandshake || route == gateway.RouteLogin {
 				rest := ctx.FrameBuf[offset+totalLen:]
 				if len(rest) > 0 {
 					tail := make([]byte, len(rest))
@@ -882,7 +882,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 	// 认证守卫: 批量消息必须已完成认证（serverID + userUUID）
 	conn := g.connectionManager.GetConnection(ctx.ConnectionID)
 	if conn != nil && !conn.IsAuthenticated() {
-		errorResp := newErrorResponse(sgate.RouteError, "unauthorized", "connection not authenticated, handshake required", "")
+		errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated, handshake required", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		g.messagesDroppedAuth.Add(1)
@@ -910,7 +910,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(int64(batchCount))
 		g.messagesDroppedOverload.Add(int64(batchCount))
-		errorResp := newErrorResponse(sgate.RouteError, "server overload", "cpu threshold exceeded", "")
+		errorResp := newErrorResponse(gateway.RouteError, "server overload", "cpu threshold exceeded", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		return
@@ -922,11 +922,11 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		return
 	}
 
-	batchMsg := &commonstruct.Message{
-		ConnectionId: ctx.ConnectionID,
-		Route:        sgate.RouteBatch,
-		Data:         batchData,
-		Cmd:          int32(batchCount),
+	batchMsg := &gateway.StreamData{
+		SessionId: ctx.ConnectionID,
+		Route:     gateway.RouteBatch,
+		Data:      batchData,
+		Cmd:       int32(batchCount),
 	}
 
 	if err := logicClient.SendMessage(batchMsg); err != nil {
@@ -968,7 +968,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
-		errorResp := newErrorResponse(sgate.RouteError, "server overload", "cpu threshold exceeded", "")
+		errorResp := newErrorResponse(gateway.RouteError, "server overload", "cpu threshold exceeded", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		return
@@ -1001,18 +1001,18 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	}
 	route, cmd := message.Route, message.Cmd
 	if route == "" {
-		route = sgate.RouteForCmd(cmd)
+		route = gateway.RouteForCmd(cmd)
 	}
-	if route == sgate.RouteHandshake {
+	if route == gateway.RouteHandshake {
 		return g.handleHandshake(c, connectionID, message)
 	}
 
 	// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
 	// 登录消息必须放行，因为它是完成认证的必要步骤
-	if route != sgate.RouteLogin {
+	if route != gateway.RouteLogin {
 		conn := g.connectionManager.GetConnection(connectionID)
 		if conn != nil && !conn.IsAuthenticated() {
-			errorResp := newErrorResponse(sgate.RouteError, "unauthorized", "connection not authenticated, handshake+login required", "")
+			errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated, handshake+login required", "")
 			respData, _ := proto.Marshal(errorResp)
 			writeFrame(c, respData)
 			g.messagesDroppedAuth.Add(1)
@@ -1098,11 +1098,11 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	}
 	if protoMsg == nil {
 		// 兼容 filter chain 未启用场景：构造默认消息
-		protoMsg = &commonstruct.Message{
-			ConnectionId: connectionID,
-			Route:        route,
-			Data:         append([]byte(nil), message.Data...),
-			Sequence:     message.Sequence,
+		protoMsg = &gateway.StreamData{
+			SessionId: connectionID,
+			Route:     route,
+			Data:      append([]byte(nil), message.Data...),
+			SeqId:     message.SeqId,
 		}
 		if cmd > 0 {
 			protoMsg.Cmd = cmd
@@ -1171,7 +1171,7 @@ func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 	return g.circuitBreakerMgr.GetCircuitBreaker(route, 5, 3, timeout)
 }
 
-func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *commonstruct.Message) gnet.Action {
+func (g *Gateway) handleHandshake(c gnet.Conn, connectionID string, message *gateway.StreamData) gnet.Action {
 	handshakeDataStr := message.Payload["handshake_data"]
 	var handshakeBytes []byte
 
@@ -1215,7 +1215,7 @@ func writeErrorFrame(c gnet.Conn, errMsg *commonstruct.ErrorResponse) {
 	writeFrame(c, data)
 }
 
-func writeMsgFrame(c gnet.Conn, msg *commonstruct.Message) {
+func writeMsgFrame(c gnet.Conn, msg *gateway.StreamData) {
 	data, _ := marshalClientMessage(msg)
 	writeFrame(c, data)
 }

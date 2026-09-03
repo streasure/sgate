@@ -2,7 +2,7 @@ package gateway
 
 import (
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/types"
 )
 
@@ -22,7 +22,7 @@ func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID, rou
 
 // applyForwardFilters 在转发前运行全部过滤器
 // 返回 false 表示请求被中止，调用方应丢弃该请求
-func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, route string, cmd int32) (*commonstruct.Message, bool) {
+func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, route string, cmd int32) (*gateway.StreamData, bool) {
 	if g.filterChain == nil {
 		return nil, true
 	}
@@ -41,13 +41,13 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, ro
 		g.trafficMirror.Mirror(fcx)
 	}
 	// 构造转发消息（允许过滤器修改 metadata）
-	msg := &commonstruct.Message{
-		ConnectionId: connectionID,
-		Route:        route,
-		Data:         append([]byte(nil), data...),
+	msg := &gateway.StreamData{
+		SessionId: connectionID,
+		Route:     route,
+		Data:      append([]byte(nil), data...),
 	}
 	if fcx.UserUUID != "" {
-		msg.UserUuid = fcx.UserUUID
+		msg.UserKey = fcx.UserUUID
 	}
 	return msg, true
 }

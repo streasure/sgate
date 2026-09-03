@@ -10,7 +10,7 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -376,8 +376,8 @@ func (cm *ConnectionManager) kickConnection(connectionID string, reason string, 
 	}
 
 	// 发送下线通知
-	kickMessage := &commonstruct.Message{
-		Route: sgate.RouteServerKick,
+	kickMessage := &gateway.StreamData{
+		Route: gateway.RouteServerKick,
 		Payload: map[string]string{
 			"reason":  reason,
 			"message": message,
@@ -670,12 +670,12 @@ func (cm *ConnectionManager) SendToConnection(connectionID string, message inter
 	switch msg := message.(type) {
 	case []byte:
 		responseData = marshalClientBytes(msg)
-	case *commonstruct.Message:
+	case *gateway.StreamData:
 		responseData, err = marshalClientMessage(msg)
 	case *commonstruct.ErrorResponse:
 		responseData = marshalClientError(msg)
 	case map[string]string:
-		protoMsg := &commonstruct.Message{
+		protoMsg := &gateway.StreamData{
 			Route:   "message",
 			Payload: msg,
 		}
@@ -731,14 +731,14 @@ func marshalPushMessage(message interface{}) ([]byte, error) {
 	switch msg := message.(type) {
 	case []byte:
 		return marshalClientBytes(msg), nil
-	case *commonstruct.Message:
+	case *gateway.StreamData:
 		return marshalClientMessage(msg)
 	case *commonstruct.ErrorResponse:
 		return marshalClientError(msg), nil
 	case map[string]string:
-		return marshalClientMessage(&commonstruct.Message{Route: "broadcast", Payload: msg})
+		return marshalClientMessage(&gateway.StreamData{Route: "broadcast", Payload: msg})
 	case string:
-		return marshalClientMessage(&commonstruct.Message{Route: "broadcast", Payload: map[string]string{"data": msg}})
+		return marshalClientMessage(&gateway.StreamData{Route: "broadcast", Payload: map[string]string{"data": msg}})
 	default:
 		return nil, fmt.Errorf("unsupported push message type %T", message)
 	}
@@ -1147,7 +1147,7 @@ func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
 		conn := cm.GetConnection(connectionID)
 		if conn != nil {
 			// 发送超时通知
-			timeoutMessage := &commonstruct.Message{
+			timeoutMessage := &gateway.StreamData{
 				Route: "timeout",
 				Payload: map[string]string{
 					"reason":  "inactive",

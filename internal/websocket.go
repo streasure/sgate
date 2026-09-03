@@ -12,8 +12,7 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 )
 
@@ -257,7 +256,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
-		errorResp := newErrorResponse(sgate.RouteError, "server overload", "cpu threshold exceeded", "")
+		errorResp := newErrorResponse(gateway.RouteError, "server overload", "cpu threshold exceeded", "")
 		respData := marshalClientError(errorResp)
 		g.sendWebSocketMessage(wsConn, WSOpBinary, respData)
 		return nil
@@ -337,19 +336,19 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		conn.SetWS(true)
 	}
 
-	if message.UserUuid != "" {
+	if message.UserKey != "" {
 		oldUserUUID := "temp_" + connectionID
-		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserUuid)
-		tlog.Debug("received user UUID", "connectionID", connectionID, "userUUID", message.UserUuid)
+		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserKey)
+		tlog.Debug("received user UUID", "connectionID", connectionID, "userUUID", message.UserKey)
 	}
 
-	if route == sgate.RouteHandshake {
+	if route == gateway.RouteHandshake {
 		g.handleHandshake(wsConn.Conn, connectionID, message)
 		return nil
 	}
 
 	// 认证守卫: 非握手/登录消息必须已完成认证（serverID + userUUID）
-	if route != sgate.RouteLogin {
+	if route != gateway.RouteLogin {
 		conn := g.connectionManager.GetConnection(connectionID)
 		if conn != nil && !conn.IsAuthenticated() {
 			errorMsg := newErrorResponse("error", "unauthorized", "connection not authenticated, handshake+login required", "")
@@ -367,14 +366,14 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return nil
 	}
 	if protoMsg == nil {
-		protoMsg = &commonstruct.Message{
-			ConnectionId: connectionID,
-			UserUuid:     message.UserUuid,
-			Route:        route,
-			Cmd:          message.Cmd,
-			Data:         message.Data,
-			Timestamp:    message.Timestamp,
-			Sequence:     message.Sequence,
+		protoMsg = &gateway.StreamData{
+			SessionId: connectionID,
+			UserKey:   message.UserKey,
+			Route:     route,
+			Cmd:       message.Cmd,
+			Data:      message.Data,
+			Timestamp: message.Timestamp,
+			SeqId:     message.SeqId,
 		}
 		if message.Payload != nil {
 			p := make(map[string]string, len(message.Payload))
@@ -385,14 +384,14 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		}
 	} else {
 		// filter chain 已构造 msg，补齐 WebSocket 路径特有的字段
-		if protoMsg.UserUuid == "" {
-			protoMsg.UserUuid = message.UserUuid
+		if protoMsg.UserKey == "" {
+			protoMsg.UserKey = message.UserKey
 		}
 		if protoMsg.Timestamp == 0 {
 			protoMsg.Timestamp = message.Timestamp
 		}
-		if protoMsg.Sequence == 0 {
-			protoMsg.Sequence = message.Sequence
+		if protoMsg.SeqId == 0 {
+			protoMsg.SeqId = message.SeqId
 		}
 		if protoMsg.Payload == nil && message.Payload != nil {
 			p := make(map[string]string, len(message.Payload))

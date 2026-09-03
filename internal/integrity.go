@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/streasure/protocol/commonstruct"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -54,7 +55,7 @@ func (mi *MessageIntegrity) cleanupCache() {
 // GenerateChecksum 生成消息校验和
 func (mi *MessageIntegrity) GenerateChecksum(msg proto.Message) string {
 	switch m := msg.(type) {
-	case *commonstruct.Message:
+	case *gateway.StreamData:
 		return mi.generateMessageChecksum(m)
 	default:
 		data, err := proto.Marshal(msg)
@@ -67,11 +68,11 @@ func (mi *MessageIntegrity) GenerateChecksum(msg proto.Message) string {
 	}
 }
 
-func (mi *MessageIntegrity) generateMessageChecksum(msg *commonstruct.Message) string {
+func (mi *MessageIntegrity) generateMessageChecksum(msg *gateway.StreamData) string {
 	var buf strings.Builder
-	buf.WriteString(msg.ConnectionId)
+	buf.WriteString(msg.SessionId)
 	buf.WriteString("|")
-	buf.WriteString(msg.UserUuid)
+	buf.WriteString(msg.UserKey)
 	buf.WriteString("|")
 	buf.WriteString(msg.Route)
 	buf.WriteString("|")
@@ -92,7 +93,7 @@ func (mi *MessageIntegrity) generateMessageChecksum(msg *commonstruct.Message) s
 
 	buf.WriteString(fmt.Sprintf("%d", msg.Timestamp))
 	buf.WriteString("|")
-	buf.WriteString(fmt.Sprintf("%d", msg.Sequence))
+	buf.WriteString(fmt.Sprintf("%d", msg.SeqId))
 	buf.WriteString("|")
 	buf.WriteString(msg.ProtocolVersion)
 
@@ -104,7 +105,7 @@ func (mi *MessageIntegrity) generateMessageChecksum(msg *commonstruct.Message) s
 func (mi *MessageIntegrity) ValidateChecksum(msg proto.Message, expectedChecksum string) bool {
 	var savedChecksum string
 	switch m := msg.(type) {
-	case *commonstruct.Message:
+	case *gateway.StreamData:
 		savedChecksum = m.Checksum
 		m.Checksum = ""
 	case *commonstruct.ErrorResponse:
@@ -121,7 +122,7 @@ func (mi *MessageIntegrity) ValidateChecksum(msg proto.Message, expectedChecksum
 	actualChecksum := mi.GenerateChecksum(msg)
 
 	switch m := msg.(type) {
-	case *commonstruct.Message:
+	case *gateway.StreamData:
 		m.Checksum = savedChecksum
 	case *commonstruct.ErrorResponse:
 		m.Checksum = savedChecksum
@@ -174,13 +175,13 @@ func (mi *MessageIntegrity) MarkProcessed(msgID string) {
 // ProcessMessage 处理消息完整性
 // 注意: 当消息未携带 checksum（空字符串）时跳过校验，视为「不要求完整性保护」，
 // 这样可兼容未签名的压测流量与历史客户端；签名消息会被完整校验。
-func (mi *MessageIntegrity) ProcessMessage(msg *commonstruct.Message) error {
+func (mi *MessageIntegrity) ProcessMessage(msg *gateway.StreamData) error {
 	if msg.Checksum == "" {
 		return nil
 	}
 
 	// 生成消息ID（用于防重放）
-	msgID := msg.ConnectionId + "-" + msg.UserUuid + "-" + msg.Route + "-" + fmt.Sprint(msg.Timestamp)
+	msgID := msg.SessionId + "-" + msg.UserKey + "-" + msg.Route + "-" + fmt.Sprint(msg.Timestamp)
 
 	// 检查是否重放
 	if mi.CheckReplay(msgID) {
@@ -204,7 +205,7 @@ func (mi *MessageIntegrity) ProcessMessage(msg *commonstruct.Message) error {
 }
 
 // PrepareMessage 准备消息（添加时间戳和校验和）
-func (mi *MessageIntegrity) PrepareMessage(msg *commonstruct.Message) {
+func (mi *MessageIntegrity) PrepareMessage(msg *gateway.StreamData) {
 	// 设置时间戳
 	msg.Timestamp = time.Now().UnixMilli()
 

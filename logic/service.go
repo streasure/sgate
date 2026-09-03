@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/nacos"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
@@ -128,7 +129,7 @@ func (s *Service) Start() error {
 			PermitWithoutStream: true,
 		}),
 	)
-	s.server.RegisterGatewayServiceServer(s.grpcServer)
+	gateway.RegisterGatewayStreamServer(s.grpcServer, s.server)
 
 	go func() {
 		tlog.Info("gRPC server starting", "port", s.cfg.ListenPort)

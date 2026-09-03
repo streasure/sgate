@@ -10,8 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -19,14 +18,13 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// appendMessageFast 将 *commonstruct.Message 序列化后直接追加到 dst（零中间分配）。
-// 快速路径仅覆盖常见字段：connection_id(1)/user_uuid(2)/route(3)/cmd(4)/
+// appendMessageFast 将 *gateway.StreamData 序列化后直接追加到 dst（零中间分配）。
+// 快速路径仅覆盖常见字段：session_id(1)/user_key(2)/route(3)/cmd(4)/
 // data(5)/timestamp(6)——反向推送的绝大多数消息（回包/推送通知）只含这些字段。
-// 若设置了扩展字段（payload/checksum/compression 等），回退到 proto.Marshal 以保证
-// 与标准序列化字节完全一致。字段号与 message.proto 定义一一对应。
-func appendMessageFast(dst []byte, m *commonstruct.Message) []byte {
-	if m.Payload != nil || m.Checksum != "" || m.Signature != nil || m.Sequence != 0 ||
-		m.RequireAck || m.Compression != 0 || m.OriginalSize != 0 || m.CompressedSize != 0 ||
+// 若设置了扩展字段（payload/checksum/protocol_version 等），回退到 proto.Marshal 以保证
+// 与标准序列化字节完全一致。字段号与 backend.proto 定义一一对应。
+func appendMessageFast(dst []byte, m *gateway.StreamData) []byte {
+	if m.Payload != nil || m.Checksum != "" || m.SeqId != 0 ||
 		m.ProtocolVersion != "" {
 		b, err := proto.Marshal(m)
 		if err != nil {
@@ -34,13 +32,13 @@ func appendMessageFast(dst []byte, m *commonstruct.Message) []byte {
 		}
 		return append(dst, b...)
 	}
-	if m.ConnectionId != "" {
+	if m.SessionId != "" {
 		dst = protowire.AppendTag(dst, 1, protowire.BytesType)
-		dst = protowire.AppendString(dst, m.ConnectionId)
+		dst = protowire.AppendString(dst, m.SessionId)
 	}
-	if m.UserUuid != "" {
+	if m.UserKey != "" {
 		dst = protowire.AppendTag(dst, 2, protowire.BytesType)
-		dst = protowire.AppendString(dst, m.UserUuid)
+		dst = protowire.AppendString(dst, m.UserKey)
 	}
 	if m.Route != "" {
 		dst = protowire.AppendTag(dst, 3, protowire.BytesType)
@@ -65,23 +63,23 @@ type DisconnectCallback func(connectionID string)
 
 // reverseItem 携带预序列化的反向消息，避免 flushLoop 单协程做 proto.Marshal。
 // reverseItem 反向推送队列条目。
-// 优化：直接携带 *commonstruct.Message 引用，由 flushLoop 在组装 multi-conn
+// 优化：直接携带 *gateway.StreamData 引用，由 flushLoop 在组装 multi-conn
 // 批量缓冲时用 appendMessageFast 就地序列化。原先在 worker 侧先 proto.Marshal
 // 分配独立 []byte、flushLoop 再整体拷贝一次，两条开销全部消除。
 type reverseItem struct {
 	connID string
 	route  string
-	msg    *commonstruct.Message
+	msg    *gateway.StreamData
 }
 
 type streamConn struct {
-	stream    sgate.GatewayService_StreamMessagesServer
+	stream    gateway.GatewayStream_OnDataServer
 	sendCh    chan reverseItem
 	done      chan struct{}
 	gatewayID string
 }
 
-func newStreamConn(stream sgate.GatewayService_StreamMessagesServer, sendChSize int, gatewayID string) *streamConn {
+func newStreamConn(stream gateway.GatewayStream_OnDataServer, sendChSize int, gatewayID string) *streamConn {
 	if sendChSize <= 0 {
 		sendChSize = 1048576
 	}
@@ -97,14 +95,14 @@ func newStreamConn(stream sgate.GatewayService_StreamMessagesServer, sendChSize 
 
 // Send 将消息引用推入 sendCh（无序列化、无分配）。
 // 序列化延迟到 flushLoop 组批时用 appendMessageFast 直写完成。
-func (sc *streamConn) Send(msg *commonstruct.Message) (err error) {
+func (sc *streamConn) Send(msg *gateway.StreamData) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("send on closed channel: %v", r)
 		}
 	}()
 	item := reverseItem{
-		connID: msg.ConnectionId,
+		connID: msg.SessionId,
 		route:  msg.Route,
 		msg:    msg,
 	}
@@ -136,8 +134,8 @@ func (sc *streamConn) flushLoop() {
 			if mcCount == 0 {
 				return
 			}
-			_ = sc.stream.Send(&commonstruct.Message{
-				Route: sgate.RouteBatch,
+			_ = sc.stream.Send(&gateway.StreamData{
+				Route: gateway.RouteBatch,
 				Data:  mcBuf,
 				Cmd:   int32(mcCount),
 			})
@@ -145,7 +143,7 @@ func (sc *streamConn) flushLoop() {
 			mcCount = 0
 		}
 		for _, item := range items {
-			if item.route == sgate.RouteBatch || (len(item.route) >= 7 && item.route[:7] == "server.") || item.route == sgate.RouteLogin {
+			if item.route == gateway.RouteBatch || (len(item.route) >= 7 && item.route[:7] == "server.") || item.route == gateway.RouteLogin {
 				flushMultiConn()
 				_ = sc.stream.Send(item.msg)
 			} else {
@@ -196,7 +194,7 @@ func (sc *streamConn) flushLoop() {
 	}
 }
 
-func marshalLogicFrame(msg *commonstruct.Message) ([]byte, error) {
+func marshalLogicFrame(msg *gateway.StreamData) ([]byte, error) {
 	body := msg.Data
 	if len(body) == 0 {
 		var err error
@@ -207,9 +205,9 @@ func marshalLogicFrame(msg *commonstruct.Message) ([]byte, error) {
 	}
 	cmd := msg.Cmd
 	if cmd == 0 {
-		cmd = sgate.CmdForRoute(msg.Route)
+		cmd = gateway.CmdForRoute(msg.Route)
 	}
-	return proto.Marshal(&commonstruct.MessageFrame{Cmd: cmd, SeqId: msg.Sequence, Body: body})
+	return proto.Marshal(&gateway.MessageFrame{Cmd: cmd, SeqId: msg.SeqId, Body: body})
 }
 
 type pushGroup struct {
@@ -217,7 +215,7 @@ type pushGroup struct {
 }
 
 type Server struct {
-	sgate.UnimplementedGatewayServiceServer
+	gateway.UnimplementedGatewayStreamServer
 	routes       sync.Map
 	cmdRoutes    sync.Map
 	connections  sync.Map
@@ -251,17 +249,17 @@ type Server struct {
 }
 
 type dispatchItem struct {
-	msg  *commonstruct.Message
+	msg  *gateway.StreamData
 	conn *streamConn
 }
 
-// msgPool reuses commonstruct.Message structs in the RouteBatch dispatch path
+// msgPool reuses gateway.StreamData structs in the RouteBatch dispatch path
 // to eliminate per-frame struct allocation at 20M+ QPS.
 // After dispatchMessage returns, the dispatch worker resets and returns
 // the Message to the pool. This is safe because all callbacks are called
 // synchronously within dispatchMessage — no async reference to msg survives.
 var msgPool = sync.Pool{
-	New: func() interface{} { return &commonstruct.Message{} },
+	New: func() interface{} { return &gateway.StreamData{} },
 }
 
 func NewServer(opts ...ServerOption) *Server {
@@ -332,13 +330,13 @@ func (s *Server) dispatchOne(item dispatchItem) {
 			)
 		}
 	}()
-	connID := item.msg.ConnectionId
-	s.dispatchMessage(item.msg, func(response *commonstruct.Message) {
+	connID := item.msg.SessionId
+	s.dispatchMessage(item.msg, func(response *gateway.StreamData) {
 		if response != nil {
-			if response.ConnectionId == "" {
-				response.ConnectionId = connID
+			if response.SessionId == "" {
+				response.SessionId = connID
 			}
-			if response.ConnectionId == "" {
+			if response.SessionId == "" {
 				return
 			}
 			item.conn.Send(response)
@@ -401,7 +399,7 @@ func (s *Server) OnDisconnect(cb DisconnectCallback) {
 	s.mu.Unlock()
 }
 
-func (s *Server) StreamMessages(stream sgate.GatewayService_StreamMessagesServer) error {
+func (s *Server) OnData(stream gateway.GatewayStream_OnDataServer) error {
 	connectionID := fmt.Sprintf("conn_%s_%d", s.serverID, s.connIDCounter.Add(1))
 
 	gatewayID := ""
@@ -448,11 +446,11 @@ func (s *Server) StreamMessages(stream sgate.GatewayService_StreamMessagesServer
 		}
 
 		// Forward batch: unbatch and dispatch each entry individually.
-		// Format: [4-byte payloadLen][payload] repeated, payload = serialized commonstruct.Message
+		// Format: [4-byte payloadLen][payload] repeated, payload = serialized gateway.StreamData
 		// Two sources of RouteBatch:
 		//   1. Gateway gnet-level batch (handleBatchTraffic): ConnectionId on outer message,
 		//      inner payloads are raw client frames (may lack ConnectionId)
-		//   2. Gateway startSendLoop batch: each inner payload is a full commonstruct.Message
+		//   2. Gateway startSendLoop batch: each inner payload is a full gateway.StreamData
 		//      with its own ConnectionId
 		//
 		// Optimization: use ExtractRouteAndCmd (lightweight field scan) instead of
@@ -460,9 +458,9 @@ func (s *Server) StreamMessages(stream sgate.GatewayService_StreamMessagesServer
 		// UserUuid, etc. — reducing per-frame allocation from ~200B to ~0B at 20M QPS.
 		// The Data field points to the raw payload (zero-copy) for handlers that
 		// need full message data (Dispatcher/protoEntry will Unmarshal Data themselves).
-		if msg.Route == sgate.RouteBatch {
+		if msg.Route == gateway.RouteBatch {
 			data := msg.Data
-			connID := msg.ConnectionId
+			connID := msg.SessionId
 			// multi-conn batch: 外层 ConnectionId 为空，需从每条 payload 提取各自的 ConnectionId
 			// single-conn batch: 外层 ConnectionId 已设置，所有 payload 共用，无需逐条提取
 			multiConn := connID == ""
@@ -474,14 +472,14 @@ func (s *Server) StreamMessages(stream sgate.GatewayService_StreamMessagesServer
 				payload := data[4 : 4+payloadLen]
 				data = data[4+payloadLen:]
 
-				cmd, seqID, body, frameOK := sgate.ExtractMessageFrame(payload)
+				cmd, seqID, body, frameOK := gateway.ExtractMessageFrame(payload)
 				var route string
 				var innerConnID string
 				if !frameOK {
 					if multiConn {
-						route, cmd, innerConnID = sgate.ExtractRouteCmdAndConnID(payload)
+						route, cmd, innerConnID = gateway.ExtractRouteCmdAndConnID(payload)
 					} else {
-						route, cmd = sgate.ExtractRouteAndCmd(payload)
+						route, cmd = gateway.ExtractRouteAndCmd(payload)
 					}
 					if route == "" {
 						continue
@@ -490,14 +488,14 @@ func (s *Server) StreamMessages(stream sgate.GatewayService_StreamMessagesServer
 				} else if cmd == 0 || len(body) == 0 {
 					continue
 				}
-				innerMsg := msgPool.Get().(*commonstruct.Message)
+				innerMsg := msgPool.Get().(*gateway.StreamData)
 				innerMsg.Route = route
 				innerMsg.Cmd = cmd
-				innerMsg.Sequence = seqID
+				innerMsg.SeqId = seqID
 				if multiConn {
-					innerMsg.ConnectionId = innerConnID
+					innerMsg.SessionId = innerConnID
 				} else {
-					innerMsg.ConnectionId = connID
+					innerMsg.SessionId = connID
 				}
 				innerMsg.Data = body // zero-copy: points into batch's Data buffer
 
@@ -512,20 +510,20 @@ func (s *Server) StreamMessages(stream sgate.GatewayService_StreamMessagesServer
 			continue
 		}
 
-		if msg.ConnectionId == "" {
+		if msg.SessionId == "" {
 			tlog.Warn("received message with empty ConnectionId", "route", msg.Route)
 		}
 
 		select {
 		case s.dispatchChs[s.dispatchRR.Add(1)%uint64(len(s.dispatchChs))] <- dispatchItem{msg: msg, conn: conn}:
 		default:
-			tlog.Warn("dispatch channel full, dropping message", "route", msg.Route, "connectionID", msg.ConnectionId)
+			tlog.Warn("dispatch channel full, dropping message", "route", msg.Route, "connectionID", msg.SessionId)
 		}
 	}
 }
 
-func (s *Server) SendMessage(ctx context.Context, msg *commonstruct.Message) (*commonstruct.Message, error) {
-	var response *commonstruct.Message
+func (s *Server) SendMessage(ctx context.Context, msg *gateway.StreamData) (*gateway.StreamData, error) {
+	var response *gateway.StreamData
 
 	func() {
 		defer func() {
@@ -533,20 +531,20 @@ func (s *Server) SendMessage(ctx context.Context, msg *commonstruct.Message) (*c
 				tlog.Error("SendMessage dispatchMessage panic recovered", "error", r, "route", msg.Route, "cmd", msg.Cmd)
 			}
 		}()
-		s.dispatchMessage(msg, func(resp *commonstruct.Message) { response = resp })
+		s.dispatchMessage(msg, func(resp *gateway.StreamData) { response = resp })
 	}()
 
 	return response, nil
 }
 
-func (s *Server) PushToConnection(connectionID string, msg *commonstruct.Message) error {
+func (s *Server) PushToConnection(connectionID string, msg *gateway.StreamData) error {
 	val, ok := s.connections.Load(connectionID)
 	if !ok {
 		return fmt.Errorf("connection %s not found", connectionID)
 	}
 	conn := val.(*streamConn)
-	if msg.ConnectionId == "" {
-		msg.ConnectionId = connectionID
+	if msg.SessionId == "" {
+		msg.SessionId = connectionID
 	}
 	if msg.Timestamp == 0 {
 		msg.Timestamp = time.Now().UnixMilli()
@@ -588,7 +586,7 @@ func (s *Server) cleanupUserByConnection(connectionID string) {
 	}
 }
 
-func (s *Server) PushToServer(msg *commonstruct.Message, exclude ...string) int {
+func (s *Server) PushToServer(msg *gateway.StreamData, exclude ...string) int {
 	if s.serverID == "" {
 		return 0
 	}
@@ -615,7 +613,7 @@ var sentGatewaysPool = sync.Pool{
 // than once per stream shard. Each target Gateway then fans the command out to
 // its local connections. Streams without an identity intentionally remain
 // independent for backward compatibility.
-func (s *Server) PushToEachGateway(msg *commonstruct.Message) int {
+func (s *Server) PushToEachGateway(msg *gateway.StreamData) int {
 	if s.serverID == "" {
 		return 0
 	}
@@ -646,9 +644,9 @@ func (s *Server) PushToEachGateway(msg *commonstruct.Message) int {
 // Broadcast 向所有客户端广播消息。
 // 通过 server.broadcast 指令让 Gateway 的 ConnectionManager.Broadcast 执行推送。
 // Logic 不直接操作 streamConn，只通过 Gateway 侧的推送机制。
-func (s *Server) Broadcast(msg *commonstruct.Message, exclude ...string) int {
-	pushMsg := &commonstruct.Message{
-		Route:   sgate.RouteServerBroadcast,
+func (s *Server) Broadcast(msg *gateway.StreamData, exclude ...string) int {
+	pushMsg := &gateway.StreamData{
+		Route:   gateway.RouteServerBroadcast,
 		Payload: make(map[string]string),
 	}
 	if msg.Route != "" {
@@ -735,9 +733,9 @@ func (s *Server) leaveAllGroups(connectionID string) {
 	delete(s.connGroups, connectionID)
 }
 
-func (s *Server) PushToGroup(groupID string, msg *commonstruct.Message, exclude ...string) int {
-	pushMsg := &commonstruct.Message{
-		Route:   sgate.RouteServerSendToGroup,
+func (s *Server) PushToGroup(groupID string, msg *gateway.StreamData, exclude ...string) int {
+	pushMsg := &gateway.StreamData{
+		Route:   gateway.RouteServerSendToGroup,
 		Payload: make(map[string]string),
 	}
 	pushMsg.Payload["groupID"] = groupID
@@ -819,8 +817,8 @@ func (s *Server) ConnectionExists(connectionID string) bool {
 	return ok
 }
 
-func (s *Server) RegisterGatewayServiceServer(srv *grpc.Server) {
-	sgate.RegisterGatewayServiceServer(srv, s)
+func (s *Server) RegisterGatewayStreamServer(srv *grpc.Server) {
+	gateway.RegisterGatewayStreamServer(srv, s)
 }
 
 func (s *Server) GetConnectionCount() int {
@@ -833,8 +831,8 @@ func (s *Server) GetConnectionCount() int {
 }
 
 func (s *Server) JoinGroupByUser(groupID, serverID, userUUID string) {
-	s.PushToServer(&commonstruct.Message{
-		Route: sgate.RouteServerJoinGroupByUser,
+	s.PushToServer(&gateway.StreamData{
+		Route: gateway.RouteServerJoinGroupByUser,
 		Payload: map[string]string{
 			"groupID":  groupID,
 			"serverID": serverID,
@@ -845,8 +843,8 @@ func (s *Server) JoinGroupByUser(groupID, serverID, userUUID string) {
 }
 
 func (s *Server) LeaveGroupByUser(groupID, serverID, userUUID string) {
-	s.PushToServer(&commonstruct.Message{
-		Route: sgate.RouteServerLeaveGroupByUser,
+	s.PushToServer(&gateway.StreamData{
+		Route: gateway.RouteServerLeaveGroupByUser,
 		Payload: map[string]string{
 			"groupID":  groupID,
 			"serverID": serverID,
@@ -857,8 +855,8 @@ func (s *Server) LeaveGroupByUser(groupID, serverID, userUUID string) {
 }
 
 func (s *Server) CreateGroup(groupID, groupName string) {
-	s.PushToServer(&commonstruct.Message{
-		Route: sgate.RouteServerCreateGroup,
+	s.PushToServer(&gateway.StreamData{
+		Route: gateway.RouteServerCreateGroup,
 		Payload: map[string]string{
 			"groupID":   groupID,
 			"groupName": groupName,
@@ -868,8 +866,8 @@ func (s *Server) CreateGroup(groupID, groupName string) {
 }
 
 func (s *Server) DeleteGroup(groupID string) {
-	s.PushToServer(&commonstruct.Message{
-		Route: sgate.RouteServerDeleteGroup,
+	s.PushToServer(&gateway.StreamData{
+		Route: gateway.RouteServerDeleteGroup,
 		Payload: map[string]string{
 			"groupID": groupID,
 		},
@@ -877,9 +875,9 @@ func (s *Server) DeleteGroup(groupID string) {
 	})
 }
 
-func (s *Server) SendToGroup(groupID string, msg *commonstruct.Message) {
-	pushMsg := &commonstruct.Message{
-		Route:     sgate.RouteServerSendToGroup,
+func (s *Server) SendToGroup(groupID string, msg *gateway.StreamData) {
+	pushMsg := &gateway.StreamData{
+		Route:     gateway.RouteServerSendToGroup,
 		Payload:   make(map[string]string),
 		Timestamp: time.Now().UnixMilli(),
 	}
@@ -896,8 +894,8 @@ func (s *Server) SendToGroup(groupID string, msg *commonstruct.Message) {
 }
 
 func (s *Server) GetGroupInfo(groupID string) {
-	s.PushToServer(&commonstruct.Message{
-		Route: sgate.RouteServerGetGroupInfo,
+	s.PushToServer(&gateway.StreamData{
+		Route: gateway.RouteServerGetGroupInfo,
 		Payload: map[string]string{
 			"groupID": groupID,
 		},

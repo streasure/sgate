@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -38,12 +38,12 @@ var drainBufPool = sync.Pool{
 }
 
 func buildSingleFrame(route string, payload map[string]string) []byte {
-	body := &commonstruct.Message{
+	body := &gateway.StreamData{
 		Route:   route,
 		Payload: payload,
 	}
-	data, _ := proto.Marshal(&commonstruct.MessageFrame{
-		Cmd:  sgate.CmdForRoute(route),
+	data, _ := proto.Marshal(&gateway.MessageFrame{
+		Cmd:  gateway.CmdForRoute(route),
 		Body: mustMarshal(body),
 	})
 	frame := make([]byte, 4+len(data))
@@ -86,7 +86,7 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 		Timestamp:       time.Now().UnixMilli(),
 	}
 	hsData, _ := proto.Marshal(hs)
-	handshakeFrame := buildSingleFrame(sgate.RouteHandshake, map[string]string{
+	handshakeFrame := buildSingleFrame(gateway.RouteHandshake, map[string]string{
 		"serverId":       fmt.Sprintf("bench_server_%d", clientID),
 		"handshake_data": base64.StdEncoding.EncodeToString(hsData),
 	})
@@ -112,7 +112,7 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	conn.SetReadDeadline(time.Time{})
 
 	// Login: set userUUID
-	loginFrame := buildSingleFrame(sgate.RouteLogin, map[string]string{
+	loginFrame := buildSingleFrame(gateway.RouteLogin, map[string]string{
 		"userId": fmt.Sprintf("u_%d_%d_%d", mode[0], clientID, rand.Int63()),
 	})
 	conn.Write(loginFrame)

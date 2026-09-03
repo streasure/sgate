@@ -39,8 +39,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/logic"
 	"github.com/streasure/util/tlog"
 )
@@ -87,50 +86,50 @@ func main() {
 
 	// ── Ping/Pong: 基准心跳 ─────────────────────────────────────────
 	// 客户端发 "ping"，服务端回 "pong"，用于连通性检测和基准压测
-	svc.RegisterRoute(sgate.RoutePing, func(msg *commonstruct.Message) *commonstruct.Message {
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        sgate.RoutePong,
-			Payload:      map[string]string{"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10)},
-			Timestamp:    time.Now().UnixMilli(),
+	svc.RegisterRoute(gateway.RoutePing, func(msg *gateway.StreamData) *gateway.StreamData {
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     gateway.RoutePong,
+			Payload:   map[string]string{"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10)},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
 	// ── BurstRoute: 每次请求触发推送（duplex 压测用）────────────────
 	// push 回调直接写入 gRPC stream，是最高效的推送路径
-	svc.RegisterBurstRoute(sgate.RouteTest, func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
-		push(&commonstruct.Message{
-			Route:     sgate.RouteTestResult,
+	svc.RegisterBurstRoute(gateway.RouteTest, func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
+		push(&gateway.StreamData{
+			Route:     gateway.RouteTestResult,
 			Timestamp: time.Now().UnixMilli(),
 		})
 	})
 
 	// ── Login: 用户登录（必须） ──────────────────────────────────────
 	// 注册 userUUID → connectionID 映射，使所有推送功能可用
-	svc.RegisterRoute(sgate.RouteLogin, func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute(gateway.RouteLogin, func(msg *gateway.StreamData) *gateway.StreamData {
 		userID := msg.GetPayload()["userId"]
 		if userID == "" {
-			userID = msg.ConnectionId
+			userID = msg.SessionId
 		}
 		userUUID := "uuid_" + userID
 
 		// ★ 关键: RegisterUser 注册映射，否则 PushToConnection/PushToGroup 不工作
-		svc.RegisterUser(userUUID, msg.ConnectionId)
+		svc.RegisterUser(userUUID, msg.SessionId)
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			UserUuid:     userUUID,
-			Route:        sgate.RouteLogin,
-			Payload:      map[string]string{"code": "200", "userId": userID, "userUUID": userUUID},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			UserKey:   userUUID,
+			Route:     gateway.RouteLogin,
+			Payload:   map[string]string{"code": "200", "userId": userID, "userUUID": userUUID},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
 	// ── Echo: 回显测试 ──────────────────────────────────────────────
-	svc.RegisterRoute(sgate.RouteEcho, func(msg *commonstruct.Message) *commonstruct.Message {
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        sgate.RouteEcho,
+	svc.RegisterRoute(gateway.RouteEcho, func(msg *gateway.StreamData) *gateway.StreamData {
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     gateway.RouteEcho,
 			Payload: map[string]string{
 				"echo":      msg.GetPayload()["message"],
 				"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
@@ -144,8 +143,8 @@ func main() {
 	// ══════════════════════════════════════════════════════════════════
 	// 使用 burst route 的 push 回调，最高效路径（直接写 stream）
 	// Flow: client → sgate → logic(push callback) → sgate → client
-	svc.RegisterBurstRoute("push_me", func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
-		push(&commonstruct.Message{
+	svc.RegisterBurstRoute("push_me", func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
+		push(&gateway.StreamData{
 			Route: "personal_notification",
 			Payload: map[string]string{
 				"type":    "personal_push",
@@ -161,33 +160,33 @@ func main() {
 	// ══════════════════════════════════════════════════════════════════
 	// 使用 PushToServer + server.send_to_user 路由
 	// Flow: client_A → sgate → logic(PushToServer) → sgate.gateway.SendToUser → client_B
-	svc.RegisterRoute("send_msg", func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute("send_msg", func(msg *gateway.StreamData) *gateway.StreamData {
 		targetUUID := msg.GetPayload()["targetUUID"]
 		if targetUUID == "" {
-			return &commonstruct.Message{
-				ConnectionId: msg.ConnectionId,
-				Route:        "send_msg_ack",
-				Payload:      map[string]string{"code": "400", "message": "missing targetUUID"},
-				Timestamp:    time.Now().UnixMilli(),
+			return &gateway.StreamData{
+				SessionId: msg.SessionId,
+				Route:     "send_msg_ack",
+				Payload:   map[string]string{"code": "400", "message": "missing targetUUID"},
+				Timestamp: time.Now().UnixMilli(),
 			}
 		}
 
-		svc.Server().PushToServer(&commonstruct.Message{
-			Route: sgate.RouteServerSendToUser,
+		svc.Server().PushToServer(&gateway.StreamData{
+			Route: gateway.RouteServerSendToUser,
 			Payload: map[string]string{
 				"userUUID": targetUUID,
 				"route":    "direct_message",
 				"message":  msg.GetPayload()["message"],
-				"from":     msg.UserUuid,
+				"from":     msg.UserKey,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "send_msg_ack",
-			Payload:      map[string]string{"code": "200", "message": "delivered"},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "send_msg_ack",
+			Payload:   map[string]string{"code": "200", "message": "delivered"},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
@@ -197,46 +196,46 @@ func main() {
 	// 组是 Gateway 本地的，每个 Gateway 维护自己的组成员列表
 	// JoinGroup/LeaveGroup 通过 PushToServer 发送到 Gateway，异步生效
 
-	svc.RegisterRoute("join_group", func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute("join_group", func(msg *gateway.StreamData) *gateway.StreamData {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
-		// server.join_group: Gateway 根据 ConnectionId 查找连接，自动加入组
-		svc.Server().PushToServer(&commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        sgate.RouteServerJoinGroup,
-			Payload:      map[string]string{"groupID": groupID},
-			Timestamp:    time.Now().UnixMilli(),
+		// server.join_group: Gateway 根据 SessionId 查找连接，自动加入组
+		svc.Server().PushToServer(&gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     gateway.RouteServerJoinGroup,
+			Payload:   map[string]string{"groupID": groupID},
+			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "join_group_ack",
-			Payload:      map[string]string{"code": "200", "groupID": groupID},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "join_group_ack",
+			Payload:   map[string]string{"code": "200", "groupID": groupID},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
-	svc.RegisterRoute("leave_group", func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute("leave_group", func(msg *gateway.StreamData) *gateway.StreamData {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
-		svc.Server().PushToServer(&commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        sgate.RouteServerLeaveGroup,
-			Payload:      map[string]string{"groupID": groupID},
-			Timestamp:    time.Now().UnixMilli(),
+		svc.Server().PushToServer(&gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     gateway.RouteServerLeaveGroup,
+			Payload:   map[string]string{"groupID": groupID},
+			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "leave_group_ack",
-			Payload:      map[string]string{"code": "200"},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "leave_group_ack",
+			Payload:   map[string]string{"code": "200"},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
@@ -246,27 +245,27 @@ func main() {
 	// SendToGroup 路由到 Gateway 的 ConnectionManager.SendToGroup
 	// 组成员需先通过 server.join_group 加入
 	// Flow: client → sgate → logic → sgate.gateway.SendToGroup → all group members
-	svc.RegisterRoute("group_msg", func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute("group_msg", func(msg *gateway.StreamData) *gateway.StreamData {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
-		svc.Server().SendToGroup(groupID, &commonstruct.Message{
+		svc.Server().SendToGroup(groupID, &gateway.StreamData{
 			Route: "group_broadcast",
 			Payload: map[string]string{
 				"message": msg.GetPayload()["message"],
-				"from":    msg.UserUuid,
+				"from":    msg.UserKey,
 				"groupID": groupID,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "group_msg_ack",
-			Payload:      map[string]string{"code": "200", "message": "sent to group"},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "group_msg_ack",
+			Payload:   map[string]string{"code": "200", "message": "sent to group"},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
@@ -275,21 +274,21 @@ func main() {
 	// ══════════════════════════════════════════════════════════════════
 	// Broadcast 推送到所有连接的客户端
 	// Flow: client → sgate → logic(Broadcast) → sgate.gateway.Broadcast → all clients
-	svc.RegisterRoute("broadcast_msg", func(msg *commonstruct.Message) *commonstruct.Message {
-		svc.Server().Broadcast(&commonstruct.Message{
+	svc.RegisterRoute("broadcast_msg", func(msg *gateway.StreamData) *gateway.StreamData {
+		svc.Server().Broadcast(&gateway.StreamData{
 			Route: "global_broadcast",
 			Payload: map[string]string{
 				"message": msg.GetPayload()["message"],
-				"from":    msg.UserUuid,
+				"from":    msg.UserKey,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "broadcast_msg_ack",
-			Payload:      map[string]string{"code": "200", "message": "broadcast sent"},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "broadcast_msg_ack",
+			Payload:   map[string]string{"code": "200", "message": "broadcast sent"},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
@@ -298,13 +297,13 @@ func main() {
 	// ══════════════════════════════════════════════════════════════════
 	// 高吞吐场景：每次请求推送多条消息（如游戏状态同步）
 	// burst route 的 push 回调可多次调用，每条消息独立序列化
-	svc.RegisterBurstRoute("batch_push", func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
+	svc.RegisterBurstRoute("batch_push", func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
 		targetCount := 1
 		if n, err := strconv.Atoi(msg.GetPayload()["count"]); err == nil && n > 0 {
 			targetCount = n
 		}
 		for i := 0; i < targetCount; i++ {
-			push(&commonstruct.Message{
+			push(&gateway.StreamData{
 				Route: "batch_push_item",
 				Payload: map[string]string{
 					"index": strconv.Itoa(i),

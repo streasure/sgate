@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -33,13 +33,13 @@ var drainBufPool = sync.Pool{
 }
 
 func buildSendFrame() {
-	body := &commonstruct.Message{
-		Route:   sgate.RouteTest,
+	body := &gateway.StreamData{
+		Route:   gateway.RouteTest,
 		Payload: map[string]string{"data": "1"},
 	}
 	bodyData, _ := proto.Marshal(body)
-	data, _ := proto.Marshal(&commonstruct.MessageFrame{
-		Cmd:  sgate.CmdForRoute(sgate.RouteTest),
+	data, _ := proto.Marshal(&gateway.MessageFrame{
+		Cmd:  gateway.CmdForRoute(gateway.RouteTest),
 		Body: bodyData,
 	})
 	frame := make([]byte, 4+len(data))
@@ -93,13 +93,13 @@ func (bc *benchConn) authenticate(clientID int) error {
 		Timestamp:       time.Now().UnixMilli(),
 	}
 	hsData, _ := proto.Marshal(hs)
-	body := &commonstruct.Message{
-		Route:   sgate.RouteHandshake,
+	body := &gateway.StreamData{
+		Route:   gateway.RouteHandshake,
 		Payload: map[string]string{"serverId": "bench_server", "handshake_data": base64.StdEncoding.EncodeToString(hsData)},
 	}
 	bodyData, _ := proto.Marshal(body)
-	handshakeData, _ := proto.Marshal(&commonstruct.MessageFrame{
-		Cmd:  sgate.CmdForRoute(sgate.RouteHandshake),
+	handshakeData, _ := proto.Marshal(&gateway.MessageFrame{
+		Cmd:  gateway.CmdForRoute(gateway.RouteHandshake),
 		Body: bodyData,
 	})
 	handshakeFrame := make([]byte, 4+len(handshakeData))
@@ -130,13 +130,13 @@ func (bc *benchConn) authenticate(clientID int) error {
 	}
 	bc.conn.SetReadDeadline(time.Time{})
 
-	loginBody := &commonstruct.Message{
-		Route:   sgate.RouteLogin,
+	loginBody := &gateway.StreamData{
+		Route:   gateway.RouteLogin,
 		Payload: map[string]string{"userId": fmt.Sprintf("bench_%d", clientID)},
 	}
 	loginBodyData, _ := proto.Marshal(loginBody)
-	loginData, _ := proto.Marshal(&commonstruct.MessageFrame{
-		Cmd:  sgate.CmdForRoute(sgate.RouteLogin),
+	loginData, _ := proto.Marshal(&gateway.MessageFrame{
+		Cmd:  gateway.CmdForRoute(gateway.RouteLogin),
 		Body: loginBodyData,
 	})
 	loginFrame := make([]byte, 4+len(loginData))

@@ -28,8 +28,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/logic"
 	"github.com/streasure/util/tlog"
 )
@@ -66,19 +65,19 @@ func main() {
 	//    Client sends "ping", server responds "pong".
 	//    Used by bench tool for QPS measurement.
 	// =========================================================================
-	svc.RegisterRoute(sgate.RoutePing, func(msg *commonstruct.Message) *commonstruct.Message {
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        sgate.RoutePong,
-			Payload:      map[string]string{"ts": strconv.FormatInt(time.Now().UnixMilli(), 10)},
-			Timestamp:    time.Now().UnixMilli(),
+	svc.RegisterRoute(gateway.RoutePing, func(msg *gateway.StreamData) *gateway.StreamData {
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     gateway.RoutePong,
+			Payload:   map[string]string{"ts": strconv.FormatInt(time.Now().UnixMilli(), 10)},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
 	// BurstRoute: every request triggers a push response (for duplex bench).
-	svc.RegisterBurstRoute(sgate.RouteTest, func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
-		push(&commonstruct.Message{
-			Route:     sgate.RouteTestResult,
+	svc.RegisterBurstRoute(gateway.RouteTest, func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
+		push(&gateway.StreamData{
+			Route:     gateway.RouteTestResult,
 			Timestamp: time.Now().UnixMilli(),
 		})
 	})
@@ -88,22 +87,22 @@ func main() {
 	//    After login, userUUID → connectionID is registered.
 	//    This enables PushToConnection (personal push) and group operations.
 	// =========================================================================
-	svc.RegisterRoute(sgate.RouteLogin, func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute(gateway.RouteLogin, func(msg *gateway.StreamData) *gateway.StreamData {
 		userID := msg.GetPayload()["userId"]
 		if userID == "" {
-			userID = msg.ConnectionId
+			userID = msg.SessionId
 		}
 		userUUID := "uuid_" + userID
 
 		// Register user → connection mapping (required for push operations)
-		svc.RegisterUser(userUUID, msg.ConnectionId)
+		svc.RegisterUser(userUUID, msg.SessionId)
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			UserUuid:     userUUID,
-			Route:        sgate.RouteLogin,
-			Payload:      map[string]string{"code": "200", "userId": userID, "userUUID": userUUID},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			UserKey:   userUUID,
+			Route:     gateway.RouteLogin,
+			Payload:   map[string]string{"code": "200", "userId": userID, "userUUID": userUUID},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
@@ -115,8 +114,8 @@ func main() {
 	//
 	//    Flow: client → sgate → logic(push callback) → sgate → client
 	// =========================================================================
-	svc.RegisterBurstRoute("push_me", func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
-		push(&commonstruct.Message{
+	svc.RegisterBurstRoute("push_me", func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
+		push(&gateway.StreamData{
 			Route: "personal_notification",
 			Payload: map[string]string{
 				"type":    "personal_push",
@@ -134,35 +133,35 @@ func main() {
 	//
 	//    Flow: client_A → sgate → logic(PushToServer) → sgate.gateway.SendToUser → client_B
 	// =========================================================================
-	svc.RegisterRoute("send_msg", func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute("send_msg", func(msg *gateway.StreamData) *gateway.StreamData {
 		targetUUID := msg.GetPayload()["targetUUID"]
 		if targetUUID == "" {
-			return &commonstruct.Message{
-				ConnectionId: msg.ConnectionId,
-				Route:        "send_msg_ack",
-				Payload:      map[string]string{"code": "400", "message": "missing targetUUID"},
-				Timestamp:    time.Now().UnixMilli(),
+			return &gateway.StreamData{
+				SessionId: msg.SessionId,
+				Route:     "send_msg_ack",
+				Payload:   map[string]string{"code": "400", "message": "missing targetUUID"},
+				Timestamp: time.Now().UnixMilli(),
 			}
 		}
 
 		// PushToServer sends a server-side command to the gateway.
 		// The gateway handles "server.send_to_user" by looking up the user's connection.
-		svc.Server().PushToServer(&commonstruct.Message{
-			Route: sgate.RouteServerSendToUser,
+		svc.Server().PushToServer(&gateway.StreamData{
+			Route: gateway.RouteServerSendToUser,
 			Payload: map[string]string{
 				"userUUID": targetUUID,
 				"route":    "direct_message",
 				"message":  msg.GetPayload()["message"],
-				"from":     msg.UserUuid,
+				"from":     msg.UserKey,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "send_msg_ack",
-			Payload:      map[string]string{"code": "200", "message": "delivered"},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "send_msg_ack",
+			Payload:   map[string]string{"code": "200", "message": "delivered"},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
@@ -179,73 +178,73 @@ func main() {
 	//    Flow (join):  client → sgate → logic → sgate.gateway.JoinGroupByUser
 	//    Flow (push):  client → sgate → logic → sgate.gateway.SendToGroup → all group members
 	// =========================================================================
-	svc.RegisterRoute("join_group", func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute("join_group", func(msg *gateway.StreamData) *gateway.StreamData {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
-		// Use server.join_group: gateway looks up the connection by msg.ConnectionId,
+		// Use server.join_group: gateway looks up the connection by msg.SessionId,
 		// extracts serverID/userUUID from the connection, and adds to the group.
 		// This is the correct approach for single-gateway setups.
-		svc.Server().PushToServer(&commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        sgate.RouteServerJoinGroup,
-			Payload:      map[string]string{"groupID": groupID},
-			Timestamp:    time.Now().UnixMilli(),
+		svc.Server().PushToServer(&gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     gateway.RouteServerJoinGroup,
+			Payload:   map[string]string{"groupID": groupID},
+			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "join_group_ack",
-			Payload:      map[string]string{"code": "200", "groupID": groupID},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "join_group_ack",
+			Payload:   map[string]string{"code": "200", "groupID": groupID},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
-	svc.RegisterRoute("leave_group", func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute("leave_group", func(msg *gateway.StreamData) *gateway.StreamData {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
-		svc.Server().PushToServer(&commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        sgate.RouteServerLeaveGroup,
-			Payload:      map[string]string{"groupID": groupID},
-			Timestamp:    time.Now().UnixMilli(),
+		svc.Server().PushToServer(&gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     gateway.RouteServerLeaveGroup,
+			Payload:   map[string]string{"groupID": groupID},
+			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "leave_group_ack",
-			Payload:      map[string]string{"code": "200", "groupID": groupID},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "leave_group_ack",
+			Payload:   map[string]string{"code": "200", "groupID": groupID},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
-	svc.RegisterRoute("group_msg", func(msg *commonstruct.Message) *commonstruct.Message {
+	svc.RegisterRoute("group_msg", func(msg *gateway.StreamData) *gateway.StreamData {
 		groupID := msg.GetPayload()["groupID"]
 		if groupID == "" {
 			groupID = "default_room"
 		}
 
 		// SendToGroup pushes a message to all members of the specified group.
-		svc.Server().SendToGroup(groupID, &commonstruct.Message{
+		svc.Server().SendToGroup(groupID, &gateway.StreamData{
 			Route: "group_broadcast",
 			Payload: map[string]string{
 				"message": msg.GetPayload()["message"],
-				"from":    msg.UserUuid,
+				"from":    msg.UserKey,
 				"groupID": groupID,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "group_msg_ack",
-			Payload:      map[string]string{"code": "200", "message": "sent to group"},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "group_msg_ack",
+			Payload:   map[string]string{"code": "200", "message": "sent to group"},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
@@ -258,21 +257,21 @@ func main() {
 	//    Broadcast sends via ALL gateways (PushToServer → each gateway's Broadcast).
 	//    Use exclude list to skip specific connectionIDs.
 	// =========================================================================
-	svc.RegisterRoute("broadcast_msg", func(msg *commonstruct.Message) *commonstruct.Message {
-		svc.Server().Broadcast(&commonstruct.Message{
+	svc.RegisterRoute("broadcast_msg", func(msg *gateway.StreamData) *gateway.StreamData {
+		svc.Server().Broadcast(&gateway.StreamData{
 			Route: "global_broadcast",
 			Payload: map[string]string{
 				"message": msg.GetPayload()["message"],
-				"from":    msg.UserUuid,
+				"from":    msg.UserKey,
 			},
 			Timestamp: time.Now().UnixMilli(),
 		})
 
-		return &commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			Route:        "broadcast_msg_ack",
-			Payload:      map[string]string{"code": "200", "message": "broadcast sent"},
-			Timestamp:    time.Now().UnixMilli(),
+		return &gateway.StreamData{
+			SessionId: msg.SessionId,
+			Route:     "broadcast_msg_ack",
+			Payload:   map[string]string{"code": "200", "message": "broadcast sent"},
+			Timestamp: time.Now().UnixMilli(),
 		}
 	})
 
@@ -281,13 +280,13 @@ func main() {
 	//    For scenarios needing massive push throughput (e.g. game state sync),
 	//    register a burst handler that pushes to multiple targets per request.
 	// =========================================================================
-	svc.RegisterBurstRoute("batch_push", func(msg *commonstruct.Message, push func(*commonstruct.Message)) {
+	svc.RegisterBurstRoute("batch_push", func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
 		targetCount := 1
 		if n, err := strconv.Atoi(msg.GetPayload()["count"]); err == nil && n > 0 {
 			targetCount = n
 		}
 		for i := 0; i < targetCount; i++ {
-			push(&commonstruct.Message{
+			push(&gateway.StreamData{
 				Route: "batch_push_item",
 				Payload: map[string]string{
 					"index": strconv.Itoa(i),

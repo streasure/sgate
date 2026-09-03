@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 )
 
@@ -165,14 +165,14 @@ func (vn *VersionNegotiation) isVersionSupported(version string) bool {
 //
 // 返回值:
 //
-//	*commonstruct.Message: 握手响应消息
-func (vn *VersionNegotiation) GenerateHandshakeResponse(negotiatedVersion string) *commonstruct.Message {
+//	*gateway.StreamData: 握手响应消息
+func (vn *VersionNegotiation) GenerateHandshakeResponse(negotiatedVersion string) *gateway.StreamData {
 	payload := make(map[string]string)
 	payload["negotiated_version"] = negotiatedVersion
 	payload["supported_versions"] = fmt.Sprintf("%v", vn.supportedVersions)
 
-	return &commonstruct.Message{
-		Route:           sgate.RouteHandshakeResponse,
+	return &gateway.StreamData{
+		Route:           gateway.RouteHandshakeResponse,
 		Payload:         payload,
 		ProtocolVersion: negotiatedVersion,
 		Timestamp:       time.Now().UnixMilli(),

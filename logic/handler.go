@@ -6,8 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/protocol/commonstruct"
-	"github.com/streasure/protocol/sgate"
+	"github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -16,16 +15,16 @@ type Context struct {
 	ConnectionID string
 	UserUUID     string
 	Server       *Server
-	Msg          *commonstruct.Message
+	Msg          *gateway.StreamData
 }
 
 type ProtoHandler func(ctx *Context, req proto.Message) proto.Message
 
-type RouteHandler func(msg *commonstruct.Message) *commonstruct.Message
+type RouteHandler func(msg *gateway.StreamData) *gateway.StreamData
 
 // BurstRouteHandler 允许单次触发推送多条响应消息，用于压测反向链路吞吐量。
 // push 回调可被调用任意次数，每次调用发送一条消息回客户端。
-type BurstRouteHandler func(msg *commonstruct.Message, push func(*commonstruct.Message))
+type BurstRouteHandler func(msg *gateway.StreamData, push func(*gateway.StreamData))
 
 type cmdEntry struct {
 	reqType  reflect.Type
@@ -57,14 +56,14 @@ func (d *Dispatcher) Handle(cmd int32, reqProto proto.Message, respCmd int32, ha
 }
 
 func (d *Dispatcher) HandleFromProto(reqProto proto.Message, handler ProtoHandler) *Dispatcher {
-	cmdVal, respCmdVal := sgate.CmdFromProto(d.route, reqProto)
+	cmdVal, respCmdVal := gateway.CmdFromProto(d.route, reqProto)
 	return d.Handle(cmdVal, reqProto, respCmdVal, handler)
 }
 
-func (d *Dispatcher) dispatch(ctx *Context, msg *commonstruct.Message, callback func(*commonstruct.Message)) {
+func (d *Dispatcher) dispatch(ctx *Context, msg *gateway.StreamData, callback func(*gateway.StreamData)) {
 	val, ok := d.handlers.Load(msg.Cmd)
 	if !ok {
-		callback(errorReply(msg.ConnectionId, msg.Cmd, "Cmd not found in dispatcher", "404",
+		callback(errorReply(msg.SessionId, msg.Cmd, "Cmd not found in dispatcher", "404",
 			"route", d.route, "cmd", fmt.Sprintf("%d", msg.Cmd)))
 		return
 	}
@@ -75,7 +74,7 @@ func (d *Dispatcher) dispatch(ctx *Context, msg *commonstruct.Message, callback 
 		proto.Reset(reqVal)
 		if err := proto.Unmarshal(msg.Data, reqVal); err != nil {
 			entry.reqPool.Put(reqVal)
-			callback(errorReply(msg.ConnectionId, msg.Cmd, "Failed to decode request", "400", "details", err.Error()))
+			callback(errorReply(msg.SessionId, msg.Cmd, "Failed to decode request", "400", "details", err.Error()))
 			return
 		}
 	}
@@ -85,16 +84,16 @@ func (d *Dispatcher) dispatch(ctx *Context, msg *commonstruct.Message, callback 
 
 	respData, err := proto.Marshal(resp)
 	if err != nil {
-		callback(errorReply(msg.ConnectionId, msg.Cmd, "Failed to encode response", "500"))
+		callback(errorReply(msg.SessionId, msg.Cmd, "Failed to encode response", "500"))
 		return
 	}
 
-	callback(&commonstruct.Message{
-		ConnectionId: msg.ConnectionId,
-		UserUuid:     msg.UserUuid,
-		Route:        msg.Route,
-		Cmd:          entry.respCmd,
-		Data:         respData,
+	callback(&gateway.StreamData{
+		SessionId: msg.SessionId,
+		UserKey:   msg.UserKey,
+		Route:     msg.Route,
+		Cmd:       entry.respCmd,
+		Data:      respData,
 	})
 }
 
@@ -127,13 +126,13 @@ func (s *Server) RegisterDispatcher(d *Dispatcher) {
 
 func (s *Server) RegisterRoute(route string, handler RouteHandler) {
 	s.routes.Store(route, handler)
-	s.cmdRoutes.Store(sgate.CmdForRoute(route), route)
+	s.cmdRoutes.Store(gateway.CmdForRoute(route), route)
 	tlog.Info("route registered", "route", route)
 }
 
 func (s *Server) RegisterBurstRoute(route string, handler BurstRouteHandler) {
 	s.routes.Store(route, handler)
-	s.cmdRoutes.Store(sgate.CmdForRoute(route), route)
+	s.cmdRoutes.Store(gateway.CmdForRoute(route), route)
 	tlog.Info("burst route registered", "route", route)
 }
 
@@ -144,14 +143,14 @@ func routeKey(route string, cmd int32) string {
 	return fmt.Sprintf("%s:%d", route, cmd)
 }
 
-func (s *Server) dispatchMessage(msg *commonstruct.Message, callback func(*commonstruct.Message)) {
+func (s *Server) dispatchMessage(msg *gateway.StreamData, callback func(*gateway.StreamData)) {
 	if msg.Route == "" {
 		// MessageFrame requests carry only cmd and body. Resolve the route from
 		// the command registry before decoding the business protobuf.
 		if key, ok := s.cmdRoutes.Load(msg.Cmd); ok {
 			msg.Route = key.(string)
 		} else {
-			callback(errorReply(msg.ConnectionId, msg.Cmd, "Missing route", "400"))
+			callback(errorReply(msg.SessionId, msg.Cmd, "Missing route", "400"))
 			return
 		}
 	}
@@ -161,15 +160,15 @@ func (s *Server) dispatchMessage(msg *commonstruct.Message, callback func(*commo
 		val, ok = s.routes.Load(routeKey(msg.Route, msg.Cmd))
 	}
 	if !ok {
-		callback(errorReply(msg.ConnectionId, msg.Cmd, "Route not found", "404", "details", msg.Route))
+		callback(errorReply(msg.SessionId, msg.Cmd, "Route not found", "404", "details", msg.Route))
 		return
 	}
 
 	switch entry := val.(type) {
 	case *Dispatcher:
 		entry.dispatch(&Context{
-			ConnectionID: msg.ConnectionId,
-			UserUUID:     msg.UserUuid,
+			ConnectionID: msg.SessionId,
+			UserUUID:     msg.UserKey,
 			Server:       s,
 			Msg:          msg,
 		}, msg, callback)
@@ -181,14 +180,14 @@ func (s *Server) dispatchMessage(msg *commonstruct.Message, callback func(*commo
 			proto.Reset(reqVal)
 			if err := proto.Unmarshal(msg.Data, reqVal); err != nil {
 				entry.reqPool.Put(reqVal)
-				callback(errorReply(msg.ConnectionId, msg.Cmd, "Failed to decode request", "400", "details", err.Error()))
+				callback(errorReply(msg.SessionId, msg.Cmd, "Failed to decode request", "400", "details", err.Error()))
 				return
 			}
 		}
 
 		resp := entry.handler(&Context{
-			ConnectionID: msg.ConnectionId,
-			UserUUID:     msg.UserUuid,
+			ConnectionID: msg.SessionId,
+			UserUUID:     msg.UserKey,
 			Server:       s,
 			Msg:          msg,
 		}, reqVal)
@@ -196,16 +195,16 @@ func (s *Server) dispatchMessage(msg *commonstruct.Message, callback func(*commo
 
 		respData, err := proto.Marshal(resp)
 		if err != nil {
-			callback(errorReply(msg.ConnectionId, msg.Cmd, "Failed to encode response", "500"))
+			callback(errorReply(msg.SessionId, msg.Cmd, "Failed to encode response", "500"))
 			return
 		}
 
-		callback(&commonstruct.Message{
-			ConnectionId: msg.ConnectionId,
-			UserUuid:     msg.UserUuid,
-			Route:        msg.Route,
-			Cmd:          entry.respCmd,
-			Data:         respData,
+		callback(&gateway.StreamData{
+			SessionId: msg.SessionId,
+			UserKey:   msg.UserKey,
+			Route:     msg.Route,
+			Cmd:       entry.respCmd,
+			Data:      respData,
 		})
 
 	case RouteHandler:
@@ -218,14 +217,14 @@ func (s *Server) dispatchMessage(msg *commonstruct.Message, callback func(*commo
 		// 将 gRPC Send 调用数降低约 256 倍。
 		// BURST_COUNT>1 时，相同 Route+Timestamp 的消息会在 flushLoop 的 marshal 缓存中命中，
 		// 避免重复 Marshal。
-		entry(msg, func(response *commonstruct.Message) {
+		entry(msg, func(response *gateway.StreamData) {
 			if response == nil {
 				return
 			}
-			if response.ConnectionId == "" {
-				response.ConnectionId = msg.ConnectionId
+			if response.SessionId == "" {
+				response.SessionId = msg.SessionId
 			}
-			if response.ConnectionId == "" {
+			if response.SessionId == "" {
 				return
 			}
 			callback(response)
@@ -233,7 +232,7 @@ func (s *Server) dispatchMessage(msg *commonstruct.Message, callback func(*commo
 	}
 }
 
-func errorReply(connID string, cmd int32, message, code string, kv ...string) *commonstruct.Message {
+func errorReply(connID string, cmd int32, message, code string, kv ...string) *gateway.StreamData {
 	payload := map[string]string{
 		"message": message,
 		"code":    code,
@@ -241,11 +240,11 @@ func errorReply(connID string, cmd int32, message, code string, kv ...string) *c
 	for i := 0; i+1 < len(kv); i += 2 {
 		payload[kv[i]] = kv[i+1]
 	}
-	return &commonstruct.Message{
-		ConnectionId: connID,
-		Route:        sgate.RouteError,
-		Cmd:          cmd,
-		Payload:      payload,
-		Timestamp:    time.Now().UnixMilli(),
+	return &gateway.StreamData{
+		SessionId: connID,
+		Route:     gateway.RouteError,
+		Cmd:       cmd,
+		Payload:   payload,
+		Timestamp: time.Now().UnixMilli(),
 	}
 }
