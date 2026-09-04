@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,6 +38,39 @@ type Config struct {
 	Degradation   DegradationConfig   `yaml:"degradation"`
 	FilterChain   FilterChainConfig   `yaml:"filterChain"`
 	Monitoring    MonitoringConfig    `yaml:"monitoring"`
+}
+
+func (c *Config) Validate() error {
+	if c.GRPC.Port <= 0 || c.GRPC.Port > 65535 {
+		return fmt.Errorf("grpc.port must be between 1 and 65535")
+	}
+	seen := make(map[int]bool, len(c.Transports))
+	for _, transport := range c.Transports {
+		if transport.Protocol != "tcp" {
+			return fmt.Errorf("transport %d must use protocol tcp; UDP and other protocols are unsupported", transport.Port)
+		}
+		if transport.Port <= 0 || transport.Port > 65535 {
+			return fmt.Errorf("transport port must be between 1 and 65535")
+		}
+		if seen[transport.Port] {
+			return fmt.Errorf("duplicate transport port: %d", transport.Port)
+		}
+		seen[transport.Port] = true
+		if transport.Type != "" && transport.Type != "websocket" {
+			return fmt.Errorf("unsupported transport type %q", transport.Type)
+		}
+	}
+	if c.TLS.Enabled {
+		return fmt.Errorf("TLS/WSS is not supported by gnet v2 transport; disable tls.enabled")
+	}
+	return nil
+}
+
+func (c *Config) PortAddress() string {
+	if c.Port <= 0 {
+		return ""
+	}
+	return ":" + strconv.Itoa(c.Port)
 }
 
 // MonitoringConfig 监控接入配置（可插拔）
@@ -319,8 +353,7 @@ func loadDefaultConfig() *Config {
 
 	defaultTransports := []Transport{
 		{Protocol: "tcp", Port: 8080},
-		{Protocol: "udp", Port: 8081},
-		{Protocol: "tcp", Port: 8082, Type: "websocket"},
+		{Protocol: "tcp", Port: 8081, Type: "websocket"},
 	}
 
 	return &Config{

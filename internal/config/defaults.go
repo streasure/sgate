@@ -40,7 +40,7 @@ const (
 	// DefaultStreamReceiveBatchSize 反向接收批量大小（每批 ACK 数）
 	DefaultStreamReceiveBatchSize = 64
 
-	// DefaultMaxFrameSize 单帧 payload 上限（TCP/UDP）
+	// DefaultMaxFrameSize 单帧 payload 上限（TCP）
 	// protobuf 业务消息一般 < 4KB；4MB 足够大业务消息
 	DefaultMaxFrameSize = 4 * 1024 * 1024
 

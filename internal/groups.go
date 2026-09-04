@@ -96,12 +96,17 @@ func (m *GroupManager) RemoveSession(sessionID string) {
 
 func (m *GroupManager) RangeSessions(groupID string, fn func(*Session) bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	g, ok := m.groups[groupID]
 	if !ok {
+		m.mu.RUnlock()
 		return
 	}
+	sessions := make([]*Session, 0, len(g.members))
 	for _, sess := range g.members {
+		sessions = append(sessions, sess)
+	}
+	m.mu.RUnlock()
+	for _, sess := range sessions {
 		if !fn(sess) {
 			break
 		}

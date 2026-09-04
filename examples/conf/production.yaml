@@ -17,10 +17,8 @@ discovery:
 transports:
   - protocol: tcp
     port: 48080
-  - protocol: udp
-    port: 48081
   - protocol: tcp
-    port: 48082
+    port: 48081
     type: websocket
 
 grpc:

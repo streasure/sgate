@@ -1,15 +1,17 @@
 package gateway
 
 import (
-	"encoding/binary"
+	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/codec"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -38,8 +40,12 @@ type Gateway struct {
 	messagesReceived  atomic.Int64
 	messagesForwarded atomic.Int64
 	messagesPushed    atomic.Int64
+	messagesDropped   atomic.Int64
 
 	transportType sync.Map
+	statsServer   *http.Server
+	enginesMu     sync.Mutex
+	engines       []gnet.Engine
 }
 
 func NewGateway(cfg *config.Config) *Gateway {
@@ -61,11 +67,25 @@ func (g *Gateway) StartServices() {
 		g.grpcSrv.Start(addr, g.cfg.GRPC.MaxMessageSize, g.cfg.GRPC.WindowSize)
 	}()
 	tlog.Info("gateway gRPC server started", "addr", addr)
+	g.startDefaultObservability(g.cfg.PortAddress())
 }
 
 func (g *Gateway) Close() {
 	g.once.Do(func() { close(g.stopCh) })
+	if g.statsServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = g.statsServer.Shutdown(ctx)
+		cancel()
+	}
 	g.grpcSrv.Stop()
+	g.enginesMu.Lock()
+	engines := append([]gnet.Engine(nil), g.engines...)
+	g.enginesMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, eng := range engines {
+		_ = eng.Stop(ctx)
+	}
 	g.wg.Wait()
 }
 
@@ -76,6 +96,9 @@ func (g *Gateway) SetTransportType(port, transportType string) {
 // ---- gnet.EventHandler ----
 
 func (g *Gateway) OnBoot(eng gnet.Engine) gnet.Action {
+	g.enginesMu.Lock()
+	g.engines = append(g.engines, eng)
+	g.enginesMu.Unlock()
 	return gnet.None
 }
 
@@ -88,6 +111,13 @@ func (g *Gateway) OnInit() (options []gnet.Option, action gnet.Action) {
 func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	ip := c.RemoteAddr().(*net.TCPAddr).IP.String()
 	sess := NewSession(c, ip)
+	port := fmt.Sprintf("%d", c.LocalAddr().(*net.TCPAddr).Port)
+	transportType, _ := g.transportType.Load(port)
+	if transportType == "websocket" {
+		sess.codec = codec.NewWebSocketCodecWithLimit(g.cfg.Protection.MaxWSFrameSize)
+	} else {
+		sess.codec = codec.NewTCPCodecWithLimit(g.cfg.Protection.MaxFrameSize)
+	}
 	g.sessions.Add(sess)
 	g.connectionsTotal.Add(1)
 	g.connectionsActive.Add(1)
@@ -114,20 +144,12 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 		return gnet.None
 	}
 
-	for {
-		buf, err := c.Peek(-1)
-		if err != nil || len(buf) < 4 {
-			break
-		}
-
-		bodyLen := int(binary.BigEndian.Uint32(buf[:4]))
-		if bodyLen <= 0 || bodyLen+4 > len(buf) {
-			break
-		}
-
-		frame := buf[4 : 4+bodyLen]
-		c.Discard(4 + bodyLen)
-
+	frames, err := sess.Codec().Decode(context.Background(), c)
+	if err != nil {
+		return gnet.Close
+	}
+	for _, frame := range frames {
+		sess.Touch()
 		g.messagesReceived.Add(1)
 		g.handleFrame(sess, frame)
 	}
@@ -135,6 +157,15 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 }
 
 func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
+	if idle, err := time.ParseDuration(g.cfg.Protection.ConnIdleTimeout); err == nil && idle > 0 {
+		now := time.Now()
+		g.sessions.Range(func(sess *Session) bool {
+			if sess.IdleFor(now) > idle {
+				_ = sess.Conn().Close()
+			}
+			return true
+		})
+	}
 	return 30 * time.Second, gnet.None
 }
 
@@ -153,8 +184,11 @@ func (g *Gateway) handleFrame(sess *Session, frame []byte) {
 		return
 	}
 
-	g.grpcSrv.SendToLogic(sess, cmd, body)
-	g.messagesForwarded.Add(1)
+	if g.grpcSrv.SendToLogic(sess, cmd, body) {
+		g.messagesForwarded.Add(1)
+	} else {
+		g.messagesDropped.Add(1)
+	}
 }
 
 func (g *Gateway) handleLoginGate(sess *Session, body []byte) {
@@ -185,7 +219,7 @@ func (g *Gateway) handleLoginGate(sess *Session, body []byte) {
 		ServerId:  req.ServerId,
 	}
 	data, _ := proto.Marshal(ack)
-	SendFrameToConn(sess.Conn(), CmdLoginGateAck, 0, data)
+	g.sendToSession(sess, CmdLoginGateAck, data)
 }
 
 func (g *Gateway) SendToClient(sessionID string, cmd int32, data []byte) bool {
@@ -193,15 +227,21 @@ func (g *Gateway) SendToClient(sessionID string, cmd int32, data []byte) bool {
 	if sess == nil {
 		return false
 	}
-	SendFrameToConn(sess.Conn(), cmd, 0, data)
+	return g.sendToSession(sess, cmd, data)
+}
+
+func (g *Gateway) sendToSession(sess *Session, cmd int32, data []byte) bool {
+	if err := sess.Conn().AsyncWrite(sess.Codec().Encode(EncodeMessageFrame(cmd, 0, data)), nil); err != nil {
+		g.messagesDropped.Add(1)
+		return false
+	}
 	g.messagesPushed.Add(1)
 	return true
 }
 
 func (g *Gateway) Broadcast(cmd int32, data []byte) {
 	g.sessions.Range(func(sess *Session) bool {
-		SendFrameToConn(sess.Conn(), cmd, 0, data)
-		g.messagesPushed.Add(1)
+		g.sendToSession(sess, cmd, data)
 		return true
 	})
 }
@@ -213,21 +253,10 @@ func (g *Gateway) SendToGroup(groupID string, cmd int32, data []byte, excludeSes
 	}
 	g.groups.RangeSessions(groupID, func(sess *Session) bool {
 		if !exclude[sess.ID()] {
-			SendFrameToConn(sess.Conn(), cmd, 0, data)
-			g.messagesPushed.Add(1)
+			g.sendToSession(sess, cmd, data)
 		}
 		return true
 	})
-}
-
-// ---- wire helpers ----
-
-func SendFrameToConn(c gnet.Conn, cmd int32, seqID int64, body []byte) {
-	frame := EncodeMessageFrame(cmd, seqID, body)
-	buf := make([]byte, 4+len(frame))
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(frame)))
-	copy(buf[4:], frame)
-	c.AsyncWrite(buf, nil)
 }
 
 func EncodeMessageFrame(cmd int32, seqID int64, body []byte) []byte {

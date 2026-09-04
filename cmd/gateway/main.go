@@ -54,7 +54,12 @@ func main() {
 
 	cfg, err := config.LoadConfig(*confFiles)
 	if err != nil {
-		tlog.Warn("load config failed, using defaults", "error", err)
+		tlog.Error("load config failed", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Validate(); err != nil {
+		tlog.Error("invalid gateway config", "error", err)
+		os.Exit(1)
 	}
 	tlog.Info("config loaded", "port", cfg.Port)
 

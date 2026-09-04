@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
@@ -22,6 +23,8 @@ type GRPCServer struct {
 
 	logicClients map[string]*LogicConn
 	mu           sync.RWMutex
+	connectMu    sync.Mutex
+	reconnecting sync.Map
 }
 
 type LogicConn struct {
@@ -71,6 +74,7 @@ func (s *GRPCServer) Stop() {
 			lc.conn.Close()
 		}
 	}
+	s.logicClients = make(map[string]*LogicConn)
 }
 
 // ---- GatewayStreamServer ----
@@ -100,6 +104,9 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 			return err
 		}
 		if msg.SessionId != "" {
+			if sess := s.gw.sessions.GetByID(msg.SessionId); sess != nil && msg.UserKey != "" {
+				sess.Authenticate(msg.UserKey)
+			}
 			s.gw.SendToClient(msg.SessionId, msg.Cmd, msg.Data)
 		}
 	}
@@ -183,6 +190,11 @@ func (s *GRPCServer) GetGroupInfo(ctx context.Context, req *protoGw.GetGroupInfo
 // ---- Logic client management ----
 
 func (s *GRPCServer) ConnectLogic(serverID, address string) error {
+	s.connectMu.Lock()
+	defer s.connectMu.Unlock()
+	if s.IsLogicConnected(serverID) {
+		return nil
+	}
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(8*1024*1024)),
@@ -228,12 +240,32 @@ func (s *GRPCServer) IsLogicConnected(serverID string) bool {
 	return ok && lc.stream != nil
 }
 
-func (s *GRPCServer) SendToLogic(sess *Session, cmd int32, body []byte) {
+func (s *GRPCServer) hasLogicConnection() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, lc := range s.logicClients {
+		if lc != nil && lc.stream != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *GRPCServer) SendToLogic(sess *Session, cmd int32, body []byte) bool {
 	s.mu.RLock()
 	lc, ok := s.logicClients[sess.ServerID()]
 	s.mu.RUnlock()
 	if !ok {
-		return
+		server, found := s.gw.cfg.LogicServer(sess.ServerID())
+		if !found || s.ConnectLogic(sess.ServerID(), server.Address) != nil {
+			return false
+		}
+		s.mu.RLock()
+		lc, ok = s.logicClients[sess.ServerID()]
+		s.mu.RUnlock()
+		if !ok {
+			return false
+		}
 	}
 
 	msg := &protoGw.StreamData{
@@ -245,8 +277,10 @@ func (s *GRPCServer) SendToLogic(sess *Session, cmd int32, body []byte) {
 	}
 	select {
 	case lc.sendCh <- msg:
+		return true
 	default:
 		tlog.Warn("logic send channel full", "serverID", sess.ServerID())
+		return false
 	}
 }
 
@@ -280,6 +314,7 @@ func (s *GRPCServer) getOrCreateLogicConn(serverID string) *LogicConn {
 // ---- LogicConn loops ----
 
 func (lc *LogicConn) sendLoop(ctx context.Context) {
+	defer lc.markDisconnected()
 	for {
 		select {
 		case <-ctx.Done():
@@ -294,6 +329,7 @@ func (lc *LogicConn) sendLoop(ctx context.Context) {
 }
 
 func (lc *LogicConn) receiveLoop(ctx context.Context) {
+	defer lc.markDisconnected()
 	for {
 		msg, err := lc.stream.Recv()
 		if err != nil {
@@ -304,4 +340,50 @@ func (lc *LogicConn) receiveLoop(ctx context.Context) {
 			lc.gw.SendToClient(msg.SessionId, msg.Cmd, msg.Data)
 		}
 	}
+}
+
+func (lc *LogicConn) markDisconnected() {
+	lc.gw.grpcSrv.mu.Lock()
+	if lc.gw.grpcSrv.logicClients[lc.serverID] == lc {
+		delete(lc.gw.grpcSrv.logicClients, lc.serverID)
+	}
+	lc.gw.grpcSrv.mu.Unlock()
+	lc.cancel()
+	if lc.conn != nil {
+		_ = lc.conn.Close()
+	}
+	server, ok := lc.gw.cfg.LogicServer(lc.serverID)
+	if ok {
+		lc.gw.grpcSrv.scheduleReconnect(lc.serverID, server.Address)
+	}
+}
+
+func (s *GRPCServer) scheduleReconnect(serverID, address string) {
+	if _, loaded := s.reconnecting.LoadOrStore(serverID, true); loaded {
+		return
+	}
+	go func() {
+		defer s.reconnecting.Delete(serverID)
+		backoff := time.Second
+		for {
+			select {
+			case <-s.gw.stopCh:
+				return
+			default:
+			}
+			if s.ConnectLogic(serverID, address) == nil {
+				return
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-s.gw.stopCh:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+		}
+	}()
 }

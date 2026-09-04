@@ -34,7 +34,7 @@ discovery:
   zone: ""                     # 留空则回退到顶层 zone
 
 # --- 监听协议 ---
-# 客户端接入端口（TCP/UDP/WebSocket）
+# 客户端接入端口（TCP/WebSocket）
 transports:
   - protocol: tcp
     port: 48080               # TCP 接入端口

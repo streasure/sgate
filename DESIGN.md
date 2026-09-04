@@ -1,747 +1,248 @@
 # sgate 设计文档
 
-## 1. 项目概述
+## 范围
 
-sgate 是一个高性能游戏网关，作为客户端与逻辑服之间的协议桥梁，负责：
-- 多协议接入（TCP/UDP/WebSocket）
-- 消息转发（客户端 ↔ 逻辑服）
-- 会话管理（连接状态机、用户绑定）
-- 组管理（组广播、全服广播）
+本文档描述仓库的默认构建，不将带 `legacy` build tag 的文件视为可运行实现。
 
-### 1.1 设计目标
+默认网关只支持两种客户端 codec，且两者均运行在 TCP 监听器上：
 
-| 目标 | 说明 |
-|------|------|
-| 高性能 | 百万级 QPS 双向转发能力 |
-| 低延迟 | 亚毫秒级消息转发延迟 |
-| 高可用 | 单节点故障自动容灾 |
-| 可扩展 | 支持水平扩展，线性提升吞吐 |
-| 简洁性 | 核心代码精简，易于理解和维护 |
+- TCP Length-Value 帧。
+- RFC 6455 WebSocket 二进制帧。
 
-### 1.2 技术选型
+UDP 已明确移除；项目中没有 UDP 源码、配置、说明或压测路径。
 
-| 组件 | 选型 | 理由 |
-|------|------|------|
-| 网络框架 | gnet v2 | 事件驱动、零拷贝、多核支持 |
-| RPC | gRPC | 双向流、高效序列化、跨语言 |
-| 序列化 | Protocol Buffers | 紧凑、高效、向后兼容 |
-| 服务发现 | etcd | 强一致性、租约机制、Watch 支持 |
-| 编程语言 | Go 1.22+ | 并发模型、GC 性能、生态丰富 |
+## 运行拓扑
 
-## 2. 整体架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        客户端集群                            │
-│   (Game Client / Mobile App / Web Client)                   │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ TCP/UDP/WebSocket
-                       │ [4字节长度][MessageFrame{cmd, seq_id, body}]
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     sgate Gateway                           │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  gnet Event Loop (多核)                              │   │
-│  │  ├── OnOpen: 创建 Session                           │   │
-│  │  ├── OnTraffic: 解析帧 → 路由 → 转发                │   │
-│  │  ├── OnClose: 清理 Session + 通知 Logic              │   │
-│  │  └── OnTick: 定时任务                                │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  SessionManager                                      │   │
-│  │  ├── sessions: map[sessionID]*Session                │   │
-│  │  └── byConn: map[gnet.Conn]*Session                  │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  GroupManager                                        │   │
-│  │  └── groups: map[groupID]*group                      │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  GRPCServer                                          │   │
-│  │  ├── GatewayStream (双向流)                          │   │
-│  │  └── Gateway (Unary RPC: SendToClient/Broadcast等)   │   │
-│  └─────────────────────────────────────────────────────┘   │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ gRPC Bidirectional Stream
-                       │ StreamData{session_id, user_key, cmd, data}
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Logic Server 集群                         │
-│   ┌──────────┐  ┌──────────┐  ┌──────────┐                │
-│   │ logic-1  │  │ logic-2  │  │ logic-3  │                │
-│   └──────────┘  └──────────┘  └──────────┘                │
-└─────────────────────────────────────────────────────────────┘
+```text
+                              Gateway unary RPC
+                      +--------------------------------+
+                      | Close / Kick / Send / Broadcast |
+                      | Join / Leave / GroupInfo        |
+                      +----------------+---------------+
+                                       ^
+                                       | gRPC :50051
++----------------+  TCP :48080  +------+----------------------------+  gRPC stream  +----------------+
+| TCP client     | -----------> | gnet event loops                  | <-----------> | logic server   |
++----------------+              |                                  |                +----------------+
+                                | SessionManager / GroupManager     |
++----------------+  TCP :48081  |                                  |
+| WebSocket      | -----------> | TCPCodec / WebSocketCodec         |
+| client         | HTTP Upgrade |                                  |
++----------------+              +----------------------------------+
 ```
 
-### 2.1 核心组件职责
+`TransportComponent` 为每个 transport 启动一个 gnet engine。当前两个 transport 的 `protocol` 都是 `tcp`，`type: websocket` 使该监听端口创建的 Session 使用 `WebSocketCodec`。启动选项启用 multicore、reuse-port、256 KiB gnet 读写缓冲、4 MiB socket 缓冲与 TCP_NODELAY。
 
-| 组件 | 文件 | 职责 |
-|------|------|------|
-| Gateway | `gateway.go` | 核心网关，gnet 事件处理，帧编解码，消息转发 |
-| SessionManager | `session.go` | 连接管理，状态机，用户绑定 |
-| GroupManager | `groups.go` | 组生命周期管理，组内广播 |
-| GRPCServer | `grpc_server.go` | gRPC 服务，Logic 连接管理，双向流处理 |
-| TransportComponent | `transport_component.go` | 传输层启动，gnet 配置 |
+## 连接与 Codec
 
-## 3. 协议设计
+`Gateway.OnOpen` 创建 `Session`，按本地监听端口选择 codec，然后以 session ID 与 `gnet.Conn` 双索引保存。
 
-### 3.1 客户端 ↔ Gateway：MessageFrame
+`Gateway.OnTraffic` 调用 Session 的 `Decode`，转发每一个完整的 `MessageFrame` payload。`Gateway.sendToSession` 通过同一 Session 的 `Encode` 下行，因此回复、个人推送、组广播和全服广播都维持客户端接入协议。
 
-客户端与 Gateway 之间使用 `MessageFrame` 作为线路协议：
+### TCP Codec
+
+```text
++----------------------+-----------------------+
+| uint32 big endian N  | N bytes MessageFrame  |
++----------------------+-----------------------+
+```
+
+`TCPCodec.Decode` 在一个流量事件中循环解析所有完整帧；不完整头和 payload 保留在 gnet 入站缓冲。完成的 payload 会复制后返回，避免 gnet 复用入站内存导致数据失效。
+
+### WebSocket Codec
+
+WebSocket codec 为每个连接维护 Upgrade 状态及可选的分片消息状态。
+
+HTTP Upgrade 要求：
+
+- 请求行以 `GET ` 开头。
+- `Upgrade: websocket`。
+- `Connection` 包含 `Upgrade`。
+- `Sec-WebSocket-Version: 13`。
+- `Sec-WebSocket-Key` 非空。
+
+codec 只消费 HTTP `\r\n\r\n` 结束符之前的数据，写回 `101 Switching Protocols`，并保留同次 gnet 入站缓冲中可能已经到达的首个 WebSocket 帧。
+
+数据帧约束：
+
+- 客户端帧必须使用掩码。
+- 只有 binary data message 会转发到网关。
+- binary 分片消息会完成重组后再转发。
+- 重组后消息上限为 4 MiB。
+- Ping 返回相同 payload 的 Pong。
+- Close 返回 Close，随后事件处理器关闭连接。
+- text、extension、无掩码、无效控制帧和未知 opcode 都会被拒绝。
+
+WebSocket payload 就是序列化后的 `MessageFrame`，不包含 TCP 4 字节长度前缀；服务端发送未掩码的 binary frame。
+
+codec 会从 `X-Forwarded-For` 的第一个合法 IP 或 `X-Real-IP` 提取 IP。但默认 `Session.IP` 仍使用建连时的 TCP peer IP；若要信任代理头，需要补充显式的可信代理策略和 Session IP 覆盖逻辑。
+
+## 客户端与 Logic 协议
+
+### 客户端 MessageFrame
 
 ```protobuf
 message MessageFrame {
-    int32 cmd    = 1;   // 指令号
-    int64 seq_id = 2;   // 序列号（请求-响应配对）
-    bytes body   = 99;  // 业务载荷（序列化的 StreamData）
+  int32 cmd = 1;
+  int64 seq_id = 2;
+  bytes body = 99;
 }
 ```
 
-**线路格式**：
-```
-[4字节大端长度][MessageFrame protobuf 字节]
-```
+`ExtractMessageFrame` 通过 `protowire` 扫描字段，不反序列化整个 envelope。有效帧必须含有非零 `cmd` 与非空 `body`。
 
-**设计要点**：
-- 固定 3 个字段，protowire 零拷贝解析
-- `body` 内部是业务数据的序列化字节
-- 长度前缀支持高效帧解析，避免半包问题
+### 内部 StreamData
 
-### 3.2 Gateway ↔ Logic：StreamData
+网关把合法客户端帧转换为 protocol 模块的 `gateway.StreamData`：
 
-Gateway 与 Logic 之间使用 `GatewayStream.onData` 双向 gRPC 流：
-
-```protobuf
-service GatewayStream {
-    rpc onData(stream StreamData) returns (stream StreamData);
-}
-
-message StreamData {
-    string session_id = 1;   // 连接会话 ID
-    string user_key   = 2;   // 用户唯一标识（登录后填充）
-    int32  cmd        = 3;   // 指令号
-    int64  seq_id     = 4;   // 序列号
-    bytes  data       = 5;   // 业务载荷
-    string client_ip  = 6;   // 客户端 IP
+```text
+StreamData {
+  session_id = session.ID()
+  user_key   = session.UserKey()
+  cmd        = MessageFrame.cmd
+  data       = MessageFrame.body
+  client_ip  = session.IP()
 }
 ```
 
-**设计要点**：
-- `session_id` 用于标识客户端连接，支持 Logic 主动推送
-- `user_key` 用于用户级推送（跨连接）
-- `cmd` 用于路由到具体业务处理器
-- `data` 承载业务数据，Gateway 不解析内容
+gRPC 双向流传输 `StreamData`。下行 `StreamData` 带有 `session_id` 时，网关将它转换为 `MessageFrame{cmd, seq_id: 0, body: data}`，再通过目标 Session codec 下行。
 
-### 3.3 Gateway ↔ Logic：Unary RPCs
+## Session 生命周期
 
-Logic 可通过 Unary RPC 主动操作 Gateway：
-
-| RPC | 说明 |
-|-----|------|
-| `SendToClient` | 向指定客户端推送消息 |
-| `Broadcast` | 向指定组广播消息 |
-| `BroadcastAll` | 全服广播 |
-| `JoinGroup` | 客户端加入组 |
-| `LeaveGroup` | 客户端离开组 |
-| `CloseSession` | 关闭客户端连接 |
-| `KickSession` | 踢下线 |
-| `GetGroupInfo` | 查询组信息 |
-
-### 3.4 指令号定义
-
-```protobuf
-enum Cmd {
-    CMD_UNSPECIFIED       = 0;
-    
-    // Gateway 控制 (1,000,000 - 1,099,999)
-    CMD_LOGIN_GATE_REQ    = 1000001;  // 登录网关请求
-    CMD_LOGIN_GATE_ACK    = 1000002;  // 登录网关响应
-    
-    // Logic 业务 (1,100,000 - 1,199,999)
-    CMD_LOGIN_REQ         = 1100001;  // 业务登录请求
-    CMD_LOGIN_ACK         = 1100002;  // 业务登录响应
-    CMD_HEARTBEAT_REQ     = 1100010;  // 心跳请求
-    CMD_HEARTBEAT_ACK     = 1100011;  // 心跳响应
-    CMD_USER_OFFLINE      = 1100012;  // 用户下线通知
-}
+```text
+OnOpen
+  |
+  v
+StateConnected
+  | LoginGateReq (cmd 1000001)
+  v
+StateBound
+  | logic response with non-empty user_key
+  v
+StateAuthenticated
+  | OnClose
+  v
+删除 session、删除组成员；仅 authenticated 时才通知 logic
 ```
 
-## 4. 数据流设计
+`LoginGateReq` 携带目标 logic server ID。`Gateway.handleLoginGate` 在 `Config.LogicServer` 中校验 server ID，必要时以 `ConnectLogic` 建立 gRPC client stream，然后绑定 session 并下行 `LoginGateAck`（`cmd=1000002`）。未绑定连接除了 `LoginGateReq` 以外的帧都会被静默忽略。
 
-### 4.1 正向流（客户端 → 逻辑服）
+gRPC 下行路径收到带非空 `user_key` 的同 session 消息时调用 `Session.Authenticate`；连接关闭时，已认证 session 会发送 `CmdUserOffline` 离线通知。
 
-```
-1. 客户端发送: [4字节长度][MessageFrame{cmd=1000001, body=LoginGateReq}]
-2. gnet OnTraffic 触发
-3. Peek 读取缓冲区
-4. 解析 4 字节长度前缀
-5. ExtractMessageFrame 提取 cmd/seq_id/body
-6. 检查 cmd 是否为 LoginGateReq
-   - 是: handleLoginGate 处理登录
-   - 否: SendToLogic 转发
-7. SendToLogic 构造 StreamData
-8. LogicConn.sendCh <- msg
-9. sendLoop 异步发送到 Logic
-```
+当前 logic 连接行为：
 
-### 4.2 反向流（逻辑服 → 客户端）
+- 每个 logic server ID 对应一个 `LogicConn` 和容量为 1024 的上行 channel。
+- channel 满时记录 warning 并丢弃该条上行消息。
+- gRPC 接收循环依据 session ID 分发下行消息。
+- stream 断开后会移除旧连接，并按 1、2、4 秒递增、最多 30 秒的退避策略自动重连；网关关闭时会停止重连。
 
-```
-1. Logic 调用 SendToClient/Broadcast 等 RPC
-2. GRPCServer 收到请求
-3. Gateway.SendToClient/Broadcast 处理
-4. 按 sessionID 查找连接
-5. EncodeMessageFrame 编码响应
-6. [4字节长度][MessageFrame] 写入连接
-7. gnet AsyncWrite 异步发送
-```
+## Logic 主动操作
 
-### 4.3 批量处理
+Gateway gRPC service 当前实现以下 unary RPC。
 
-**OnTraffic 批量解析**：
-```go
-for {
-    buf, err := c.Peek(-1)
-    if err != nil || len(buf) < 4 {
-        break
-    }
-    bodyLen := int(binary.BigEndian.Uint32(buf[:4]))
-    if bodyLen <= 0 || bodyLen+4 > len(buf) {
-        break
-    }
-    frame := buf[4 : 4+bodyLen]
-    c.Discard(4 + bodyLen)
-    handleFrame(sess, frame)
-}
-```
+| RPC | Gateway 行为 |
+|---|---|
+| `CloseSession`、`KickSession` | 关闭目标 gnet 连接。 |
+| `SendToClient` | 对指定 session 编码并异步写入。 |
+| `Broadcast` | 遍历请求中的每个组并下行给组成员。 |
+| `BroadcastAll` | 遍历全部活跃 session 并下行。 |
+| `JoinGroup`、`LeaveGroup` | 更新 `GroupManager` 和 Session 的 group set。 |
+| `GetGroupInfo` | 返回当前成员数与 session ID。 |
 
-**设计要点**：
-- 一次 OnTraffic 可能包含多帧
-- 循环解析直到缓冲区不足
-- 减少事件循环次数，提升吞吐
+组在第一次加入时隐式创建，最后成员离开或 session 关闭时隐式清理。
 
-## 5. 会话管理
+## 配置
 
-### 5.1 Session 状态机
+`config.LoadConfig` 先创建硬编码默认值，再将所选 YAML 解码到该结构中。单个 YAML 字段没有环境变量覆盖；`PORT`、`LOG_LEVEL`、`GATEWAY_SERVER_ID` 仅在默认值构造时使用。
 
-```
-┌─────────────────┐
-│ StateConnected  │  TCP 已连接，未认证
-│ (state = 0)     │
-└────────┬────────┘
-         │ LoginGateReq + LoginGateAck
-         ▼
-┌─────────────────┐
-│ StateBound      │  已绑定 Logic Server
-│ (state = 1)     │
-└────────┬────────┘
-         │ Logic 返回 UserKey
-         ▼
-┌─────────────────┐
-│ StateAuthenticated │ 已完成用户认证
-│ (state = 2)     │
-└─────────────────┘
+本地压测使用 `config/bench.yaml`：
+
+```yaml
+transports:
+  - protocol: tcp
+    port: 48080
+  - protocol: tcp
+    port: 48081
+    type: websocket
+
+grpc:
+  port: 50051
+
+logicServers:
+  - serverId: "logic-1"
+    serverType: "Logic"
+    zone: "default"
+    address: "localhost:50052"
 ```
 
-### 5.2 Session 结构
+该文件关闭 `etcd`、`discovery`、`configCenter`、`cluster` 和 monitoring。`config/config.yaml` 含外部集成配置，不能假定在未部署其依赖时可直接运行。
 
-```go
-type Session struct {
-    conn      gnet.Conn      // 底层连接
-    id        string         // 会话 ID (UUID)
-    ip        string         // 客户端 IP
-    state     SessionState   // 状态机
-    serverID  string         // 绑定的 Logic Server
-    userID    string         // 客户端用户 ID
-    userKey   string         // Logic 分配的用户 Key
-    groups    map[string]bool // 加入的组
-}
+## 性能特征
+
+默认路径利用 gnet event loop、单次流量事件的多帧解析、protobuf wire envelope 提取和异步客户端写入。当前未实现写合并、批量 gRPC 转发、客户端背压反馈或 TLS/WSS；TCP/WS 帧大小限制、空闲连接回收、stream 退避重连已实现。
+
+因此容量由本地 logic server、gRPC stream、codec 分配、内核缓冲和客户端发送行为共同决定，不能仅根据 gnet 推导。
+
+## 压测方法与结果
+
+### 方法
+
+记录日期：2026-09-04。环境：Windows、12 logical CPUs、Go 1.22.5。gateway、`examples/logic_server_min` 与压测客户端运行在同一主机。逻辑服对登录请求应答，对心跳请求回显。
+
+| 项目 | TCP | WebSocket |
+|---|---|---|
+| Gateway 配置 | `config/bench.yaml` | `config/bench.yaml` |
+| 监听地址 | `127.0.0.1:48080` | `ws://127.0.0.1:48081/` |
+| 登录 server ID | `logic-1` | `logic-1` |
+| 负载 | 登录后心跳双向回显 | HTTP Upgrade、登录后心跳双向回显 |
+| 在途上限 | 每连接 8192 消息 | 每连接 8192 消息 |
+| 隔离 | 每轮前重启 gateway 与 logic | 每轮前重启 gateway 与 logic |
+
+命令：
+
+```powershell
+go run ./examples/logic_server_min
+go run ./cmd/gateway -conf config/bench.yaml
+
+go run ./examples/bench 127.0.0.1:48080 10 5 16 8192 127.0.0.1:8081 logic-1
+go run ./examples/ws_bench ws://127.0.0.1:48081/ 10 5
 ```
 
-### 5.3 SessionManager
+TCP 和 WebSocket 不得并发运行；二者共享同一 gateway、logic process、gRPC stream 与 loopback socket，并发运行会使协议对比失效。
 
-```go
-type SessionManager struct {
-    sessions map[string]*Session      // sessionID → Session
-    byConn   map[gnet.Conn]*Session   // conn → Session
-    mu       sync.RWMutex
-}
+### 结果
+
+| Transport | 连接数 | 标称时长 | 接收消息 | 平均接收 QPS | 认证失败 | 客户端丢弃 |
+|---|---:|---:|---:|---:|---:|---:|
+| TCP | 1 | 2.01 s | 344,220 | 171,577 | 0 | 0 |
+| WebSocket | 1 | 2.00 s | 300,999 | 150,402 | 0 | 此工具未统计 |
+| TCP | 10 | 5.00 s | 1,870,522 | 374,052 | 1 | 0 |
+| WebSocket | 10 | 5.00 s | 1,321,790 | 264,186 | 0 | 此工具未统计 |
+
+最新一轮 TCP 10 连接结果有 4 个客户端认证失败。该结果为保证透明度被保留，但不是零错误容量基准。WebSocket 工具统计写入错误和认证失败，以固定在途上限发送，并报告成功读取的回包数。两种工具均不测量 Pxx 延迟、CPU、内存、NIC 吞吐、丢包、GC pause、TLS/WSS 开销、业务 handler 成本、长稳泄漏或多主机表现。
+
+这些数据仅用于同机 loopback 的协议量级比较，不能作为生产 QPS 承诺，也不能外推到不同主机、网络、payload、并发、logic 实现或业务逻辑。
+
+## 可观测性
+
+默认构建会在顶层 `port`（默认为 `:8081`）启动 HTTP 服务：`/health`、`/live`、`/ready`、`/stats` 和 `/metrics`。`/ready` 在没有 logic stream 时返回 `503`。
+
+## 验证状态
+
+TCP/WebSocket 实现修改后，已执行：
+
+```powershell
+go test ./...
+go vet ./...
+git grep -in udp
 ```
 
-**查询操作**：
-- `GetByID(id)`: O(1) 按 sessionID 查询
-- `GetByConn(conn)`: O(1) 按连接查询
-- `Range(fn)`: O(N) 遍历所有 session
-
-**写操作**：
-- `Add(s)`: O(1) 添加 session
-- `Remove(conn)`: O(1) 移除 session
-
-## 6. 组管理
-
-### 6.1 隐式组生命周期
-
-组的创建和删除是隐式的：
-- **创建**: 第一个成员 Join 时自动创建
-- **删除**: 最后一个成员 Leave 时自动删除
-
-```go
-func (m *GroupManager) Join(groupID string, sess *Session) int {
-    g, ok := m.groups[groupID]
-    if !ok {
-        g = &group{id: groupID, members: make(map[string]*Session)}
-        m.groups[groupID] = g
-    }
-    g.members[sess.ID()] = sess
-    return len(g.members)
-}
-
-func (m *GroupManager) Leave(groupID string, sess *Session) int {
-    g, ok := m.groups[groupID]
-    if !ok {
-        return 0
-    }
-    delete(g.members, sess.ID())
-    count := len(g.members)
-    if count == 0 {
-        delete(m.groups, groupID)  // 空组自动删除
-    }
-    return count
-}
-```
-
-### 6.2 组广播
-
-```go
-func (g *Gateway) SendToGroup(groupID string, cmd int32, data []byte, excludeSessionIDs ...string) {
-    exclude := make(map[string]bool, len(excludeSessionIDs))
-    for _, id := range excludeSessionIDs {
-        exclude[id] = true
-    }
-    g.groups.RangeSessions(groupID, func(sess *Session) bool {
-        if !exclude[sess.ID()] {
-            SendFrameToConn(sess.Conn(), cmd, 0, data)
-        }
-        return true
-    })
-}
-```
-
-### 6.3 全服广播
-
-```go
-func (g *Gateway) Broadcast(cmd int32, data []byte) {
-    g.sessions.Range(func(sess *Session) bool {
-        SendFrameToConn(sess.Conn(), cmd, 0, data)
-        return true
-    })
-}
-```
-
-## 7. gRPC 连接管理
-
-### 7.1 LogicConn 结构
-
-```go
-type LogicConn struct {
-    serverID string                           // Logic Server ID
-    conn     *grpc.ClientConn                 // gRPC 连接
-    stream   protoGw.GatewayStream_OnDataClient // 双向流
-    sendCh   chan *protoGw.StreamData          // 发送队列
-    cancel   context.CancelFunc               // 取消函数
-}
-```
-
-### 7.2 连接建立
-
-```
-1. 客户端发送 LoginGateReq 指定 serverID
-2. Gateway 检查是否已连接该 Logic
-3. 若未连接，调用 ConnectLogic 建立连接：
-   a. grpc.NewClient 创建连接
-   b. NewGatewayStreamClient.OnData 打开双向流
-   c. 启动 sendLoop 和 receiveLoop goroutine
-4. 更新 logicClients 映射
-```
-
-### 7.3 消息收发
-
-**发送循环 (sendLoop)**：
-```go
-func (lc *LogicConn) sendLoop(ctx context.Context) {
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        case msg := <-lc.sendCh:
-            lc.stream.Send(msg)
-        }
-    }
-}
-```
-
-**接收循环 (receiveLoop)**：
-```go
-func (lc *LogicConn) receiveLoop(ctx context.Context) {
-    for {
-        msg, err := lc.stream.Recv()
-        if err != nil {
-            return
-        }
-        if msg.SessionId != "" {
-            lc.gw.SendToClient(msg.SessionId, msg.Cmd, msg.Data)
-        }
-    }
-}
-```
-
-## 8. 帧编解码
-
-### 8.1 零拷贝解析
-
-```go
-func ExtractMessageFrame(data []byte) (cmd int32, seqID int64, body []byte, ok bool) {
-    for len(data) > 0 {
-        num, typ, n := protowire.ConsumeTag(data)
-        if n < 0 {
-            return 0, 0, nil, false
-        }
-        data = data[n:]
-        switch num {
-        case 1: // cmd
-            v, m := protowire.ConsumeVarint(data)
-            cmd = int32(v)
-            data = data[m:]
-        case 2: // seq_id
-            v, m := protowire.ConsumeVarint(data)
-            seqID = int64(v)
-            data = data[m:]
-        case 99: // body
-            v, m := protowire.ConsumeBytes(data)
-            body = v
-            data = data[m:]
-        default:
-            m := protowire.ConsumeFieldValue(num, typ, data)
-            data = data[m:]
-        }
-    }
-    return cmd, seqID, body, cmd != 0 && len(body) > 0
-}
-```
-
-**设计要点**：
-- 直接操作 protowire 字节，不反序列化整个 MessageFrame
-- 只提取需要的字段（cmd, seq_id, body）
-- 减少内存分配和 CPU 开销
-
-### 8.2 编码
-
-```go
-func EncodeMessageFrame(cmd int32, seqID int64, body []byte) []byte {
-    buf := make([]byte, 0, 4+len(body))
-    buf = protowire.AppendTag(buf, 1, protowire.VarintType)
-    buf = protowire.AppendVarint(buf, uint64(cmd))
-    buf = protowire.AppendTag(buf, 2, protowire.VarintType)
-    buf = protowire.AppendVarint(buf, uint64(seqID))
-    buf = protowire.AppendTag(buf, 99, protowire.BytesType)
-    buf = protowire.AppendBytes(buf, body)
-    return buf
-}
-```
-
-## 9. 性能优化
-
-### 9.1 网络层优化
-
-| 优化项 | 实现 | 效果 |
-|--------|------|------|
-| 事件驱动 | gnet v2 多核事件循环 | 充分利用多核 CPU |
-| 零拷贝解析 | protowire 直接扫描 | 减少内存分配 |
-| 异步写入 | AsyncWrite 非阻塞 | 避免写阻塞事件循环 |
-| 缓冲区调优 | Socket 4MB, 读写 256KB | 减少系统调用次数 |
-
-### 9.2 协议层优化
-
-| 优化项 | 实现 | 效果 |
-|--------|------|------|
-| 紧凑编码 | protobuf 3 字段 | 减少序列化开销 |
-| 批量解析 | OnTraffic 循环处理 | 减少事件触发次数 |
-| 长度前缀 | 4 字节大端长度 | 快速帧边界判断 |
-
-### 9.3 内存优化
-
-| 优化项 | 实现 | 效果 |
-|--------|------|------|
-| 零分配解析 | ExtractMessageFrame 无分配 | 减少 GC 压力 |
-| 预分配缓冲区 | 编码时预估容量 | 减少扩容拷贝 |
-| 连接池复用 | gRPC 连接复用 | 减少连接建立开销 |
-
-### 9.4 并发优化
-
-| 优化项 | 实现 | 效果 |
-|--------|------|------|
-| RWMutex | SessionManager 读写锁 | 支持并发读 |
-| 无锁队列 | sendCh channel | 避免锁竞争 |
-| 细粒度锁 | Session/Group 独立锁 | 减少锁竞争 |
-
-## 10. 企业级架构（Legacy）
-
-### 10.1 架构概览
-
-企业级架构在简化架构基础上增加了：
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     sgate Gateway (Enterprise)               │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Filter Chain                                        │   │
-│  │  ├── PreAuth: IP黑白名单                            │   │
-│  │  ├── Auth: JWT 鉴权                                 │   │
-│  │  ├── PostAuth: 限流、熔断、WAF                       │   │
-│  │  └── Forward: 完整性校验、路由                        │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Overload Protector                                  │   │
-│  │  ├── CPU 监控                                        │   │
-│  │  ├── 内存监控                                        │   │
-│  │  └── 过载降级                                        │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Observability                                       │   │
-│  │  ├── Prometheus Metrics                              │   │
-│  │  ├── pprof Profiling                                 │   │
-│  │  ├── Health/Readiness/Liveness Probes                │   │
-│  │  └── OpenTelemetry Tracing                           │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Traffic Management                                  │   │
-│  │  ├── Canary Release                                  │   │
-│  │  ├── Traffic Mirroring                               │   │
-│  │  ├── Degradation Rules                               │   │
-│  │  └── WASM Plugins                                   │   │
-│  └─────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Cluster Management                                  │   │
-│  │  ├── etcd Service Discovery                          │   │
-│  │  ├── Leader Election                                 │   │
-│  │  ├── Load Balancing                                  │   │
-│  │  └── Alert Webhooks                                  │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 10.2 安全防护
-
-| 组件 | 功能 | 配置 |
-|------|------|------|
-| IP 白名单/黑名单 | 按 IP 过滤连接 | `security.whitelist/blacklist` |
-| 限流 | 令牌桶限流 | `security.rateLimit` |
-| 熔断器 | 失败熔断、半开恢复 | `security.circuitBreaker` |
-| WAF | SQL 注入/XSS 检测 | `waf.enabled` |
-| JWT | Token 鉴权 | `jwtAuth.enabled` |
-| TLS | 加密传输 | `tls.enabled` |
-
-### 10.3 可观测性
-
-| 组件 | 功能 | 端点 |
-|------|------|------|
-| Prometheus | 指标采集 | `/metrics` |
-| pprof | 性能分析 | `:6060/debug/pprof/` |
-| Health | 健康检查 | `/health` |
-| Readiness | 就绪检查 | `/ready` |
-| Liveness | 存活检查 | `/live` |
-| Tracing | 分布式追踪 | OpenTelemetry/Zipkin |
-
-### 10.4 流量管理
-
-| 组件 | 功能 | 配置 |
-|------|------|------|
-| 灰度发布 | 按百分比/用户灰度 | `canary.enabled` |
-| 流量镜像 | 录制/回放流量 | `trafficMirror.enabled` |
-| 降级规则 | 错误阈值触发降级 | `degradation.rules` |
-| WASM 插件 | 自定义过滤逻辑 | `traffic.wasm` |
-
-## 11. 部署架构
-
-### 11.1 单机部署
-
-```
-┌─────────────────────────────┐
-│         单机部署             │
-│  ┌───────────────────────┐  │
-│  │    sgate Gateway       │  │
-│  │    (TCP :48080)        │  │
-│  │    (gRPC :50051)       │  │
-│  │    (metrics :9100)     │  │
-│  └───────────────────────┘  │
-│  ┌───────────────────────┐  │
-│  │    Logic Server        │  │
-│  │    (gRPC :50052)       │  │
-│  └───────────────────────┘  │
-└─────────────────────────────┘
-```
-
-### 11.2 集群部署
-
-```
-                    ┌─────────────┐
-                    │   etcd      │
-                    │   集群      │
-                    └──────┬──────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-┌───────▼──────┐  ┌───────▼──────┐  ┌───────▼──────┐
-│  Gateway-1   │  │  Gateway-2   │  │  Gateway-3   │
-│  (TCP:48080) │  │  (TCP:48080) │  │  (TCP:48080) │
-└───────┬──────┘  └───────┬──────┘  └───────┬──────┘
-        │                  │                  │
-        └──────────────────┼──────────────────┘
-                           │ gRPC
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-┌───────▼──────┐  ┌───────▼──────┐  ┌───────▼──────┐
-│  Logic-1     │  │  Logic-2     │  │  Logic-3     │
-│  (gRPC:50052)│  │  (gRPC:50052)│  │  (gRPC:50052)│
-└──────────────┘  └──────────────┘  └──────────────┘
-```
-
-### 11.3 扩容策略
-
-| 维度 | 策略 | 说明 |
-|------|------|------|
-| Gateway 水平扩展 | 增加节点 | 客户端通过负载均衡连接 |
-| Logic 水平扩展 | 增加节点 | Gateway 通过 etcd 发现 |
-| 连接数扩展 | 增加 Gateway 节数 | 每个节点处理部分连接 |
-| 吞吐扩展 | 增加 Logic 节数 | 业务处理能力线性提升 |
-
-## 12. 配置管理
-
-### 12.1 配置加载
-
-```go
-func LoadConfig(configFiles ...string) (*Config, error) {
-    // 1. 加载默认配置
-    cfg := loadDefaultConfig()
-    
-    // 2. 从 yaml 文件覆盖
-    if file != nil {
-        yaml.NewDecoder(file).Decode(cfg)
-    }
-    
-    return cfg, nil
-}
-```
-
-**合并语义**：
-- yaml 中显式出现的字段，覆盖默认值
-- yaml 中未出现的字段，保留默认值
-- 支持环境变量覆盖
-
-### 12.2 核心配置项
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `transports[].port` | 8080 | TCP 监听端口 |
-| `grpc.port` | 50051 | gRPC 服务端口 |
-| `grpc.windowSize` | 16MB | gRPC 窗口大小 |
-| `stream.shardCount` | 0 | 流分片数（0=不分片） |
-| `protection.cpuThreshold` | 90% | CPU 过载阈值 |
-
-## 13. 错误处理
-
-### 13.1 错误码定义
-
-```go
-// Gateway 级错误
-var (
-    ErrInvalidFrame    = errors.New("invalid frame")
-    ErrFrameTooLarge   = errors.New("frame too large")
-    ErrNotConnected    = errors.New("not connected to logic")
-    ErrSessionNotFound = errors.New("session not found")
-    ErrGroupNotFound   = errors.New("group not found")
-)
-
-// Protocol 级错误
-var (
-    ErrUnauthorized  = errors.New("unauthorized")
-    ErrRateLimited   = errors.New("rate limited")
-    ErrCircuitOpen   = errors.New("circuit breaker open")
-)
-```
-
-### 13.2 错误恢复
-
-| 场景 | 处理策略 |
-|------|----------|
-| Logic 连接断开 | 自动重连，通知客户端 |
-| 客户端断开 | 清理 Session，通知 Logic |
-| 消息发送失败 | 丢弃消息，记录日志 |
-| 内存溢出 | 触发过载保护，拒绝新连接 |
-
-## 14. 监控指标
-
-### 14.1 核心指标
-
-| 指标 | 类型 | 说明 |
-|------|------|------|
-| `connections_total` | Counter | 总连接数 |
-| `connections_active` | Gauge | 活跃连接数 |
-| `messages_received` | Counter | 收到消息数 |
-| `messages_forwarded` | Counter | 转发消息数 |
-| `messages_pushed` | Counter | 推送消息数 |
-
-### 14.2 性能指标
-
-| 指标 | 类型 | 说明 |
-|------|------|------|
-| `forward_qps` | Gauge | 转发 QPS |
-| `push_qps` | Gauge | 推送 QPS |
-| `latency_p50` | Histogram | 50 分位延迟 |
-| `latency_p99` | Histogram | 99 分位延迟 |
-
-## 15. 测试策略
-
-### 15.1 单元测试
-
-- `ExtractMessageFrame` 帧解析测试
-- `EncodeMessageFrame` 帧编码测试
-- `SessionManager` 会话管理测试
-- `GroupManager` 组管理测试
-
-### 15.2 集成测试
-
-- 完整登录流程测试
-- 心跳保活测试
-- 组广播测试
-- 全服广播测试
-
-### 15.3 性能测试
-
-- 双向 QPS 压测
-- 推送 QPS 压测
-- 高并发连接测试
-- 长时间稳定性测试
-
-## 16. 未来规划
-
-### 16.1 短期优化
-
-- [ ] 批量转发优化（RouteBatch）
-- [ ] 写合并优化（Writev）
-- [ ] gRPC 流分片
-- [ ] 连接池优化
-
-### 16.2 中期规划
-
-- [ ] WebSocket 支持完善
-- [ ] UDP 支持
-- [ ] 消息压缩
-- [ ] 消息加密
-
-### 16.3 长期规划
-
-- [ ] 多租户支持
-- [ ] 跨区域部署
-- [ ] AI 流量分析
-- [ ] 自适应限流
+前两项通过，UDP 搜索没有结果。`go test -tags legacy ./...` 当前要求更新模块，legacy 不在本文档的已验证范围内。
+
+## 已知缺口
+
+- malformed WebSocket frame、fragmentation 与 Upgrade 半包的单元测试仍不完整。
+- 默认 gnet 版本不支持 TLS listener，因此当前只能部署 TCP 和明文 WebSocket；需要 WSS 时必须升级或替换网络层。
+- `ProtectionConfig` 中仍保留部分 legacy 导向的 WebSocket 心跳字段，默认 codec 不使用这些字段。
+- logic stream 重连不会恢复断线期间已经丢弃的消息；需要业务幂等或持久化队列保证语义。
+- Group/session 遍历已复制 session 列表后再执行下行写入，不再持有 manager 读锁；大规模 fan-out 仍应先 profiling。

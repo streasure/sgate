@@ -4,48 +4,61 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/panjf2000/gnet/v2"
+	"github.com/streasure/sgate/internal/codec"
 )
 
 // SessionState tracks the authentication state of a connection.
 type SessionState int32
 
 const (
-	StateConnected  SessionState = 0 // TCP connected, not yet LoginGate
-	StateBound      SessionState = 1 // LoginGate accepted, bound to logic server
+	StateConnected     SessionState = 0 // TCP connected, not yet LoginGate
+	StateBound         SessionState = 1 // LoginGate accepted, bound to logic server
 	StateAuthenticated SessionState = 2 // Logic returned user_key
 )
 
 // Session represents a single client connection.
 type Session struct {
-	conn      gnet.Conn
-	id        string
-	ip        string
-	state     SessionState
-	serverID  string // bound logic server
-	userID    string // client user ID
-	userKey   string // logic-assigned user key
-	groups    map[string]bool
-	mu        sync.RWMutex
+	conn       gnet.Conn
+	id         string
+	ip         string
+	state      SessionState
+	serverID   string // bound logic server
+	userID     string // client user ID
+	userKey    string // logic-assigned user key
+	groups     map[string]bool
+	codec      codec.Codec
+	mu         sync.RWMutex
+	lastActive atomic.Int64
 }
 
 func NewSession(c gnet.Conn, ip string) *Session {
-	return &Session{
+	s := &Session{
 		conn:   c,
 		id:     generateSessionID(),
 		ip:     ip,
 		state:  StateConnected,
 		groups: make(map[string]bool),
 	}
+	s.Touch()
+	return s
 }
 
-func (s *Session) ID() string      { return s.id }
-func (s *Session) Conn() gnet.Conn { return s.conn }
-func (s *Session) IP() string      { return s.ip }
+func (s *Session) ID() string             { return s.id }
+func (s *Session) Conn() gnet.Conn        { return s.conn }
+func (s *Session) IP() string             { return s.ip }
+func (s *Session) Codec() codec.Codec     { return s.codec }
+func (s *Session) SetCodec(c codec.Codec) { s.codec = c }
+func (s *Session) Touch()                 { s.lastActive.Store(time.Now().UnixNano()) }
+func (s *Session) IdleFor(now time.Time) time.Duration {
+	return now.Sub(time.Unix(0, s.lastActive.Load()))
+}
 func (s *Session) ServerID() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.serverID }
-func (s *Session) UserID() string  { s.mu.RLock(); defer s.mu.RUnlock(); return s.userID }
-func (s *Session) UserKey() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.userKey }
+func (s *Session) UserID() string   { s.mu.RLock(); defer s.mu.RUnlock(); return s.userID }
+func (s *Session) UserKey() string  { s.mu.RLock(); defer s.mu.RUnlock(); return s.userKey }
 
 func (s *Session) IsBound() bool {
 	s.mu.RLock()
@@ -94,8 +107,8 @@ func (s *Session) InGroup(groupID string) bool {
 
 // SessionManager manages all active sessions.
 type SessionManager struct {
-	sessions map[string]*Session      // sessionID -> Session
-	byConn   map[gnet.Conn]*Session   // conn -> Session
+	sessions map[string]*Session    // sessionID -> Session
+	byConn   map[gnet.Conn]*Session // conn -> Session
 	mu       sync.RWMutex
 }
 
@@ -142,8 +155,12 @@ func (m *SessionManager) Count() int {
 
 func (m *SessionManager) Range(fn func(*Session) bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	sessions := make([]*Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	m.mu.RUnlock()
+	for _, s := range sessions {
 		if !fn(s) {
 			break
 		}

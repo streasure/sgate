@@ -3,6 +3,7 @@ package codec
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 
 	"github.com/panjf2000/gnet/v2"
 )
@@ -13,40 +14,44 @@ const (
 
 // TCPCodec implements Length-Value binary protocol decoding.
 // Wire format: [4-byte length][payload]
-type TCPCodec struct{}
+type TCPCodec struct{ maxMessageSize int }
 
 func NewTCPCodec() *TCPCodec {
-	return &TCPCodec{}
+	return NewTCPCodecWithLimit(4 * 1024 * 1024)
+}
+
+func NewTCPCodecWithLimit(maxSize int) *TCPCodec {
+	if maxSize <= 0 {
+		maxSize = 4 * 1024 * 1024
+	}
+	return &TCPCodec{maxMessageSize: maxSize}
 }
 
 // Decode reads a single Length-Value frame from the connection.
 func (c *TCPCodec) Decode(ctx context.Context, conn gnet.Conn) ([][]byte, error) {
-	if conn.InboundBuffered() < TCPHeaderLen {
-		return nil, nil
+	var messages [][]byte
+	for conn.InboundBuffered() >= TCPHeaderLen {
+		lenData, err := conn.Peek(TCPHeaderLen)
+		if err != nil {
+			return nil, err
+		}
+		dataLen := binary.BigEndian.Uint32(lenData)
+		if dataLen == 0 || uint64(dataLen) > uint64(c.maxMessageSize) {
+			return nil, fmt.Errorf("TCP message size %d is outside 1..%d", dataLen, c.maxMessageSize)
+		}
+		msgLen := int(TCPHeaderLen + dataLen)
+		if conn.InboundBuffered() < msgLen {
+			break
+		}
+		dataWithLen, err := conn.Next(msgLen)
+		if err != nil {
+			return nil, err
+		}
+		data := make([]byte, dataLen)
+		copy(data, dataWithLen[TCPHeaderLen:])
+		messages = append(messages, data)
 	}
-
-	lenData, err := conn.Peek(TCPHeaderLen)
-	if err != nil {
-		return nil, err
-	}
-
-	dataLen := binary.BigEndian.Uint32(lenData)
-	msgLen := int(TCPHeaderLen + dataLen)
-
-	if conn.InboundBuffered() < msgLen {
-		return nil, nil
-	}
-
-	dataWithLen, err := conn.Next(msgLen)
-	if err != nil {
-		return nil, err
-	}
-
-	// Copy to avoid gnet buffer reuse
-	data := make([]byte, dataLen)
-	copy(data, dataWithLen[TCPHeaderLen:])
-
-	return [][]byte{data}, nil
+	return messages, nil
 }
 
 // Encode wraps raw bytes with a 4-byte length prefix.

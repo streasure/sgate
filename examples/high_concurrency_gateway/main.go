@@ -2,7 +2,7 @@
 //
 // Architecture:
 //
-//	Client (TCP/UDP/WS) ──→ sgate(:48080) ──gRPC──→ Logic Server(:50052)
+//	Client (TCP/WS) ──────→ sgate(:48080) ──gRPC──→ Logic Server(:50052)
 //	                       sgate(:48080) ←─gRPC──── Logic Server(:50052)
 //
 // Run:

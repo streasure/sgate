@@ -37,11 +37,12 @@ func (c *TransportComponent) StartTransports() {
 		return
 	}
 	for _, transport := range c.transports {
-		addr := fmt.Sprintf("%s://:%d", transport.Protocol, transport.Port)
 		port := fmt.Sprintf("%d", transport.Port)
 		transportType := transport.Type
 		c.gw.SetTransportType(port, transportType)
 
+		// TCP and WebSocket share gnet's stream transport.
+		addr := fmt.Sprintf("%s://:%d", transport.Protocol, transport.Port)
 		go func(addr, transportType string) {
 			options := []gnet.Option{
 				gnet.WithMulticore(true),
