@@ -7,21 +7,27 @@ sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/W
 ```
 客户端 (TCP/UDP/WS)
     │
-    │  MessageFrame{cmd, seq_id, body=StreamData}
+    │  [4字节长度][MessageFrame{cmd, seq_id, body=StreamData}]
     ▼
 ┌─────────────────────────────────────────────────┐
 │                  sgate Gateway                   │
 │                                                  │
-│  OnTraffic ──► decodeClientMessage ──► filter ──►│──► gRPC StreamData ──► Logic Server
-│  OnTraffic ◄── marshalClientMessage ◄── push  ◄──│◄── gRPC StreamData ◄── Logic Server
+│  OnTraffic ──► ExtractMessageFrame ──► Forward ──►│──► gRPC StreamData ──► Logic Server
+│  OnTraffic ◄── EncodeMessageFrame ◄── push    ◄──│◄── gRPC StreamData ◄── Logic Server
 │                                                  │
-│  ConnectionManager: session映射/组管理/广播       │
-│  OverloadProtector: CPU/内存过载保护             │
-│  Security: IP黑名单/限流/熔断/WAF/JWT            │
+│  SessionManager: session映射/状态机               │
+│  GroupManager: 组管理/组广播/全服广播             │
 └─────────────────────────────────────────────────┘
          │
-    etcd (配置中心 / 服务发现 / 租约保活)
+    Logic Server (gRPC 双向流)
 ```
+
+### 简化架构 vs 企业级架构
+
+当前代码库包含两套架构：
+
+- **简化架构**（当前活跃代码）：核心转发逻辑，代码精简，适合快速迭代和性能调优
+- **企业级架构**（`//go:build legacy` 标签）：包含安全防护、过载保护、过滤器链、可观测性等完整企业特性
 
 ## 协议设计
 
@@ -81,12 +87,12 @@ message StreamData {
 
 ## 核心特性
 
-- **高性能**: 基于 gnet v2 事件驱动网络框架，写合并（write coalescing）+ 批量刷新
+- **高性能**: 基于 gnet v2 事件驱动网络框架，零拷贝帧解析
 - **多协议**: TCP、UDP、WebSocket
-- **服务发现**: etcd 租约注册与 watch 发现，支持 serverType/serverId/zone 隔离
+- **服务发现**: etcd 租约注册与 watch 发现
 - **集群部署**: 多节点水平扩展，Leader 选举与自动容灾
-- **安全防护**: IP 白名单/黑名单、多维限流、熔断器、WAF、TLS、消息完整性校验
-- **监控**: `/stats` JSON + `/metrics` Prometheus + `/health` `/ready` `/live` K8s 探针
+- **安全防护**: IP 白名单/黑名单、多维限流、熔断器、WAF、TLS（企业级架构）
+- **监控**: `/stats` JSON + `/metrics` Prometheus + `/health` K8s 探针（企业级架构）
 - **推送模式**: 个人推送、组推送、全服广播
 
 ## 指令号定义
@@ -144,8 +150,11 @@ google.golang.org/protobuf v1.33.0
 ```bash
 $env:CGO_ENABLED=0
 
-# Gateway
+# Gateway (简化架构)
 go build -o gw.exe ./cmd/gateway/
+
+# Gateway (企业级架构，含安全/监控/过滤器链)
+go build -tags legacy -o gw_legacy.exe ./cmd/gateway/
 
 # Logic Server
 go build -o logic.exe ./examples/logic_server/
@@ -179,9 +188,20 @@ go build -o push_bench.exe ./examples/push_bench/
 
 ## 压测结果
 
+### 简化架构（当前活跃代码）
+
 **环境**: Intel Core i5-10400F (6 核 12 线程, 2.90GHz), Windows, Go 1.22.5
 
-### 双向压测（100 连接, 10s, batchSize=16）
+| 测试 | 连接数 | QPS |
+|------|--------|-----|
+| 双向 Heartbeat | 500 | **~350K** |
+| Personal Push | 500 | **~365K** |
+
+### 企业级架构（legacy 构建）
+
+**环境**: Intel Core i5-10400F (6 核 12 线程, 2.90GHz), Windows, Go 1.22.5
+
+#### 双向压测（100 连接, 10s, batchSize=16）
 
 | 指标 | 数值 |
 |------|------|
@@ -191,7 +211,7 @@ go build -o push_bench.exe ./examples/push_bench/
 | 推送丢弃 | **0** |
 | 结果 | **BIDIRECTIONAL SUCCESS** |
 
-### 推送压测（100 连接, 10s, batchSize=16）
+#### 推送压测（100 连接, 10s, batchSize=16）
 
 | 模式 | 发送 QPS | 接收 QPS | 有效吞吐 | 说明 |
 |------|----------|----------|----------|------|
@@ -199,73 +219,84 @@ go build -o push_bench.exe ./examples/push_bench/
 | Group push (100人) | 280K | 198K | **19.8M/sec** | 每次请求推整个组 |
 | Broadcast (100人) | 386K | 366K | **36.6M/sec** | 每次请求推所有客户端 |
 
+### 性能对比分析
+
+| 对比维度 | 简化架构 | 企业级架构 |
+|----------|----------|------------|
+| 正向 QPS | ~350K (500连接) | 2.25M (100连接) |
+| 推送 QPS | ~365K (500连接) | 2.17M (100连接) |
+| 批量转发 | 无 | RouteBatch 多帧合并 |
+| 写合并 | AsyncWrite | Writev 多缓冲区合并 |
+| gRPC 流 | 单流 per logic | 多分片 StreamManager |
+| 代码复杂度 | 低（~1000行核心） | 高（含安全/监控/过滤器链） |
+
+**结论**: 简化架构牺牲了批量转发和写合并等优化，换取代码可维护性。适合中小规模场景（百万连接以下），大规模场景建议使用企业级架构。
+
 ## 实现原理
 
 ### 1. 网络层：gnet 事件驱动
 
-Gateway 使用 gnet v2 作为网络框架，所有 TCP 连接运行在单个事件循环中：
+Gateway 使用 gnet v2 作为网络框架，所有 TCP 连接运行在事件循环中：
 
 ```
 OnTraffic(conn, inBuf)
-  ├── 解析 [4字节长度][MessageFrame] 帧
+  ├── 循环解析 [4字节长度][MessageFrame] 帧
   ├── 首帧拦截: LoginGateReq 选服并绑定 session
-  ├── 批量收集: 多帧打包为 RouteBatch
-  ├── 认证守卫: 未认证连接拒绝转发
-  ├── 过滤器链: IP黑名单 → 限流 → WAF → 熔断 → 完整性校验
-  └── 转发: logicClient.SendMessage(batchMsg)
+  ├── 认证守卫: 未绑定连接拒绝转发
+  └── 转发: SendToLogic(sess, cmd, body)
 ```
 
 **关键优化**：
-- 写合并（write coalescing）：多条推送消息合并为单次系统调用
 - 零拷贝帧解析：`ExtractMessageFrame` 使用 protowire 直接扫描字节，不反序列化整个 MessageFrame
-- 批量转发：多条客户端消息打包为单个 `RouteBatch`，减少 gRPC 调用次数
+- AsyncWrite 异步写入：gnet 事件循环内批量处理，减少系统调用次数
+- 写缓冲区调优：Socket 缓冲区 4MB，读写缓冲区 256KB
 
 ### 2. 协议层：MessageFrame + StreamData
 
 ```
 客户端发送 (wire bytes):
   [00 00 00 1B] [MessageFrame{cmd=1000001, seq_id=1, body=LoginReq{...}}]
-   ↑ 4字节长度     ↑ protobuf 序列化
+   ↑ 4字节大端长度     ↑ protobuf 序列化
 
 Gateway 解码:
   ExtractMessageFrame(data) → (cmd=1000001, seqID=1, body=LoginReq_bytes)
-  → StreamData{Route: RouteForCmd(cmd), Cmd: cmd, SeqId: seqID, Data: body}
+  → StreamData{SessionId, UserKey, Cmd: cmd, SeqId: seqID, Data: body}
 
 Gateway 转发 (gRPC stream):
-  StreamData{
+  stream.Send(&StreamData{
     SessionId: "conn_abc123",
     UserKey:   "uuid_12345",      // 登录后填充
     Cmd:       1000001,
-    SeqId:     1,
     Data:      LoginReq_bytes,
     ClientIp:  "192.168.1.100",
-  }
+  })
 
 Logic 处理:
   按 cmd 查找 cmdRoutes → 调用注册的 handler → 返回 StreamData
 
 Gateway 编码回包:
-  marshalClientMessage(response) → [4字节长度][MessageFrame{cmd, seq_id, body}]
+  SendFrameToConn(conn, cmd, seqID, body)
+  → EncodeMessageFrame → [4字节长度][MessageFrame{cmd, seq_id, body}]
 ```
 
 ### 3. 登录流程
 
 ```
-客户端                    Gateway                     Logic(logic-1)
+客户端                    Gateway                     Logic
   │                         │                           │
   │── MessageFrame ────────►│                           │
   │   {cmd=1000001,         │── 绑定 session→logic-1    │
   │    LoginGateReq}        │                           │
   │◄── LoginGateAck ───────│                            │
+  │   {sessionId, serverId} │                           │
   │                         │                           │
   │── MessageFrame ────────►│                           │
-  │   {cmd=1100001,         │── 固定 StreamData ───────►│
+  │   {cmd=1100001,         │── StreamData ─────────────►│
   │    LoginReq}            │                           │── 注册 user→session 映射
   │                         │                           │── 返回 LoginAck
   │                         │◄── StreamData ────────────│
   │◄── MessageFrame ───────│  {UserKey:"uuid_xxx"}     │
-  │   {cmd=1000002,         │                           │
-  │    LoginAck}            │                           │
+  │   {cmd=1100002}         │                           │
 ```
 
 ### 4. 心跳流程
@@ -274,93 +305,101 @@ Gateway 编码回包:
 客户端                    Gateway                     Logic
   │                         │                           │
   │── MessageFrame ────────►│                           │
-  │   {cmd=1100010,         │── 绑定的 StreamData ──────►│
+  │   {cmd=1100010,         │── StreamData ─────────────►│
   │    HeartbeatReq}        │                           │── 返回 HeartbeatAck
-  │◄── MessageFrame ───────│  {cmd=1000011}             │
-  │   {cmd=respCmd, body=   │   Timestamp:...}          │
-  │    StreamData{           │                           │
-  │      Route:"pong"}}     │                           │
+  │◄── MessageFrame ───────│                           │
+  │   {cmd=1100011}         │◄── StreamData ────────────│
 ```
 
 ### 5. 推送模式
 
-#### 个人推送（Burst Route）
+#### 个人推送
 ```
-Logic 调用 push 回调:
-  push(&StreamData{Route:"notify", Payload:{...}})
-  → flushLoop 序列化 → stream.Send()
-  → Gateway 收到 → 按 SessionId 查找连接 → Writev 合并写入
+Logic 调用 SendToClient:
+  Stream.Send(&StreamData{SessionId: "xxx", Cmd: cmd, Data: data})
+  → Gateway receiveLoop 收到 → SendToClient(sessionID, cmd, data)
+  → 按 sessionID 查找连接 → EncodeMessageFrame → AsyncWrite
 ```
 
 #### 组推送
 ```
-Logic 调用 SendToGroup:
-  PushToServer(&StreamData{Route:"server.send_to_group", Payload:{groupID:"xxx"}})
-  → Gateway ConnectionManager.SendToGroup()
-  → 遍历组内所有连接 → 逐条 Writev
+Logic 调用 Broadcast (带 group_id):
+  Gateway.SendToGroup(groupID, cmd, data)
+  → GroupManager.RangeSessions(groupID, fn)
+  → 遍历组内所有连接 → 逐条 SendFrameToConn
 ```
 
 #### 全服广播
 ```
-Logic 调用 Broadcast:
-  PushToServer(&StreamData{Route:"server.broadcast"})
-  → Gateway ConnectionManager.Broadcast()
-  → 遍历所有活跃连接 → 逐条 Writev
+Logic 调用 BroadcastAll:
+  Gateway.Broadcast(cmd, data)
+  → SessionManager.Range(fn)
+  → 遍历所有活跃连接 → 逐条 SendFrameToConn
 ```
 
-### 6. 性能优化
+### 6. Session 状态机
 
-| 优化项 | 实现 |
-|--------|------|
-| **批量转发** | 多帧合并为 RouteBatch，单次 gRPC 发送 |
-| **写合并** | gnet Writev 多缓冲区单次系统调用 |
-| **零拷贝解析** | ExtractMessageFrame 直接扫描 protowire 字节 |
-| **连接池复用** | StreamManager 多分片 gRPC 流，消除锁竞争 |
-| **序列化优化** | appendMessageFast 手写 protowire 编码，跳过反射 |
-| **对象池** | sync.Pool 复用 StreamData、FrameBuf、序列化缓冲区 |
-| **内存池** | FrameBuf 按需分配，避免固定大缓冲区浪费 |
+```
+StateConnected (TCP 已连接)
+    │
+    │  LoginGateReq + LoginGateAck
+    ▼
+StateBound (已绑定 logic server)
+    │
+    │  Logic 返回 UserKey
+    ▼
+StateAuthenticated (已认证)
+```
 
 ## 项目结构
 
 ```
 sgate/
 ├── cmd/gateway/              # Gateway 主入口
+│   ├── main.go               # CLI 入口、配置加载、信号处理
+│   ├── gc_tune.go            # GC 调优
+│   └── priority_*.go         # 进程优先级设置
+│
+├── internal/                 # 核心实现
+│   ├── gateway.go            # Gateway 核心 + gnet EventHandler + 帧编解码
+│   ├── session.go            # Session/SessionManager (FSM: Connected→Bound→Authenticated)
+│   ├── grpc_server.go        # GRPCServer: GatewayStream + Gateway 双 service 实现
+│   ├── groups.go             # GroupManager: 隐式组生命周期管理
+│   ├── transport_component.go# gnet 传输层组件
+│   ├── config/               # 配置解析 (config.go, defaults.go)
+│   ├── security/             # 安全组件 (IP/限流/熔断/WAF/JWT)
+│   ├── traffic/              # 流量组件 (灰度/镜像/降级/WASM)
+│   ├── cluster/              # 集群组件 (etcd/告警/负载均衡)
+│   ├── obs/                  # 可观测性 (pprof/prometheus/tracing)
+│   └── codec/                # 协议编解码
+│
+├── gateway/                  # 公共路由定义 + 协议辅助函数
+│   └── routes.go             # 路由常量、ExtractMessageFrame、类型别名
+│
+├── logic/                    # Logic Server SDK (legacy)
+│   ├── server.go             # 推送/组管理/广播
+│   ├── handler.go            # RouteHandler/Dispatcher
+│   └── service.go            # gRPC 服务 + etcd 注册
+│
+├── types/                    # 公共类型 (FilterContext, FilterChain)
+├── api/codes/                # 错误码定义
+│
 ├── examples/
 │   ├── bench/                # 双向压测客户端
-│   ├── push_bench/           # 推送压测（personal/group/broadcast）
-│   ├── logic_server/         # 逻辑服示例（完整路由注册）
-│   └── integration/          # 完整接入示例
-├── internal/
-│   ├── frontend.go           # TCP/WS 流量处理、帧解析、认证、过滤、转发
-│   ├── backend.go            # LogicClient、StreamManager、gRPC 流管理
-│   ├── session.go            # 连接 FSM、组管理、广播、推送
-│   ├── frame.go              # MessageFrame 编解码
-│   ├── filter.go             # 过滤器链
-│   ├── integrity.go          # 消息完整性校验
-│   ├── negotiation.go        # 版本协商
-│   ├── overload.go           # 过载保护
-│   ├── stats.go              # 统计数据
-│   ├── config/               # 配置解析
-│   ├── obs/                  # 可观测性（pprof/prometheus/tracing）
-│   ├── security/             # 安全组件（IP/限流/熔断/WAF/JWT）
-│   ├── traffic/              # 流量组件（灰度/镜像/降级）
-│   └── cluster/              # 集群组件（etcd/告警）
-├── logic/                    # Logic Server SDK
-│   ├── server.go             # 推送/组管理/广播
-│   ├── handler.go            # RouteHandler/BurstRouteHandler/Dispatcher
-│   └── service.go            # gRPC 服务 + etcd 注册
-├── gateway/                  # sgate 路由与帧解析逻辑
-├── types/                    # FilterContext 等公共类型
-└── config/                   # 配置文件 & Grafana/Prometheus
-
-protocol/                     # 协议定义（独立仓库）
-├── gateway/
-│   ├── gateway.proto         # MessageFrame + LoginGate + StreamData + GatewayStream
-│   ├── gateway.pb.go
-│   └── gateway_grpc.pb.go
-├── commonstruct/             # 公共 protobuf 类型
-├── enums/                    # CMD 枚举号 + PushType/CompressionType
-└── logic/                    # 业务协议（LoginReq/Ack, Heartbeat, Push 等）
+│   ├── push_bench/           # 推送压测 (personal/group/broadcast)
+│   ├── logic_server/         # 逻辑服示例 (完整路由注册)
+│   └── integration/          # 集成测试示例
+│
+├── config/                   # 配置文件
+│   ├── config.yaml           # 主配置
+│   ├── prometheus.yml        # Prometheus 抓取配置
+│   └── grafana-dashboard.json# Grafana 仪表盘
+│
+├── go.mod                    # Go 模块定义
+├── go.sum                    # 依赖校验
+├── .golangci.yml             # Linter 配置
+├── README.md                 # 项目文档
+└── DESIGN.md                 # 设计文档
 ```
 
 ## 配置
