@@ -1,3 +1,5 @@
+//go:build legacy
+
 package gateway
 
 import "github.com/streasure/sgate/internal/config"

@@ -13,11 +13,13 @@ type Config struct {
 	Port         int                 `yaml:"port"`
 	LogLevel     string              `yaml:"logLevel"`
 	ServerID     string              `yaml:"serverId"`
+	ServerType   string              `yaml:"serverType"`
 	Zone         string              `yaml:"zone"`
 	Discovery    DiscoveryConfig     `yaml:"discovery"`
 	Transports   []Transport         `yaml:"transports"`
 	GRPC         GRPCConfig          `yaml:"grpc"`
 	LogicServers []LogicServerConfig `yaml:"logicServers"`
+	Etcd         EtcdConfig          `yaml:"etcd"`
 	Stream       StreamConfig        `yaml:"stream"`
 	Protection   ProtectionConfig    `yaml:"protection"`
 	Security     SecurityConfig      `yaml:"security"`
@@ -97,20 +99,28 @@ type OTelTracerConfig struct {
 	Workers     int    `yaml:"workers"`
 }
 
-// ConfigCenterConfig 配置中心配置（兼容 Nacos/Apollo/etcd-v3-gateway/Consul）
+// ConfigCenterConfig is retained for HTTP-based dynamic configuration.
 type ConfigCenterConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	Type           string `yaml:"type"`           // nacos | apollo | etcd | consul | http
-	Endpoint       string `yaml:"endpoint"`       // Nacos 控制台地址（用于登录认证/配置拉取）
-	NamingEndpoint string `yaml:"namingEndpoint"` // Nacos 主端口地址（用于服务注册/发现）；为空则回退到 Endpoint
-	Namespace      string `yaml:"namespace"`      // 命名空间
-	DataID         string `yaml:"dataID"`         // 配置 ID
-	Group          string `yaml:"group"`          // 分组
-	Token          string `yaml:"token"`          // 认证 token（直接使用，不登录）
-	Username       string `yaml:"username"`       // Nacos 3.x 用户名（用于登录获取 token）
-	Password       string `yaml:"password"`       // Nacos 3.x 密码
-	PollInterval   string `yaml:"pollInterval"`
-	APIVersion     string `yaml:"apiVersion"` // Nacos API 版本: "v3"（默认，Nacos 3.x）或 "v1"（Nacos 2.x）
+	Enabled      bool   `yaml:"enabled"`
+	Type         string `yaml:"type"`
+	Endpoint     string `yaml:"endpoint"`
+	DataID       string `yaml:"dataID"`
+	Group        string `yaml:"group"`
+	Token        string `yaml:"token"`
+	Username     string `yaml:"username"`
+	Password     string `yaml:"password"`
+	PollInterval string `yaml:"pollInterval"`
+}
+
+type EtcdConfig struct {
+	Enabled       bool     `yaml:"enabled"`
+	Endpoints     []string `yaml:"endpoints"`
+	Endpoint      string   `yaml:"endpoint"`
+	Username      string   `yaml:"username"`
+	Password      string   `yaml:"password"`
+	DialTimeout   string   `yaml:"dialTimeout"`
+	ServicePrefix string   `yaml:"servicePrefix"`
+	LeaseTTL      string   `yaml:"leaseTTL"`
 }
 
 // AlertWebhookConfig 告警 webhook 配置
@@ -197,7 +207,6 @@ type TLSConfig struct {
 }
 
 // ClusterConfig 集群配置
-// 基于 Nacos 临时实例实现节点注册与 Leader 选举（同 zone 内按 ip:port 排序，排名第一者为 Leader）
 type ClusterConfig struct {
 	Enabled        bool   `yaml:"enabled"`
 	NodeID         string `yaml:"nodeID"`
@@ -226,14 +235,18 @@ type GRPCConfig struct {
 // Discovery may add dynamic instances, but a login gate request is accepted
 // only for a known, connected server ID in the gateway's zone.
 type LogicServerConfig struct {
-	ServerID string `yaml:"serverId"`
-	Zone     string `yaml:"zone"`
-	Address  string `yaml:"address"`
+	ServerID   string `yaml:"serverId"`
+	ServerType string `yaml:"serverType"`
+	Zone       string `yaml:"zone"`
+	Address    string `yaml:"address"`
 }
 
 func (c *Config) LogicServer(serverID string) (LogicServerConfig, bool) {
 	for _, server := range c.LogicServers {
-		if server.ServerID == serverID && (server.Zone == "" || server.Zone == c.Zone) {
+		if server.ServerType == "" {
+			server.ServerType = "Logic"
+		}
+		if server.ServerType == "Logic" && server.ServerID == serverID && (server.Zone == "" || server.Zone == c.Zone) {
 			return server, true
 		}
 	}
@@ -311,9 +324,10 @@ func loadDefaultConfig() *Config {
 	}
 
 	return &Config{
-		Port:     port,
-		LogLevel: logLevel,
-		ServerID: getEnvString("GATEWAY_SERVER_ID", "gateway-1"),
+		Port:       port,
+		LogLevel:   logLevel,
+		ServerID:   getEnvString("GATEWAY_SERVER_ID", "gateway-1"),
+		ServerType: "Gateway",
 		Discovery: DiscoveryConfig{
 			Enabled:           true,
 			ServiceName:       "logic",
@@ -405,7 +419,6 @@ func loadDefaultConfig() *Config {
 		ConfigCenter: ConfigCenterConfig{
 			Enabled:      false,
 			PollInterval: DefaultConfigCenterPollInterval,
-			APIVersion:   DefaultConfigCenterAPIVersion,
 		},
 		Alert: AlertWebhookConfig{
 			Enabled:   false,

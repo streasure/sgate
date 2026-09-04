@@ -1,4 +1,4 @@
-// Package main benchmarks all push patterns with optimized batching.
+// Package main benchmarks push patterns with optimized batching.
 //
 // Usage:
 //
@@ -6,9 +6,9 @@
 //
 // Modes:
 //
-//	personal  - each client sends batched "push_me", receives push back
-//	group     - N clients join group, batched "group_msg", all receive
-//	broadcast - each client sends batched "broadcast_msg", all receive
+//	personal  - each client sends batched ChatMsg, receives push back
+//	group     - N clients send ChatMsg with group target_id, logic handles routing
+//	broadcast - each client sends batched ChatMsg, all receive
 package main
 
 import (
@@ -23,8 +23,16 @@ import (
 	"time"
 
 	protoLogic "github.com/streasure/protocol/logic"
-	"github.com/streasure/sgate/gateway"
+	protoGw "github.com/streasure/protocol/gateway"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	cmdChatMsg      int32 = 1100008
+	cmdPushNotify   int32 = 1100006
+	cmdLoginGate    int32 = 1000001
+	cmdLoginGateAck int32 = 1000002
+	cmdLogicLogin   int32 = 1100001
 )
 
 var (
@@ -36,15 +44,8 @@ var drainBufPool = sync.Pool{
 	New: func() interface{} { return make([]byte, 4*1024*1024) },
 }
 
-func buildSingleFrame(route string, payload map[string]string) []byte {
-	body := &gateway.StreamData{
-		Route:   route,
-		Payload: payload,
-	}
-	data, _ := proto.Marshal(&gateway.MessageFrame{
-		Cmd:  gateway.CmdForRoute(route),
-		Body: mustMarshal(body),
-	})
+func buildSingleFrame(cmd int32, body proto.Message) []byte {
+	data, _ := proto.Marshal(&protoGw.MessageFrame{Cmd: cmd, Body: mustMarshal(body)})
 	frame := make([]byte, 4+len(data))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
 	copy(frame[4:], data)
@@ -56,8 +57,8 @@ func mustMarshal(msg proto.Message) []byte {
 	return data
 }
 
-func buildBatchFrame(route string, payload map[string]string, batchSize int) []byte {
-	single := buildSingleFrame(route, payload)
+func buildBatchFrame(cmd int32, body proto.Message, batchSize int) []byte {
+	single := buildSingleFrame(cmd, body)
 	batch := make([]byte, len(single)*batchSize)
 	for i := 0; i < batchSize; i++ {
 		copy(batch[i*len(single):], single)
@@ -78,18 +79,16 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	tcpConn.SetWriteBuffer(8 * 1024 * 1024)
 	defer conn.Close()
 
-	// Login gate binds the session to logic-1 before business login.
 	buf := make([]byte, 65536)
 	userID := fmt.Sprintf("u_%d_%d_%d", mode[0], clientID, rand.Int63())
-	gateBody, _ := proto.Marshal(&protoLogic.LoginGateReq{ServerId: "logic-1", UserId: userID, Zone: "default"})
-	conn.Write(buildRawFrame(gateway.RouteLoginGate, gateway.CmdLoginGate, gateBody))
+	gateBody, _ := proto.Marshal(&protoGw.LoginGateReq{ServerId: "logic-1", UserId: userID})
+	conn.Write(buildRawFrame(cmdLoginGate, gateBody))
 	if !readOneFrame(conn, buf) {
 		return
 	}
 
-	// Login is the first business message; logic owns its validation.
 	loginBody, _ := proto.Marshal(&protoLogic.LoginReq{UserId: userID})
-	loginFrame := buildRawFrame(gateway.RouteLogin, gateway.CmdLogicLoginReq, loginBody)
+	loginFrame := buildRawFrame(cmdLogicLogin, loginBody)
 	conn.Write(loginFrame)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	totalRead := 0
@@ -110,31 +109,18 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 	}
 	conn.SetReadDeadline(time.Time{})
 
-	// Mode-specific setup
-	switch mode {
-	case "group":
-		joinFrame := buildSingleFrame("join_group", map[string]string{"groupID": "bench_group"})
-		conn.Write(joinFrame)
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		conn.Read(buf)
-		conn.SetReadDeadline(time.Time{})
-		// PushToServer is async — wait for gateway to process server.join_group
-		time.Sleep(300 * time.Millisecond)
-	}
-
 	var sendFrame []byte
 	switch mode {
 	case "group":
-		sendFrame = buildBatchFrame("group_msg", map[string]string{"groupID": "bench_group", "message": "hello"}, batchSize)
+		sendFrame = buildBatchFrame(cmdChatMsg, &protoLogic.ChatMsg{Content: "hello", TargetId: "bench_group"}, batchSize)
 	case "broadcast":
-		sendFrame = buildBatchFrame("broadcast_msg", map[string]string{"message": "hello all"}, batchSize)
+		sendFrame = buildBatchFrame(cmdChatMsg, &protoLogic.ChatMsg{Content: "hello all"}, batchSize)
 	default:
-		sendFrame = buildBatchFrame("push_me", map[string]string{}, batchSize)
+		sendFrame = buildBatchFrame(cmdPushNotify, &protoLogic.PushNotify{Content: "hello"}, batchSize)
 	}
 
 	var inflight int64
 
-	// Receiver goroutine
 	recvDone := make(chan struct{})
 	go func() {
 		defer close(recvDone)
@@ -175,7 +161,6 @@ func runPushConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInfli
 		}
 	}()
 
-	// Sender loop
 	for {
 		select {
 		case <-stopCh:
@@ -220,9 +205,8 @@ func readOneFrame(conn net.Conn, buf []byte) bool {
 	return true
 }
 
-func buildRawFrame(route string, cmd int32, body []byte) []byte {
-	inner, _ := proto.Marshal(&gateway.StreamData{Route: route, Cmd: cmd, Data: body})
-	data, _ := proto.Marshal(&gateway.MessageFrame{Cmd: cmd, Body: inner})
+func buildRawFrame(cmd int32, body []byte) []byte {
+	data, _ := proto.Marshal(&protoGw.MessageFrame{Cmd: cmd, Body: body})
 	frame := make([]byte, 4+len(data))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
 	copy(frame[4:], data)

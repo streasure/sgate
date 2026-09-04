@@ -9,8 +9,46 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+// DispatchMeta contains sgate-only routing metadata. It is never serialized
+// into protocol/gateway.StreamData; business data travels in StreamData.data.
+type DispatchMeta struct {
+	Route     string
+	Fields    map[string]string
+	Timestamp int64
+}
+
+// StreamData is sgate's internal dispatch model. Route and Fields are local
+// routing metadata and are never serialized into protocol.StreamData.
+type StreamData struct {
+	SessionId string
+	UserKey   string
+	Cmd       int32
+	SeqId     int64
+	Data      []byte
+	ClientIp  string
+	Route     string
+	Fields    map[string]string
+	Timestamp int64
+}
+
+func FromStreamData(m *protocol.StreamData) *StreamData {
+	if m == nil {
+		return nil
+	}
+	return &StreamData{SessionId: m.SessionId, UserKey: m.UserKey, Cmd: m.Cmd, SeqId: m.SeqId, Data: m.Data, ClientIp: m.ClientIp}
+}
+
+func (m *StreamData) ToStreamData() *protocol.StreamData {
+	if m == nil {
+		return nil
+	}
+	return &protocol.StreamData{SessionId: m.SessionId, UserKey: m.UserKey, Cmd: m.Cmd, SeqId: m.SeqId, Data: m.Data, ClientIp: m.ClientIp}
+}
+
 type MessageFrame = protocol.MessageFrame
-type StreamData = protocol.StreamData
+type LoginGateReq = protocol.LoginGateReq
+type LoginGateAck = protocol.LoginGateAck
+type ProtocolStreamData = protocol.StreamData
 type GatewayStreamClient = protocol.GatewayStreamClient
 type GatewayStream_OnDataClient = protocol.GatewayStream_OnDataClient
 type GatewayStreamServer = protocol.GatewayStreamServer
@@ -26,13 +64,13 @@ func RegisterGatewayStreamServer(s grpc.ServiceRegistrar, srv GatewayStreamServe
 const (
 	CmdLogin         int32 = 2
 	CmdError         int32 = 3
-	CmdLoginGate     int32 = 2000001
-	CmdLoginGateAck  int32 = 2000002
-	CmdUserOffline   int32 = 1000012
-	CmdLogicLoginReq int32 = 1000001
-	CmdLogicLoginAck int32 = 1000002
-	CmdHeartbeatReq  int32 = 1000010
-	CmdHeartbeatAck  int32 = 1000011
+	CmdLoginGate     int32 = 1000001
+	CmdLoginGateAck  int32 = 1000002
+	CmdLogicLoginReq int32 = 1100001
+	CmdLogicLoginAck int32 = 1100002
+	CmdHeartbeatReq  int32 = 1100010
+	CmdHeartbeatAck  int32 = 1100011
+	CmdUserOffline   int32 = 1100012
 )
 
 const (

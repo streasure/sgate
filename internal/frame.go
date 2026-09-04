@@ -1,3 +1,5 @@
+//go:build legacy
+
 package gateway
 
 import (
@@ -9,22 +11,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// decodeClientMessage accepts the public MessageFrame protocol. Clients wrap a
-// serialized backend.StreamData as the MessageFrame body; the gateway extracts
-// it to obtain Route, Payload and other fields for routing/handling.
+// decodeClientMessage accepts the public MessageFrame protocol. The body is
+// the business protobuf payload; StreamData is only the backend envelope.
 func decodeClientMessage(data []byte) (*protoGw.StreamData, bool) {
 	cmd, seqID, body, ok := routes.ExtractMessageFrame(data)
 	if !ok {
 		return nil, false
 	}
-	inner := new(protoGw.StreamData)
-	if err := proto.Unmarshal(body, inner); err == nil && inner.Route != "" {
-		inner.Cmd = cmd
-		inner.SeqId = seqID
-		return inner, true
-	}
 	return &protoGw.StreamData{
-		Route: routes.RouteForCmd(cmd),
 		Cmd:   cmd,
 		SeqId: seqID,
 		Data:  append([]byte(nil), body...),
@@ -45,26 +39,14 @@ func marshalClientMessage(msg *protoGw.StreamData) ([]byte, error) {
 			return nil, err
 		}
 	}
-	cmd := msg.Cmd
-	if cmd == 0 {
-		cmd = routes.CmdForRoute(msg.Route)
-	}
-	return proto.Marshal(&protoGw.MessageFrame{Cmd: cmd, SeqId: msg.SeqId, Body: body})
+	return proto.Marshal(&protoGw.MessageFrame{Cmd: msg.Cmd, SeqId: msg.SeqId, Body: body})
 }
 
 // marshalClientBytes converts an internal Message payload to the public frame
 // format. Raw non-Message payloads are left unchanged for transport helpers
 // that already provide a complete frame.
 func marshalClientBytes(data []byte) []byte {
-	msg := new(protoGw.StreamData)
-	if err := proto.Unmarshal(data, msg); err != nil || msg.Route == "" {
-		return data
-	}
-	framed, err := marshalClientMessage(msg)
-	if err != nil {
-		return data
-	}
-	return framed
+	return data
 }
 
 func marshalClientError(errMsg *commonstruct.ErrorResponse) []byte {

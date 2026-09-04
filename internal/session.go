@@ -1,1217 +1,157 @@
 package gateway
 
 import (
-	"encoding/binary"
-	"fmt"
-	"strings"
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/protocol/commonstruct"
-	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/gateway"
-	"github.com/streasure/util/tlog"
-	"google.golang.org/protobuf/proto"
 )
 
-// Connection 连接结构体
-// 功能: 封装连接的所有信息，替代map[string]interface{}
-// 优化: 为支持百万级并发，减少内存占用
-//   id: 连接唯一标识
-//   UserUUID: 用户UUID
-//   Conn: 底层网络连接
-//   RemoteAddr: 远程地址
-//   CreatedAt: 创建时间戳
-//   LastActive: 最后活跃时间
-//   Status: 连接状态 (0=active, 1=closing, 2=closed)
-
-// SessionState represents the FSM state of a connection.
+// SessionState tracks the authentication state of a connection.
 type SessionState int32
 
 const (
-	StateAuth    SessionState = iota // awaiting logic authentication
-	StateForward                     // authenticated, forwarding traffic
-	StateClosed                      // closed, no more I/O
+	StateConnected  SessionState = 0 // TCP connected, not yet LoginGate
+	StateBound      SessionState = 1 // LoginGate accepted, bound to logic server
+	StateAuthenticated SessionState = 2 // Logic returned user_key
 )
 
-type Connection struct {
-	id         string
-	UserUUID   string
-	ServerID   string
-	Conn       gnet.Conn
-	CreatedAt  int64
-	LastActive int64
-	// activitySeq 用于在高吞吐连接上降低时间戳更新频率。
-	// LastActive 仅用于空闲连接回收，不需要每条消息都刷新。
-	activitySeq atomic.Uint32
-	Groups      map[string]struct{}
-	IsWS        bool
-	mu          sync.Mutex
-	// FSM state (CAS only)
-	state int32 // atomic: SessionState
+// Session represents a single client connection.
+type Session struct {
+	conn      gnet.Conn
+	id        string
+	ip        string
+	state     SessionState
+	serverID  string // bound logic server
+	userID    string // client user ID
+	userKey   string // logic-assigned user key
+	groups    map[string]bool
+	mu        sync.RWMutex
 }
 
-func (c *Connection) ID() string {
-	return c.id
-}
-
-// IsAuthenticated reports whether logic has assigned a stable user key.
-func (c *Connection) IsAuthenticated() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.UserUUID != "" && !strings.HasPrefix(c.UserUUID, "temp_")
-}
-
-func (c *Connection) IsBound() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.ServerID != ""
-}
-
-// SetUserUUID thread-safe setter for UserUUID
-func (c *Connection) SetUserUUID(uuid string) {
-	c.mu.Lock()
-	c.UserUUID = uuid
-	c.mu.Unlock()
-}
-
-// GetUserUUID thread-safe getter for UserUUID
-func (c *Connection) GetUserUUID() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.UserUUID
-}
-
-// SetServerID thread-safe setter for ServerID
-func (c *Connection) SetServerID(sid string) {
-	c.mu.Lock()
-	c.ServerID = sid
-	c.mu.Unlock()
-}
-
-// GetServerID thread-safe getter for ServerID
-func (c *Connection) GetServerID() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.ServerID
-}
-
-// SetWS 标记连接为 WebSocket（线程安全）
-func (c *Connection) SetWS(v bool) {
-	c.mu.Lock()
-	c.IsWS = v
-	c.mu.Unlock()
-}
-
-// IsWebSocket 返回是否为 WebSocket 连接（线程安全）
-func (c *Connection) IsWebSocket() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.IsWS
-}
-
-// --- FSM methods ---
-
-// GetState returns the current session state (lock-free).
-func (c *Connection) GetState() SessionState {
-	return SessionState(atomic.LoadInt32(&c.state))
-}
-
-// SetState atomically transitions the session state.
-// Returns true if the transition was successful.
-func (c *Connection) SetState(from, to SessionState) bool {
-	return atomic.CompareAndSwapInt32(&c.state, int32(from), int32(to))
-}
-
-// CloseState transitions to StateClosed exactly once (CAS).
-// Returns true if this goroutine performed the close.
-func (c *Connection) CloseState() bool {
-	return atomic.CompareAndSwapInt32(&c.state, int32(StateAuth), int32(StateClosed)) ||
-		atomic.CompareAndSwapInt32(&c.state, int32(StateForward), int32(StateClosed))
-}
-
-// IsClosed returns true if the session is in the Closed state.
-func (c *Connection) IsClosed() bool {
-	return c.GetState() == StateClosed
-}
-
-// noopAsyncCallback 空回调，用于 AsyncWrite/AsyncWritev
-// 注意: gnet 的 Write/Writev 不是并发安全的，只能用于 event-loop 内
-// 从 goroutine（如 receiveMessages）调用必须使用 AsyncWrite/AsyncWritev
-func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
-
-func (c *Connection) Send(data []byte) error {
-	if c.Conn == nil {
-		return fmt.Errorf("connection is nil")
-	}
-	c.touch()
-	if c.IsWS {
-		return c.sendWSFrame(data)
-	}
-	// AsyncWritev 异步发送，buf 所有权转移给 event-loop，必须为独立分配
-	// data 来自 proto.Marshal 是独立分配；header 需独立分配（不能用栈数组）
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
-	return c.Conn.AsyncWritev([][]byte{header, data}, noopAsyncCallback)
-}
-
-// SendMulti 在单次 AsyncWrite 中发送多条已组帧的消息，大幅减少 event-loop 入队次数和内存分配。
-// combined 必须包含 [4字节长度][payload] 重复格式，且必须是独立分配（所有权转移给 event-loop）。
-func (c *Connection) SendMulti(combined []byte) error {
-	if c.Conn == nil {
-		return fmt.Errorf("connection is nil")
-	}
-	c.touch()
-	if c.IsWS {
-		// WebSocket 不支持批量，逐帧发送
-		// 注：此路径在 burst 压测中不会触发（客户端为 TCP 连接）
-		return c.Conn.AsyncWrite(combined, noopAsyncCallback)
-	}
-	return c.Conn.AsyncWrite(combined, noopAsyncCallback)
-}
-
-// SendMultiWithCallback 与 SendMulti 相同，但在 gnet 写完成后调用 cb。
-// 用于 writeCoalescer 在 AsyncWrite 完成后归还池化 buffer，减少 GC 压力。
-// cb 在 gnet event-loop goroutine 中被调用，不可执行耗时操作。
-func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
-	if c.Conn == nil {
-		return fmt.Errorf("connection is nil")
-	}
-	c.touch()
-	if c.IsWS {
-		return c.Conn.AsyncWrite(combined, noopAsyncCallback)
-	}
-	return c.Conn.AsyncWrite(combined, func(_ gnet.Conn, _ error) error {
-		if cb != nil {
-			cb()
-		}
-		return nil
-	})
-}
-
-// touch 以固定频率更新活跃时间。反向千万级 QPS 场景下，同一连接在一个毫秒内
-// 可能发送成千上万条消息；空闲回收只关心毫秒级精度，无需每条消息调用 time.Now。
-func (c *Connection) touch() {
-	seq := c.activitySeq.Add(1)
-	if seq&63 != 0 && atomic.LoadInt64(&c.LastActive) != 0 {
-		return
-	}
-	atomic.StoreInt64(&c.LastActive, time.Now().UnixMilli())
-}
-
-func (c *Connection) sendWSFrame(data []byte) error {
-	payloadLen := len(data)
-	var frame []byte
-	if payloadLen < 126 {
-		frame = make([]byte, 0, 2+payloadLen)
-		frame = append(frame, 0x82, byte(payloadLen))
-	} else if payloadLen <= 65535 {
-		frame = make([]byte, 0, 4+payloadLen)
-		frame = append(frame, 0x82, 126)
-		frame = append(frame, byte(payloadLen>>8), byte(payloadLen))
-	} else {
-		frame = make([]byte, 0, 10+payloadLen)
-		frame = append(frame, 0x82, 127)
-		for i := 7; i >= 0; i-- {
-			frame = append(frame, byte(uint64(payloadLen)>>(uint(i)*8)))
-		}
-	}
-	frame = append(frame, data...)
-	// frame 是独立分配，可直接用于 AsyncWrite
-	return c.Conn.AsyncWrite(frame, noopAsyncCallback)
-}
-
-func (c *Connection) Close() error {
-	return c.Conn.Close()
-}
-
-// ConnectionManager 连接管理器
-// 功能: 管理所有网络连接，包括添加、移除、获取连接，以及广播消息
-// 字段:
-//   connections: 本地连接映射，使用 sync.Map 实现，key为连接ID，value为Connection结构体
-//   userConnections: 用户连接映射，使用 sync.Map 实现，key为用户UUID，value为连接ID（单一登录模式）
-//   groups: 推送组映射，使用 sync.Map 实现，key为组ID，value为用户UUID集合
-//   count: 连接数量，使用原子操作进行更新，确保并发安全
-//   connectionStats: 连接统计信息，使用原子操作进行更新
-
-type serverUserKey struct {
-	serverID string
-	userUUID string
-}
-
-type GroupInfo struct {
-	Name    string
-	Members map[serverUserKey]struct{}
-}
-
-type ConnectionManager struct {
-	connections           sync.Map
-	userConnections       sync.Map
-	serverUserConnections sync.Map
-	serverConnections     sync.Map
-	groups                sync.Map
-	groupMutex            sync.RWMutex
-	count                 int32
-	stopCh                chan struct{}
-	totalConnections      atomic.Int64
-	activeConnections     atomic.Int64
-	closedConnections     atomic.Int64
-	connectionTimeouts    atomic.Int64
-	totalConnectionTime   atomic.Int64
-	totalMessages         atomic.Int64
-	failedMessages        atomic.Int64
-}
-
-// connectionPool 连接对象池
-// 功能: 复用Connection结构体，减少内存分配
-var connectionPool = sync.Pool{
-	New: func() interface{} {
-		return &Connection{}
-	},
-}
-
-// getConnection 从对象池获取Connection
-// 参数:
-//
-//	connectionID: 连接ID
-//	conn: 底层网络连接
-//	userUUID: 用户UUID
-//	remoteAddr: 远程地址
-//	localAddr: 本地地址
-//	status: 连接状态
-//
-// 返回值:
-//
-//	*Connection: Connection结构体
-func getConnection(connectionID string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
-	c := connectionPool.Get().(*Connection)
-	c.id = connectionID
-	c.UserUUID = userUUID
-	c.Conn = conn
-	c.CreatedAt = time.Now().UnixMilli()
-	atomic.StoreInt64(&c.LastActive, time.Now().UnixMilli())
-	c.activitySeq.Store(0)
-	return c
-}
-
-// putConnection 归还Connection到对象池
-func putConnection(c *Connection) {
-	c.id = ""
-	c.UserUUID = ""
-	c.Conn = nil
-	c.CreatedAt = 0
-	atomic.StoreInt64(&c.LastActive, 0)
-	c.activitySeq.Store(0)
-	c.Groups = nil
-	c.ServerID = ""
-	c.IsWS = false
-	connectionPool.Put(c)
-}
-
-// NewConnectionManager 创建连接管理器实例
-// 返回值:
-//
-//	*ConnectionManager: 连接管理器实例
-func NewConnectionManager() *ConnectionManager {
-	return &ConnectionManager{}
-}
-
-// AddConnection 添加连接
-// 功能: 将新的网络连接添加到连接管理器中，并生成唯一的连接ID
-// 单一登录模式: 如果用户已有连接，会踢掉旧连接
-// 参数:
-//
-//	conn: 网络连接
-//	userUUID: 用户UUID
-//
-// 返回值:
-//
-//	string: 连接ID
-func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) string {
-	connectionID := generateConnectionID()
-
-	remoteAddr := ""
-	if conn != nil && conn.RemoteAddr() != nil {
-		remoteAddr = conn.RemoteAddr().String()
-	}
-	connection := getConnection(connectionID, conn, userUUID, remoteAddr)
-
-	// 存储连接信息到本地
-	cm.connections.Store(connectionID, connection)
-	atomic.AddInt32(&cm.count, 1)
-
-	cm.totalConnections.Add(1)
-	cm.activeConnections.Add(1)
-
-	// 单一登录模式: 如果用户已有连接，踢掉旧连接
-	if userUUID != "" {
-		if oldConnectionID, ok := cm.userConnections.Load(userUUID); ok {
-			// 用户已有连接，踢掉旧连接
-			oldConnID := oldConnectionID.(string)
-			if oldConnID != connectionID {
-				tlog.Info("用户已有连接，踢掉旧连接", "userUUID", userUUID, "oldConnectionID", oldConnID, "newConnectionID", connectionID)
-				cm.kickConnection(oldConnID, "new_login", "您的账号在其他地方登录")
-			}
-		}
-		// 更新用户连接映射为新连接
-		cm.userConnections.Store(userUUID, connectionID)
-	}
-
-	// 输出调试日志
-	tlog.Debug("连接已添加", "connectionID", connectionID, "userUUID", userUUID, "count", int(atomic.LoadInt32(&cm.count)))
-
-	return connectionID
-}
-
-// kickConnection 踢掉指定连接
-// 功能: 向指定连接发送下线通知并断开连接
-// 参数:
-//
-//	connectionID: 要踢掉的连接ID
-//	reason: 踢人原因
-//	message: 踢人消息
-func (cm *ConnectionManager) kickConnection(connectionID string, reason string, message string) {
-	conn := cm.GetConnection(connectionID)
-	if conn == nil {
-		return
-	}
-	if conn.Conn == nil {
-		cm.RemoveConnection(connectionID)
-		return
-	}
-
-	// 发送下线通知
-	kickMessage := &protoGw.StreamData{
-		Route: gateway.RouteServerKick,
-		Payload: map[string]string{
-			"reason":  reason,
-			"message": message,
-		},
-	}
-
-	// 序列化消息
-	responseData, err := proto.Marshal(kickMessage)
-	if err != nil {
-		tlog.Error("序列化踢人消息失败", "error", err)
-	} else {
-		conn.Send(responseData)
-	}
-
-	// 关闭连接
-	if conn.Conn != nil {
-		conn.Conn.Close()
-	}
-
-	// 从连接管理器中移除
-	cm.RemoveConnection(connectionID)
-
-	tlog.Info("连接已被踢掉", "connectionID", connectionID, "reason", reason)
-}
-
-// RemoveConnection 移除连接
-// 功能: 从连接管理器中移除指定的连接，并更新连接计数
-// 参数:
-//
-//	connectionID: 连接ID
-func (cm *ConnectionManager) RemoveConnection(connectionID string) {
-	conn, exists := cm.connections.LoadAndDelete(connectionID)
-	if exists {
-		atomic.AddInt32(&cm.count, -1)
-
-		connection := conn.(*Connection)
-		userUUID := connection.GetUserUUID()
-		serverID := connection.GetServerID()
-
-		if connection.Groups != nil {
-			cm.groupMutex.Lock()
-			key := serverUserKey{serverID: serverID, userUUID: userUUID}
-			for groupID := range connection.Groups {
-				if groupInfo, ok := cm.groups.Load(groupID); ok {
-					info := groupInfo.(*GroupInfo)
-					delete(info.Members, key)
-					if len(info.Members) == 0 {
-						cm.groups.Delete(groupID)
-					}
-				}
-			}
-			cm.groupMutex.Unlock()
-		}
-
-		connectionTime := time.Now().UnixMilli() - connection.CreatedAt
-
-		cm.activeConnections.Add(-1)
-		cm.closedConnections.Add(1)
-		cm.totalConnectionTime.Add(connectionTime)
-
-		cm.removeFromServerIndex(serverID, userUUID)
-
-		putConnection(connection)
-
-		// 从用户连接映射中移除该连接ID（单一登录模式）
-		if userUUID != "" {
-			if currentConnID, ok := cm.userConnections.Load(userUUID); ok {
-				// 只有当当前存储的连接ID等于要移除的连接ID时才删除
-				if currentConnID.(string) == connectionID {
-					cm.userConnections.Delete(userUUID)
-				}
-			}
-		}
-	}
-
-	// 输出调试日志
-	if exists {
-		tlog.Debug("连接已移除", "connectionID", connectionID, "count", int(atomic.LoadInt32(&cm.count)))
+func NewSession(c gnet.Conn, ip string) *Session {
+	return &Session{
+		conn:   c,
+		id:     generateSessionID(),
+		ip:     ip,
+		state:  StateConnected,
+		groups: make(map[string]bool),
 	}
 }
 
-// GetConnection 获取连接
-// 功能: 根据连接ID获取对应的Connection结构体
-// 参数:
-//
-//	connectionID: 连接ID
-//
-// 返回值:
-//
-//	*Connection: Connection结构体，如果连接不存在则返回nil
-func (cm *ConnectionManager) GetConnection(connectionID string) *Connection {
-	if conn, ok := cm.connections.Load(connectionID); ok {
-		return conn.(*Connection)
-	}
-	return nil
+func (s *Session) ID() string      { return s.id }
+func (s *Session) Conn() gnet.Conn { return s.conn }
+func (s *Session) IP() string      { return s.ip }
+func (s *Session) ServerID() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.serverID }
+func (s *Session) UserID() string  { s.mu.RLock(); defer s.mu.RUnlock(); return s.userID }
+func (s *Session) UserKey() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.userKey }
+
+func (s *Session) IsBound() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state >= StateBound
 }
 
-func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string) {
-	if conn, ok := cm.connections.Load(connectionID); ok {
-		c := conn.(*Connection)
-		oldServerID := c.GetServerID()
-		userUUID := c.GetUserUUID()
+func (s *Session) IsAuthenticated() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state >= StateAuthenticated
+}
 
-		if oldServerID != "" && userUUID != "" {
-			cm.RemoveUserFromGroup("server:"+oldServerID, oldServerID, userUUID)
-		}
+func (s *Session) Bind(serverID, userID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.serverID = serverID
+	s.userID = userID
+	s.state = StateBound
+}
 
-		cm.removeFromServerIndex(oldServerID, userUUID)
+func (s *Session) Authenticate(userKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userKey = userKey
+	s.state = StateAuthenticated
+}
 
-		c.SetServerID(serverID)
+func (s *Session) AddGroup(groupID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.groups[groupID] = true
+}
 
-		cm.addToServerIndex(c)
+func (s *Session) RemoveGroup(groupID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.groups, groupID)
+}
 
-		if serverID != "" && userUUID != "" {
-			cm.AddUserToGroup("server:"+serverID, serverID, userUUID)
-			tlog.Info("connection auto-joined server group", "connectionID", connectionID, "serverID", serverID)
+func (s *Session) InGroup(groupID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.groups[groupID]
+}
+
+// SessionManager manages all active sessions.
+type SessionManager struct {
+	sessions map[string]*Session      // sessionID -> Session
+	byConn   map[gnet.Conn]*Session   // conn -> Session
+	mu       sync.RWMutex
+}
+
+func NewSessionManager() *SessionManager {
+	return &SessionManager{
+		sessions: make(map[string]*Session),
+		byConn:   make(map[gnet.Conn]*Session),
+	}
+}
+
+func (m *SessionManager) Add(s *Session) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions[s.id] = s
+	m.byConn[s.conn] = s
+}
+
+func (m *SessionManager) Remove(c gnet.Conn) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.byConn[c]; ok {
+		delete(m.sessions, s.id)
+		delete(m.byConn, c)
+	}
+}
+
+func (m *SessionManager) GetByID(id string) *Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessions[id]
+}
+
+func (m *SessionManager) GetByConn(c gnet.Conn) *Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.byConn[c]
+}
+
+func (m *SessionManager) Count() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
+}
+
+func (m *SessionManager) Range(fn func(*Session) bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, s := range m.sessions {
+		if !fn(s) {
+			break
 		}
 	}
 }
 
-// GetConnectionByUserUUID 根据用户UUID获取连接
-// 功能: 根据用户UUID获取对应的Connection结构体（单一登录模式）
-// 参数:
-//
-//	userUUID: 用户UUID
-//
-// 返回值:
-//
-//	*Connection: Connection结构体，如果连接不存在则返回nil
-func (cm *ConnectionManager) GetConnectionByUserUUID(userUUID string) *Connection {
-	if connectionID, ok := cm.userConnections.Load(userUUID); ok {
-		return cm.GetConnection(connectionID.(string))
-	}
-	return nil
-}
-
-// UpdateConnectionUserUUID 更新连接的用户UUID
-// 功能: 更新指定连接的用户UUID（单一登录模式：如果新用户已有连接，会踢掉旧连接）
-// 参数:
-//
-//	connectionID: 连接ID
-//	newUserUUID: 新的用户UUID
-func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID string, newUserUUID string) {
-	conn := cm.GetConnection(connectionID)
-	if conn == nil {
-		tlog.Warn("连接不存在", "connectionID", connectionID)
-		return
-	}
-
-	oldUserUUID := conn.GetUserUUID()
-
-	if oldUserUUID == newUserUUID {
-		return
-	}
-
-	serverID := conn.GetServerID()
-
-	cm.removeFromServerIndex(serverID, oldUserUUID)
-
-	if oldUserUUID != "" {
-		if currentConnID, ok := cm.userConnections.Load(oldUserUUID); ok {
-			if currentConnID.(string) == connectionID {
-				cm.userConnections.Delete(oldUserUUID)
-			}
-		}
-	}
-
-	// 单一登录模式: 如果新用户已有连接，踢掉旧连接
-	if newUserUUID != "" {
-		if oldConnectionID, ok := cm.userConnections.Load(newUserUUID); ok {
-			oldConnID := oldConnectionID.(string)
-			if oldConnID != connectionID {
-				tlog.Info("用户已有连接，踢掉旧连接", "userUUID", newUserUUID, "oldConnectionID", oldConnID, "newConnectionID", connectionID)
-				cm.kickConnection(oldConnID, "user_changed", "您的账号已切换到其他设备")
-			}
-		}
-		// 更新用户连接映射
-		cm.userConnections.Store(newUserUUID, connectionID)
-	}
-
-	// 更新Connection的UserUUID
-	conn.SetUserUUID(newUserUUID)
-
-	cm.addToServerIndex(conn)
-
-	tlog.Debug("连接用户UUID已更新", "connectionID", connectionID, "oldUserUUID", oldUserUUID, "newUserUUID", newUserUUID)
-}
-
-func (cm *ConnectionManager) addToServerIndex(conn *Connection) {
-	serverID := conn.GetServerID()
-	userUUID := conn.GetUserUUID()
-	if serverID == "" || userUUID == "" {
-		return
-	}
-
-	key := serverUserKey{serverID: serverID, userUUID: userUUID}
-	cm.serverUserConnections.Store(key, conn)
-
-	for {
-		val, loaded := cm.serverConnections.LoadOrStore(serverID, &sync.Map{})
-		userMap := val.(*sync.Map)
-		userMap.Store(userUUID, conn)
-		if loaded {
-			return
-		}
-		return
-	}
-}
-
-func (cm *ConnectionManager) removeFromServerIndex(serverID, userUUID string) {
-	if serverID == "" || userUUID == "" {
-		return
-	}
-
-	key := serverUserKey{serverID: serverID, userUUID: userUUID}
-	cm.serverUserConnections.Delete(key)
-
-	if val, ok := cm.serverConnections.Load(serverID); ok {
-		userMap := val.(*sync.Map)
-		userMap.Delete(userUUID)
-		empty := true
-		userMap.Range(func(_, _ interface{}) bool {
-			empty = false
-			return false
-		})
-		if empty {
-			cm.serverConnections.Delete(serverID)
-		}
-	}
-}
-
-func (cm *ConnectionManager) GetConnectionByServerUser(serverID, userUUID string) *Connection {
-	key := serverUserKey{serverID: serverID, userUUID: userUUID}
-	if conn, ok := cm.serverUserConnections.Load(key); ok {
-		return conn.(*Connection)
-	}
-	return nil
-}
-
-func (cm *ConnectionManager) GetConnectionsByServerID(serverID string) []*Connection {
-	val, ok := cm.serverConnections.Load(serverID)
-	if !ok {
-		return nil
-	}
-	userMap := val.(*sync.Map)
-	var conns []*Connection
-	userMap.Range(func(_, v interface{}) bool {
-		if c, ok := v.(*Connection); ok && c != nil {
-			conns = append(conns, c)
-		}
-		return true
-	})
-	return conns
-}
-
-func (cm *ConnectionManager) GetConnectionCountByServerID(serverID string) int {
-	val, ok := cm.serverConnections.Load(serverID)
-	if !ok {
-		return 0
-	}
-	count := 0
-	val.(*sync.Map).Range(func(_, _ interface{}) bool {
-		count++
-		return true
-	})
-	return count
-}
-
-// SendToConnection 发送消息到指定连接
-// 功能: 向指定的连接发送消息，并处理连接关闭的情况
-// 参数:
-//
-//	connectionID: 连接ID
-//	message: 消息内容
-//
-// 返回值:
-//
-//	bool: 是否发送成功
-func (cm *ConnectionManager) SendToConnection(connectionID string, message interface{}) bool {
-	conn := cm.GetConnection(connectionID)
-	if conn == nil {
-		cm.totalMessages.Add(1)
-		cm.failedMessages.Add(1)
-		return false
-	}
-
-	var responseData []byte
-	var err error
-
-	switch msg := message.(type) {
-	case []byte:
-		responseData = marshalClientBytes(msg)
-	case *protoGw.StreamData:
-		responseData, err = marshalClientMessage(msg)
-	case *commonstruct.ErrorResponse:
-		responseData = marshalClientError(msg)
-	case map[string]string:
-		protoMsg := &protoGw.StreamData{
-			Route:   "message",
-			Payload: msg,
-		}
-		responseData, err = marshalClientMessage(protoMsg)
-	default:
-		cm.totalMessages.Add(1)
-		cm.failedMessages.Add(1)
-		return false
-	}
-
-	if err != nil {
-		cm.totalMessages.Add(1)
-		cm.failedMessages.Add(1)
-		return false
-	}
-
-	if err := conn.Send(responseData); err != nil {
-		cm.RemoveConnection(connectionID)
-		cm.totalMessages.Add(1)
-		cm.failedMessages.Add(1)
-		return false
-	}
-
-	cm.totalMessages.Add(1)
-	atomic.StoreInt64(&conn.LastActive, time.Now().UnixMilli())
-
-	return true
-}
-
-// Broadcast 广播消息
-// 功能: 向所有连接广播消息，使用并发方式提高性能
-// 参数:
-//
-//	message: 消息内容
-func (cm *ConnectionManager) Broadcast(message interface{}) {
-	responseData, marshalErr := marshalPushMessage(message)
-	if marshalErr != nil {
-		tlog.Error("序列化广播消息失败", "error", marshalErr)
-		return
-	}
-
-	var sent int64
-	cm.connections.Range(func(_, value interface{}) bool {
-		if value.(*Connection).Send(responseData) == nil {
-			sent++
-		}
-		return true
-	})
-	cm.totalMessages.Add(sent)
-}
-
-func marshalPushMessage(message interface{}) ([]byte, error) {
-	switch msg := message.(type) {
-	case []byte:
-		return marshalClientBytes(msg), nil
-	case *protoGw.StreamData:
-		return marshalClientMessage(msg)
-	case *commonstruct.ErrorResponse:
-		return marshalClientError(msg), nil
-	case map[string]string:
-		return marshalClientMessage(&protoGw.StreamData{Route: "broadcast", Payload: msg})
-	case string:
-		return marshalClientMessage(&protoGw.StreamData{Route: "broadcast", Payload: map[string]string{"data": msg}})
-	default:
-		return nil, fmt.Errorf("unsupported push message type %T", message)
-	}
-}
-
-// BroadcastBytes 向所有连接广播已帧化的消息（含4字节长度前缀），
-// 避免每个连接重复分配 header 和调用 proto.Marshal。
-func (cm *ConnectionManager) BroadcastBytes(data []byte) {
-	framed := make([]byte, 4+len(data))
-	binary.BigEndian.PutUint32(framed[:4], uint32(len(data)))
-	copy(framed[4:], data)
-
-	var sent int64
-	cm.connections.Range(func(_, value interface{}) bool {
-		conn := value.(*Connection)
-		if conn.IsWS {
-			if conn.Send(data) == nil {
-				sent++
-			}
-		} else {
-			// 直接发送帧化数据，跳过 Send() 中的 header 分配
-			if conn.Conn != nil {
-				conn.touch()
-				if conn.Conn.AsyncWrite(framed, noopAsyncCallback) == nil {
-					sent++
-				}
-			}
-		}
-		return true
-	})
-	cm.totalMessages.Add(sent)
-}
-
-// SendToGroupBytes 向推送组所有成员发送已序列化的消息，避免每个成员重复 proto.Marshal。
-func (cm *ConnectionManager) SendToGroupBytes(groupID string, data []byte) bool {
-	cm.groupMutex.RLock()
-	groupInfo, ok := cm.groups.Load(groupID)
-	if !ok {
-		cm.groupMutex.RUnlock()
-		return false
-	}
-
-	keys := make([]serverUserKey, 0, len(groupInfo.(*GroupInfo).Members))
-	for key := range groupInfo.(*GroupInfo).Members {
-		keys = append(keys, key)
-	}
-	cm.groupMutex.RUnlock()
-
-	// 预帧化：所有 TCP 连接共享同一份 [4字节 len][payload]
-	framed := make([]byte, 4+len(data))
-	binary.BigEndian.PutUint32(framed[:4], uint32(len(data)))
-	copy(framed[4:], data)
-
-	success := false
-	for _, key := range keys {
-		conn := cm.GetConnectionByServerUser(key.serverID, key.userUUID)
-		if conn == nil {
-			continue
-		}
-		if conn.IsWS {
-			if conn.Send(data) == nil {
-				success = true
-			}
-		} else if conn.Conn != nil {
-			conn.touch()
-			if conn.Conn.AsyncWrite(framed, noopAsyncCallback) == nil {
-				success = true
-			}
-		}
-	}
-	return success
-}
-
-// GetConnectionCount 获取连接数
-// 功能: 获取当前连接管理器中的连接数量
-// 返回值:
-//
-//	int: 连接数
-func (cm *ConnectionManager) GetConnectionCount() int {
-	return int(atomic.LoadInt32(&cm.count))
-}
-
-// CloseAllConnections 关闭所有连接
-// 功能: 关闭所有连接并清空连接管理器
-func (cm *ConnectionManager) CloseAllConnections() {
-	cm.connections.Range(func(key, value interface{}) bool {
-		connectionID := key.(string)
-		conn := value.(*Connection)
-		if err := conn.Conn.Close(); err != nil {
-			tlog.Error("关闭连接失败", "connectionID", connectionID, "error", err)
-		}
-		putConnection(conn)
-		cm.connections.Delete(key)
-		return true
-	})
-
-	cm.serverUserConnections = sync.Map{}
-	cm.serverConnections = sync.Map{}
-	cm.groups = sync.Map{}
-	cm.userConnections = sync.Map{}
-
-	atomic.StoreInt32(&cm.count, 0)
-
-	tlog.Info("所有连接已关闭")
-}
-
-// generateConnectionID 生成连接ID
-// 功能: 生成唯一的连接ID，格式为时间戳-随机字符串
-// 返回值:
-//
-//	string: 连接ID
-var connIDCounter uint64
-
-func generateConnectionID() string {
-	n := atomic.AddUint64(&connIDCounter, 1)
-	return fmt.Sprintf("%d%06d", time.Now().UnixMilli(), n%1000000)
-}
-
-// CreateGroup 创建推送组
-// 功能: 创建一个新的推送组
-// 参数:
-//
-//	groupID: 组ID
-//	groupName: 组名称
-func (cm *ConnectionManager) CreateGroup(groupID string, groupName string) {
-	cm.groupMutex.Lock()
-	defer cm.groupMutex.Unlock()
-
-	if _, ok := cm.groups.Load(groupID); ok {
-		tlog.Warn("组已存在", "groupID", groupID)
-		return
-	}
-
-	cm.groups.Store(groupID, &GroupInfo{
-		Name:    groupName,
-		Members: make(map[serverUserKey]struct{}),
-	})
-	tlog.Debug("推送组已创建", "groupID", groupID, "groupName", groupName)
-}
-
-// DeleteGroup 删除推送组
-// 功能: 删除一个推送组
-// 参数:
-//
-//	groupID: 组ID
-func (cm *ConnectionManager) DeleteGroup(groupID string) {
-	cm.groupMutex.Lock()
-	defer cm.groupMutex.Unlock()
-
-	groupInfo, ok := cm.groups.Load(groupID)
-	if !ok {
-		tlog.Warn("组不存在", "groupID", groupID)
-		return
-	}
-
-	info := groupInfo.(*GroupInfo)
-	for key := range info.Members {
-		conn := cm.GetConnectionByServerUser(key.serverID, key.userUUID)
-		if conn != nil && conn.Groups != nil {
-			delete(conn.Groups, groupID)
-		}
-	}
-
-	cm.groups.Delete(groupID)
-	tlog.Debug("推送组已删除", "groupID", groupID)
-}
-
-// AddUserToGroup 添加用户到推送组
-// 功能: 将用户添加到指定的推送组
-// 参数:
-//
-//	groupID: 组ID
-//	userUUID: 用户UUID
-func (cm *ConnectionManager) AddUserToGroup(groupID string, serverID string, userUUID string) {
-	cm.groupMutex.Lock()
-	defer cm.groupMutex.Unlock()
-
-	key := serverUserKey{serverID: serverID, userUUID: userUUID}
-
-	if groupInfo, ok := cm.groups.Load(groupID); ok {
-		groupInfo.(*GroupInfo).Members[key] = struct{}{}
-	} else {
-		info := &GroupInfo{
-			Name:    groupID,
-			Members: make(map[serverUserKey]struct{}),
-		}
-		info.Members[key] = struct{}{}
-		cm.groups.Store(groupID, info)
-	}
-
-	conn := cm.GetConnectionByServerUser(serverID, userUUID)
-	if conn != nil {
-		if conn.Groups == nil {
-			conn.Groups = make(map[string]struct{})
-		}
-		conn.Groups[groupID] = struct{}{}
-	}
-	tlog.Debug("用户已添加到推送组", "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
-}
-
-// RemoveUserFromGroup 从推送组中移除用户
-// 功能: 将用户从指定的推送组中移除
-// 参数:
-//
-//	groupID: 组ID
-//	userUUID: 用户UUID
-func (cm *ConnectionManager) RemoveUserFromGroup(groupID string, serverID string, userUUID string) {
-	cm.groupMutex.Lock()
-	defer cm.groupMutex.Unlock()
-
-	key := serverUserKey{serverID: serverID, userUUID: userUUID}
-
-	if groupInfo, ok := cm.groups.Load(groupID); ok {
-		info := groupInfo.(*GroupInfo)
-		delete(info.Members, key)
-		if len(info.Members) == 0 {
-			cm.groups.Delete(groupID)
-		}
-	}
-
-	conn := cm.GetConnectionByServerUser(serverID, userUUID)
-	if conn != nil {
-		if conn.Groups != nil {
-			delete(conn.Groups, groupID)
-		}
-	}
-	tlog.Debug("用户已从推送组中移除", "groupID", groupID, "serverID", serverID, "userUUID", userUUID)
-}
-
-// SendToUser 发送消息到指定用户
-// 功能: 向指定用户的连接发送消息（单一登录模式）
-// 参数:
-//
-//	userUUID: 用户UUID
-//	message: 消息内容
-//
-// 返回值:
-//
-//	bool: 是否发送成功
-func (cm *ConnectionManager) SendToUser(userUUID string, message interface{}) bool {
-	// 获取用户的连接（单一登录模式）
-	connection := cm.GetConnectionByUserUUID(userUUID)
-	if connection == nil {
-		tlog.Warn("用户不存在或不在线", "userUUID", userUUID)
-		return false
-	}
-
-	// 发送消息
-	return cm.SendToConnection(connection.id, message)
-}
-
-// SendToGroup 发送消息到指定推送组
-// 功能: 向指定推送组的所有用户发送消息
-// 参数:
-//
-//	groupID: 组ID
-//	message: 消息内容
-//
-// 返回值:
-//
-//	bool: 是否发送成功
-func (cm *ConnectionManager) SendToGroup(groupID string, message interface{}) bool {
-	cm.groupMutex.RLock()
-	groupInfo, ok := cm.groups.Load(groupID)
-	if !ok {
-		cm.groupMutex.RUnlock()
-		tlog.Warn("组不存在", "groupID", groupID)
-		return false
-	}
-
-	keys := make([]serverUserKey, 0, len(groupInfo.(*GroupInfo).Members))
-	for key := range groupInfo.(*GroupInfo).Members {
-		keys = append(keys, key)
-	}
-	cm.groupMutex.RUnlock()
-
-	success := false
-	for _, key := range keys {
-		conn := cm.GetConnectionByServerUser(key.serverID, key.userUUID)
-		if conn != nil {
-			if cm.SendToConnection(conn.id, message) {
-				success = true
-			}
-		}
-	}
-
-	return success
-}
-
-// GetGroupUsers 获取推送组的所有用户
-// 功能: 获取指定推送组的所有用户UUID
-// 参数:
-//
-//	groupID: 组ID
-//
-// 返回值:
-//
-//	[]string: 用户UUID列表
-func (cm *ConnectionManager) GetGroupUsers(groupID string) []string {
-	cm.groupMutex.RLock()
-	defer cm.groupMutex.RUnlock()
-
-	groupInfo, ok := cm.groups.Load(groupID)
-	if !ok {
-		return []string{}
-	}
-
-	info := groupInfo.(*GroupInfo)
-	userUUIDs := make([]string, 0, len(info.Members))
-	for key := range info.Members {
-		userUUIDs = append(userUUIDs, key.userUUID)
-	}
-
-	return userUUIDs
-}
-
-func (cm *ConnectionManager) GetGroupName(groupID string) string {
-	cm.groupMutex.RLock()
-	defer cm.groupMutex.RUnlock()
-
-	if groupInfo, ok := cm.groups.Load(groupID); ok {
-		return groupInfo.(*GroupInfo).Name
-	}
-	return ""
-}
-
-func (cm *ConnectionManager) GetGroupMemberCount(groupID string) int {
-	cm.groupMutex.RLock()
-	defer cm.groupMutex.RUnlock()
-
-	if groupInfo, ok := cm.groups.Load(groupID); ok {
-		return len(groupInfo.(*GroupInfo).Members)
-	}
-	return 0
-}
-
-// UpdateUserConnection 更新连接的用户映射
-// 功能: 更新指定连接的用户UUID映射（单一登录模式）
-// 参数:
-//
-//	connectionID: 连接ID
-//	oldUserUUID: 旧用户UUID
-//	newUserUUID: 新用户UUID
-func (cm *ConnectionManager) UpdateUserConnection(connectionID string, oldUserUUID string, newUserUUID string) {
-	cm.UpdateConnectionUserUUID(connectionID, newUserUUID)
-}
-
-// StartConnectionChecker 启动连接检查器
-// 功能: 定期检查不活跃的连接并自动清理
-// 参数:
-//
-//	timeout: 连接超时时间
-//	interval: 检查间隔
-func (cm *ConnectionManager) StartConnectionChecker(timeout time.Duration, interval time.Duration) {
-	cm.stopCh = make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-cm.stopCh:
-				return
-			case <-ticker.C:
-				cm.checkInactiveConnections(timeout)
-			}
-		}
-	}()
-}
-
-func (cm *ConnectionManager) StopConnectionChecker() {
-	if cm.stopCh != nil {
-		select {
-		case <-cm.stopCh:
-		default:
-			close(cm.stopCh)
-		}
-	}
-}
-
-// checkInactiveConnections 检查不活跃的连接
-// 功能: 检查所有连接，清理超过超时时间的不活跃连接
-// 参数:
-//
-//	timeout: 连接超时时间
-func (cm *ConnectionManager) checkInactiveConnections(timeout time.Duration) {
-	now := time.Now().UnixMilli()
-	timeoutMs := int64(timeout / time.Millisecond)
-
-	// 收集需要清理的连接ID
-	var connectionsToRemove []string
-
-	cm.connections.Range(func(key, value interface{}) bool {
-		connectionID := key.(string)
-		conn := value.(*Connection)
-
-		// 检查连接是否超过超时时间
-		if now-atomic.LoadInt64(&conn.LastActive) > timeoutMs {
-			connectionsToRemove = append(connectionsToRemove, connectionID)
-		}
-		return true
-	})
-
-	// 清理不活跃的连接
-	for _, connectionID := range connectionsToRemove {
-		conn := cm.GetConnection(connectionID)
-		if conn != nil {
-			// 发送超时通知
-			timeoutMessage := &protoGw.StreamData{
-				Route: "timeout",
-				Payload: map[string]string{
-					"reason":  "inactive",
-					"message": "Connection timeout due to inactivity",
-				},
-			}
-
-			// 序列化消息
-			responseData, err := proto.Marshal(timeoutMessage)
-			if err == nil {
-				// 使用 Send (AsyncWrite) 而非直接 Write，避免在非 event-loop goroutine 中调用 gnet Write
-				conn.Send(responseData)
-			}
-
-			// 关闭连接
-			conn.Conn.Close()
-
-			cm.connectionTimeouts.Add(1)
-
-			// 从连接管理器中移除
-			cm.RemoveConnection(connectionID)
-
-			tlog.Info("清理不活跃连接", "connectionID", connectionID, "userUUID", conn.GetUserUUID())
-		}
-	}
-}
-
-// GetConnectionInfo 获取连接信息
-// 功能: 获取指定连接的详细信息
-// 参数:
-//
-//	connectionID: 连接ID
-//
-// GetConnectionStats 获取连接统计信息
-// 功能: 获取连接管理器的统计信息
-// 返回值:
-//
-//	map[string]interface{}: 连接统计信息
-func (cm *ConnectionManager) GetConnectionStats() map[string]interface{} {
-	totalConn := cm.totalConnections.Load()
-	closedConn := cm.closedConnections.Load()
-	totalConnTime := cm.totalConnectionTime.Load()
-	var avgConnTime int64
-	if closedConn > 0 {
-		avgConnTime = totalConnTime / closedConn
-	}
-
-	totalMsg := cm.totalMessages.Load()
-
-	return map[string]interface{}{
-		"totalConnections":    totalConn,
-		"activeConnections":   cm.activeConnections.Load(),
-		"closedConnections":   closedConn,
-		"connectionTimeouts":  cm.connectionTimeouts.Load(),
-		"avgConnectionTime":   avgConnTime,
-		"totalConnectionTime": totalConnTime,
-		"totalMessages":       totalMsg,
-		"failedMessages":      cm.failedMessages.Load(),
-	}
+func generateSessionID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }

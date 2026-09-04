@@ -9,9 +9,6 @@ import (
 	"github.com/streasure/util/tlog"
 )
 
-// TransportComponent owns all client-facing gnet listeners.
-// It is intentionally separate from Gateway so transports can be added or removed
-// without changing the gateway's internal service lifecycle.
 type TransportComponent struct {
 	component.BaseComponent
 	gw         *Gateway
@@ -27,17 +24,13 @@ func (c *TransportComponent) SetGateway(gw *Gateway) { c.gw = gw }
 func (c *TransportComponent) Name() string { return "gateway-transports" }
 func (c *TransportComponent) Order() int   { return 500 }
 
-// Init implements component.Component. Transport has no init work.
 func (c *TransportComponent) Init() error { return nil }
 
-// Start implements component.Component. Starts gnet listeners.
 func (c *TransportComponent) Start() error {
 	c.StartTransports()
 	return nil
 }
 
-// StartTransports launches all configured gnet listeners (TCP/UDP/WebSocket).
-// Safe to call explicitly when using manual component lifecycle.
 func (c *TransportComponent) StartTransports() {
 	if c.gw == nil {
 		tlog.Warn("transport component: gateway is nil, skipping transport start")
@@ -69,7 +62,6 @@ func (c *TransportComponent) StartTransports() {
 	}
 }
 
-// Destroy implements component.Component.
 func (c *TransportComponent) Destroy() {
 	if c.gw != nil {
 		c.gw.Close()

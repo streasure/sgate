@@ -1,3 +1,5 @@
+//go:build legacy
+
 package gateway
 
 import (
@@ -17,7 +19,7 @@ import (
 	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/util/nacos"
+	"github.com/streasure/util/etcd"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -1487,7 +1489,7 @@ type LogicClientPool struct {
 	ordered   []string // deterministic round-robin: ordered list of service IDs
 	mu        sync.RWMutex
 	gateway   GatewayInterface
-	discovery *nacos.Discovery
+	discovery *etcd.Component
 	balancer  *cluster.Balancer
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
@@ -1541,7 +1543,7 @@ func (pool *LogicClientPool) updateFastClient() {
 	pool.fastClient.Store(nil)
 }
 
-func (pool *LogicClientPool) SetDiscovery(discovery *nacos.Discovery) {
+func (pool *LogicClientPool) SetDiscovery(discovery *etcd.Component) {
 	pool.discovery = discovery
 	discovery.OnServiceChange(pool.handleServiceChange)
 }
@@ -1550,18 +1552,18 @@ func (pool *LogicClientPool) SetBalancer(balancer *cluster.Balancer) {
 	pool.balancer = balancer
 }
 
-func (pool *LogicClientPool) handleServiceChange(event nacos.ServiceEvent) {
+func (pool *LogicClientPool) handleServiceChange(event etcd.ServiceEvent) {
 	switch event.Type {
-	case nacos.EventRegister:
+	case etcd.EventRegister:
 		pool.handleServiceRegister(event)
-	case nacos.EventDeregister:
+	case etcd.EventDeregister:
 		pool.handleServiceDeregister(event)
 	}
 }
 
-func (pool *LogicClientPool) handleServiceRegister(event nacos.ServiceEvent) {
+func (pool *LogicClientPool) handleServiceRegister(event etcd.ServiceEvent) {
 	pool.mu.RLock()
-	existing, exists := pool.clients[event.Service.ServiceID]
+	existing, exists := pool.clients[event.InstanceID]
 	pool.mu.RUnlock()
 
 	// 已存在且连接正常，跳过
@@ -1572,90 +1574,90 @@ func (pool *LogicClientPool) handleServiceRegister(event nacos.ServiceEvent) {
 	// 已存在但连接已断开，先清理旧 client
 	if exists && existing != nil && !existing.IsConnected() {
 		pool.mu.Lock()
-		delete(pool.clients, event.Service.ServiceID)
+		delete(pool.clients, event.InstanceID)
 		pool.updateFastClient()
 		pool.mu.Unlock()
 		go existing.Close()
 	}
 
 	client := NewLogicClient(pool.gateway)
-	client.SetServerID(event.Service.ServiceID)
+	client.SetServerID(event.InstanceID)
 	client.shardCount = runtime.NumCPU() * 8
 
 	go func() {
 		tlog.Info("connecting to discovered logic service",
-			"serviceID", event.Service.ServiceID,
-			"address", event.Service.Address,
+			"serviceID", event.InstanceID,
+			"address", event.Address,
 		)
-		if err := client.Connect(event.Service.Address); err != nil {
+		if err := client.Connect(event.Address); err != nil {
 			tlog.Error("failed to connect to discovered logic service",
-				"serviceID", event.Service.ServiceID,
-				"address", event.Service.Address,
+				"serviceID", event.InstanceID,
+				"address", event.Address,
 				"error", err,
 			)
 			return
 		}
 		tlog.Info("connected to discovered logic service",
-			"serviceID", event.Service.ServiceID,
-			"address", event.Service.Address,
+			"serviceID", event.InstanceID,
+			"address", event.Address,
 		)
 	}()
 
 	pool.mu.Lock()
-	pool.clients[event.Service.ServiceID] = client
-	if !containsString(pool.ordered, event.Service.ServiceID) {
-		pool.ordered = append(pool.ordered, event.Service.ServiceID)
+	pool.clients[event.InstanceID] = client
+	if !containsString(pool.ordered, event.InstanceID) {
+		pool.ordered = append(pool.ordered, event.InstanceID)
 	}
 	pool.updateFastClient()
 	pool.mu.Unlock()
 
 	if pool.balancer != nil {
-		pool.balancer.AddNode(event.Service.ServiceID, event.Service.Address, 1)
+		pool.balancer.AddNode(event.InstanceID, event.Address, 1)
 	}
 
 	tlog.Info("logic client added to pool",
-		"serviceID", event.Service.ServiceID,
-		"address", event.Service.Address,
+		"serviceID", event.InstanceID,
+		"address", event.Address,
 		"totalClients", pool.ClientCount(),
 	)
 }
 
-func (pool *LogicClientPool) handleServiceDeregister(event nacos.ServiceEvent) {
-	// 高负载下 Nacos 心跳可能超时导致实例被摘除，但 gRPC 连接可能仍可用。
+func (pool *LogicClientPool) handleServiceDeregister(event etcd.ServiceEvent) {
+	// A discovery lease may expire while an existing gRPC connection is still usable.
 	// 不立即从 pool 删除和关闭连接，避免误判导致转发中断。
 	// 让 HealthChecker 和 gRPC 流自身错误检测来处理真正的连接断开。
 	pool.mu.RLock()
-	client, exists := pool.clients[event.Service.ServiceID]
+	client, exists := pool.clients[event.InstanceID]
 	pool.mu.RUnlock()
 
 	if exists && client != nil {
 		if !client.IsConnected() {
 			// gRPC 连接已断开，安全清理
 			pool.mu.Lock()
-			delete(pool.clients, event.Service.ServiceID)
-			pool.ordered = removeString(pool.ordered, event.Service.ServiceID)
+			delete(pool.clients, event.InstanceID)
+			pool.ordered = removeString(pool.ordered, event.InstanceID)
 			pool.updateFastClient()
 			pool.mu.Unlock()
 			if pool.balancer != nil {
-				pool.balancer.RemoveNode(event.Service.ServiceID)
+				pool.balancer.RemoveNode(event.InstanceID)
 			}
 			go client.Close()
 			tlog.Warn("logic service offline and connection already disconnected, cleaning up",
-				"serviceID", event.Service.ServiceID,
-				"address", event.Service.Address,
+				"serviceID", event.InstanceID,
+				"address", event.Address,
 			)
 		} else {
 			// gRPC 连接仍存活，保留连接，等服务重新注册或 HealthChecker 检测到断开
-			tlog.Warn("logic service deregistered from nacos, keeping gRPC connection (still connected)",
-				"serviceID", event.Service.ServiceID,
-				"address", event.Service.Address,
+			tlog.Warn("logic service deregistered from etcd, keeping gRPC connection (still connected)",
+				"serviceID", event.InstanceID,
+				"address", event.Address,
 			)
 		}
 	}
 
 	tlog.Warn("logic client deregister event processed",
-		"serviceID", event.Service.ServiceID,
-		"address", event.Service.Address,
+		"serviceID", event.InstanceID,
+		"address", event.Address,
 		"totalClients", pool.ClientCount(),
 	)
 }

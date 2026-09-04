@@ -1,34 +1,6 @@
-// Package main demonstrates a production-ready logic server with sgate.
-//
-// Architecture:
-//
-//	Client ──TCP──▶ sgate(:48080) ──gRPC──▶ logic(:50052)
-//
-// Push patterns (logic → sgate → client):
-//
-//  1. Personal push:  PushToConnection(connID, msg)        // push to specific connection
-//  2. Personal push:  PushToServer + server.send_to_user    // push by userUUID
-//  3. Personal push:  burst route push callback             // push to requesting client (most efficient)
-//  4. Group push:     JoinGroupByUser + SendToGroup         // push to group members
-//  5. Broadcast:      Broadcast(msg)                        // push to all connected clients
-//
-// Run:
-//
-//	go build -o logic.exe .
-//	./logic.exe
-//
-// Environment variables:
-//
-//	LOGIC_SERVICE_ID        logic-1           Service instance ID
-//	LOGIC_ADVERTISE_ADDR    localhost:50052   Advertise address
-//	LOGIC_PORT              50052             gRPC listen port
-//	NACOS_ENDPOINT          ""                Nacos console URL
-//	NACOS_NAMESPACE         public            Nacos namespace
-//	GRPC_WINDOW_SIZE        67108864          gRPC window size
-//	GRPC_MAX_MSG_SIZE       4194304           Max gRPC message size
-//	LOGIC_STREAM_CH_SIZE    1048576           Stream send channel size
-//	LOGIC_DISPATCH_WORKERS  24                Consumer goroutine count
-//	LOGIC_PASSTHROUGH       false             Passthrough mode
+//go:build ignore
+
+// Package main runs a cmd-only logic service for the sgate examples.
 package main
 
 import (
@@ -39,20 +11,14 @@ import (
 	"strconv"
 	"time"
 
-	protoLogic "github.com/streasure/protocol/logic"
-	"github.com/streasure/sgate/gateway"
+	enums "github.com/streasure/protocol/enums"
+	logicproto "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/logic"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
 
 func main() {
-	logicCfg, err := logic.LoadConfig("config/logic.yaml")
-	if err != nil {
-		logicCfg, _ = logic.LoadConfig("../../config/logic.yaml")
-	}
-	// ── 1. 日志初始化 ────────────────────────────────────────────────
-	// tlog 自动创建日志目录（基于 exe 所在目录解析相对路径）
 	if _, err := tlog.New("config/tlog.yaml"); err != nil {
 		if _, err := tlog.New("../config/tlog.yaml"); err != nil {
 			if _, err := tlog.New("../../config/tlog.yaml"); err != nil {
@@ -61,331 +27,104 @@ func main() {
 			}
 		}
 	}
-
-	// ── 2. pprof 可选 ────────────────────────────────────────────────
 	if addr := os.Getenv("LOGIC_PPROF_ADDR"); addr != "" {
-		go http.ListenAndServe(addr, nil)
+		go func() { _ = http.ListenAndServe(addr, nil) }()
 	}
 
-	// ── 3. 创建 Logic Service ───────────────────────────────────────
+	cfg, err := logic.LoadConfig("config/logic.yaml")
+	if err != nil {
+		cfg, _ = logic.LoadConfig("../../config/logic.yaml")
+	}
 	svc := logic.NewService(
-		logic.WithConfig(logicCfg),
+		logic.WithConfig(cfg),
 		logic.WithServiceID(envOr("LOGIC_SERVICE_ID", "logic-1")),
 		logic.WithAdvertiseAddr(envOr("LOGIC_ADVERTISE_ADDR", "localhost:50052")),
 		logic.WithListenPort(envOr("LOGIC_PORT", "50052")),
-		logic.WithNacosEndpoint(envOr("NACOS_ENDPOINT", "")),
-		logic.WithNacosNamingEndpoint(envOr("NACOS_NAMING_ENDPOINT", "")),
-		logic.WithNacosNamespace(envOr("NACOS_NAMESPACE", "public")),
-		logic.WithNacosGroup(envOr("NACOS_GROUP", "DEFAULT_GROUP")),
-		logic.WithNacosAuth(envOr("NACOS_USERNAME", "nacos"), envOr("NACOS_PASSWORD", "nacos")),
-		logic.WithNacosAPIVersion(envOr("NACOS_API_VERSION", "v3")),
-		logic.WithServiceName(envOr("LOGIC_SERVICE_NAME", "logic")),
-		logic.WithZone(envOr("LOGIC_ZONE", "default")),
-		logic.WithGRPCWindowSize(envInt("GRPC_WINDOW_SIZE", 67108864)),
-		logic.WithGRPCMaxMessageSize(envInt("GRPC_MAX_MSG_SIZE", 4194304)),
 		logic.WithStreamSendChSize(envInt("LOGIC_STREAM_CH_SIZE", 1048576)),
-		logic.WithDispatchWorkerCount(envInt("LOGIC_DISPATCH_WORKERS", 24)),
-		logic.WithPassthrough(envBool("LOGIC_PASSTHROUGH", false)),
 	)
+	registerHandlers(svc)
+	if err := svc.Run(); err != nil {
+		tlog.Error("logic service failed", "error", err)
+		os.Exit(1)
+	}
+}
 
-	// ══════════════════════════════════════════════════════════════════
-	// 路由注册
-	// ══════════════════════════════════════════════════════════════════
-
-	// ── Ping/Pong: 基准心跳 ─────────────────────────────────────────
-	// 客户端发 "ping"，服务端回 "pong"，用于连通性检测和基准压测
-	svc.RegisterRoute(gateway.RoutePing, func(msg *gateway.StreamData) *gateway.StreamData {
-		return &gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     gateway.RoutePong,
-			Payload:   map[string]string{"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10)},
-			Timestamp: time.Now().UnixMilli(),
-		}
-	})
-
-	// ── BurstRoute: 每次请求触发推送（duplex 压测用）────────────────
-	// push 回调直接写入 gRPC stream，是最高效的推送路径
-	svc.RegisterBurstRoute(gateway.RouteTest, func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
-		push(&gateway.StreamData{
-			Route:     gateway.RouteTestResult,
-			Timestamp: time.Now().UnixMilli(),
-		})
-	})
-
-	// ── Login: 用户登录（必须） ──────────────────────────────────────
-	// 注册 userUUID → connectionID 映射，使所有推送功能可用
-	svc.RegisterProto(gateway.RouteLogin, gateway.CmdLogicLoginReq, &protoLogic.LoginReq{}, gateway.CmdLogicLoginAck, func(ctx *logic.Context, req proto.Message) proto.Message {
-		login := req.(*protoLogic.LoginReq)
-		userID := login.UserId
+func registerHandlers(svc *logic.Service) {
+	svc.RegisterProto(int32(enums.Cmd_CMD_LOGIN_REQ), &logicproto.LoginReq{}, int32(enums.Cmd_CMD_LOGIN_ACK), func(ctx *logic.Context, req proto.Message) proto.Message {
+		login := req.(*logicproto.LoginReq)
+		userID := login.GetUserId()
 		if userID == "" {
 			userID = ctx.ConnectionID
 		}
-		userKey := "uuid_" + userID
+		userKey := "user_" + userID
 		svc.RegisterUser(userKey, ctx.ConnectionID)
-		return &protoLogic.LoginAck{UserKey: userKey, ServerTime: time.Now().UnixMilli()}
+		return &logicproto.LoginAck{UserKey: userKey, ServerTime: time.Now().UnixMilli()}
 	})
 
-	svc.RegisterProto(gateway.RouteHeartbeat, gateway.CmdHeartbeatReq, &protoLogic.HeartbeatReq{}, gateway.CmdHeartbeatAck, func(ctx *logic.Context, req proto.Message) proto.Message {
-		heartbeat := req.(*protoLogic.HeartbeatReq)
-		return &protoLogic.HeartbeatAck{ServerTime: time.Now().UnixMilli(), RttMs: time.Now().UnixMilli() - heartbeat.ClientTime}
+	svc.RegisterProto(int32(enums.Cmd_CMD_HEARTBEAT_REQ), &logicproto.HeartbeatReq{}, int32(enums.Cmd_CMD_HEARTBEAT_ACK), func(_ *logic.Context, req proto.Message) proto.Message {
+		heartbeat := req.(*logicproto.HeartbeatReq)
+		now := time.Now().UnixMilli()
+		return &logicproto.HeartbeatAck{ServerTime: now, RttMs: now - heartbeat.GetClientTime()}
 	})
 
-	svc.RegisterProto(gateway.RouteUserOffline, gateway.CmdUserOffline, &protoLogic.UserOfflineNtf{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
-		n := req.(*protoLogic.UserOfflineNtf)
-		svc.Server().Offline(n.SessionId, n.UserKey)
-		tlog.Info("user offline notification", "sessionID", n.SessionId, "userKey", n.UserKey, "serverID", n.ServerId)
+	svc.RegisterProto(int32(enums.Cmd_CMD_USER_OFFLINE_NTF), &logicproto.UserOfflineNtf{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
+		offline := req.(*logicproto.UserOfflineNtf)
+		ctx.Server.Offline(offline.GetSessionId(), offline.GetUserKey())
 		return nil
 	})
 
-	// ── Echo: 回显测试 ──────────────────────────────────────────────
-	svc.RegisterRoute(gateway.RouteEcho, func(msg *gateway.StreamData) *gateway.StreamData {
-		return &gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     gateway.RouteEcho,
-			Payload: map[string]string{
-				"echo":      msg.GetPayload()["message"],
-				"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
-			},
-			Timestamp: time.Now().UnixMilli(),
-		}
+	svc.RegisterProto(int32(enums.Cmd_CMD_JOIN_GROUP_REQ), &logicproto.JoinGroupReq{}, int32(enums.Cmd_CMD_JOIN_GROUP_ACK), func(ctx *logic.Context, req proto.Message) proto.Message {
+		join := req.(*logicproto.JoinGroupReq)
+		return &logicproto.JoinGroupAck{Code: 0, GroupId: join.GetGroupId(), MemberCount: int32(ctx.Server.JoinGroup(join.GetGroupId(), ctx.ConnectionID))}
 	})
 
-	// ══════════════════════════════════════════════════════════════════
-	// 推送模式 1: 个人推送（push to self）
-	// ══════════════════════════════════════════════════════════════════
-	// 使用 burst route 的 push 回调，最高效路径（直接写 stream）
-	// Flow: client → sgate → logic(push callback) → sgate → client
-	svc.RegisterBurstRoute("push_me", func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
-		push(&gateway.StreamData{
-			Route: "personal_notification",
-			Payload: map[string]string{
-				"type":    "personal_push",
-				"message": "Hello from logic server!",
-				"from":    "server",
-			},
-			Timestamp: time.Now().UnixMilli(),
-		})
+	svc.RegisterProto(int32(enums.Cmd_CMD_LEAVE_GROUP_REQ), &logicproto.LeaveGroupReq{}, int32(enums.Cmd_CMD_LEAVE_GROUP_ACK), func(ctx *logic.Context, req proto.Message) proto.Message {
+		leave := req.(*logicproto.LeaveGroupReq)
+		return &logicproto.LeaveGroupAck{Code: 0, GroupId: leave.GetGroupId(), MemberCount: int32(ctx.Server.LeaveGroup(leave.GetGroupId(), ctx.ConnectionID))}
 	})
 
-	// ══════════════════════════════════════════════════════════════════
-	// 推送模式 2: 个人推送（push to another user）
-	// ══════════════════════════════════════════════════════════════════
-	// 使用 PushToServer + server.send_to_user 路由
-	// Flow: client_A → sgate → logic(PushToServer) → sgate.gateway.SendToUser → client_B
-	svc.RegisterRoute("send_msg", func(msg *gateway.StreamData) *gateway.StreamData {
-		targetUUID := msg.GetPayload()["targetUUID"]
-		if targetUUID == "" {
-			return &gateway.StreamData{
-				SessionId: msg.SessionId,
-				Route:     "send_msg_ack",
-				Payload:   map[string]string{"code": "400", "message": "missing targetUUID"},
-				Timestamp: time.Now().UnixMilli(),
-			}
-		}
-
-		svc.Server().PushToServer(&gateway.StreamData{
-			Route: gateway.RouteServerSendToUser,
-			Payload: map[string]string{
-				"userUUID": targetUUID,
-				"route":    "direct_message",
-				"message":  msg.GetPayload()["message"],
-				"from":     msg.UserKey,
-			},
-			Timestamp: time.Now().UnixMilli(),
-		})
-
-		return &gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     "send_msg_ack",
-			Payload:   map[string]string{"code": "200", "message": "delivered"},
-			Timestamp: time.Now().UnixMilli(),
-		}
+	svc.RegisterProto(int32(enums.Cmd_CMD_SEND_TO_GROUP_REQ), &logicproto.SendToGroupReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
+		push := req.(*logicproto.SendToGroupReq)
+		ctx.Server.SendToGroup(push.GetGroupId(), push.GetTargetCmd(), push.GetData())
+		return nil
 	})
 
-	// ══════════════════════════════════════════════════════════════════
-	// 推送模式 3: 组管理（join/leave）
-	// ══════════════════════════════════════════════════════════════════
-	// 组是 Gateway 本地的，每个 Gateway 维护自己的组成员列表
-	// JoinGroup/LeaveGroup 通过 PushToServer 发送到 Gateway，异步生效
-
-	svc.RegisterRoute("join_group", func(msg *gateway.StreamData) *gateway.StreamData {
-		groupID := msg.GetPayload()["groupID"]
-		if groupID == "" {
-			groupID = "default_room"
-		}
-
-		// server.join_group: Gateway 根据 SessionId 查找连接，自动加入组
-		svc.Server().PushToServer(&gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     gateway.RouteServerJoinGroup,
-			Payload:   map[string]string{"groupID": groupID},
-			Timestamp: time.Now().UnixMilli(),
-		})
-
-		return &gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     "join_group_ack",
-			Payload:   map[string]string{"code": "200", "groupID": groupID},
-			Timestamp: time.Now().UnixMilli(),
-		}
+	svc.RegisterProto(int32(enums.Cmd_CMD_BROADCAST_REQ), &logicproto.BroadcastReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
+		push := req.(*logicproto.BroadcastReq)
+		ctx.Server.Broadcast(push.GetTargetCmd(), push.GetData())
+		return nil
 	})
 
-	svc.RegisterRoute("leave_group", func(msg *gateway.StreamData) *gateway.StreamData {
-		groupID := msg.GetPayload()["groupID"]
-		if groupID == "" {
-			groupID = "default_room"
-		}
-
-		svc.Server().PushToServer(&gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     gateway.RouteServerLeaveGroup,
-			Payload:   map[string]string{"groupID": groupID},
-			Timestamp: time.Now().UnixMilli(),
-		})
-
-		return &gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     "leave_group_ack",
-			Payload:   map[string]string{"code": "200"},
-			Timestamp: time.Now().UnixMilli(),
-		}
+	svc.RegisterProto(int32(enums.Cmd_CMD_SEND_TO_USER_REQ), &logicproto.SendToUserReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
+		push := req.(*logicproto.SendToUserReq)
+		ctx.Server.SendToUser(push.GetUserKey(), push.GetTargetCmd(), push.GetData())
+		return nil
 	})
 
-	// ══════════════════════════════════════════════════════════════════
-	// 推送模式 4: 组推送（group push）
-	// ══════════════════════════════════════════════════════════════════
-	// SendToGroup 路由到 Gateway 的 ConnectionManager.SendToGroup
-	// 组成员需先通过 server.join_group 加入
-	// Flow: client → sgate → logic → sgate.gateway.SendToGroup → all group members
-	svc.RegisterRoute("group_msg", func(msg *gateway.StreamData) *gateway.StreamData {
-		groupID := msg.GetPayload()["groupID"]
-		if groupID == "" {
-			groupID = "default_room"
+	svc.RegisterProto(int32(enums.Cmd_CMD_KICK_NTF), &logicproto.KickNtf{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
+		kick := req.(*logicproto.KickNtf)
+		if kick.GetSessionId() != "" {
+			ctx.Server.Kick(kick.GetSessionId(), mustMarshal(kick))
 		}
-
-		svc.Server().SendToGroup(groupID, &gateway.StreamData{
-			Route: "group_broadcast",
-			Payload: map[string]string{
-				"message": msg.GetPayload()["message"],
-				"from":    msg.UserKey,
-				"groupID": groupID,
-			},
-			Timestamp: time.Now().UnixMilli(),
-		})
-
-		return &gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     "group_msg_ack",
-			Payload:   map[string]string{"code": "200", "message": "sent to group"},
-			Timestamp: time.Now().UnixMilli(),
-		}
+		return nil
 	})
-
-	// ══════════════════════════════════════════════════════════════════
-	// 推送模式 5: 全服广播（broadcast）
-	// ══════════════════════════════════════════════════════════════════
-	// Broadcast 推送到所有连接的客户端
-	// Flow: client → sgate → logic(Broadcast) → sgate.gateway.Broadcast → all clients
-	svc.RegisterRoute("broadcast_msg", func(msg *gateway.StreamData) *gateway.StreamData {
-		svc.Server().Broadcast(&gateway.StreamData{
-			Route: "global_broadcast",
-			Payload: map[string]string{
-				"message": msg.GetPayload()["message"],
-				"from":    msg.UserKey,
-			},
-			Timestamp: time.Now().UnixMilli(),
-		})
-
-		return &gateway.StreamData{
-			SessionId: msg.SessionId,
-			Route:     "broadcast_msg_ack",
-			Payload:   map[string]string{"code": "200", "message": "broadcast sent"},
-			Timestamp: time.Now().UnixMilli(),
-		}
-	})
-
-	// ══════════════════════════════════════════════════════════════════
-	// 推送模式 6: 批量推送（burst pattern）
-	// ══════════════════════════════════════════════════════════════════
-	// 高吞吐场景：每次请求推送多条消息（如游戏状态同步）
-	// burst route 的 push 回调可多次调用，每条消息独立序列化
-	svc.RegisterBurstRoute("batch_push", func(msg *gateway.StreamData, push func(*gateway.StreamData)) {
-		targetCount := 1
-		if n, err := strconv.Atoi(msg.GetPayload()["count"]); err == nil && n > 0 {
-			targetCount = n
-		}
-		for i := 0; i < targetCount; i++ {
-			push(&gateway.StreamData{
-				Route: "batch_push_item",
-				Payload: map[string]string{
-					"index": strconv.Itoa(i),
-					"total": strconv.Itoa(targetCount),
-				},
-				Timestamp: time.Now().UnixMilli(),
-			})
-		}
-	})
-
-	// ══════════════════════════════════════════════════════════════════
-	// 启动服务
-	// ══════════════════════════════════════════════════════════════════
-	if err := svc.Run(); err != nil {
-		tlog.Error("logic service failed", "error", err)
-		tlog.Sync()
-		os.Exit(1)
-	}
-	tlog.Sync()
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// API Reference (logic.Server methods):
-//
-// Personal push:
-//
-//	svc.Server().PushToConnection(connID, msg)       // push to specific connection
-//	svc.Server().GetConnectionIDByUser(userUUID)      // lookup connection by user
-//
-// Group operations:
-//
-//	svc.Server().JoinGroupByUser(groupID, serverID, userUUID)   // user joins group
-//	svc.Server().LeaveGroupByUser(groupID, serverID, userUUID)  // user leaves group
-//	svc.Server().SendToGroup(groupID, msg)                      // push to all group members
-//	svc.Server().PushToGroup(groupID, msg, exclude...)          // push with exclude list
-//
-// Broadcast:
-//
-//	svc.Server().Broadcast(msg, exclude...)            // push to all connected clients
-//
-// User registration (required for push operations):
-//
-//	svc.RegisterUser(userUUID, connectionID)           // call in login handler
-//	svc.UnregisterUser(userUUID)                       // call on logout
-//	svc.Server().GetConnectionIDByUser(userUUID)       // lookup
-//
-// Server group (internal, for multi-gateway):
-//
-//	svc.Server().PushToServer(msg)                     // push to all gateways
-// ══════════════════════════════════════════════════════════════════════
+func mustMarshal(message proto.Message) []byte {
+	data, _ := proto.Marshal(message)
+	return data
+}
 
 func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
 	return def
 }
 
 func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-func envBool(key string, def bool) bool {
-	if v := os.Getenv(key); v != "" {
-		if parsed, err := strconv.ParseBool(v); err == nil {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
 			return parsed
 		}
 	}

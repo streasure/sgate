@@ -1,3 +1,5 @@
+//go:build legacy
+
 package gateway
 
 import (
@@ -25,7 +27,7 @@ import (
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/types"
 	"github.com/streasure/util/component"
-	"github.com/streasure/util/nacos"
+	"github.com/streasure/util/etcd"
 	"github.com/streasure/util/prometheus"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
@@ -81,7 +83,7 @@ type Gateway struct {
 	logicClient       *LogicClient
 	logicClientPool   *LogicClientPool
 	serverID          string
-	serviceDiscovery  *nacos.Discovery
+	serviceDiscovery  *etcd.Component
 	overloadProtector *OverloadProtector
 	grpcServer        *grpc.Server
 	promExporter      *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为 nil）
@@ -105,7 +107,7 @@ type Gateway struct {
 	jwtAuth       *security.JWTAuthFilter     // JWT 鉴权
 	balancer      *cluster.Balancer           // 负载均衡 + 故障节点摘除
 	degradation   *traffic.DegradationManager // 降级管理
-	configCenter  cluster.ConfigCenter        // 配置中心（Nacos/Apollo/etcd/Consul）
+	configCenter  cluster.ConfigCenter        // etcd 配置中心
 	otelTracer    *obs.OTelTracer             // 分布式追踪导出
 	alertWebhook  *cluster.AlertWebhook       // 告警 webhook（企业微信/钉钉）
 	canaryFilter  *traffic.CanaryFilter       // 灰度发布
@@ -927,6 +929,12 @@ func (g *Gateway) isLogicConnected() bool {
 }
 
 func (g *Gateway) isPreAuthCommand(cmd int32) bool {
+	// The logic login command is the stable protocol boundary. Keep it as a
+	// built-in fallback so an older dynamic configuration cannot lock out all
+	// newly connected sessions after a command-range migration.
+	if cmd == gateway.CmdLogicLoginReq {
+		return true
+	}
 	for _, allowed := range g.protection.PreAuthCommands {
 		if cmd == allowed {
 			return true
@@ -958,18 +966,14 @@ func (g *Gateway) validateLoginKey(_ string, _ string) bool {
 }
 
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
-	req := new(protoLogic.LoginGateReq)
+	req := new(protoGw.LoginGateReq)
 	writeAck := func(code int32, text, serverID string) {
-		ack := &protoLogic.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
+		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
 		body, _ := proto.Marshal(ack)
 		writeMsgFrame(c, &protoGw.StreamData{Cmd: gateway.CmdLoginGateAck, Route: gateway.RouteLoginGate, Data: body, SeqId: message.SeqId})
 	}
 	if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
 		writeAck(400, "invalid login gate request", req.ServerId)
-		return gnet.None
-	}
-	if req.Zone != "" && req.Zone != g.zone {
-		writeAck(403, "zone mismatch", req.ServerId)
 		return gnet.None
 	}
 	if !g.validateLoginKey(req.UserId, req.LoginKey) {

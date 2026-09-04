@@ -1,3 +1,5 @@
+//go:build legacy
+
 package gateway
 
 import (
@@ -12,7 +14,7 @@ import (
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/types"
-	"github.com/streasure/util/nacos"
+	"github.com/streasure/util/etcd"
 )
 
 // GatewayDeps holds all external dependencies for Gateway construction.
@@ -41,7 +43,7 @@ type GatewayDeps struct {
 	Degradation   *traffic.DegradationManager
 
 	// Cluster
-	Discovery    *nacos.Discovery
+	Discovery    *etcd.Component
 	Balancer     *cluster.Balancer
 	ConfigCenter cluster.ConfigCenter
 	ClusterNode  *cluster.Cluster

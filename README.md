@@ -20,7 +20,7 @@ sgate 是一个基于 Go 语言编写的高性能游戏网关，支持 TCP/UDP/W
 │  Security: IP黑名单/限流/熔断/WAF/JWT            │
 └─────────────────────────────────────────────────┘
          │
-    Nacos (配置中心 / 服务发现 / 集群选举)
+    etcd (配置中心 / 服务发现 / 租约保活)
 ```
 
 ## 协议设计
@@ -83,7 +83,7 @@ message StreamData {
 
 - **高性能**: 基于 gnet v2 事件驱动网络框架，写合并（write coalescing）+ 批量刷新
 - **多协议**: TCP、UDP、WebSocket
-- **服务发现**: Nacos 自动注册/发现，支持 zone 隔离
+- **服务发现**: etcd 租约注册与 watch 发现，支持 serverType/serverId/zone 隔离
 - **集群部署**: 多节点水平扩展，Leader 选举与自动容灾
 - **安全防护**: IP 白名单/黑名单、多维限流、熔断器、WAF、TLS、消息完整性校验
 - **监控**: `/stats` JSON + `/metrics` Prometheus + `/health` `/ready` `/live` K8s 探针
@@ -101,13 +101,14 @@ enum Cmd {
     CMD_HANDSHAKE         = 11;
     CMD_STREAM_DATA       = 14;
 
-    // 逻辑层 (1,000,000+)
-    CMD_LOGIN_REQ         = 1000001;
-    CMD_LOGIN_ACK         = 1000002;
-    CMD_LOGOUT_REQ        = 1000003;
-    CMD_LOGOUT_ACK        = 1000004;
-    CMD_PUSH_NOTIFY       = 1000006;
-    CMD_KICK_NOTIFY       = 1000009;
+    // Gateway control (1,000,000 - 1,099,999)
+    CMD_LOGIN_GATE_REQ    = 1000001;
+    CMD_LOGIN_GATE_ACK    = 1000002;
+    // Logic business (1,100,000 - 1,199,999)
+    CMD_LOGIN_REQ         = 1100001;
+    CMD_LOGIN_ACK         = 1100002;
+    CMD_HEARTBEAT_REQ     = 1100010;
+    CMD_HEARTBEAT_ACK     = 1100011;
 }
 ```
 
@@ -115,7 +116,7 @@ enum Cmd {
 
 | 常量 | 值 | 说明 |
 |------|-----|------|
-| `RouteLoginGate` | `"login_gate"` | 选服并将 session 绑定到指定 logic server |
+| `RouteLoginGate` | `"login_gate"` | 选服并将 session 绑定到指定 logic server，客户端不感知 zone |
 | `RouteLogin` | `"login"` | Logic 业务登录 |
 | `RouteHeartbeat` | `"heartbeat"` | Logic 心跳 |
 | `RouteUserOffline` | `"user_offline"` | Gateway 通知 Logic 客户端异常断开 |
@@ -253,12 +254,12 @@ Gateway 编码回包:
 客户端                    Gateway                     Logic(logic-1)
   │                         │                           │
   │── MessageFrame ────────►│                           │
-  │   {cmd=2000001,         │── 绑定 session→logic-1    │
+  │   {cmd=1000001,         │── 绑定 session→logic-1    │
   │    LoginGateReq}        │                           │
   │◄── LoginGateAck ───────│                            │
   │                         │                           │
   │── MessageFrame ────────►│                           │
-  │   {cmd=1000001,         │── 固定 StreamData ───────►│
+  │   {cmd=1100001,         │── 固定 StreamData ───────►│
   │    LoginReq}            │                           │── 注册 user→session 映射
   │                         │                           │── 返回 LoginAck
   │                         │◄── StreamData ────────────│
@@ -273,7 +274,7 @@ Gateway 编码回包:
 客户端                    Gateway                     Logic
   │                         │                           │
   │── MessageFrame ────────►│                           │
-  │   {cmd=1000010,         │── 绑定的 StreamData ──────►│
+  │   {cmd=1100010,         │── 绑定的 StreamData ──────►│
   │    HeartbeatReq}        │                           │── 返回 HeartbeatAck
   │◄── MessageFrame ───────│  {cmd=1000011}             │
   │   {cmd=respCmd, body=   │   Timestamp:...}          │
@@ -343,23 +344,23 @@ sgate/
 │   ├── obs/                  # 可观测性（pprof/prometheus/tracing）
 │   ├── security/             # 安全组件（IP/限流/熔断/WAF/JWT）
 │   ├── traffic/              # 流量组件（灰度/镜像/降级）
-│   └── cluster/              # 集群组件（Nacos/告警）
+│   └── cluster/              # 集群组件（etcd/告警）
 ├── logic/                    # Logic Server SDK
 │   ├── server.go             # 推送/组管理/广播
 │   ├── handler.go            # RouteHandler/BurstRouteHandler/Dispatcher
-│   └── service.go            # gRPC 服务 + Nacos 注册
+│   └── service.go            # gRPC 服务 + etcd 注册
 ├── gateway/                  # sgate 路由与帧解析逻辑
 ├── types/                    # FilterContext 等公共类型
 └── config/                   # 配置文件 & Grafana/Prometheus
 
 protocol/                     # 协议定义（独立仓库）
 ├── gateway/
-│   ├── gateway.proto         # MessageFrame + StreamData + GatewayStream
+│   ├── gateway.proto         # MessageFrame + LoginGate + StreamData + GatewayStream
 │   ├── gateway.pb.go
 │   └── gateway_grpc.pb.go
 ├── commonstruct/             # 公共 protobuf 类型
 ├── enums/                    # CMD 枚举号 + PushType/CompressionType
-└── logic/                    # 前后端交互协议（LoginReq/Ack, PushNotify 等）
+└── logic/                    # 业务协议（LoginReq/Ack, Heartbeat, Push 等）
 ```
 
 ## 配置
@@ -397,9 +398,8 @@ monitoring:
 
 configCenter:
   enabled: true
-  type: "nacos"
-  endpoint: "http://127.0.0.1:8080"
-  namingEndpoint: "http://127.0.0.1:56000"
+  type: "etcd"
+  endpoint: "http://127.0.0.1:2379"
 
 cluster:
   enabled: true

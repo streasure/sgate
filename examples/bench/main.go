@@ -26,7 +26,6 @@ var (
 	sendFrame       []byte
 	batchSend       map[int][]byte
 	targetServerID  = "logic-1"
-	targetZone      = "default"
 )
 
 // drainBufPool 复用读取缓冲区，避免高并发下大量 4MB 分配导致 Go runtime heap 扩展失败
@@ -36,12 +35,7 @@ var drainBufPool = sync.Pool{
 
 func buildSendFrame() {
 	heartbeat, _ := proto.Marshal(&protoLogic.HeartbeatReq{ClientTime: time.Now().UnixMilli()})
-	body := &gateway.StreamData{Route: gateway.RouteHeartbeat, Cmd: gateway.CmdHeartbeatReq, Data: heartbeat}
-	bodyData, _ := proto.Marshal(body)
-	data, _ := proto.Marshal(&gateway.MessageFrame{
-		Cmd:  gateway.CmdHeartbeatReq,
-		Body: bodyData,
-	})
+	data, _ := proto.Marshal(&gateway.MessageFrame{Cmd: gateway.CmdHeartbeatReq, Body: heartbeat})
 	frame := make([]byte, 4+len(data))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
 	copy(frame[4:], data)
@@ -88,8 +82,8 @@ func (bc *benchConn) close() {
 // authenticate sends the logic-owned login request directly after connection setup.
 func (bc *benchConn) authenticate(clientID int) error {
 	buf := make([]byte, 65536)
-	gateBody, _ := proto.Marshal(&protoLogic.LoginGateReq{ServerId: targetServerID, UserId: fmt.Sprintf("bench_%d", clientID), Zone: targetZone})
-	gateFrame := buildRawFrame(gateway.RouteLoginGate, gateway.CmdLoginGate, gateBody)
+	gateBody, _ := proto.Marshal(&gateway.LoginGateReq{ServerId: targetServerID, UserId: fmt.Sprintf("bench_%d", clientID)})
+	gateFrame := buildRawFrame(gateway.CmdLoginGate, gateBody)
 	if _, err := bc.conn.Write(gateFrame); err != nil {
 		return err
 	}
@@ -98,13 +92,12 @@ func (bc *benchConn) authenticate(clientID int) error {
 		return err
 	}
 	var frame gateway.MessageFrame
-	var envelope gateway.StreamData
-	var gateAck protoLogic.LoginGateAck
-	if proto.Unmarshal(gatePayload, &frame) != nil || proto.Unmarshal(frame.Body, &envelope) != nil || proto.Unmarshal(envelope.Data, &gateAck) != nil || gateAck.Code != 0 {
+	var gateAck gateway.LoginGateAck
+	if proto.Unmarshal(gatePayload, &frame) != nil || frame.Cmd != gateway.CmdLoginGateAck || proto.Unmarshal(frame.Body, &gateAck) != nil || gateAck.Code != 0 {
 		return fmt.Errorf("login gate rejected: code=%d message=%s", gateAck.Code, gateAck.Message)
 	}
 	loginBody, _ := proto.Marshal(&protoLogic.LoginReq{UserId: fmt.Sprintf("bench_%d", clientID)})
-	loginFrame := buildRawFrame(gateway.RouteLogin, gateway.CmdLogicLoginReq, loginBody)
+	loginFrame := buildRawFrame(gateway.CmdLogicLoginReq, loginBody)
 	if _, err := bc.conn.Write(loginFrame); err != nil {
 		return err
 	}
@@ -152,9 +145,8 @@ func readFrame(conn net.Conn, buf []byte, name string) ([]byte, error) {
 	return buf[4 : 4+frameLen], nil
 }
 
-func buildRawFrame(route string, cmd int32, body []byte) []byte {
-	inner, _ := proto.Marshal(&gateway.StreamData{Route: route, Cmd: cmd, Data: body})
-	data, _ := proto.Marshal(&gateway.MessageFrame{Cmd: cmd, Body: inner})
+func buildRawFrame(cmd int32, body []byte) []byte {
+	data, _ := proto.Marshal(&gateway.MessageFrame{Cmd: cmd, Body: body})
 	frame := make([]byte, 4+len(data))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
 	copy(frame[4:], data)
@@ -293,7 +285,7 @@ func runDuplexConn(addr string, wg *sync.WaitGroup, stopCh chan struct{}, maxInf
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <addr> <conns> [duration] [batchSize] [inflight] [statsAddr] [ratePerConn] [serverId] [zone]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s <addr> <conns> [duration] [batchSize] [inflight] [statsAddr] [serverId]\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -318,9 +310,6 @@ func main() {
 	}
 	if len(os.Args) >= 8 {
 		targetServerID = os.Args[7]
-	}
-	if len(os.Args) >= 9 {
-		targetZone = os.Args[8]
 	}
 
 	buildSendFrame()
