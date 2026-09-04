@@ -116,17 +116,17 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 
 	for {
 		buf, err := c.Peek(-1)
-		if err != nil || len(buf) == 0 {
+		if err != nil || len(buf) < 4 {
 			break
 		}
 
-		bodyLen, n := decodeVarintFast(buf)
-		if n <= 0 || int(bodyLen)+n > len(buf) {
+		bodyLen := int(binary.BigEndian.Uint32(buf[:4]))
+		if bodyLen <= 0 || bodyLen+4 > len(buf) {
 			break
 		}
 
-		frame := buf[n : n+int(bodyLen)]
-		c.Discard(n + int(bodyLen))
+		frame := buf[4 : 4+bodyLen]
+		c.Discard(4 + bodyLen)
 
 		g.messagesReceived.Add(1)
 		g.handleFrame(sess, frame)
@@ -224,10 +224,10 @@ func (g *Gateway) SendToGroup(groupID string, cmd int32, data []byte, excludeSes
 
 func SendFrameToConn(c gnet.Conn, cmd int32, seqID int64, body []byte) {
 	frame := EncodeMessageFrame(cmd, seqID, body)
-	buf := make([]byte, len(frame)+binary.MaxVarintLen64)
-	n := binary.PutUvarint(buf, uint64(len(frame)))
-	copy(buf[n:], frame)
-	c.AsyncWrite(buf[:n+len(frame)], nil)
+	buf := make([]byte, 4+len(frame))
+	binary.BigEndian.PutUint32(buf[:4], uint32(len(frame)))
+	copy(buf[4:], frame)
+	c.AsyncWrite(buf, nil)
 }
 
 func EncodeMessageFrame(cmd int32, seqID int64, body []byte) []byte {
