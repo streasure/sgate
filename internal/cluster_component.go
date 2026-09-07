@@ -41,18 +41,34 @@ func (c *ClusterComponent) Init() error {
 
 func (c *ClusterComponent) Start() error {
 	etcdCfg := etcd.Config{Endpoints: c.cfg.Etcd.Endpoints, Endpoint: c.cfg.Etcd.Endpoint, Username: c.cfg.Etcd.Username, Password: c.cfg.Etcd.Password, ServicePrefix: c.cfg.Etcd.ServicePrefix}
-	if c.cfg.Etcd.Enabled && c.cfg.Discovery.Enabled {
-		c.Discovery = etcd.New(etcd.ComponentConfig{Enabled: true, Etcd: etcdCfg, Discovery: etcd.DiscoveryConfig{Enabled: true, ServiceID: "Logic:" + c.cfg.Zone}})
-		if err := c.Discovery.Start(); err != nil {
-			return fmt.Errorf("start etcd discovery: %w", err)
+	if c.cfg.Etcd.Enabled {
+		compCfg := etcd.ComponentConfig{Enabled: true, Etcd: etcdCfg}
+		if c.cfg.Discovery.Enabled {
+			compCfg.Discovery = etcd.DiscoveryConfig{Enabled: true, ServiceID: "Logic:" + c.cfg.Zone}
 		}
+		// Register gateway itself so other services can discover it
+		compCfg.Registration = etcd.RegistrationConfig{
+			Enabled:    true,
+			ServiceID:  c.cfg.ServerType + ":" + c.cfg.Zone,
+			InstanceID: c.cfg.ServerID,
+			Address:    fmt.Sprintf("localhost:%d", c.grpcPort),
+			LeaseTTL:   c.cfg.Etcd.LeaseTTL,
+		}
+		c.Discovery = etcd.New(compCfg)
+		if err := c.Discovery.Start(); err != nil {
+			return fmt.Errorf("start etcd: %w", err)
+		}
+		tlog.Info("etcd registration succeeded",
+			"serviceID", c.cfg.ServerType+":"+c.cfg.Zone,
+			"instanceID", c.cfg.ServerID,
+			"address", fmt.Sprintf("localhost:%d", c.grpcPort))
 	}
 	c.Cluster = clusterPkg.NewCluster(c.cfg.Cluster, c.cfg.ServerID, c.cfg.ServerType, c.cfg.Zone)
 	c.Cluster.Start()
 	if c.Discovery == nil && c.grpcFunc != nil && c.cfg.GRPC.LogicAddr != "" {
 		go c.grpcFunc(c.cfg.GRPC.LogicAddr)
 	}
-	tlog.Info("etcd service discovery configured", "serverType", c.cfg.ServerType, "serverID", c.cfg.ServerID, "zone", c.cfg.Zone)
+	tlog.Info("cluster component started", "serverType", c.cfg.ServerType, "serverID", c.cfg.ServerID, "zone", c.cfg.Zone)
 	return nil
 }
 

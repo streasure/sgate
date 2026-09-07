@@ -279,10 +279,10 @@ TCP 和 WebSocket 不得并发运行；二者共享同一 gateway、logic proces
 
 | Transport | 连接数 | 标称时长 | 接收消息 | 平均接收 QPS | 认证失败 | 客户端丢弃 |
 |---|---:|---:|---:|---:|---:|---:|
-| TCP | 10 | 10.00 s | 3,568,187 | 356,763 | 4 | 0 |
-| WebSocket | 10 | 10.00 s | 2,522,233 | 252,105 | 0 | 0 |
+| TCP | 10 | 10.00 s | 3,486,555 | 348,621 | 6 | 0 |
+| WebSocket | 10 | 10.00 s | 2,314,021 | 231,335 | 0 | 0 |
 
-TCP 10 连接有 4 个客户端认证失败，为压测工具启动时序导致，非网关容量瓶颈。WebSocket 工具统计写入错误和认证失败，以固定在途上限发送，并报告成功读取的回包数。两种工具均不测量 Pxx 延迟、CPU、内存、NIC 吞吐、丢包、GC pause、TLS/WSS 开销、业务 handler 成本、长稳泄漏或多主机表现。
+TCP 10 连接有 6 个客户端认证失败，为压测工具启动时序导致，非网关容量瓶颈。WebSocket 工具统计写入错误和认证失败，以固定在途上限发送，并报告成功读取的回包数。两种工具均不测量 Pxx 延迟、CPU、内存、NIC 吞吐、丢包、GC pause、TLS/WSS 开销、业务 handler 成本、长稳泄漏或多主机表现。
 
 这些数据仅用于同机 loopback 的协议量级比较，不能作为生产 QPS 承诺，也不能外推到不同主机、网络、payload、并发、logic 实现或业务逻辑。
 
@@ -298,12 +298,12 @@ go test ./...
 go vet ./...
 ```
 
-以上全部通过。
+以上全部通过。WebSocket 单元测试覆盖：Upgrade 握手（正常、半包、缺失字段、超大 header、非 GET、X-Forwarded-For）、畸形帧（未掩码、RSV 扩展、超大消息、控制帧无 FIN、不支持 opcode）、分片（多帧、三帧、超大分片、交织数据帧、文本拒绝、孤立 continuation）、控制帧（Ping/Pong、Close）、编码（小/16bit/64bit 长度、roundtrip）。
 
 ## 已知缺口
 
-- malformed WebSocket frame、fragmentation 与 Upgrade 半包的单元测试仍不完整。
+- malformed WebSocket frame、fragmentation 与 Upgrade 半包的单元测试已补充核心场景，边界 case 可继续扩展。
 - 默认 gnet 版本不支持 TLS listener，因此当前只能部署 TCP 和明文 WebSocket；需要 WSS 时必须升级或替换网络层。
 - logic stream 重连不会恢复断线期间已经丢弃的消息；需要业务幂等或持久化队列保证语义。
 - Group/session 遍历已复制 session 列表后再执行下行写入，不再持有 manager 读锁；大规模 fan-out 仍应先 profiling。
-- `go mod tidy` 被 `cilium/ebpf` 依赖阻塞（要求 Go ≥1.25，当前 Go 1.22.5）。
+- `go mod tidy` 已修复（移除了未使用的 `cilium/ebpf` 依赖）。

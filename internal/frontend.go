@@ -347,6 +347,9 @@ func (g *Gateway) StartServices() {
 	// Stats HTTP server
 	g.StartStatsServer(fmt.Sprintf(":%d", cfg.Port))
 
+	// Start TCP/WS transports
+	g.startTransports(cfg)
+
 	// Prometheus
 	if cfg.Monitoring.Prometheus.Enabled {
 		g.promExporter = prometheus.NewExporter(prometheus.ExporterConfig{
@@ -365,6 +368,33 @@ func pprofAddrFromEnv() string {
 		return addr
 	}
 	return ":6060"
+}
+
+func (g *Gateway) startTransports(cfg *config.Config) {
+	for _, transport := range cfg.Transports {
+		port := transport.Port
+		transportType := transport.Type
+		g.SetTransportType(fmt.Sprintf("%d", port), transportType)
+
+		addr := fmt.Sprintf("tcp://:%d", port)
+		options := []gnet.Option{
+			gnet.WithMulticore(true),
+			gnet.WithReusePort(true),
+			gnet.WithReadBufferCap(262144),
+			gnet.WithWriteBufferCap(262144),
+			gnet.WithSocketRecvBuffer(4 * 1024 * 1024),
+			gnet.WithSocketSendBuffer(4 * 1024 * 1024),
+		}
+		if transportType == "" || transportType == "websocket" {
+			options = append(options, gnet.WithTCPNoDelay(gnet.TCPNoDelay))
+		}
+		tlog.Info("starting gateway transport", "addr", addr, "type", transportType)
+		go func(addr, transportType string) {
+			if err := gnet.Run(g, addr, options...); err != nil {
+				tlog.Error("gateway transport stopped", "addr", addr, "error", err)
+			}
+		}(addr, transportType)
+	}
 }
 
 func (g *Gateway) wsHeartbeatChecker() {

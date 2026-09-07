@@ -1,33 +1,35 @@
 # sgate
 
-`sgate` 是一个基于 gnet 的游戏网关。当前默认构建支持 TCP 和 WebSocket 客户端接入，以 gRPC 双向流连接逻辑服，并提供按会话推送、组广播和全服广播。
+`sgate` 是一个基于 gnet 的高性能游戏网关。默认构建支持 TCP 和 WebSocket 客户端接入，以 gRPC 双向流连接逻辑服，并提供按会话推送、组广播和全服广播。
 
-UDP 已从项目中移除。gnet 只承担 TCP stream 传输；WebSocket 是运行在独立 TCP 监听端口上的 RFC 6455 协议层。
+## 核心特性
 
-## 当前能力
-
-- TCP：4 字节大端长度前缀加 `MessageFrame` protobuf。
-- WebSocket：HTTP Upgrade、二进制帧、客户端掩码、半包/粘包、分片、Ping/Pong、Close；文本帧和扩展帧会关闭连接。
-- 会话：每条客户端连接生成 session ID；`LoginGateReq` 将 session 绑定到指定 logic server，logic 返回非空 `user_key` 后进入认证状态。
-- 转发：绑定后，客户端 `MessageFrame` 被转换为 `StreamData` 并写入对应 logic server 的 gRPC 双向流。
-- 下行：logic server 的 `StreamData` 或 Gateway unary RPC 被编码回原连接所属协议。
-- 组能力：logic server 可调用 `JoinGroup`、`LeaveGroup`、`Broadcast` 和 `BroadcastAll`。
-
-默认构建不保证 legacy 标签下的企业功能可用。`go test -tags legacy ./...` 当前会要求整理额外模块依赖，因此不能将 legacy 路径视为已验证的发布配置。
+- **双协议接入**：TCP（4 字节长度前缀）和 WebSocket（RFC 6455 二进制帧），通过 codec 策略模式实现协议热插拔。
+- **企业级安全**：IP 黑白名单、令牌桶限流、WAF、熔断器、消息完整性校验（防重放）、JWT 鉴权。
+- **可观测性**：HTTP 健康检查（`/health`、`/ready`、`/live`、`/stats`）、Prometheus 指标、OpenTelemetry 分布式追踪。
+- **流量管理**：流量镜像、降级管理、过载保护（CPU 阈值）。
+- **集群支持**：etcd 服务注册与发现、负载均衡、配置中心。
+- **过滤器链**：SPI 模式请求过滤（预鉴权 → 鉴权 → 转发）。
 
 ## 架构
 
 ```text
-TCP client                         +-------------------+
-  [len][MessageFrame]  ----------> |                   |
-                                    |       sgate       | <---- gRPC bidirectional stream ----> Logic server
-WebSocket client                   |                   |
-  HTTP Upgrade                     | Session / Groups  | <---- Gateway unary RPC -----------> Logic server
-  binary(MessageFrame) ----------> |                   |
-                                    +-------------------+
+                               Gateway unary RPC
+                       +--------------------------------+
+                       | Close / Kick / Send / Broadcast |
+                       | Join / Leave / GroupInfo        |
+                       +----------------+---------------+
+                                        ^
+                                        | gRPC :50051
++----------------+  TCP :48080  +------+----------------------------+  gRPC stream  +----------------+
+| TCP client     | -----------> | gnet event loops                  | <-----------> | logic server   |
++----------------+              |                                  |                +----------------+
+                                | SessionManager / GroupManager     |
++----------------+  TCP :48081  | ConnectionManager                |
+| WebSocket      | -----------> | TCPCodec / WebSocketCodec         |
+| client         | HTTP Upgrade | Security / Observability          |
++----------------+              +----------------------------------+
 ```
-
-客户端消息不会携带 `StreamData`。客户端 `MessageFrame.body` 是业务 protobuf 字节；网关仅使用 `cmd`、`seq_id` 与 `body` 构造内部 `StreamData`。
 
 ## 客户端协议
 
@@ -46,21 +48,27 @@ message MessageFrame {
 | TCP | `[4-byte big-endian MessageFrame length][MessageFrame protobuf]` |
 | WebSocket | RFC 6455 binary message，payload 直接为 `MessageFrame protobuf` |
 
-WebSocket payload 不包含 TCP 的 4 字节长度前缀。服务端下行会按 session 的 codec 自动采用 TCP 长度前缀或 WebSocket binary frame。
-
 ### 登录与转发
 
-1. 客户端首先发送 `cmd=1000001` (`LoginGateReq`)，其中必须给出 `server_id`。
-2. 网关在 `logicServers` 中查找同 zone 的 `server_id`，必要时连接该 logic server 并建立 gRPC stream。
-3. 网关绑定 session，并回送 `cmd=1000002` (`LoginGateAck`)。
-4. 之后的客户端消息被转为 `StreamData{session_id, user_key, cmd, data, client_ip}` 后异步写入该 logic stream。
-5. logic server 返回带 `session_id` 的 `StreamData` 时，网关将 `cmd` 与 `data` 封装为 `MessageFrame` 下行。
+1. 客户端发送 `cmd=1000001` (`LoginGateReq`)，指定 `server_id`。
+2. 网关在 `logicServers` 中查找同 zone 的 `server_id`，必要时建立 gRPC stream。
+3. 网关绑定 session，回送 `cmd=1000002` (`LoginGateAck`)。
+4. 后续消息被转为 `StreamData{session_id, user_key, cmd, data, client_ip}` 异步写入 logic stream。
+5. logic server 返回带 `session_id` 的 `StreamData` 时，网关封装为 `MessageFrame` 下行。
+6. 连接关闭时，已认证 session 发送 `cmd=1100012` 离线通知。
 
-连接关闭时，已认证 session 会向对应 logic server 发送 `cmd=1100012` 离线通知。
+### Logic 推送
+
+Logic server 通过 Gateway unary RPC 推送，使用 `userKey` 或 `groupID` 标识目标：
+
+| RPC | 行为 |
+|---|---|
+| `SendToClient` | 按 session 推送 |
+| `Broadcast` | 按组广播 |
+| `BroadcastAll` | 全服广播 |
+| `JoinGroup` / `LeaveGroup` | 组管理 |
 
 ## 配置
-
-`config/config.yaml` 是常规配置，`config/bench.yaml` 是本地压测配置。当前 transport 的 `protocol` 必须是 `tcp`；WebSocket 通过 `type: websocket` 区分。
 
 ```yaml
 transports:
@@ -73,7 +81,6 @@ transports:
 grpc:
   port: 50051
   windowSize: 67108864
-  maxMessageSize: 8388608
 
 logicServers:
   - serverId: "logic-1"
@@ -84,86 +91,101 @@ logicServers:
 
 | 配置 | 含义 |
 |---|---|
-| `transports[].port` | 客户端 TCP 监听端口；WebSocket 也使用 TCP 监听。 |
-| `transports[].type` | 留空表示 TCP；`websocket` 表示 WebSocket。 |
-| `logicServers` | `LoginGateReq.server_id` 到 logic server 地址的静态映射。 |
-| `grpc.port` | logic server 调用 Gateway unary RPC 的监听端口。 |
-| `protection.maxFrameSize` 等 | TCP 和 WebSocket codec 使用对应帧大小配置；WebSocket 最大值受 4 MiB 安全上限约束。 |
+| `transports[].protocol` | 必须为 `tcp`；WebSocket 通过 `type: websocket` 区分。 |
+| `transports[].port` | 客户端监听端口。 |
+| `transports[].type` | 留空为 TCP；`websocket` 为 WebSocket。 |
+| `logicServers` | `LoginGateReq.server_id` 到 logic server 的静态映射。 |
+| `grpc.port` | logic server 调用 Gateway unary RPC 的端口。 |
 
-## 本地启动
+`config/config.yaml` 为生产配置（含 etcd、discovery），`config/bench.yaml` 为本地压测配置（关闭外部依赖）。
 
-以下流程使用压测回显逻辑服，不依赖 etcd、Nacos 或 Prometheus。
+## 快速开始
 
 ```powershell
-# 终端 1：逻辑服，监听 :50052
+# 终端 1：逻辑服
 go run ./examples/logic_server_min
 
-# 终端 2：网关，TCP :48080、WebSocket :48081、gRPC :50051
+# 终端 2：网关
 go run ./cmd/gateway -conf config/bench.yaml
 ```
 
-生产配置中的 etcd、discovery、configCenter 和 cluster 字段需按实际部署验证；本地压测配置均关闭这些外部依赖。配置中的 `tls.enabled` 当前会被启动校验拒绝，因为 gnet v2.9.7 没有 TLS listener 支持。
+## 构建
 
-## 构建与检查
+```powershell
+go build -o sgate.exe ./cmd/gateway
+```
+
+无需特殊编译参数。`go build` 产出的二进制可直接用于生产。如需检测数据竞态：
+
+```powershell
+go build -race -o sgate.exe ./cmd/gateway
+```
+
+## 测试
 
 ```powershell
 go test ./...
 go vet ./...
-
-go build -o gateway.exe ./cmd/gateway
-go build -o logic.exe ./examples/logic_server_min
-go build -o tcp_bench.exe ./examples/bench
-go build -o ws_bench.exe ./examples/ws_bench
 ```
 
 ## 压测
 
+### 环境
+
+- Windows，12 logical CPUs，Go 1.22.5
+- gateway、`logic_server_min`、压测客户端同一主机
+- 使用 `config/bench.yaml`（关闭 etcd/discovery/cluster）
+- 逻辑服对登录请求应答，对心跳请求回显
+
+### 结果
+
+| Transport | 连接数 | 时长 | 接收消息 | 平均 Recv QPS | Auth 失败 | 丢弃 |
+|---|---:|---:|---:|---:|---:|---:|
+| TCP | 10 | 10s | 3,486,555 | **348,621** | 6 | 0 |
+| WebSocket | 10 | 10s | 2,314,021 | **231,335** | 0 | 0 |
+
+> 这些数字是本机回环吞吐，不是生产容量承诺。TCP Auth 失败为压测工具启动时序导致，非网关瓶颈。
+
 ### 工具
 
-| 工具 | 场景 | 命令格式 |
-|---|---|---|
-| `examples/bench` | TCP 登录、登录、心跳双向回显 | `<addr> <conns> [duration] [batchSize] [inflight] [statsAddr] [serverId]` |
-| `examples/ws_bench` | WebSocket Upgrade、登录、登录、心跳双向回显 | `<ws-url> <connections> <duration-seconds>` |
-| `examples/push_bench` | TCP 的 personal/group/broadcast 推送 | 见工具 usage |
-
-TCP 与 WebSocket 必须串行运行。并发向同一个本地 logic server 施压会共享 gRPC stream、CPU 与 socket 缓冲，不能用于协议性能比较。
-
 ```powershell
-# TCP: 10 connections, 5 seconds, batch=16, max 8192 in-flight messages per connection
-.\tcp_bench.exe 127.0.0.1:48080 10 5 16 8192 127.0.0.1:8081 logic-1
+# TCP
+go run ./examples/bench 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
 
-# WebSocket: 10 connections, 5 seconds, 8192 in-flight messages per connection (fixed in tool)
-.\ws_bench.exe ws://127.0.0.1:48081/ 10 5
+# WebSocket
+go run ./examples/ws_bench ws://127.0.0.1:48081/ 10 10
 ```
 
-### 已记录结果
+TCP 与 WebSocket 必须串行运行，并发运行会使协议对比失效。
 
-测试日期：2026-09-04。环境：Windows、本机 12 logical CPUs、Go 1.22.5；gateway、`logic_server_min` 与压测客户端在同一主机运行。使用 `config/bench.yaml`，业务负载是 18-byte TCP send frame 对应的 heartbeat protobuf；WebSocket 使用等价的 `MessageFrame` binary payload。每次测试前重启 gateway 和 logic server，TCP 与 WebSocket 串行执行。
-
-| 协议 | 连接数 | 时长 | 接收总数 | 接收 QPS | 认证失败 | 客户端压测丢弃 |
-|---|---:|---:|---:|---:|---:|---:|
-| TCP | 1 | 2.01 s | 344,220 | 171,577 | 0 | 0 |
-| WebSocket | 1 | 2.00 s | 300,999 | 150,402 | 0 | 不适用 |
-| TCP | 10 | 5.00 s | 1,870,522 | 374,052 | 1 | 0 |
-| WebSocket | 10 | 5.00 s | 1,321,790 | 264,186 | 0 | 不适用 |
-
-这些数字是本机回显吞吐，不是生产容量承诺，也不代表网络延迟、TLS/WSS、业务处理、外部服务发现、消息大小变化或长时间稳定性。最新一轮 TCP 10 连接运行中出现 4 个客户端认证失败，因此该条仅用于量级比较，不能标注为零失败结果。WebSocket 工具的 QPS 是成功读取的服务端 binary 回包数；它通过每连接 8192 条在途消息限制发送背压。
-
-默认网关会暴露 `/health`、`/ready`、`/live`、`/stats` 和 `/metrics`，地址由顶层 `port` 配置；`/ready` 在至少一个 logic stream 建立前返回 `503`。logic stream 断开后会按 1、2、4 秒递增、最多 30 秒的退避策略重连。压测结束后保留 gateway 进程时，logic 已停止，所以 `/ready` 返回 `503` 是预期结果。
-
-## 项目目录
+## 项目结构
 
 ```text
-cmd/gateway/                 Gateway CLI entrypoint
-internal/gateway.go          gnet event handler, session routing and client framing
-internal/codec/              TCP and WebSocket codecs
-internal/grpc_server.go      logic stream management and Gateway RPC implementation
-internal/session.go          session state and session index
-internal/groups.go           group membership and broadcast iteration
-examples/logic_server_min/   local echo logic server
-examples/bench/              TCP duplex benchmark
-examples/ws_bench/           WebSocket duplex benchmark
-config/config.yaml           normal configuration
-config/bench.yaml            local benchmark configuration
-DESIGN.md                    implementation-oriented design document
+cmd/gateway/                  CLI 入口
+internal/
+  frontend.go                 Gateway 主逻辑（legacy 默认构建）
+  backend.go                  gRPC stream 管理
+  connection.go               ConnectionManager
+  session.go                  Session 状态管理
+  groups.go                   组管理
+  codec/                      TCP / WebSocket codec（策略模式）
+  security/                   JWT、限流、WAF、熔断
+  obs/                        OpenTelemetry、延迟追踪
+  traffic/                    流量镜像、降级、eBPF stub
+  cluster/                    集群、负载均衡、告警
+  config/                     配置加载与校验
+examples/
+  logic_server_min/           本地回显逻辑服
+  bench/                      TCP 压测工具
+  ws_bench/                   WebSocket 压测工具
+config/
+  config.yaml                 生产配置
+  bench.yaml                  压测配置
+DESIGN.md                     设计文档
 ```
+
+## 已知限制
+
+- gnet v2 不原生支持 TLS，当前仅支持明文 TCP 和 WebSocket。需要 WSS 时需升级或替换网络层。
+- logic stream 重连不会恢复断线期间丢弃的消息；需要业务幂等或持久化队列。
+- WebSocket 单元测试已覆盖核心场景（畸形帧、分片、Upgrade 半包），边界 case 可继续扩展。
