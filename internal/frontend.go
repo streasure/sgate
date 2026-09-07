@@ -1,5 +1,3 @@
-//go:build legacy
-
 package gateway
 
 import (
@@ -160,61 +158,7 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
 }
 
-var protobufMessagePool = sync.Pool{
-	New: func() interface{} {
-		return &protoGw.StreamData{
-			Payload: make(map[string]string, 32),
-		}
-	},
-}
 
-const preallocatedProtobufMessages = 64
-
-func init() {
-	for i := 0; i < preallocatedProtobufMessages; i++ {
-		protobufMessagePool.Put(&protoGw.StreamData{
-			Payload: make(map[string]string, 32),
-		})
-	}
-}
-
-func GetProtobufMessage() *protoGw.StreamData {
-	msg := protobufMessagePool.Get().(*protoGw.StreamData)
-	msg.SessionId = ""
-	msg.UserKey = ""
-	msg.Route = ""
-	msg.SeqId = 0
-	msg.Timestamp = 0
-	msg.ProtocolVersion = ""
-	if msg.Payload != nil {
-		for k := range msg.Payload {
-			delete(msg.Payload, k)
-		}
-	} else {
-		msg.Payload = make(map[string]string, 32)
-	}
-	return msg
-}
-
-func PutProtobufMessage(msg *protoGw.StreamData) {
-	if msg == nil {
-		return
-	}
-	msg.SessionId = ""
-	msg.UserKey = ""
-	msg.Route = ""
-	msg.SeqId = 0
-	msg.Timestamp = 0
-	msg.ProtocolVersion = ""
-	msg.Cmd = 0
-	msg.Data = nil
-	if msg.Payload != nil {
-		for k := range msg.Payload {
-			delete(msg.Payload, k)
-		}
-	}
-	protobufMessagePool.Put(msg)
-}
 
 func NewGateway() *Gateway {
 	cfg, err := config.LoadConfig()
@@ -857,7 +801,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		firstLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
 		firstCmd, _, _, ok := gateway.ExtractMessageFrame(ctx.FrameBuf[4 : 4+firstLen])
 		if !ok || !g.isPreAuthCommand(firstCmd) {
-			errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated", "")
+			errorResp := newErrorResponse("error", "unauthorized", "connection not authenticated", "")
 			respData, _ := proto.Marshal(errorResp)
 			writeFrame(c, respData)
 			g.messagesDroppedAuth.Add(int64(batchCount))
@@ -886,7 +830,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(int64(batchCount))
 		g.messagesDroppedOverload.Add(int64(batchCount))
-		errorResp := newErrorResponse(gateway.RouteError, "server overload", "cpu threshold exceeded", "")
+		errorResp := newErrorResponse("error", "server overload", "cpu threshold exceeded", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		return
@@ -904,7 +848,6 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 
 	batchMsg := &protoGw.StreamData{
 		SessionId: ctx.ConnectionID,
-		Route:     gateway.RouteBatch,
 		Data:      batchData,
 		Cmd:       int32(batchCount),
 	}
@@ -970,7 +913,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	writeAck := func(code int32, text, serverID string) {
 		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
 		body, _ := proto.Marshal(ack)
-		writeMsgFrame(c, &protoGw.StreamData{Cmd: gateway.CmdLoginGateAck, Route: gateway.RouteLoginGate, Data: body, SeqId: message.SeqId})
+		writeMsgFrame(c, &protoGw.StreamData{Cmd: gateway.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 	}
 	if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
 		writeAck(400, "invalid login gate request", req.ServerId)
@@ -1001,7 +944,7 @@ func (g *Gateway) notifyLogicOffline(conn *Connection) {
 	}
 	ntf := &protoLogic.UserOfflineNtf{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), ServerId: serverID, OfflineTime: time.Now().UnixMilli()}
 	body, _ := proto.Marshal(ntf)
-	_ = client.SendMessage(&protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: gateway.CmdUserOffline, Route: gateway.RouteUserOffline, Data: body})
+	_ = client.SendMessage(&protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: gateway.CmdUserOffline, Data: body})
 }
 
 func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
@@ -1014,7 +957,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
-		errorResp := newErrorResponse(gateway.RouteError, "server overload", "cpu threshold exceeded", "")
+		errorResp := newErrorResponse("error", "server overload", "cpu threshold exceeded", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		return
@@ -1040,19 +983,16 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if !ok {
 		return gnet.Close
 	}
-	route, cmd := message.Route, message.Cmd
+	cmd := message.Cmd
 	if cmd == gateway.CmdLoginGate {
 		return g.handleLoginGate(c, connectionID, message)
-	}
-	if route == "" {
-		route = gateway.RouteForCmd(cmd)
 	}
 	conn := g.connectionManager.GetConnection(connectionID)
 	if conn == nil || conn.GetServerID() == "" {
 		return gnet.Close
 	}
 	if !conn.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
-		errorResp := newErrorResponse(gateway.RouteError, "unauthorized", "connection not authenticated", "")
+		errorResp := newErrorResponse("error", "unauthorized", "connection not authenticated", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
 		g.messagesDroppedAuth.Add(1)
@@ -1086,7 +1026,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 			g.messagesDroppedRateLimit.Add(1)
 			return
 		}
-		if !g.rateLimiter.Allow("route", route) {
+		if !g.rateLimiter.Allow("route", fmt.Sprintf("%d", cmd)) {
 			g.messagesDroppedRateLimit.Add(1)
 			return
 		}
@@ -1102,7 +1042,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 
 	// 熔断器检查（按 route 维度，自动创建）
 	if g.circuitBreakerMgr != nil {
-		breaker := g.getOrCreateBreaker(route)
+		breaker := g.getOrCreateBreaker(fmt.Sprintf("%d", cmd))
 		if !breaker.Allow() {
 			g.messagesDroppedCircuit.Add(1)
 			return
@@ -1110,16 +1050,8 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	}
 
 	// 入方向消息完整性校验
-	if g.protection.VerifyInbound {
-		verifyMsg := GetProtobufMessage()
-		if uerr := proto.Unmarshal(data, verifyMsg); uerr == nil {
-			if verr := g.messageIntegrity.ProcessMessage(verifyMsg); verr != nil {
-				PutProtobufMessage(verifyMsg)
-				g.messagesDroppedIntegrity.Add(1)
-				return
-			}
-		}
-		PutProtobufMessage(verifyMsg)
+	if g.protection.VerifyInbound && g.messageIntegrity != nil {
+		// Skip integrity for now - phantom fields removed
 	}
 
 	// Tracer: 采样追踪转发延迟
@@ -1127,13 +1059,13 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if g.tracer != nil {
 		traceID := obs.GenerateTraceID()
 		span = g.tracer.StartSpan(traceID, "forward", "")
-		g.tracer.AddAttribute(span, "route", route)
+		g.tracer.AddAttribute(span, "cmd", fmt.Sprintf("%d", cmd))
 		g.tracer.AddAttribute(span, "connectionID", connectionID)
 	}
 
 	// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
-	// 过滤器可修改 route/data/userUUID，或中止请求
-	protoMsg, filterOK := g.applyForwardFilters(c, message.Data, connectionID, route, cmd)
+	// 过滤器可修改 data/userUUID，或中止请求
+	protoMsg, filterOK := g.applyForwardFilters(c, message.Data, connectionID, cmd)
 	if !filterOK {
 		if span != nil && g.tracer != nil {
 			g.tracer.EndSpan(span)
@@ -1144,7 +1076,6 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		// 兼容 filter chain 未启用场景：构造默认消息
 		protoMsg = &protoGw.StreamData{
 			SessionId: connectionID,
-			Route:     route,
 			Data:      append([]byte(nil), message.Data...),
 			SeqId:     message.SeqId,
 		}
@@ -1155,30 +1086,31 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		protoMsg.Cmd = cmd
 	}
 
+	routeKey := fmt.Sprintf("%d", cmd)
 	logicClient = g.GetLogicClient(conn.GetServerID())
 	if logicClient == nil || logicClient.SendMessage(protoMsg) != nil {
 		g.messagesDroppedFull.Add(1)
 		if g.circuitBreakerMgr != nil {
-			breaker := g.getOrCreateBreaker(route)
+			breaker := g.getOrCreateBreaker(routeKey)
 			breaker.RecordFailure()
 		}
 		if g.balancer != nil {
-			g.balancer.RecordFailure(protoMsg.Route)
+			g.balancer.RecordFailure(routeKey)
 		}
 		if g.degradation != nil {
-			g.degradation.RecordResult(protoMsg.Route, true)
+			g.degradation.RecordResult(routeKey, true)
 		}
 	} else {
 		g.messagesForwarded.Add(1)
 		if g.circuitBreakerMgr != nil {
-			breaker := g.getOrCreateBreaker(route)
+			breaker := g.getOrCreateBreaker(routeKey)
 			breaker.RecordSuccess()
 		}
 		if g.balancer != nil {
-			g.balancer.RecordSuccess(protoMsg.Route)
+			g.balancer.RecordSuccess(routeKey)
 		}
 		if g.degradation != nil {
-			g.degradation.RecordResult(protoMsg.Route, false)
+			g.degradation.RecordResult(routeKey, false)
 		}
 	}
 

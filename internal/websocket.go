@@ -1,5 +1,3 @@
-//go:build legacy
-
 package gateway
 
 import (
@@ -273,9 +271,9 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
-	route := message.Route
-	if route == "" && message.Cmd == 0 {
-		errorMsg := newErrorResponse("error", "Invalid message format: missing route", "", "")
+	route := fmt.Sprintf("%d", message.Cmd)
+	if message.Cmd == 0 {
+		errorMsg := newErrorResponse("error", "Invalid message format: missing cmd", "", "")
 		responseData := marshalClientError(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
@@ -363,7 +361,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 
 	// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
 	// 与 TCP 路径对齐，避免 WebSocket 绕过 JWT 鉴权
-	protoMsg, fcOK := g.applyForwardFilters(wsConn.Conn, payload, connectionID, route, message.Cmd)
+	protoMsg, fcOK := g.applyForwardFilters(wsConn.Conn, payload, connectionID, message.Cmd)
 	if !fcOK {
 		return nil
 	}
@@ -371,36 +369,16 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		protoMsg = &protoGw.StreamData{
 			SessionId: connectionID,
 			UserKey:   message.UserKey,
-			Route:     route,
 			Cmd:       message.Cmd,
 			Data:      message.Data,
-			Timestamp: message.Timestamp,
 			SeqId:     message.SeqId,
 		}
-		if message.Payload != nil {
-			p := make(map[string]string, len(message.Payload))
-			for k, v := range message.Payload {
-				p[k] = v
-			}
-			protoMsg.Payload = p
-		}
 	} else {
-		// filter chain 已构造 msg，补齐 WebSocket 路径特有的字段
 		if protoMsg.UserKey == "" {
 			protoMsg.UserKey = message.UserKey
 		}
-		if protoMsg.Timestamp == 0 {
-			protoMsg.Timestamp = message.Timestamp
-		}
 		if protoMsg.SeqId == 0 {
 			protoMsg.SeqId = message.SeqId
-		}
-		if protoMsg.Payload == nil && message.Payload != nil {
-			p := make(map[string]string, len(message.Payload))
-			for k, v := range message.Payload {
-				p[k] = v
-			}
-			protoMsg.Payload = p
 		}
 	}
 
@@ -412,10 +390,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 				g.getOrCreateBreaker(route).RecordFailure()
 			}
 			if g.balancer != nil {
-				g.balancer.RecordFailure(protoMsg.Route)
+				g.balancer.RecordFailure(route)
 			}
 			if g.degradation != nil {
-				g.degradation.RecordResult(protoMsg.Route, true)
+				g.degradation.RecordResult(route, true)
 			}
 			errorMsg := newErrorResponse("error", "Failed to send message to logic server", err.Error(), "")
 			responseData := marshalClientError(errorMsg)
@@ -426,10 +404,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			g.getOrCreateBreaker(route).RecordSuccess()
 		}
 		if g.balancer != nil {
-			g.balancer.RecordSuccess(protoMsg.Route)
+			g.balancer.RecordSuccess(route)
 		}
 		if g.degradation != nil {
-			g.degradation.RecordResult(protoMsg.Route, false)
+			g.degradation.RecordResult(route, false)
 		}
 	} else {
 		errorMsg := newErrorResponse("error", "Logic server not connected", "", "")

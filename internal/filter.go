@@ -1,5 +1,3 @@
-//go:build legacy
-
 package gateway
 
 import (
@@ -9,12 +7,11 @@ import (
 )
 
 // buildFilterContext 从原始请求构造过滤器上下文
-func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID, route string, cmd int32) *types.FilterContext {
+func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID string, cmd int32) *types.FilterContext {
 	fc := &types.FilterContext{
 		Ctx:          g.ctx,
 		ConnectionID: connectionID,
 		RemoteIP:     getRemoteIP(c),
-		Route:        route,
 		Cmd:          cmd,
 		Data:         data,
 		Metadata:     make(map[string]string),
@@ -22,13 +19,11 @@ func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID, rou
 	return fc
 }
 
-// applyForwardFilters 在转发前运行全部过滤器
-// 返回 false 表示请求被中止，调用方应丢弃该请求
-func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, route string, cmd int32) (*protoGw.StreamData, bool) {
+func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID string, cmd int32) (*protoGw.StreamData, bool) {
 	if g.filterChain == nil {
 		return nil, true
 	}
-	fcx := g.buildFilterContext(c, data, connectionID, route, cmd)
+	fcx := g.buildFilterContext(c, data, connectionID, cmd)
 	for phase := types.PhasePreAuth; phase <= types.PhaseForward; phase++ {
 		if !g.filterChain.RunByPhase(phase, fcx) {
 			g.messagesDroppedFilterChain.Add(1)
@@ -45,7 +40,6 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID, ro
 	// 构造转发消息（允许过滤器修改 metadata）
 	msg := &protoGw.StreamData{
 		SessionId: connectionID,
-		Route:     route,
 		Data:      append([]byte(nil), data...),
 	}
 	if fcx.UserUUID != "" {

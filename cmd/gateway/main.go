@@ -63,16 +63,9 @@ func main() {
 	}
 	tlog.Info("config loaded", "port", cfg.Port)
 
-	gw := gateway.NewGateway(cfg)
-
-	trnComp := gateway.NewTransportComponent(gw, cfg.Transports)
-	if err := trnComp.Init(); err != nil {
-		tlog.Error("transport init failed", "error", err)
-		os.Exit(1)
-	}
+	gw := gateway.NewGateway()
 
 	gw.StartServices()
-	trnComp.StartTransports()
 
 	tlog.Info("all components started, waiting for signal...")
 
@@ -80,7 +73,5 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	tlog.Info("signal received, shutting down...")
-	trnComp.Destroy()
-	tlog.Info("gateway stopped")
+	tlog.Info("gateway stopping...")
 }

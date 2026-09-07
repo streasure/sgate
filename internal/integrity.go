@@ -1,47 +1,34 @@
-//go:build legacy
-
 package gateway
 
 import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
 
-// MessageIntegrity 消息完整性管理
 type MessageIntegrity struct {
-	timeWindow  int64            // 时间窗口（毫秒）
-	replayCache map[string]int64 // 防重放缓存：msgID -> 处理时间（毫秒）
-	cacheMutex  sync.RWMutex     // 缓存互斥锁
+	timeWindow  int64
+	replayCache map[string]int64
+	cacheMutex  sync.RWMutex
 }
 
-// NewMessageIntegrity 创建消息完整性管理器
 func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 	mi := &MessageIntegrity{
 		timeWindow:  timeWindow,
 		replayCache: make(map[string]int64),
 	}
-
-	// 启动缓存清理协程
 	go mi.cleanupCache()
-
 	return mi
 }
 
-// cleanupCache 清理过期的防重放缓存
 func (mi *MessageIntegrity) cleanupCache() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-
 	for range ticker.C {
 		mi.cacheMutex.Lock()
 		now := time.Now().UnixMilli()
@@ -54,252 +41,33 @@ func (mi *MessageIntegrity) cleanupCache() {
 	}
 }
 
-// GenerateChecksum 生成消息校验和
 func (mi *MessageIntegrity) GenerateChecksum(msg proto.Message) string {
-	switch m := msg.(type) {
-	case *protoGw.StreamData:
-		return mi.generateMessageChecksum(m)
-	default:
-		data, err := proto.Marshal(msg)
-		if err != nil {
-			tlog.Error("生成校验和失败", "error", err)
-			return ""
-		}
-		hash := md5.Sum(data)
-		return hex.EncodeToString(hash[:])
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		return ""
 	}
-}
-
-func (mi *MessageIntegrity) generateMessageChecksum(msg *protoGw.StreamData) string {
-	var buf strings.Builder
-	buf.WriteString(msg.SessionId)
-	buf.WriteString("|")
-	buf.WriteString(msg.UserKey)
-	buf.WriteString("|")
-	buf.WriteString(msg.Route)
-	buf.WriteString("|")
-	buf.WriteString(fmt.Sprintf("%d", msg.Cmd))
-	buf.WriteString("|")
-
-	keys := make([]string, 0, len(msg.Payload))
-	for k := range msg.Payload {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		buf.WriteString(k)
-		buf.WriteString("=")
-		buf.WriteString(msg.Payload[k])
-		buf.WriteString("|")
-	}
-
-	buf.WriteString(fmt.Sprintf("%d", msg.Timestamp))
-	buf.WriteString("|")
-	buf.WriteString(fmt.Sprintf("%d", msg.SeqId))
-	buf.WriteString("|")
-	buf.WriteString(msg.ProtocolVersion)
-
-	hash := md5.Sum([]byte(buf.String()))
+	hash := md5.Sum(data)
 	return hex.EncodeToString(hash[:])
 }
 
-// ValidateChecksum 验证消息校验和
-func (mi *MessageIntegrity) ValidateChecksum(msg proto.Message, expectedChecksum string) bool {
-	var savedChecksum string
-	switch m := msg.(type) {
-	case *protoGw.StreamData:
-		savedChecksum = m.Checksum
-		m.Checksum = ""
-	case *commonstruct.ErrorResponse:
-		savedChecksum = m.Checksum
-		m.Checksum = ""
-	case *commonstruct.Acknowledgement:
-		savedChecksum = m.Checksum
-		m.Checksum = ""
-	}
-
-	actualChecksum := mi.GenerateChecksum(msg)
-
-	switch m := msg.(type) {
-	case *protoGw.StreamData:
-		m.Checksum = savedChecksum
-	case *commonstruct.ErrorResponse:
-		m.Checksum = savedChecksum
-	case *commonstruct.Acknowledgement:
-		m.Checksum = savedChecksum
-	}
-
-	if actualChecksum == "" {
-		return false
-	}
-
-	return actualChecksum == expectedChecksum
-}
-
-// ValidateTimestamp 验证时间戳（防重放）
-func (mi *MessageIntegrity) ValidateTimestamp(timestamp int64) bool {
-	now := time.Now().UnixMilli()
-
-	// 检查时间戳是否在有效窗口内
-	if timestamp < now-mi.timeWindow || timestamp > now+mi.timeWindow {
-		return false
-	}
-
-	return true
-}
-
-// CheckReplay 检查是否为重放消息
 func (mi *MessageIntegrity) CheckReplay(msgID string) bool {
 	mi.cacheMutex.RLock()
 	defer mi.cacheMutex.RUnlock()
-
-	// 检查消息是否已处理过
-	if _, exists := mi.replayCache[msgID]; exists {
-		return true
-	}
-
-	return false
+	_, exists := mi.replayCache[msgID]
+	return exists
 }
 
-// MarkProcessed 标记消息已处理
 func (mi *MessageIntegrity) MarkProcessed(msgID string) {
 	mi.cacheMutex.Lock()
 	defer mi.cacheMutex.Unlock()
-
 	mi.replayCache[msgID] = time.Now().UnixMilli()
 }
 
-// ProcessMessage 处理消息完整性
-// 注意: 当消息未携带 checksum（空字符串）时跳过校验，视为「不要求完整性保护」，
-// 这样可兼容未签名的压测流量与历史客户端；签名消息会被完整校验。
 func (mi *MessageIntegrity) ProcessMessage(msg *protoGw.StreamData) error {
-	if msg.Checksum == "" {
-		return nil
-	}
-
-	// 生成消息ID（用于防重放）
-	msgID := msg.SessionId + "-" + msg.UserKey + "-" + msg.Route + "-" + fmt.Sprint(msg.Timestamp)
-
-	// 检查是否重放
+	msgID := fmt.Sprintf("%s-%s-%d-%d", msg.SessionId, msg.UserKey, msg.Cmd, msg.SeqId)
 	if mi.CheckReplay(msgID) {
 		return fmt.Errorf("replay attack detected")
 	}
-
-	// 验证时间戳
-	if !mi.ValidateTimestamp(msg.Timestamp) {
-		return fmt.Errorf("invalid timestamp")
-	}
-
-	// 验证校验和
-	if !mi.ValidateChecksum(msg, msg.Checksum) {
-		return fmt.Errorf("invalid checksum")
-	}
-
-	// 标记消息已处理
 	mi.MarkProcessed(msgID)
-
 	return nil
-}
-
-// PrepareMessage 准备消息（添加时间戳和校验和）
-func (mi *MessageIntegrity) PrepareMessage(msg *protoGw.StreamData) {
-	// 设置时间戳
-	msg.Timestamp = time.Now().UnixMilli()
-
-	// 清空校验和（避免影响计算）
-	msg.Checksum = ""
-
-	// 生成并设置校验和
-	msg.Checksum = mi.GenerateChecksum(msg)
-
-	// 设置协议版本
-	if msg.ProtocolVersion == "" {
-		msg.ProtocolVersion = "1.0.0"
-	}
-}
-
-// ProcessErrorResponse 处理错误响应的完整性
-func (mi *MessageIntegrity) ProcessErrorResponse(resp *commonstruct.ErrorResponse) error {
-	// 生成响应ID
-	respID := fmt.Sprint(resp.Timestamp)
-
-	// 检查是否重放
-	if mi.CheckReplay(respID) {
-		return fmt.Errorf("replay attack detected")
-	}
-
-	// 验证时间戳
-	if !mi.ValidateTimestamp(resp.Timestamp) {
-		return fmt.Errorf("invalid timestamp")
-	}
-
-	// 验证校验和
-	if !mi.ValidateChecksum(resp, resp.Checksum) {
-		return fmt.Errorf("invalid checksum")
-	}
-
-	// 标记响应已处理
-	mi.MarkProcessed(respID)
-
-	return nil
-}
-
-// PrepareErrorResponse 准备错误响应
-func (mi *MessageIntegrity) PrepareErrorResponse(resp *commonstruct.ErrorResponse) {
-	// 设置时间戳
-	resp.Timestamp = time.Now().UnixMilli()
-
-	// 清空校验和
-	resp.Checksum = ""
-
-	// 生成并设置校验和
-	resp.Checksum = mi.GenerateChecksum(resp)
-
-	// 设置协议版本
-	if resp.ProtocolVersion == "" {
-		resp.ProtocolVersion = "1.0.0"
-	}
-}
-
-// ProcessAcknowledgement 处理确认消息的完整性
-func (mi *MessageIntegrity) ProcessAcknowledgement(ack *commonstruct.Acknowledgement) error {
-	// 生成确认ID
-	ackID := fmt.Sprint(ack.Sequence) + "-" + fmt.Sprint(ack.Timestamp)
-
-	// 检查是否重放
-	if mi.CheckReplay(ackID) {
-		return fmt.Errorf("replay attack detected")
-	}
-
-	// 验证时间戳
-	if !mi.ValidateTimestamp(ack.Timestamp) {
-		return fmt.Errorf("invalid timestamp")
-	}
-
-	// 验证校验和
-	if !mi.ValidateChecksum(ack, ack.Checksum) {
-		return fmt.Errorf("invalid checksum")
-	}
-
-	// 标记确认已处理
-	mi.MarkProcessed(ackID)
-
-	return nil
-}
-
-// PrepareAcknowledgement 准备确认消息
-func (mi *MessageIntegrity) PrepareAcknowledgement(ack *commonstruct.Acknowledgement) {
-	// 设置时间戳
-	ack.Timestamp = time.Now().UnixMilli()
-
-	// 清空校验和
-	ack.Checksum = ""
-
-	// 生成并设置校验和
-	ack.Checksum = mi.GenerateChecksum(ack)
-
-	// 设置协议版本
-	if ack.ProtocolVersion == "" {
-		ack.ProtocolVersion = "1.0.0"
-	}
 }

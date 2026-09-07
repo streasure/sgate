@@ -1,5 +1,3 @@
-//go:build legacy
-
 package gateway
 
 import (
@@ -31,21 +29,21 @@ import (
 type LogicConnectionState int32
 
 const (
-	StateDisconnected LogicConnectionState = iota
-	StateConnecting
-	StateConnected
-	StateReconnecting
+	LogicStateDisconnected LogicConnectionState = iota
+	LogicStateConnecting
+	LogicStateConnected
+	LogicStateReconnecting
 )
 
 func (s LogicConnectionState) String() string {
 	switch s {
-	case StateDisconnected:
+	case LogicStateDisconnected:
 		return "Disconnected"
-	case StateConnecting:
+	case LogicStateConnecting:
 		return "Connecting"
-	case StateConnected:
+	case LogicStateConnected:
 		return "Connected"
-	case StateReconnecting:
+	case LogicStateReconnecting:
 		return "Reconnecting"
 	default:
 		return "Unknown"
@@ -131,7 +129,7 @@ func NewStreamManager(shardCount int, sendChannelSize int) *StreamManager {
 	return sm
 }
 
-// writeCoalescer 跨多个 RouteBatch 累积反向推送数据，按连接合并后一次性 flush。
+// writeCoalescer 按连接合并后一次性 flush。
 // 目的：减少 gnet AsyncWrite 调用次数。每次 AsyncWrite 向 event-loop channel 发送一个 task，
 // 在 Windows 上 channel send 竞争 runtime 互斥锁（runtime.lock2），94 个 receiveMessages
 // goroutine 同时发送时 lock 竞争达 74% CPU。通过跨 batch 合并，将 N 次 SendMulti
@@ -304,23 +302,6 @@ func (s *StreamShard) startSendLoop() {
 			return
 		}
 
-		// Pre-batched RouteBatch messages from handleBatchTraffic: send directly
-		// to avoid double-batching overhead. These messages already contain
-		// multiple frames packed into Data with ConnectionId on the outer message.
-		// This is the hot path for high-throughput forwarding (gnet-level batching).
-		if msg.Route == gateway.RouteBatch {
-			s.mu.Lock()
-			stream := s.stream
-			s.mu.Unlock()
-			if stream != nil {
-				if err := safeStreamSend(stream, msg); err != nil {
-					tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
-					s.markShardBroken()
-				}
-			}
-			continue
-		}
-
 		batch = batch[:0]
 		batch = append(batch, msg)
 		drained := true
@@ -358,7 +339,7 @@ func (s *StreamShard) startSendLoop() {
 				return
 			}
 
-			// Batch path: serialize multiple messages into a single RouteBatch
+			// Batch path: serialize multiple messages into a single batch message
 			// to reduce gRPC stream.Send calls by up to maxBatchCount times.
 			// Format: [4-byte payloadLen][payload] repeated
 			bufPtr := marshalBufPool.Get().(*[]byte)
@@ -377,9 +358,8 @@ func (s *StreamShard) startSendLoop() {
 			}
 			if count > 0 {
 				batchMsg := &protoGw.StreamData{
-					Route: gateway.RouteBatch,
-					Data:  buf,
-					Cmd:   int32(count),
+					Data: buf,
+					Cmd:  int32(count),
 				}
 				if err := safeStreamSend(stream, batchMsg); err != nil {
 					tlog.Warn("shard batch send error, isolating shard", "shard", s.index, "error", err)
@@ -450,7 +430,7 @@ type LogicClient struct {
 
 func NewLogicClient(gateway GatewayInterface) *LogicClient {
 	return &LogicClient{
-		state:             int32(StateDisconnected),
+		state:             int32(LogicStateDisconnected),
 		reconnectConfig:   DefaultReconnectConfig,
 		healthCheckConfig: DefaultHealthCheckConfig,
 		streamManager:     NewStreamManager(0, 0),
@@ -505,10 +485,10 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	var oldState LogicConnectionState
 	if isReconnect {
 		oldState = LogicConnectionState(atomic.LoadInt32(&lc.state))
-		atomic.StoreInt32(&lc.state, int32(StateReconnecting))
+		atomic.StoreInt32(&lc.state, int32(LogicStateReconnecting))
 	} else {
 		oldState = LogicConnectionState(atomic.LoadInt32(&lc.state))
-		atomic.StoreInt32(&lc.state, int32(StateConnecting))
+		atomic.StoreInt32(&lc.state, int32(LogicStateConnecting))
 	}
 
 	if lc.conn != nil {
@@ -547,7 +527,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	)
 	if err != nil {
 		tlog.Error("grpc.Dial failed", "error", err, "address", lc.address)
-		lc.setState(StateDisconnected)
+		lc.setState(LogicStateDisconnected)
 		return err
 	}
 
@@ -556,7 +536,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	if lc.closing {
 		lc.mu.RUnlock()
 		conn.Close()
-		lc.setState(StateDisconnected)
+		lc.setState(LogicStateDisconnected)
 		return ErrConnectionClosing
 	}
 	lc.mu.RUnlock()
@@ -656,13 +636,13 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			lc.client = nil
 		}
 		lc.mu.Unlock()
-		lc.setState(StateDisconnected)
+		lc.setState(LogicStateDisconnected)
 		return firstErr
 	}
 
 	tlog.Info("all stream shards established", "count", shardCount)
 
-	lc.setState(StateConnected)
+	lc.setState(LogicStateConnected)
 
 	for i := 0; i < shardCount; i++ {
 		lc.streamManager.shards[i].lc = lc
@@ -710,7 +690,7 @@ func (lc *LogicClient) Close() {
 	}
 	lc.mu.Unlock()
 
-	lc.setState(StateDisconnected)
+	lc.setState(LogicStateDisconnected)
 
 	if lc.healthChecker != nil {
 		lc.healthChecker.Stop()
@@ -743,30 +723,11 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	s.mu.Unlock()
 
 	if stream == nil {
-		// 分片已被 sendLoop 隔离（stream 断开）：必须触发重连，否则该分片永久失效
 		if !lc.closing {
 			s.markShardBroken()
 		}
 		return
 	}
-
-	// 每个 shard 维护一个 writeCoalescer，跨多个 RouteBatch 累积反向推送数据。
-	// flush 时每个连接只调用一次 SendMulti（= 一次 gnet AsyncWrite = 一次 event-loop channel send），
-	// 将 channel send 次数从 ~250/batch 降至 ~M/flush（M=不同连接数），减少 runtime lock 竞争。
-	var wc *writeCoalescer
-	if lc.gateway != nil {
-		wc = newWriteCoalescer(lc.gateway.GetConnectionManager())
-	}
-
-	// 退出时 flush 残留数据
-	defer func() {
-		if wc != nil && wc.count > 0 {
-			pushed := wc.flush()
-			if pushed > 0 && lc.gateway != nil {
-				lc.gateway.AddPushedToClient(pushed)
-			}
-		}
-	}()
 
 	for {
 		select {
@@ -792,244 +753,41 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			return
 		}
 
-		// 批量消息：解包逐条分发（logic->sgate 反向链路优化）
-		// 两种格式：
-		//   single-conn (msg.SessionId 非空): Data = [4字节 payloadLen][payload] 重复
-		//     → 只需一次 GetConnection，所有 payload 发送到同一连接
-		//   multi-conn (msg.SessionId 为空): Data = [2字节 connIDLen][connID][4字节 payloadLen][payload] 重复
-		//     → 每条消息单独查找连接
-		if lc.gateway != nil && msg.Route == gateway.RouteBatch {
-			data := msg.Data
-
-			if msg.SessionId != "" {
-				// single-conn 快速路径：data 已是 [4字节 len][payload] 格式，直接追加到 coalescer
-				if !wc.addSingle(msg.SessionId, data, int(msg.Cmd)) {
-					lc.gateway.AddPushDroppedNoConn(int64(msg.Cmd))
+		if lc.gateway != nil && msg.SessionId != "" {
+			conn := lc.gateway.GetConnectionManager().GetConnection(msg.SessionId)
+			if conn != nil {
+				if msg.UserKey != "" {
+					lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
+				}
+				responseData, err := marshalClientMessage(msg)
+				if err == nil {
+					conn.Send(responseData)
+					lc.gateway.AddPushedToClient(1)
 				}
 			} else {
-				// multi-conn 路径：逐条解析 connID，加入 coalescer（不再逐条 flush）
-				var dropped int64
-				for len(data) >= 6 {
-					connIDLen := int(binary.BigEndian.Uint16(data[:2]))
-					if connIDLen == 0 || len(data) < 2+connIDLen+4 {
-						break
-					}
-					connID := string(data[2 : 2+connIDLen])
-					payloadLen := int(binary.BigEndian.Uint32(data[2+connIDLen : 6+connIDLen]))
-					if len(data) < 6+connIDLen+payloadLen {
-						break
-					}
-					payload := data[6+connIDLen : 6+connIDLen+payloadLen]
-					data = data[6+connIDLen+payloadLen:]
-
-					if !wc.addMulti(connID, payload) {
-						dropped++
-					}
-				}
-				if dropped > 0 {
-					lc.gateway.AddPushDroppedNoConn(dropped)
-				}
-			}
-
-			// 累积到阈值或时间到达时 flush，减少 AsyncWrite 调用
-			if wc.shouldFlush() {
-				pushed := wc.flush()
-				if pushed > 0 {
-					lc.gateway.AddPushedToClient(pushed)
-				}
-			}
-			continue
-		}
-
-		// 非 RouteBatch 消息：先 flush 累积数据，保持消息顺序
-		if wc.count > 0 {
-			pushed := wc.flush()
-			if pushed > 0 {
-				lc.gateway.AddPushedToClient(pushed)
+				lc.gateway.AddPushDroppedNoConn(1)
 			}
 		}
-		lc.handleReceivedMessage(msg)
 	}
 }
 
-// handleReceivedMessage 处理单条来自 logic 的消息（正向转发或 server.* 路由）
+// handleReceivedMessage 处理单条来自 logic 的消息，转发到对应客户端连接
 func (lc *LogicClient) handleReceivedMessage(msg *protoGw.StreamData) {
-	if lc.gateway == nil {
-		return
-	}
-	// 快速路径：非 server.* 路由直接序列化转发，避免遍历所有 RouteServer* 分支
-	route := msg.Route
-	if len(route) < 7 || route[:7] != "server." {
-		if msg.SessionId == "" {
-			tlog.Warn("received message with empty ConnectionId", "route", route)
-			return
-		}
-		conn := lc.gateway.GetConnectionManager().GetConnection(msg.SessionId)
-		if conn == nil {
-			lc.gateway.AddPushDroppedNoConn(1)
-			return
-		}
-		// Authentication is owned by logic. Any successful response carrying a
-		// user key promotes the connection without naming a login route here.
-		if msg.UserKey != "" {
-			lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
-			tlog.Debug("logic response updated connection userUUID", "connectionID", msg.SessionId, "userUUID", msg.UserKey)
-		}
-		// 注意: 不能使用 pooled buffer，因为 gnet Writev 可能异步传递 slice 引用
-		responseData, err := marshalClientMessage(msg)
-		if err == nil {
-			conn.Send(responseData)
-			lc.gateway.AddPushedToClient(1)
-		}
-		return
-	}
-
-	// server.* 路由：以下指令不需要 ConnectionId（按 Payload 中的 key 定位目标）
-	if route == gateway.RouteServerBroadcast {
-		// 预序列化：避免 Broadcast 内部为每个连接重复 proto.Marshal
-		pushMsg := &protoGw.StreamData{
-			Route:   "broadcast",
-			Payload: msg.Payload,
-		}
-		if data, err := marshalClientMessage(pushMsg); err == nil {
-			lc.gateway.GetConnectionManager().BroadcastBytes(data)
-		}
-		return
-	}
-
-	if route == gateway.RouteServerSendToUser {
-		userUUID := msg.Payload["userUUID"]
-		if userUUID != "" {
-			responseData, _ := marshalClientMessage(&protoGw.StreamData{
-				Route:   msg.Payload["route"],
-				Payload: msg.Payload,
-			})
-			if responseData != nil {
-				lc.gateway.GetConnectionManager().SendToUser(userUUID, responseData)
-			}
-		}
-		return
-	}
-
-	if route == gateway.RouteServerSendToGroup {
-		groupID := msg.Payload["groupID"]
-		if groupID != "" {
-			// 预序列化：避免 SendToGroup 内部为每个成员重复 proto.Marshal
-			sendMsg := &protoGw.StreamData{
-				Route:   msg.Payload["route"],
-				Payload: msg.Payload,
-			}
-			if data, err := marshalClientMessage(sendMsg); err == nil {
-				lc.gateway.GetConnectionManager().SendToGroupBytes(groupID, data)
-			}
-		}
-		return
-	}
-
-	if route == gateway.RouteServerJoinGroupByUser {
-		groupID := msg.Payload["groupID"]
-		serverID := msg.Payload["serverID"]
-		userUUID := msg.Payload["userUUID"]
-		if groupID != "" && serverID != "" && userUUID != "" {
-			lc.gateway.GetConnectionManager().AddUserToGroup(groupID, serverID, userUUID)
-		}
-		return
-	}
-
-	if route == gateway.RouteServerLeaveGroupByUser {
-		groupID := msg.Payload["groupID"]
-		serverID := msg.Payload["serverID"]
-		userUUID := msg.Payload["userUUID"]
-		if groupID != "" && serverID != "" && userUUID != "" {
-			lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, serverID, userUUID)
-		}
-		return
-	}
-
-	if route == gateway.RouteServerCreateGroup {
-		groupID := msg.Payload["groupID"]
-		groupName := msg.Payload["groupName"]
-		if groupID != "" {
-			lc.gateway.GetConnectionManager().CreateGroup(groupID, groupName)
-		}
-		return
-	}
-
-	if route == gateway.RouteServerDeleteGroup {
-		groupID := msg.Payload["groupID"]
-		if groupID != "" {
-			lc.gateway.GetConnectionManager().DeleteGroup(groupID)
-		}
-		return
-	}
-
-	if route == gateway.RouteServerGetGroupInfo {
-		groupID := msg.Payload["groupID"]
-		if groupID != "" {
-			memberCount := lc.gateway.GetConnectionManager().GetGroupMemberCount(groupID)
-			groupName := lc.gateway.GetConnectionManager().GetGroupName(groupID)
-			users := lc.gateway.GetConnectionManager().GetGroupUsers(groupID)
-			tlog.Debug("group info requested", "groupID", groupID, "groupName", groupName, "memberCount", memberCount, "users", users)
-		}
-		return
-	}
-
-	// 以下 server.* 指令需要 ConnectionId
-	if msg.SessionId == "" {
-		tlog.Warn("server.* message requires ConnectionId", "route", route)
+	if lc.gateway == nil || msg.SessionId == "" {
 		return
 	}
 	conn := lc.gateway.GetConnectionManager().GetConnection(msg.SessionId)
 	if conn == nil {
+		lc.gateway.AddPushDroppedNoConn(1)
 		return
 	}
-
-	if route == gateway.RouteServerKick {
-		reason := ""
-		if msg.Payload != nil {
-			reason = msg.Payload["reason"]
-		}
-		responseData, _ := marshalClientMessage(msg)
+	if msg.UserKey != "" {
+		lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
+	}
+	responseData, err := marshalClientMessage(msg)
+	if err == nil {
 		conn.Send(responseData)
-		tlog.Info("kicking connection by logic server", "connectionID", msg.SessionId, "reason", reason)
-		if conn.Conn != nil {
-			conn.Conn.Close()
-		} else {
-			lc.gateway.GetConnectionManager().RemoveConnection(msg.SessionId)
-		}
-	} else if route == gateway.RouteServerJoinGroup {
-		groupID := msg.Payload["groupID"]
-		connID := msg.SessionId
-		if groupID != "" && connID != "" {
-			conn := lc.gateway.GetConnectionManager().GetConnection(connID)
-			if conn != nil {
-				serverID := conn.ServerID
-				userUUID := conn.UserUUID
-				lc.gateway.GetConnectionManager().AddUserToGroup(groupID, serverID, userUUID)
-				tlog.Debug("connection joined group by logic server", "connectionID", connID, "groupID", groupID)
-			}
-		}
-		conn := lc.gateway.GetConnectionManager().GetConnection(connID)
-		if conn != nil {
-			responseData, _ := marshalClientMessage(msg)
-			conn.Send(responseData)
-		}
-	} else if route == gateway.RouteServerLeaveGroup {
-		groupID := msg.Payload["groupID"]
-		connID := msg.SessionId
-		if groupID != "" && connID != "" {
-			conn := lc.gateway.GetConnectionManager().GetConnection(connID)
-			if conn != nil {
-				serverID := conn.ServerID
-				userUUID := conn.UserUUID
-				lc.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, serverID, userUUID)
-			}
-		}
-	} else {
-		responseData, err := marshalClientMessage(msg)
-		if err == nil {
-			conn.Send(responseData)
-		}
+		lc.gateway.AddPushedToClient(1)
 	}
 }
 
@@ -1043,11 +801,11 @@ func (lc *LogicClient) handleDisconnection() {
 		return
 	}
 
-	if state == StateConnecting || state == StateReconnecting {
+	if state == LogicStateConnecting || state == LogicStateReconnecting {
 		return
 	}
 
-	lc.setState(StateDisconnected)
+	lc.setState(LogicStateDisconnected)
 
 	if lc.reconnectManager != nil {
 		lc.reconnectManager.NotifyDisconnection()
@@ -1068,7 +826,7 @@ func (lc *LogicClient) handleDisconnection() {
 
 func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 	// Fast path: check state atomically without lock
-	if lc.getState() != StateConnected {
+	if lc.getState() != LogicStateConnected {
 		lc.mu.RLock()
 		closing := lc.closing
 		lc.mu.RUnlock()
@@ -1103,7 +861,7 @@ func (lc *LogicClient) SendMessageDirect(msg *protoGw.StreamData) error {
 		return ErrConnectionClosing
 	}
 
-	if state != StateConnected {
+	if state != LogicStateConnected {
 		return ErrNotConnected
 	}
 
@@ -1112,7 +870,7 @@ func (lc *LogicClient) SendMessageDirect(msg *protoGw.StreamData) error {
 }
 
 func (lc *LogicClient) IsConnected() bool {
-	return lc.getState() == StateConnected
+	return lc.getState() == LogicStateConnected
 }
 
 func (lc *LogicClient) GetState() LogicConnectionState {
@@ -1171,7 +929,7 @@ func (hc *HealthChecker) doCheck() {
 	closing := hc.lc.closing
 	hc.lc.mu.RUnlock()
 
-	if closing || state != StateConnected {
+	if closing || state != LogicStateConnected {
 		return
 	}
 
@@ -1181,8 +939,7 @@ func (hc *HealthChecker) doCheck() {
 	}
 
 	pingMsg := &protoGw.StreamData{
-		Route:   gateway.RoutePing,
-		Payload: map[string]string{"type": "health_check"},
+		Cmd: int32(gateway.CmdHeartbeatReq),
 	}
 
 	err := hc.lc.SendMessageDirect(pingMsg)
@@ -1343,7 +1100,7 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 			return
 		}
 
-		if state == StateConnected {
+		if state == LogicStateConnected {
 			err := lc.SendMessageDirect(msg)
 			if err != nil {
 				mq.Enqueue(msg)
@@ -1397,12 +1154,7 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 				stream.Send(protoMsg)
 			} else if errorMsg, ok := response.(*commonstruct.ErrorResponse); ok {
 				responseMsg := &protoGw.StreamData{
-					Route: gateway.RouteError,
-					Payload: map[string]string{
-						"message": errorMsg.Error.Message,
-						"code":    errorMsg.Error.Code,
-						"details": errorMsg.Error.Details,
-					},
+					Data: []byte(errorMsg.Error.Message),
 				}
 				stream.Send(responseMsg)
 			}
@@ -1428,12 +1180,7 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (
 			response = protoMsg
 		} else if errorMsg, ok := resp.(*commonstruct.ErrorResponse); ok {
 			response = &protoGw.StreamData{
-				Route: gateway.RouteError,
-				Payload: map[string]string{
-					"message": errorMsg.Error.Message,
-					"code":    errorMsg.Error.Code,
-					"details": errorMsg.Error.Details,
-				},
+				Data: []byte(errorMsg.Error.Message),
 			}
 		}
 	}, grpcCtx)
@@ -1443,11 +1190,11 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (
 }
 
 func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamData, callback func(interface{}), ctx map[string]interface{}) {
-	if msg.Route == "" {
-		callback(newErrorResponse("error", "Missing route", "", ""))
+	if msg.Cmd == 0 {
+		callback(newErrorResponse("error", "Missing cmd", "", ""))
 		return
 	}
-	callback(newErrorResponse("error", "Gateway does not handle routes locally, forward to logic server", "", ""))
+	callback(newErrorResponse("error", "Gateway does not handle commands locally, forward to logic server", "", ""))
 }
 
 func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSize int) (*grpc.Server, error) {

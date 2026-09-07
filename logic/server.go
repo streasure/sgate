@@ -1,5 +1,3 @@
-//go:build legacy
-
 package logic
 
 import (
@@ -8,9 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	enums "github.com/streasure/protocol/enums"
 	protocol "github.com/streasure/protocol/gateway"
-	logicproto "github.com/streasure/protocol/logic"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -294,16 +290,7 @@ func (s *Server) Offline(sessionID, userKey string) {
 	}
 }
 
-func (s *Server) sendControl(cmd enums.Cmd, message proto.Message) int {
-	data, err := proto.Marshal(message)
-	if err != nil {
-		tlog.Error("failed to encode control message", "cmd", cmd, "error", err)
-		return 0
-	}
-	return s.sendRawControl(cmd, data)
-}
-
-func (s *Server) sendRawControl(cmd enums.Cmd, data []byte) int {
+func (s *Server) sendRawControl(cmd int32, data []byte) int {
 	count := 0
 	sent := make(map[string]struct{})
 	s.streams.Range(func(_, value any) bool {
@@ -311,7 +298,7 @@ func (s *Server) sendRawControl(cmd enums.Cmd, data []byte) int {
 		if _, ok := sent[conn.gatewayID]; ok {
 			return true
 		}
-		if conn.Send(&protocol.StreamData{Cmd: int32(cmd), Data: data}) == nil {
+		if conn.Send(&protocol.StreamData{Cmd: cmd, Data: data}) == nil {
 			sent[conn.gatewayID] = struct{}{}
 			count++
 		}
@@ -320,54 +307,44 @@ func (s *Server) sendRawControl(cmd enums.Cmd, data []byte) int {
 	return count
 }
 
-// SendToGroup asks Gateway instances to fan out targetCmd and data to a group.
+// SendToGroup sends a control message through the stream for gateway fan-out.
 func (s *Server) SendToGroup(groupID string, targetCmd int32, data []byte) int {
-	return s.sendControl(enums.Cmd_CMD_SEND_TO_GROUP_REQ, &logicproto.SendToGroupReq{GroupId: groupID, TargetCmd: targetCmd, Data: data})
+	controlData := mustMarshal(&protocol.StreamData{
+		Cmd:  targetCmd,
+		Data: data,
+	})
+	return s.sendRawControl(int32(targetCmd), controlData)
 }
 
-// Broadcast asks Gateway instances to fan out targetCmd and data to all clients.
+// Broadcast sends a raw control message to all gateways.
 func (s *Server) Broadcast(targetCmd int32, data []byte) int {
-	return s.sendControl(enums.Cmd_CMD_BROADCAST_REQ, &logicproto.BroadcastReq{TargetCmd: targetCmd, Data: data})
+	return s.sendRawControl(int32(targetCmd), data)
 }
 
-// SendToUser asks Gateway instances to send targetCmd and data to a user key.
+// SendToUser finds the session by userKey and sends directly.
 func (s *Server) SendToUser(userKey string, targetCmd int32, data []byte) int {
-	return s.sendControl(enums.Cmd_CMD_SEND_TO_USER_REQ, &logicproto.SendToUserReq{UserKey: userKey, TargetCmd: targetCmd, Data: data})
+	if _, ok := s.GetConnectionIDByUser(userKey); ok {
+		return s.sendRawControl(int32(targetCmd), data)
+	}
+	return 0
 }
 
-// Kick accepts either serialized logic.KickNtf bytes or targetCmd and data.
+// Kick sends a kick notification through the stream.
 func (s *Server) Kick(sessionID string, args ...any) int {
+	var targetCmd int32
+	var data []byte
 	if len(args) == 2 {
-		targetCmd, ok := args[0].(int32)
-		data, dataOK := args[1].([]byte)
-		if ok && dataOK {
-			return s.sendRawControl(enums.Cmd_CMD_KICK_NTF, mustMarshal(&logicproto.KickNtf{
-				SessionId: sessionID,
-				Code:      targetCmd,
-				Message:   string(data),
-			}))
+		if cmd, ok := args[0].(int32); ok {
+			targetCmd = cmd
+		}
+		if d, ok := args[1].([]byte); ok {
+			data = d
 		}
 	}
-	if len(args) != 1 {
-		return 0
+	if targetCmd == 0 {
+		targetCmd = 1100012 // CmdUserOffline
 	}
-	kickNtf, ok := args[0].([]byte)
-	if !ok {
-		return 0
-	}
-	notification := &logicproto.KickNtf{}
-	if len(kickNtf) > 0 {
-		if err := proto.Unmarshal(kickNtf, notification); err != nil {
-			tlog.Warn("invalid KickNtf", "sessionID", sessionID, "error", err)
-			return 0
-		}
-	}
-	notification.SessionId = sessionID
-	data, err := proto.Marshal(notification)
-	if err != nil {
-		return 0
-	}
-	return s.sendRawControl(enums.Cmd_CMD_KICK_NTF, data)
+	return s.sendRawControl(targetCmd, data)
 }
 
 func mustMarshal(message proto.Message) []byte {

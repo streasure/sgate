@@ -17,11 +17,13 @@ require (
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect
 	github.com/coreos/go-semver v0.3.0 // indirect
+	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/panjf2000/ants/v2 v2.11.3 // indirect
 	github.com/streasure/treasure-slog v1.0.15 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
+	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.18 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.18 // indirect
 	go.etcd.io/etcd/client/v3 v3.5.18 // indirect

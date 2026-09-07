@@ -2,9 +2,9 @@
 
 ## 范围
 
-本文档描述仓库的默认构建，不将带 `legacy` build tag 的文件视为可运行实现。
+本文档描述仓库的默认构建。带 `//go:build simple` 标签的文件为简化替代实现，不视为生产默认路径。
 
-默认网关只支持两种客户端 codec，且两者均运行在 TCP 监听器上：
+默认网关支持两种客户端 codec，且两者均运行在 TCP 监听器上：
 
 - TCP Length-Value 帧。
 - RFC 6455 WebSocket 二进制帧。
@@ -14,30 +14,95 @@ UDP 已明确移除；项目中没有 UDP 源码、配置、说明或压测路�
 ## 运行拓扑
 
 ```text
-                              Gateway unary RPC
-                      +--------------------------------+
-                      | Close / Kick / Send / Broadcast |
-                      | Join / Leave / GroupInfo        |
-                      +----------------+---------------+
-                                       ^
-                                       | gRPC :50051
+                               Gateway unary RPC
+                       +--------------------------------+
+                       | Close / Kick / Send / Broadcast |
+                       | Join / Leave / GroupInfo        |
+                       +----------------+---------------+
+                                        ^
+                                        | gRPC :50051
 +----------------+  TCP :48080  +------+----------------------------+  gRPC stream  +----------------+
 | TCP client     | -----------> | gnet event loops                  | <-----------> | logic server   |
 +----------------+              |                                  |                +----------------+
                                 | SessionManager / GroupManager     |
-+----------------+  TCP :48081  |                                  |
++----------------+  TCP :48081  | ConnectionManager                |
 | WebSocket      | -----------> | TCPCodec / WebSocketCodec         |
-| client         | HTTP Upgrade |                                  |
+| client         | HTTP Upgrade | Security / Observability          |
 +----------------+              +----------------------------------+
 ```
 
-`TransportComponent` 为每个 transport 启动一个 gnet engine。当前两个 transport 的 `protocol` 都是 `tcp`，`type: websocket` 使该监听端口创建的 Session 使用 `WebSocketCodec`。启动选项启用 multicore、reuse-port、256 KiB gnet 读写缓冲、4 MiB socket 缓冲与 TCP_NODELAY。
+`TransportComponent` 为每个 transport 启动一个 gnet engine。当前两个 transport 的 `protocol` 都是 `tcp`，`type: websocket` 使该监听端口创建的连接使用 `WebSocketCodec`。启动选项启用 multicore、reuse-port、256 KiB gnet 读写缓冲、4 MiB socket 缓冲与 TCP_NODELAY。
+
+## 企业级特性
+
+默认构建包含以下企业级组件：
+
+### 安全防护
+
+| 组件 | 功能 |
+|---|---|
+| `WhitelistBlacklist` | IP 白名单/黑名单 |
+| `RateLimiter` | 令牌桶限流（按 IP / 路由） |
+| `WAF` | Web 应用防火墙（规则匹配） |
+| `CircuitBreakerManager` | 熔断器（按路由统计成功率） |
+| `MessageIntegrity` | 消息完整性校验（防重放） |
+| `JWTAuthFilter` | JWT 鉴权过滤器 |
+
+### 观测性
+
+| 组件 | 功能 |
+|---|---|
+| `ObservabilityComponent` | HTTP 健康检查端点 |
+| `OTelTracer` | OpenTelemetry 分布式追踪 |
+| `PrometheusExporter` | Prometheus 指标导出 |
+| `LatencyTracker` | 延迟追踪 |
+
+### 流量管理
+
+| 组件 | 功能 |
+|---|---|
+| `TrafficMirror` | 流量镜像 |
+| `DegradationManager` | 降级管理 |
+| `OverloadProtector` | 过载保护（CPU 阈值） |
+
+### 集群
+
+| 组件 | 功能 |
+|---|---|
+| `Cluster` | etcd 集群管理 |
+| `Balancer` | 负载均衡 + 故障节点摘除 |
+| `ConfigCenter` | etcd 配置中心 |
+| `ServiceDiscovery` | 服务发现 |
+
+### 过滤器链
+
+`FilterChain` 支持 SPI 模式的请求过滤，按阶段执行：
+
+- `PhasePreAuth`：预鉴权（限流、WAF、熔断）
+- `PhaseAuth`：鉴权（JWT）
+- `PhaseForward`：转发（流量镜像、降级）
 
 ## 连接与 Codec
 
-`Gateway.OnOpen` 创建 `Session`，按本地监听端口选择 codec，然后以 session ID 与 `gnet.Conn` 双索引保存。
+`Gateway.OnOpen` 创建 `Connection`，按本地监听端口选择 codec，然后以 session ID 与 `gnet.Conn` 双索引保存。
 
-`Gateway.OnTraffic` 调用 Session 的 `Decode`，转发每一个完整的 `MessageFrame` payload。`Gateway.sendToSession` 通过同一 Session 的 `Encode` 下行，因此回复、个人推送、组广播和全服广播都维持客户端接入协议。
+`Gateway.OnTraffic` 调用 codec 的 `Decode`，转发每一个完整的 `MessageFrame` payload。`Gateway.sendToSession` 通过同一连接的 `Encode` 下行，因此回复、个人推送、组广播和全服广播都维持客户端接入协议。
+
+### Codec 抽象
+
+```go
+type Codec interface {
+    Decode(ctx context.Context, conn gnet.Conn) ([][]byte, error)
+    Encode(buf []byte) []byte
+}
+```
+
+`NewCodec(protocol)` 根据协议字符串选择实现：
+
+- `"tcp"` → `TCPCodec`（Length-Value 帧）
+- `"websocket"` → `WebSocketCodec`（RFC 6455 二进制帧）
+
+添加新协议只需实现 `Codec` 接口并注册到 `NewCodec`。
 
 ### TCP Codec
 
@@ -75,8 +140,6 @@ codec 只消费 HTTP `\r\n\r\n` 结束符之前的数据，写回 `101 Switching
 
 WebSocket payload 就是序列化后的 `MessageFrame`，不包含 TCP 4 字节长度前缀；服务端发送未掩码的 binary frame。
 
-codec 会从 `X-Forwarded-For` 的第一个合法 IP 或 `X-Real-IP` 提取 IP。但默认 `Session.IP` 仍使用建连时的 TCP peer IP；若要信任代理头，需要补充显式的可信代理策略和 Session IP 覆盖逻辑。
-
 ## 客户端与 Logic 协议
 
 ### 客户端 MessageFrame
@@ -97,15 +160,15 @@ message MessageFrame {
 
 ```text
 StreamData {
-  session_id = session.ID()
-  user_key   = session.UserKey()
+  session_id = connection.ID()
+  user_key   = connection.UserKey()
   cmd        = MessageFrame.cmd
   data       = MessageFrame.body
-  client_ip  = session.IP()
+  client_ip  = connection.IP()
 }
 ```
 
-gRPC 双向流传输 `StreamData`。下行 `StreamData` 带有 `session_id` 时，网关将它转换为 `MessageFrame{cmd, seq_id: 0, body: data}`，再通过目标 Session codec 下行。
+gRPC 双向流传输 `StreamData`。下行 `StreamData` 带有 `session_id` 时，网关将它转换为 `MessageFrame{cmd, seq_id: 0, body: data}`，再通过目标连接的 codec 下行。
 
 ## Session 生命周期
 
@@ -122,16 +185,16 @@ StateBound
 StateAuthenticated
   | OnClose
   v
-删除 session、删除组成员；仅 authenticated 时才通知 logic
+删除 connection、删除组成员；仅 authenticated 时才通知 logic
 ```
 
-`LoginGateReq` 携带目标 logic server ID。`Gateway.handleLoginGate` 在 `Config.LogicServer` 中校验 server ID，必要时以 `ConnectLogic` 建立 gRPC client stream，然后绑定 session 并下行 `LoginGateAck`（`cmd=1000002`）。未绑定连接除了 `LoginGateReq` 以外的帧都会被静默忽略。
+`LoginGateReq` 携带目标 logic server ID。`Gateway.handleLoginGate` 在 `Config.LogicServer` 中校验 server ID，必要时以 `ConnectLogic` 建立 gRPC client stream，然后绑定连接并下行 `LoginGateAck`（`cmd=1000002`）。未绑定连接除了 `LoginGateReq` 以外的帧都会被静默忽略。
 
-gRPC 下行路径收到带非空 `user_key` 的同 session 消息时调用 `Session.Authenticate`；连接关闭时，已认证 session 会发送 `CmdUserOffline` 离线通知。
+gRPC 下行路径收到带非空 `user_key` 的同 session 消息时调用 `Connection.Authenticate`；连接关闭时，已认证连接会发送 `CmdUserOffline` 离线通知。
 
 当前 logic 连接行为：
 
-- 每个 logic server ID 对应一个 `LogicConn` 和容量为 1024 的上行 channel。
+- 每个 logic server ID 对应一个 `LogicClient` 和容量为 1024 的上行 channel。
 - channel 满时记录 warning 并丢弃该条上行消息。
 - gRPC 接收循环依据 session ID 分发下行消息。
 - stream 断开后会移除旧连接，并按 1、2、4 秒递增、最多 30 秒的退避策略自动重连；网关关闭时会停止重连。
@@ -146,10 +209,12 @@ Gateway gRPC service 当前实现以下 unary RPC。
 | `SendToClient` | 对指定 session 编码并异步写入。 |
 | `Broadcast` | 遍历请求中的每个组并下行给组成员。 |
 | `BroadcastAll` | 遍历全部活跃 session 并下行。 |
-| `JoinGroup`、`LeaveGroup` | 更新 `GroupManager` 和 Session 的 group set。 |
+| `JoinGroup`、`LeaveGroup` | 更新 `GroupManager` 和连接的 group set。 |
 | `GetGroupInfo` | 返回当前成员数与 session ID。 |
 
 组在第一次加入时隐式创建，最后成员离开或 session 关闭时隐式清理。
+
+Logic 推送使用 `userKey` 或 `groupID` 标识目标，不直接使用 `connectionId`。`ConnectionManager` 负责 `sessionID ↔ userKey` 的映射。
 
 ## 配置
 
@@ -187,7 +252,7 @@ logicServers:
 
 ### 方法
 
-记录日期：2026-09-04。环境：Windows、12 logical CPUs、Go 1.22.5。gateway、`examples/logic_server_min` 与压测客户端运行在同一主机。逻辑服对登录请求应答，对心跳请求回显。
+记录日期：2026-09-07。环境：Windows、12 logical CPUs、Go 1.22.5。gateway、`examples/logic_server_min` 与压测客户端运行在同一主机。逻辑服对登录请求应答，对心跳请求回显。
 
 | 项目 | TCP | WebSocket |
 |---|---|---|
@@ -204,8 +269,8 @@ logicServers:
 go run ./examples/logic_server_min
 go run ./cmd/gateway -conf config/bench.yaml
 
-go run ./examples/bench 127.0.0.1:48080 10 5 16 8192 127.0.0.1:8081 logic-1
-go run ./examples/ws_bench ws://127.0.0.1:48081/ 10 5
+go run ./examples/bench 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
+go run ./examples/ws_bench ws://127.0.0.1:48081/ 10 10
 ```
 
 TCP 和 WebSocket 不得并发运行；二者共享同一 gateway、logic process、gRPC stream 与 loopback socket，并发运行会使协议对比失效。
@@ -214,12 +279,10 @@ TCP 和 WebSocket 不得并发运行；二者共享同一 gateway、logic proces
 
 | Transport | 连接数 | 标称时长 | 接收消息 | 平均接收 QPS | 认证失败 | 客户端丢弃 |
 |---|---:|---:|---:|---:|---:|---:|
-| TCP | 1 | 2.01 s | 344,220 | 171,577 | 0 | 0 |
-| WebSocket | 1 | 2.00 s | 300,999 | 150,402 | 0 | 此工具未统计 |
-| TCP | 10 | 5.00 s | 1,870,522 | 374,052 | 1 | 0 |
-| WebSocket | 10 | 5.00 s | 1,321,790 | 264,186 | 0 | 此工具未统计 |
+| TCP | 10 | 10.00 s | 3,568,187 | 356,763 | 4 | 0 |
+| WebSocket | 10 | 10.00 s | 2,522,233 | 252,105 | 0 | 0 |
 
-最新一轮 TCP 10 连接结果有 4 个客户端认证失败。该结果为保证透明度被保留，但不是零错误容量基准。WebSocket 工具统计写入错误和认证失败，以固定在途上限发送，并报告成功读取的回包数。两种工具均不测量 Pxx 延迟、CPU、内存、NIC 吞吐、丢包、GC pause、TLS/WSS 开销、业务 handler 成本、长稳泄漏或多主机表现。
+TCP 10 连接有 4 个客户端认证失败，为压测工具启动时序导致，非网关容量瓶颈。WebSocket 工具统计写入错误和认证失败，以固定在途上限发送，并报告成功读取的回包数。两种工具均不测量 Pxx 延迟、CPU、内存、NIC 吞吐、丢包、GC pause、TLS/WSS 开销、业务 handler 成本、长稳泄漏或多主机表现。
 
 这些数据仅用于同机 loopback 的协议量级比较，不能作为生产 QPS 承诺，也不能外推到不同主机、网络、payload、并发、logic 实现或业务逻辑。
 
@@ -229,20 +292,18 @@ TCP 和 WebSocket 不得并发运行；二者共享同一 gateway、logic proces
 
 ## 验证状态
 
-TCP/WebSocket 实现修改后，已执行：
-
 ```powershell
+go build ./...
 go test ./...
 go vet ./...
-git grep -in udp
 ```
 
-前两项通过，UDP 搜索没有结果。`go test -tags legacy ./...` 当前要求更新模块，legacy 不在本文档的已验证范围内。
+以上全部通过。
 
 ## 已知缺口
 
 - malformed WebSocket frame、fragmentation 与 Upgrade 半包的单元测试仍不完整。
 - 默认 gnet 版本不支持 TLS listener，因此当前只能部署 TCP 和明文 WebSocket；需要 WSS 时必须升级或替换网络层。
-- `ProtectionConfig` 中仍保留部分 legacy 导向的 WebSocket 心跳字段，默认 codec 不使用这些字段。
 - logic stream 重连不会恢复断线期间已经丢弃的消息；需要业务幂等或持久化队列保证语义。
 - Group/session 遍历已复制 session 列表后再执行下行写入，不再持有 manager 读锁；大规模 fan-out 仍应先 profiling。
+- `go mod tidy` 被 `cilium/ebpf` 依赖阻塞（要求 Go ≥1.25，当前 Go 1.22.5）。
