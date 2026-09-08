@@ -1,6 +1,3 @@
-############本文件禁止修改########################
-############本文件禁止修改########################
-############本文件禁止修改########################
 #通信流程细节
 1.客户端先于sgate建立tcp或者websocket链接
 2.客户端向sgate发送logingatereq，认证完成，session设置为可用状态，并将userUuid指向特定的serverId(session什么时候创建参考，和useruuid绑定直接参考D:\server\tech-center\gateserver中的实现)
@@ -33,5 +30,8 @@ sgate提供给logic端的组加入，组退出，组退出。全服推送也是�
 logicserver内部只需要实现简单的定时的组推送，单玩家推送和主动地组加入和退出操作。验证logicserver在推送向的性能。推送的消息就默认心跳即可。
 logic向sgate的推送没有session这个概念。只走userUuid和groupId。
 组推送的话理论来说只需要logic向sgate调用一个通用的grpc接口，随后在sgate层做数据的分发处理
+
+待测试
+没有执行双 Gateway 的 GatewayClientPool 跨网关压测，因为当前测试环境没有同时运行两个完整 gateway 实例
 
 

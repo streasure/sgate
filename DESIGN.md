@@ -257,7 +257,7 @@ logicServers:
 
 ### 方法
 
-记录日期：2026-09-07。环境：Windows、12 logical CPUs、Go 1.22.5。gateway、`examples/logic_server_min` 与压测客户端运行在同一主机。逻辑服对登录请求应答，对心跳请求回显。
+记录日期：2026-09-08。环境：Windows、12 logical CPUs、Go 1.22.5。gateway、`examples/logic_server_min` 与压测客户端运行在同一主机。逻辑服对登录请求应答，对收到的 stream 消息回显。此次测试使用 `config/bench.yaml`，关闭 etcd/discovery/cluster。
 
 | 项目 | TCP | WebSocket |
 |---|---|---|
@@ -289,12 +289,21 @@ TCP 和 WebSocket 不得并发运行；二者共享同一 gateway、logic proces
 
 | Transport | 连接数 | 标称时长 | 接收消息 | 平均接收 QPS | 认证失败 | 客户端丢弃 |
 |---|---:|---:|---:|---:|---:|---:|
-| TCP | 10 | 10.00 s | 3,486,555 | 348,621 | 6 | 0 |
-| WebSocket | 10 | 10.00 s | 2,314,021 | 231,335 | 0 | 0 |
+| TCP，inflight=8192 | 10 | 10.03 s | 51,008 | 9,995 | 997 | 5 |
+| TCP，inflight=256 | 10 | 10.02 s | 12,688 | 9,990 | 997 | 0 |
+| WebSocket | 10 | 10.02 s | 91,920 | 10,000 | 998 | 0 |
 
-TCP 10 连接有 6 个客户端认证失败，为压测工具启动时序导致，非网关容量瓶颈。WebSocket 工具统计写入错误和认证失败，以固定在途上限发送，并报告成功读取的回包数。两种工具均不测量 Pxx 延迟、CPU、内存、NIC 吞吐、丢包、GC pause、TLS/WSS 开销、业务 handler 成本、长稳泄漏或多主机表现。
+TCP 稳定档的 sgate 统计为：接收 12,708、转发 10,000、转发丢弃 2,698、回推 10,000、回推无连接丢弃 0。TCP 高 inflight 档为：接收 51,028、转发 10,000、转发丢弃 41,018、回推无连接丢弃 10。WebSocket 客户端结果为发送 91,920、接收 10,000，认证失败 0。高 inflight 结果受 `logic_server_min` echo 能力和网关队列限制影响。
 
-这些数据仅用于同机 loopback 的协议量级比较，不能作为生产 QPS 承诺，也不能外推到不同主机、网络、payload、并发、logic 实现或业务逻辑。
+旧版 `push_bench` 的 personal、group、broadcast 结果只是 stream echo，不代表主动 fan-out 性能。真实主动推送使用 `examples/push_driver`，结果如下：10 个客户端、10 秒、1,000 个逻辑事件/s，`SendToUser` 收到 6,530 条、约 653 QPS；10 人组 `SendToGroup` 收到 66,125 条、约 6,609 QPS；10 人 `Broadcast` 收到 65,731 条、约 6,569 QPS。
+
+`examples/logic_noop` + `examples/forward_bench` 的 no-op 纯转发速率阶梯结果为：目标 5,000 msg/s 时实际 offered 3,312、转发 3,314、丢弃 0；目标 10,000 时实际 offered 6,631、转发 6,633、丢弃 0；目标 20,000 时实际 offered 13,300、转发 10,287、丢弃 15,110。Windows 10ms 批量调度使实际 offered load 约为目标的 2/3，本次无丢弃稳定转发约为 6.6K msg/s。
+
+使用 `ghz v0.120.0`、20 并发对 Gateway unary `GetGroupInfo` 压测 5 秒：225,191 请求，45,040 req/s，平均 0.28ms，P95 1.00ms，P99 2.02ms；正常请求 225,179 次 OK，关闭连接阶段 12 次错误不计入正常吞吐。
+
+使用生产配置启动 gateway 的验证中，gnet TCP、WebSocket 和 Prometheus 监听均成功；由于未启动 logic，`/health` 与 `/ready` 返回 503。etcd 可访问，但未启动两个 gateway 实例，因此没有执行 GatewayClientPool 的跨网关吞吐测试。
+
+这些数据仅用于同机 loopback 的协议量级比较，不能作为生产 QPS 承诺，也不能外推到不同主机、网络、payload、并发、logic 实现或业务逻辑。测试没有测量 Pxx 延迟、CPU、内存、NIC 吞吐、TLS/WSS、GC pause、长稳泄漏或真实主动推送 fan-out。
 
 ## 可观测性
 

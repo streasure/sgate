@@ -161,6 +161,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	if protoMsg == nil {
 		protoMsg = &protoGw.StreamData{
 			SessionId: connectionID,
+			UserKey:   connObj.GetUserUUID(),
 			ClientIp:  remoteIP,
 			Data:      append([]byte(nil), message.Data...),
 			SeqId:     message.SeqId,
@@ -169,6 +170,9 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			protoMsg.Cmd = cmd
 		}
 	} else {
+		if protoMsg.UserKey == "" {
+			protoMsg.UserKey = connObj.GetUserUUID()
+		}
 		if protoMsg.ClientIp == "" {
 			protoMsg.ClientIp = remoteIP
 		}

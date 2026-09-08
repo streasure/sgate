@@ -47,17 +47,23 @@ GatewayStream 投递；`sessionID` 仅是 sgate 内部连接路由标识。
 5. **组广播**: Client→ChatMsg→Logic→Gateway.Broadcast(group_id=[...])→组内全员
 6. **全服广播**: Client→ChatMsg(no target)→Logic→Gateway.BroadcastAll()→全员
 
-## 压测结果 (12核 i5-10400F, 500连接)
+## 2026-09-08 实测结果
 
-| 测试 | QPS |
-|------|-----|
-| 双向 Heartbeat | ~350K |
-| Personal Push | ~365K |
-| 组推送/全服推送 | 待组成员正确加入后验证 |
+本次在 Windows、12 logical CPUs、Go 1.22.5、本机 loopback 环境执行。TCP 和 WebSocket 均为 10 连接、10 秒、batchSize=16；TCP 另测试 inflight=8192 和 256。
 
-## 待完成
+| 场景 | 客户端发送 | 客户端接收 | 平均接收 QPS | 认证失败 |
+|---|---:|---:|---:|---:|
+| TCP，inflight=8192 | 51,008 | 9,995 | 997 | 5 |
+| TCP，inflight=256 | 12,688 | 9,990 | 997 | 0 |
+| WebSocket | 91,920 | 10,000 | 998 | 0 |
+| push personal stream echo | 12,656 | 9,990 | 997 | 未统计 |
+| push group stream echo | 12,704 | 9,990 | 997 | 未统计 |
+| push broadcast stream echo | 12,656 | 9,990 | 997 | 未统计 |
 
-1. push_bench 需要在 group 模式发送 JoinGroup 消息将 session 加入组
-2. cmd.proto 添加 CMD_JOIN_GROUP_REQ/ACK (1100013/1100014)
-3. logic_server_min 处理 CMD_JOIN_GROUP_REQ 调用 Gateway.JoinGroup
-4. 重跑组推送和全服推送压测
+真实主动推送已由 `examples/push_driver` 覆盖：10 个客户端、10 秒、1,000 个事件/s，`SendToUser` 收到 6,530 条、约 653 QPS；10 人组推送收到 66,125 条、约 6,609 QPS；10 人全服广播收到 65,731 条、约 6,569 QPS。`examples/logic_noop` + `examples/forward_bench` 的 no-op 纯转发测试在本次环境约 6.6K msg/s 无丢弃稳定运行，实际 offered 13.3K msg/s 时转发约 10.3K 并开始丢弃。`ghz v0.120.0` 对 Gateway `GetGroupInfo` 的结果为 45,040 req/s、P99 2.02ms。生产配置启动验证成功，但未启动 logic 时 `/health`、`/ready` 返回 503；未执行双 gateway GatewayClientPool 压测。
+
+## 后续压测缺口
+
+1. 增加多机网络和更多连接数的压测矩阵。
+2. 增加 P95/P99/P999、CPU、内存、GC 和长稳运行统计。
+3. 增加双 gateway GatewayClientPool 的跨网关推送压测。

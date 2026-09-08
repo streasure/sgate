@@ -117,6 +117,23 @@ func (s *Service) Stop() {
 	})
 }
 
+// StopImmediate stops the gRPC server without waiting for long-lived gateway
+// streams to finish. It is intended for benchmark drivers and forced shutdown.
+func (s *Service) StopImmediate() {
+	s.stopOnce.Do(func() {
+		if s.registry != nil {
+			s.registry.Destroy()
+		}
+		if s.grpcServer != nil {
+			s.grpcServer.Stop()
+		}
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+		s.server.Stop()
+	})
+}
+
 func (s *Service) Run() error {
 	if err := s.Start(); err != nil {
 		return err

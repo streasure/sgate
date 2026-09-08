@@ -153,12 +153,53 @@ go vet ./...
 
 ### 结果
 
-| Transport | 连接数 | 时长 | 接收消息 | 平均 Recv QPS | Auth 失败 | 丢弃 |
-|---|---:|---:|---:|---:|---:|---:|
-| TCP | 10 | 10s | 3,486,555 | **348,621** | 6 | 0 |
-| WebSocket | 10 | 10s | 2,314,021 | **231,335** | 0 | 0 |
+本次实际执行日期：2026-09-08。环境为 Windows、12 logical CPUs、Go 1.22.5，gateway、logic 和压测工具运行在同一主机。TCP/WS 测试均使用 10 个连接、10 秒、batchSize=16；TCP 稳定档使用 inflight=256。结果中的 `Recv QPS` 是客户端成功收到的回包速率，不是网关理论最大吞吐。
 
-> 这些数字是本机回环吞吐，不是生产容量承诺。TCP Auth 失败为压测工具启动时序导致，非网关瓶颈。
+| 场景 | 连接数 | 时长 | 客户端发送 | 客户端接收 | 发送 QPS | 接收 QPS | 认证失败 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| TCP，inflight=8192 | 10 | 10.03s | 51,008 | 9,995 | 5,085 | 997 | 5 |
+| TCP，inflight=256 | 10 | 10.02s | 12,688 | 9,990 | 1,266 | 997 | 0 |
+| WebSocket | 10 | 10.02s | 91,920 | 10,000 | 9,174 | 998 | 0 |
+
+TCP 稳定档对应的 sgate `/stats` 为：接收 12,708、转发 10,000、客户端回推 10,000、转发丢弃 2,698、回推无连接丢弃 0。高 inflight 档对应：接收 51,028、转发 10,000、转发丢弃 41,018、回推无连接丢弃 10。高 inflight 档说明示例 logic echo 处理能力不足时会触发网关队列丢弃，不能作为无丢包性能结果。
+
+`push_bench` 在 `personal`、`group`、`broadcast` 三种模式下均得到相近结果：
+
+| 模式 | 连接数 | 时长 | 客户端发送 | 客户端接收 | 平均发送 QPS | 平均接收 QPS |
+|---|---:|---:|---:|---:|---:|---:|
+| personal | 10 | 10.02s | 12,656 | 9,990 | 1,263 | 997 |
+| group | 10 | 10.02s | 12,704 | 9,990 | 1,268 | 997 |
+| broadcast | 10 | 10.02s | 12,656 | 9,990 | 1,263 | 997 |
+
+上述三个模式是旧版 `push_bench` 的 stream echo 结果，不代表主动 fan-out 性能。真实主动推送结果见下方“纯 sgate 转发与主动推送”部分。
+
+### 纯 sgate 转发与主动推送
+
+为隔离 logic 性能，新增 `examples/logic_noop` 和 `examples/forward_bench`。no-op logic 只接收并丢弃 `StreamData`，不解析、不回包；转发结果以 sgate `/stats` 的 `forwarded` 和 `dropped` 为准。
+
+10 个 TCP 客户端、5 秒速率阶梯测试：
+
+| Driver 目标 | 实际 offered load | sgate 转发 | 转发丢弃 |
+|---:|---:|---:|---:|
+| 5,000 msg/s | 3,312 msg/s | 3,314 msg/s | 0 |
+| 10,000 msg/s | 6,631 msg/s | 6,633 msg/s | 0 |
+| 20,000 msg/s | 13,300 msg/s | 10,287 msg/s | 15,110 |
+
+本次无丢弃稳定转发约为 6.6K msg/s；Windows 10ms 批量调度使实际 offered load 约为目标值的 2/3。目标 100,000 msg/s 的过载轮实际 offered 70,976 msg/s，sgate 转发 10,341 msg/s，丢弃 606,851，因此不作为稳定性能结果。
+
+真实主动推送使用 `examples/push_driver`，10 个客户端登录后建立 `userUUID -> sessionID` 映射，连续 10 秒、目标 1,000 个逻辑事件/s：
+
+| 模式 | 实际发送到客户端 | 客户端收到 | 接收 QPS |
+|---|---:|---:|---:|
+| `SendToUser` 单用户 | 6,540 | 6,530 | 653 |
+| `SendToGroup` 10 人组 | 66,200 | 66,125 | 6,609 |
+| `Broadcast` 10 人全体 | 65,800 | 65,731 | 6,569 |
+
+这些结果是实际 sgate 下行写出和 fan-out 结果，不是 logic echo 性能。另用 `ghz v0.120.0` 对 Gateway unary `GetGroupInfo` 做 5 秒、20 并发测试：225,191 请求，45,040 req/s，平均延迟 0.28ms，P95 1.00ms，P99 2.02ms；关闭连接阶段产生的 12 次错误不计入正常请求。
+
+启用 `config/config.yaml` 的 etcd 配置启动验证时，gateway 成功监听 TCP `:48080`、WebSocket `:48081` 和 Prometheus `:9101`；由于本次未启动 logic server，HTTP `/health` 和 `/ready` 均返回 `503`，与当前 readiness 语义一致。未进行双 gateway 的 GatewayClientPool 吞吐压测。
+
+> 这些数字是本机 loopback 测试，不是生产容量承诺。测试未覆盖多机网络、TLS/WSS、长稳运行和更大 payload。
 
 ### 工具
 
@@ -168,6 +209,9 @@ go build -o sgate.exe ./cmd/gateway
 go build -o logic_server_min.exe ./examples/logic_server_min
 go build -o tcp_bench.exe ./examples/bench
 go build -o ws_bench.exe ./examples/ws_bench
+go build -o logic_noop.exe ./examples/logic_noop
+go build -o forward_bench.exe ./examples/forward_bench
+go build -o push_driver.exe ./examples/push_driver
 
 # 终端 1：逻辑服
 .\logic_server_min.exe
@@ -180,6 +224,20 @@ go build -o ws_bench.exe ./examples/ws_bench
 
 # WebSocket
 .\ws_bench.exe ws://127.0.0.1:48081/ 10 10
+
+# push stream echo 场景；personal/group/broadcast 依次串行执行
+.\push_bench.exe 127.0.0.1:48080 10 10 personal 16 256
+.\push_bench.exe 127.0.0.1:48080 10 10 group 16 256
+.\push_bench.exe 127.0.0.1:48080 10 10 broadcast 16 256
+
+# 纯转发：先启动 logic_noop 和 sgate，再执行
+.\logic_noop.exe
+.\forward_bench.exe 127.0.0.1:48080 10 5 127.0.0.1:8081 10000
+
+# 真实主动推送：driver 内嵌 logic，先启动 sgate
+.\push_driver.exe 127.0.0.1:48080 127.0.0.1:50052 personal 10 10 1000
+.\push_driver.exe 127.0.0.1:48080 127.0.0.1:50052 group 10 10 1000
+.\push_driver.exe 127.0.0.1:48080 127.0.0.1:50052 broadcast 10 10 1000
 ```
 
 TCP 与 WebSocket 必须串行运行，并发运行会使协议对比失效。
@@ -202,6 +260,9 @@ examples/
   logic_server_min/           本地回显逻辑服
   bench/                      TCP 压测工具
   ws_bench/                   WebSocket 压测工具
+  logic_noop/                 no-op logic 转发测试服务
+  forward_bench/              纯 sgate 上行转发压测工具
+  push_driver/                真实主动推送压测工具
 config/
   config.yaml                 生产配置
   bench.yaml                  压测配置
