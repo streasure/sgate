@@ -56,17 +56,28 @@ type FilterChain struct {
 	enabled  atomic.Int32
 }
 
-var globalFilterRegistry = map[string]FilterFactory{}
+var (
+	globalFilterRegistry   = map[string]FilterFactory{}
+	globalFilterRegistryMu sync.RWMutex
+)
 
 // RegisterFilter 全局注册过滤器工厂（SPI 入口）
 func RegisterFilter(name string, f FilterFactory) {
+	globalFilterRegistryMu.Lock()
+	defer globalFilterRegistryMu.Unlock()
 	globalFilterRegistry[name] = f
 }
 
 // NewFilterChain 创建过滤器链
 func NewFilterChain() *FilterChain {
+	globalFilterRegistryMu.RLock()
+	registry := make(map[string]FilterFactory, len(globalFilterRegistry))
+	for name, factory := range globalFilterRegistry {
+		registry[name] = factory
+	}
+	globalFilterRegistryMu.RUnlock()
 	fc := &FilterChain{
-		registry: globalFilterRegistry,
+		registry: registry,
 	}
 	fc.enabled.Store(1)
 	return fc

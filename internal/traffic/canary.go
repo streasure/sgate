@@ -2,7 +2,6 @@ package traffic
 
 import (
 	"hash/fnv"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 
@@ -129,6 +128,3 @@ func init() {
 		return NewCanaryFilter(c), nil
 	})
 }
-
-// 防止 rand 未使用告警
-var _ = rand.Intn

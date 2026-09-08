@@ -16,8 +16,9 @@ import (
 //   - goroutine profile 排查 schedlatency
 //   - CPU profile 排查热点函数
 var (
-	pprofOnce   sync.Once
-	pprofServer *http.Server
+	pprofOnce     sync.Once
+	pprofServer   *http.Server
+	pprofStopOnce sync.Once
 )
 
 // StartPProfServer 启动 pprof HTTP 服务（默认 :6060）
@@ -51,7 +52,9 @@ func StartPProfServer(addr string) {
 
 // StopPProfServer 停止 pprof server
 func StopPProfServer() {
-	if pprofServer != nil {
-		pprofServer.Close()
-	}
+	pprofStopOnce.Do(func() {
+		if pprofServer != nil {
+			_ = pprofServer.Close()
+		}
+	})
 }

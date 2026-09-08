@@ -110,7 +110,8 @@ func (f *JWTAuthFilter) Validate(token string) (*JWTClaims, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !hmac.Equal(sig, f.sign(signingInput)) {
+	validSignature := hmac.Equal(sig, f.sign(signingInput))
+	if !validSignature {
 		return nil, errors.New("signature mismatch")
 	}
 	// 解析 claims
@@ -155,6 +156,8 @@ func (f *JWTAuthFilter) UpdateSecret(secret string) {
 }
 
 func (f *JWTAuthFilter) sign(input string) []byte {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	mac := hmac.New(sha256.New, f.secret)
 	mac.Write([]byte(input))
 	return mac.Sum(nil)
@@ -163,8 +166,14 @@ func (f *JWTAuthFilter) sign(input string) []byte {
 // Issue 仅供测试或本地签发使用
 func (f *JWTAuthFilter) Issue(claims JWTClaims) (string, error) {
 	header := map[string]string{"alg": "HS256", "typ": "JWT"}
-	hb, _ := json.Marshal(header)
-	pb, _ := json.Marshal(claims)
+	hb, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	pb, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
 	h := base64.RawURLEncoding.EncodeToString(hb)
 	p := base64.RawURLEncoding.EncodeToString(pb)
 	sig := base64.RawURLEncoding.EncodeToString(f.sign(h + "." + p))
@@ -183,7 +192,9 @@ func init() {
 		if v, ok := cfg["skipRoutes"]; ok {
 			if arr, ok := v.([]interface{}); ok {
 				for _, x := range arr {
-					c.SkipRoutes = append(c.SkipRoutes, x.(string))
+					if route, ok := x.(string); ok {
+						c.SkipRoutes = append(c.SkipRoutes, route)
+					}
 				}
 			}
 		}

@@ -20,6 +20,7 @@ import (
 	"github.com/streasure/util/etcd"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
@@ -53,15 +54,10 @@ func (s LogicConnectionState) String() string {
 var (
 	ErrNotConnected      = errors.New("not connected to logic server")
 	ErrConnectionClosing = errors.New("connection is closing")
+	ErrQueueFull         = errors.New("send queue full")
+	ErrSendTimeout       = errors.New("send timeout")
+	ErrBackpressure      = errors.New("backpressure activated")
 )
-
-// marshalBufPool 复用 proto 序列化缓冲区，消除 startSendLoop 热路径上的 []byte 分配
-var marshalBufPool = sync.Pool{
-	New: func() interface{} {
-		b := make([]byte, 0, 4096)
-		return &b
-	},
-}
 
 type ReconnectConfig struct {
 	InitialInterval time.Duration
@@ -94,36 +90,44 @@ var DefaultHealthCheckConfig = HealthCheckConfig{
 }
 
 type StreamShard struct {
-	stream protoGw.GatewayStream_OnDataClient
-	mu     sync.Mutex
-	sendCh chan *protoGw.StreamData
-	ctx    context.Context
-	cancel context.CancelFunc
-	index  int
-	lc     *LogicClient
-	// closed is set atomically when the shard's sendCh is closed.
-	// Allows SendMessage to skip the defer/recover overhead in the fast path.
-	closed atomic.Bool
+	stream      protoGw.GatewayStream_OnDataClient
+	mu          sync.Mutex
+	sendCh      chan *protoGw.StreamData
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	ctx         context.Context
+	cancel      context.CancelFunc
+	index       int
+	lc          *LogicClient
+	closed      atomic.Bool
+	sendTimeout time.Duration
 }
 
 type StreamManager struct {
-	shards []*StreamShard
+	shards      []*StreamShard
+	sendTimeout time.Duration
 }
 
-func NewStreamManager(shardCount int, sendChannelSize int) *StreamManager {
+func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Duration) *StreamManager {
 	if shardCount <= 0 {
 		shardCount = runtime.NumCPU() * 4
 	}
 	if sendChannelSize <= 0 {
 		sendChannelSize = 65536
 	}
+	if sendTimeout <= 0 {
+		sendTimeout = 200 * time.Millisecond
+	}
 	sm := &StreamManager{
-		shards: make([]*StreamShard, shardCount),
+		shards:      make([]*StreamShard, shardCount),
+		sendTimeout: sendTimeout,
 	}
 	for i := range sm.shards {
 		sm.shards[i] = &StreamShard{
-			sendCh: make(chan *protoGw.StreamData, sendChannelSize),
-			index:  i,
+			sendCh:      make(chan *protoGw.StreamData, sendChannelSize),
+			stopCh:      make(chan struct{}),
+			index:       i,
+			sendTimeout: sendTimeout,
 		}
 	}
 	return sm
@@ -297,9 +301,14 @@ func (s *StreamShard) startSendLoop() {
 	const maxBatchCount = 256
 	batch := make([]*protoGw.StreamData, 0, maxBatchCount)
 	for {
-		msg, ok := <-s.sendCh
-		if !ok {
+		var msg *protoGw.StreamData
+		select {
+		case <-s.stopCh:
 			return
+		case msg = <-s.sendCh:
+			if msg == nil {
+				continue
+			}
 		}
 
 		batch = batch[:0]
@@ -307,8 +316,8 @@ func (s *StreamShard) startSendLoop() {
 		drained := true
 		for drained {
 			select {
-			case m, ok := <-s.sendCh:
-				if !ok {
+			case m := <-s.sendCh:
+				if m == nil {
 					drained = false
 					break
 				}
@@ -330,46 +339,12 @@ func (s *StreamShard) startSendLoop() {
 				return
 			}
 
-			// Fast path: single message, send directly to avoid batch overhead
-			if len(batch) == 1 {
-				if err := safeStreamSend(stream, batch[0]); err != nil {
+			for _, message := range batch {
+				if err := safeStreamSend(stream, message); err != nil {
 					tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
 					s.markShardBroken()
+					break
 				}
-				return
-			}
-
-			// Batch path: serialize multiple messages into a single batch message
-			// to reduce gRPC stream.Send calls by up to maxBatchCount times.
-			// Format: [4-byte payloadLen][payload] repeated
-			bufPtr := marshalBufPool.Get().(*[]byte)
-			buf := (*bufPtr)[:0]
-			count := 0
-			for _, m := range batch {
-				data, err := proto.Marshal(m)
-				if err != nil {
-					continue
-				}
-				var lenBuf [4]byte
-				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
-				buf = append(buf, lenBuf[:]...)
-				buf = append(buf, data...)
-				count++
-			}
-			if count > 0 {
-				batchMsg := &protoGw.StreamData{
-					Data: buf,
-					Cmd:  int32(count),
-				}
-				if err := safeStreamSend(stream, batchMsg); err != nil {
-					tlog.Warn("shard batch send error, isolating shard", "shard", s.index, "error", err)
-					s.markShardBroken()
-				}
-			}
-			// Return buffer to pool (cap-based reuse, avoid holding large bufs)
-			if cap(buf) <= 4<<20 {
-				*bufPtr = buf
-				marshalBufPool.Put(bufPtr)
 			}
 		}()
 	}
@@ -397,14 +372,25 @@ func (s *StreamShard) SendMessage(msg *protoGw.StreamData) (err error) {
 				err = fmt.Errorf("send on closed channel: %v", r)
 			}
 		}()
+		timer := time.NewTimer(s.sendTimeout)
+		defer timer.Stop()
 		select {
 		case s.sendCh <- msg:
 			err = nil
-		default:
+		case <-s.stopCh:
 			err = ErrNotConnected
+		case <-timer.C:
+			err = ErrSendTimeout
 		}
 	}()
 	return
+}
+
+func (s *StreamShard) stop() {
+	s.stopOnce.Do(func() {
+		s.closed.Store(true)
+		close(s.stopCh)
+	})
 }
 
 type LogicClient struct {
@@ -429,16 +415,24 @@ type LogicClient struct {
 }
 
 func NewLogicClient(gateway GatewayInterface) *LogicClient {
+	queuePolicy := config.StreamQueueConfig{}
+	var sendTimeout time.Duration
+	if gateway != nil {
+		queuePolicy = gateway.GetStreamConfig().QueuePolicy
+		if d, err := time.ParseDuration(queuePolicy.SendTimeout); err == nil && d > 0 {
+			sendTimeout = d
+		}
+	}
 	return &LogicClient{
 		state:             int32(LogicStateDisconnected),
 		reconnectConfig:   DefaultReconnectConfig,
 		healthCheckConfig: DefaultHealthCheckConfig,
-		streamManager:     NewStreamManager(0, 0),
+		streamManager:     NewStreamManager(0, 0, sendTimeout),
 		gateway:           gateway,
 		closing:           false,
 		closed:            make(chan struct{}),
 		shardCount:        runtime.NumCPU() * 8,
-		messageQueue:      NewStreamMessageQueue(),
+		messageQueue:      NewStreamMessageQueue(queuePolicy),
 	}
 }
 
@@ -562,21 +556,25 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 				shard.mu.Lock()
 				shard.stream = nil
 				shard.mu.Unlock()
-				close(shard.sendCh)
+				shard.stop()
 			}
 		}
 	}
 
 	shardCount := lc.shardCount
 	sendChannelSize := 0
+	var sendTimeout time.Duration
 	if lc.gateway != nil {
 		streamCfg := lc.gateway.GetStreamConfig()
 		sendChannelSize = streamCfg.SendChannelSize
 		if streamCfg.ShardCount > 0 {
 			shardCount = streamCfg.ShardCount
 		}
+		if d, err := time.ParseDuration(streamCfg.QueuePolicy.SendTimeout); err == nil && d > 0 {
+			sendTimeout = d
+		}
 	}
-	lc.streamManager = NewStreamManager(shardCount, sendChannelSize)
+	lc.streamManager = NewStreamManager(shardCount, sendChannelSize, sendTimeout)
 
 	var wg sync.WaitGroup
 	var firstErr error
@@ -657,6 +655,9 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	if lc.reconnectManager == nil {
 		lc.reconnectManager = NewReconnectManager(lc, lc.reconnectConfig)
+		if lc.gateway != nil {
+			lc.reconnectManager.SetLookupAddress(lc.gateway.LookupLogicAddress)
+		}
 		go lc.reconnectManager.Run()
 	}
 
@@ -684,7 +685,7 @@ func (lc *LogicClient) Close() {
 		for i := 0; i < len(lc.streamManager.shards); i++ {
 			if shard := lc.streamManager.shards[i]; shard != nil {
 				shard.closed.Store(true)
-				close(shard.sendCh)
+				shard.stop()
 			}
 		}
 	}
@@ -761,33 +762,16 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				}
 				responseData, err := marshalClientMessage(msg)
 				if err == nil {
-					conn.Send(responseData)
-					lc.gateway.AddPushedToClient(1)
+					if sendErr := conn.Send(responseData); sendErr != nil {
+						tlog.Warn("push to client failed", "sessionID", msg.SessionId, "cmd", msg.Cmd, "error", sendErr)
+					} else {
+						lc.gateway.AddPushedToClient(1)
+					}
 				}
 			} else {
 				lc.gateway.AddPushDroppedNoConn(1)
 			}
 		}
-	}
-}
-
-// handleReceivedMessage 处理单条来自 logic 的消息，转发到对应客户端连接
-func (lc *LogicClient) handleReceivedMessage(msg *protoGw.StreamData) {
-	if lc.gateway == nil || msg.SessionId == "" {
-		return
-	}
-	conn := lc.gateway.GetConnectionManager().GetConnection(msg.SessionId)
-	if conn == nil {
-		lc.gateway.AddPushDroppedNoConn(1)
-		return
-	}
-	if msg.UserKey != "" {
-		lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
-	}
-	responseData, err := marshalClientMessage(msg)
-	if err == nil {
-		conn.Send(responseData)
-		lc.gateway.AddPushedToClient(1)
 	}
 }
 
@@ -834,7 +818,9 @@ func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 			return ErrConnectionClosing
 		}
 		if lc.messageQueue != nil {
-			lc.messageQueue.Enqueue(msg)
+			if err := lc.messageQueue.Enqueue(msg); err != nil {
+				return err
+			}
 		}
 		return ErrNotConnected
 	}
@@ -843,7 +829,9 @@ func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 	err := shard.SendMessage(msg)
 	if err != nil {
 		if lc.messageQueue != nil {
-			lc.messageQueue.Enqueue(msg)
+			if qErr := lc.messageQueue.Enqueue(msg); qErr != nil {
+				return qErr
+			}
 		}
 		return err
 	}
@@ -964,11 +952,12 @@ func (lc *LogicClient) startHealthChecker() {
 }
 
 type ReconnectManager struct {
-	lc           *LogicClient
-	config       ReconnectConfig
-	stopCh       chan struct{}
-	doneCh       chan struct{}
-	disconnectCh chan struct{}
+	lc            *LogicClient
+	config        ReconnectConfig
+	stopCh        chan struct{}
+	doneCh        chan struct{}
+	disconnectCh  chan struct{}
+	lookupAddress func(serverID string) string // optional: query etcd for replacement address
 }
 
 func NewReconnectManager(lc *LogicClient, config ReconnectConfig) *ReconnectManager {
@@ -979,6 +968,10 @@ func NewReconnectManager(lc *LogicClient, config ReconnectConfig) *ReconnectMana
 		doneCh:       make(chan struct{}),
 		disconnectCh: make(chan struct{}, 1),
 	}
+}
+
+func (rm *ReconnectManager) SetLookupAddress(fn func(serverID string) string) {
+	rm.lookupAddress = fn
 }
 
 func (rm *ReconnectManager) Run() {
@@ -1008,6 +1001,7 @@ func (rm *ReconnectManager) NotifyDisconnection() {
 func (rm *ReconnectManager) doReconnect() {
 	interval := rm.config.InitialInterval
 	attempt := 0
+	originalAddress := rm.lc.address
 
 	for {
 		select {
@@ -1017,12 +1011,29 @@ func (rm *ReconnectManager) doReconnect() {
 		}
 
 		if rm.config.MaxAttempts > 0 && attempt >= rm.config.MaxAttempts {
-			tlog.Error("max reconnect attempts reached", "maxAttempts", rm.config.MaxAttempts)
+			tlog.Error("max reconnect attempts reached, trying etcd discovery",
+				"maxAttempts", rm.config.MaxAttempts, "serverID", rm.lc.serverID)
+
+			// Try etcd discovery for a replacement node
+			if rm.lookupAddress != nil {
+				if newAddr := rm.lookupAddress(rm.lc.serverID); newAddr != "" && newAddr != originalAddress {
+					tlog.Info("discovered replacement address from etcd",
+						"serverID", rm.lc.serverID, "oldAddress", originalAddress, "newAddress", newAddr)
+					rm.lc.mu.Lock()
+					rm.lc.address = newAddr
+					rm.lc.mu.Unlock()
+					if err := rm.lc.doConnect(true); err == nil {
+						tlog.Info("reconnect to replacement node succeeded", "address", newAddr)
+						return
+					}
+					tlog.Warn("reconnect to replacement node failed", "address", newAddr)
+				}
+			}
 			return
 		}
 
 		attempt++
-		tlog.Info("attempting reconnect", "attempt", attempt, "interval", interval)
+		tlog.Info("attempting reconnect", "attempt", attempt, "address", rm.lc.address)
 
 		select {
 		case <-rm.stopCh:
@@ -1046,29 +1057,93 @@ func (rm *ReconnectManager) doReconnect() {
 }
 
 type StreamMessageQueue struct {
-	queue   []*protoGw.StreamData
-	mu      sync.Mutex
-	cond    *sync.Cond
-	maxSize int
+	queue                 []*protoGw.StreamData
+	mu                    sync.Mutex
+	cond                  *sync.Cond
+	maxSize               int
+	policy                config.QueuePolicy
+	blockTimeout          time.Duration
+	backpressureThreshold float64
 }
 
-func NewStreamMessageQueue() *StreamMessageQueue {
+func NewStreamMessageQueue(cfg config.StreamQueueConfig) *StreamMessageQueue {
+	maxSize := cfg.MaxSize
+	if maxSize <= 0 {
+		maxSize = 100000
+	}
+	blockTimeout := 500 * time.Millisecond
+	if cfg.BlockTimeout != "" {
+		if d, err := time.ParseDuration(cfg.BlockTimeout); err == nil {
+			blockTimeout = d
+		}
+	}
+	threshold := cfg.BackpressureThreshold
+	if threshold <= 0 || threshold > 1 {
+		threshold = 0.8
+	}
 	mq := &StreamMessageQueue{
-		queue:   make([]*protoGw.StreamData, 0),
-		maxSize: 100000,
+		queue:                 make([]*protoGw.StreamData, 0),
+		maxSize:               maxSize,
+		policy:                cfg.Policy,
+		blockTimeout:          blockTimeout,
+		backpressureThreshold: threshold,
 	}
 	mq.cond = sync.NewCond(&mq.mu)
 	return mq
 }
 
-func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) {
+func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 	mq.mu.Lock()
-	if len(mq.queue) >= mq.maxSize {
-		mq.queue = mq.queue[1:]
+	switch mq.policy {
+	case config.QueuePolicyBlock:
+		for len(mq.queue) >= mq.maxSize {
+			mq.cond.Wait()
+		}
+		mq.queue = append(mq.queue, msg)
+		mq.mu.Unlock()
+		return nil
+
+	case config.QueuePolicyTimeout:
+		deadline := time.Now().Add(mq.blockTimeout)
+		for len(mq.queue) >= mq.maxSize {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				mq.mu.Unlock()
+				return ErrQueueFull
+			}
+			mq.mu.Unlock()
+			time.Sleep(time.Millisecond)
+			mq.mu.Lock()
+			if len(mq.queue) < mq.maxSize {
+				break
+			}
+		}
+		mq.queue = append(mq.queue, msg)
+		mq.mu.Unlock()
+		return nil
+
+	case config.QueuePolicyBackpressure:
+		if float64(len(mq.queue))/float64(mq.maxSize) >= mq.backpressureThreshold {
+			mq.mu.Unlock()
+			return ErrBackpressure
+		}
+		if len(mq.queue) >= mq.maxSize {
+			mq.queue = mq.queue[1:]
+		}
+		mq.queue = append(mq.queue, msg)
+		mq.cond.Signal()
+		mq.mu.Unlock()
+		return nil
+
+	default: // config.QueuePolicyDrop or unknown
+		if len(mq.queue) >= mq.maxSize {
+			mq.queue = mq.queue[1:]
+		}
+		mq.queue = append(mq.queue, msg)
+		mq.cond.Signal()
+		mq.mu.Unlock()
+		return nil
 	}
-	mq.queue = append(mq.queue, msg)
-	mq.cond.Signal()
-	mq.mu.Unlock()
 }
 
 func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
@@ -1103,11 +1178,11 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 		if state == LogicStateConnected {
 			err := lc.SendMessageDirect(msg)
 			if err != nil {
-				mq.Enqueue(msg)
+				_ = mq.Enqueue(msg)
 				time.Sleep(100 * time.Millisecond)
 			}
 		} else {
-			mq.Enqueue(msg)
+			_ = mq.Enqueue(msg)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
@@ -1118,13 +1193,17 @@ type GatewayInterface interface {
 	GetGRPCConfig() config.GRPCConfig
 	GetStreamConfig() config.StreamConfig
 	GetGatewayID() string
+	GetServerID() string
 	AddPushedToClient(n int64)
 	AddPushDroppedNoConn(n int64)
 	GetLogicClient(serverID string) LogicClientProvider
+	LookupLogicAddress(serverID string) string
+	GetGatewayClient(serverID string) GatewayClientProvider
 }
 
 type GRPCServer struct {
 	protoGw.UnimplementedGatewayStreamServer
+	protoGw.UnimplementedGatewayServer
 	gateway GatewayInterface
 	mu      sync.Mutex
 }
@@ -1160,6 +1239,156 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 			}
 		}, ctx)
 	}
+}
+
+func (s *GRPCServer) connection(sessionID string) (*Connection, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+	conn := s.gateway.GetConnectionManager().GetConnection(sessionID)
+	if conn == nil {
+		return nil, fmt.Errorf("session %q not found", sessionID)
+	}
+	return conn, nil
+}
+
+func (s *GRPCServer) CloseSession(_ context.Context, req *protoGw.CloseSessionReq) (*protoGw.CloseSessionAck, error) {
+	conn, err := s.connection(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Close(); err != nil {
+		return nil, err
+	}
+	return &protoGw.CloseSessionAck{}, nil
+}
+
+func (s *GRPCServer) KickSession(ctx context.Context, req *protoGw.KickSessionReq) (*protoGw.KickSessionAck, error) {
+	conn, err := s.connection(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Close(); err != nil {
+		return nil, err
+	}
+	return &protoGw.KickSessionAck{}, nil
+}
+
+func (s *GRPCServer) SendToClient(_ context.Context, req *protoGw.SendToClientReq) (*protoGw.SendToClientAck, error) {
+	conn, err := s.connection(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Send(encodePushMessage(req.GetCmd(), req.GetData())); err != nil {
+		return nil, err
+	}
+	s.gateway.AddPushedToClient(1)
+	return &protoGw.SendToClientAck{}, nil
+}
+
+func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*protoGw.BroadcastAck, error) {
+	var totalSent, totalFailed int
+	for _, groupID := range req.GetGroupId() {
+		sent, failed := s.broadcastGroup(groupID, req.GetCmd(), req.GetData())
+		totalSent += sent
+		totalFailed += failed
+	}
+	if totalSent == 0 && totalFailed > 0 {
+		return nil, fmt.Errorf("broadcast failed: all %d sessions unreachable", totalFailed)
+	}
+	if totalFailed > 0 {
+		tlog.Warn("broadcast partial success", "sent", totalSent, "failed", totalFailed)
+	}
+	return &protoGw.BroadcastAck{}, nil
+}
+
+func (s *GRPCServer) BroadcastAll(_ context.Context, req *protoGw.BroadcastAllReq) (*protoGw.BroadcastAllAck, error) {
+	var firstErr error
+	s.gateway.GetConnectionManager().connections.Range(func(_, value any) bool {
+		conn := value.(*Connection)
+		if err := conn.Send(encodePushMessage(req.GetCmd(), req.GetData())); err != nil && firstErr == nil {
+			firstErr = err
+		} else if err == nil {
+			s.gateway.AddPushedToClient(1)
+		}
+		return true
+	})
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return &protoGw.BroadcastAllAck{}, nil
+}
+
+func (s *GRPCServer) JoinGroup(_ context.Context, req *protoGw.JoinGroupReq) (*protoGw.JoinGroupAck, error) {
+	conn, err := s.connection(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+	serverID := conn.GetServerID()
+	userUUID := conn.GetUserUUID()
+	counts := make([]int32, len(req.GetGroupId()))
+	for i, groupID := range req.GetGroupId() {
+		s.gateway.GetConnectionManager().AddUserToGroup(groupID, serverID, userUUID)
+		counts[i] = int32(s.gateway.GetConnectionManager().GetGroupMemberCount(groupID))
+	}
+	return &protoGw.JoinGroupAck{Code: 0, MemberCount: counts}, nil
+}
+
+func (s *GRPCServer) LeaveGroup(_ context.Context, req *protoGw.LeaveGroupReq) (*protoGw.LeaveGroupAck, error) {
+	conn, err := s.connection(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+	serverID := conn.GetServerID()
+	userUUID := conn.GetUserUUID()
+	counts := make([]int32, len(req.GetGroupId()))
+	for i, groupID := range req.GetGroupId() {
+		s.gateway.GetConnectionManager().RemoveUserFromGroup(groupID, serverID, userUUID)
+		counts[i] = int32(s.gateway.GetConnectionManager().GetGroupMemberCount(groupID))
+	}
+	return &protoGw.LeaveGroupAck{Code: 0, MemberCount: counts}, nil
+}
+
+func (s *GRPCServer) GetGroupInfo(_ context.Context, req *protoGw.GetGroupInfoReq) (*protoGw.GetGroupInfoAck, error) {
+	cm := s.gateway.GetConnectionManager()
+	return &protoGw.GetGroupInfoAck{
+		GroupId:     req.GetGroupId(),
+		MemberCount: int32(cm.GetGroupMemberCount(req.GetGroupId())),
+		SessionIds:  cm.GetGroupSessions(req.GetGroupId()),
+	}, nil
+}
+
+func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sent int, failed int) {
+	if groupID == "" {
+		return 0, 1
+	}
+	cm := s.gateway.GetConnectionManager()
+	sessions := cm.GetGroupSessions(groupID)
+	for _, sessionID := range sessions {
+		conn := cm.GetConnection(sessionID)
+		if conn == nil {
+			failed++
+			tlog.Warn("group push: session disappeared", "groupID", groupID, "sessionID", sessionID)
+			continue
+		}
+		msg := encodePushMessage(cmd, data)
+		if err := conn.Send(msg); err != nil {
+			failed++
+			tlog.Warn("group push: send failed", "groupID", groupID, "sessionID", sessionID, "error", err)
+			continue
+		}
+		sent++
+		s.gateway.AddPushedToClient(1)
+	}
+	if failed > 0 {
+		tlog.Warn("group push completed with failures", "groupID", groupID, "total", len(sessions), "sent", sent, "failed", failed)
+	}
+	return sent, failed
+}
+
+func encodePushMessage(cmd int32, data []byte) []byte {
+	msg, _ := proto.Marshal(&protoGw.MessageFrame{Cmd: cmd, Body: data})
+	return msg
 }
 
 func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (*protoGw.StreamData, error) {
@@ -1212,7 +1441,9 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 		grpc.InitialConnWindowSize(int32(windowSize)),
 	)
 	tlog.Info("registering GatewayService")
-	protoGw.RegisterGatewayStreamServer(server, NewGRPCServer(gw))
+	grpcService := NewGRPCServer(gw)
+	protoGw.RegisterGatewayStreamServer(server, grpcService)
+	protoGw.RegisterGatewayServer(server, grpcService)
 
 	tlog.Info("listening on port", "port", port)
 	listener, err := net.Listen("tcp", port)
@@ -1232,18 +1463,17 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 }
 
 type LogicClientPool struct {
-	clients   map[string]*LogicClient
-	ordered   []string // deterministic round-robin: ordered list of service IDs
-	mu        sync.RWMutex
-	gateway   GatewayInterface
-	discovery *etcd.Component
-	balancer  *cluster.Balancer
-	stopCh    chan struct{}
-	wg        sync.WaitGroup
-	rrIndex   uint64
-	// fastClient caches the single connected client for lock-free fast path.
-	// Updated atomically when clients are added/removed. Nil when 0 or >1 clients.
+	clients    map[string]*LogicClient
+	ordered    []string // deterministic round-robin: ordered list of service IDs
+	mu         sync.RWMutex
+	gateway    GatewayInterface
+	discovery  *etcd.Component
+	balancer   *cluster.Balancer
+	stopCh     chan struct{}
+	wg         sync.WaitGroup
+	rrIndex    uint64
 	fastClient atomic.Pointer[LogicClient]
+	addressMap map[string]string // serverID -> address (from etcd)
 }
 
 func (pool *LogicClientPool) RegisterClient(serverID string, client *LogicClient) {
@@ -1272,9 +1502,10 @@ func (pool *LogicClientPool) GetClient(serverID string) LogicClientProvider {
 
 func NewLogicClientPool(gateway GatewayInterface) *LogicClientPool {
 	return &LogicClientPool{
-		clients: make(map[string]*LogicClient),
-		gateway: gateway,
-		stopCh:  make(chan struct{}),
+		clients:    make(map[string]*LogicClient),
+		addressMap: make(map[string]string),
+		gateway:    gateway,
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -1288,6 +1519,13 @@ func (pool *LogicClientPool) updateFastClient() {
 		}
 	}
 	pool.fastClient.Store(nil)
+}
+
+// LookupAddress returns the address for a given serverID from the etcd-maintained map.
+func (pool *LogicClientPool) LookupAddress(serverID string) string {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	return pool.addressMap[serverID]
 }
 
 func (pool *LogicClientPool) SetDiscovery(discovery *etcd.Component) {
@@ -1352,6 +1590,7 @@ func (pool *LogicClientPool) handleServiceRegister(event etcd.ServiceEvent) {
 
 	pool.mu.Lock()
 	pool.clients[event.InstanceID] = client
+	pool.addressMap[event.InstanceID] = event.Address
 	if !containsString(pool.ordered, event.InstanceID) {
 		pool.ordered = append(pool.ordered, event.InstanceID)
 	}
@@ -1382,6 +1621,7 @@ func (pool *LogicClientPool) handleServiceDeregister(event etcd.ServiceEvent) {
 			// gRPC 连接已断开，安全清理
 			pool.mu.Lock()
 			delete(pool.clients, event.InstanceID)
+			delete(pool.addressMap, event.InstanceID)
 			pool.ordered = removeString(pool.ordered, event.InstanceID)
 			pool.updateFastClient()
 			pool.mu.Unlock()
@@ -1523,4 +1763,228 @@ func removeString(slice []string, s string) []string {
 		}
 	}
 	return slice
+}
+
+// ---------------------------------------------------------------------------
+// GatewayClient / GatewayClientPool – gateway-to-gateway gRPC client pool
+// ---------------------------------------------------------------------------
+
+// GatewayClient wraps a single gRPC connection to another gateway instance.
+type GatewayClient struct {
+	client   protoGw.GatewayClient
+	conn     *grpc.ClientConn
+	address  string
+	serverID string
+	mu       sync.RWMutex
+	closing  bool
+}
+
+func NewGatewayClient(serverID, address string) *GatewayClient {
+	return &GatewayClient{
+		address:  address,
+		serverID: serverID,
+	}
+}
+
+func (gc *GatewayClient) Connect() error {
+	conn, err := grpc.NewClient(gc.address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                10 * time.Second,
+			Timeout:             3 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("dial gateway %s (%s): %w", gc.serverID, gc.address, err)
+	}
+
+	gc.mu.Lock()
+	if gc.closing {
+		gc.mu.Unlock()
+		conn.Close()
+		return fmt.Errorf("client %s is closing", gc.serverID)
+	}
+	gc.conn = conn
+	gc.client = protoGw.NewGatewayClient(conn)
+	gc.mu.Unlock()
+
+	tlog.Info("gateway client created", "serverID", gc.serverID, "address", gc.address)
+	return nil
+}
+
+func (gc *GatewayClient) IsConnected() bool {
+	gc.mu.RLock()
+	defer gc.mu.RUnlock()
+	return gc.conn != nil && !gc.closing && gc.conn.GetState() != connectivity.Shutdown
+}
+
+func (gc *GatewayClient) Client() protoGw.GatewayClient {
+	gc.mu.RLock()
+	defer gc.mu.RUnlock()
+	return gc.client
+}
+
+func (gc *GatewayClient) Close() {
+	gc.mu.Lock()
+	defer gc.mu.Unlock()
+	if gc.closing {
+		return
+	}
+	gc.closing = true
+	if gc.conn != nil {
+		gc.conn.Close()
+	}
+}
+
+// GatewayClientPool manages gRPC clients to other gateway instances discovered
+// via etcd. The pool mirrors the structure of LogicClientPool but is simpler
+// because gateway-to-gateway communication uses unary RPCs (no streams).
+type GatewayClientPool struct {
+	clients    map[string]*GatewayClient
+	mu         sync.RWMutex
+	discovery  *etcd.Component
+	addressMap map[string]string // serverID → address (from etcd)
+	selfID     string            // this gateway's instance ID (excluded from pool)
+}
+
+func NewGatewayClientPool(gateway GatewayInterface) *GatewayClientPool {
+	return &GatewayClientPool{
+		clients:    make(map[string]*GatewayClient),
+		addressMap: make(map[string]string),
+		selfID:     gateway.GetServerID(),
+	}
+}
+
+func (pool *GatewayClientPool) LoadEvents(events []etcd.ServiceEvent) {
+	for _, event := range events {
+		pool.handleServiceChange(event)
+	}
+}
+
+func (pool *GatewayClientPool) GetClient(serverID string) GatewayClientProvider {
+	pool.mu.RLock()
+	client := pool.clients[serverID]
+	pool.mu.RUnlock()
+	if client == nil || !client.IsConnected() {
+		return nil
+	}
+	return client
+}
+
+func (pool *GatewayClientPool) LookupAddress(serverID string) string {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	return pool.addressMap[serverID]
+}
+
+func (pool *GatewayClientPool) SetDiscovery(discovery *etcd.Component) {
+	pool.discovery = discovery
+	discovery.OnServiceChange(pool.handleServiceChange)
+}
+
+func (pool *GatewayClientPool) handleServiceChange(event etcd.ServiceEvent) {
+	// The dedicated discovery component watches Gateway:{zone}. Skip self.
+	if event.InstanceID == pool.selfID {
+		return
+	}
+	switch event.Type {
+	case etcd.EventRegister:
+		pool.handleRegister(event)
+	case etcd.EventDeregister:
+		pool.handleDeregister(event)
+	}
+}
+
+func (pool *GatewayClientPool) handleRegister(event etcd.ServiceEvent) {
+	pool.mu.RLock()
+	existing, exists := pool.clients[event.InstanceID]
+	pool.mu.RUnlock()
+
+	if exists && existing != nil && existing.IsConnected() && existing.address == event.Address {
+		return
+	}
+
+	// Clean up stale entry
+	if exists && existing != nil && !existing.IsConnected() {
+		pool.mu.Lock()
+		delete(pool.clients, event.InstanceID)
+		delete(pool.addressMap, event.InstanceID)
+		pool.mu.Unlock()
+		go existing.Close()
+	}
+
+	client := NewGatewayClient(event.InstanceID, event.Address)
+	go func() {
+		tlog.Info("connecting to discovered gateway", "serverID", event.InstanceID, "address", event.Address)
+		if err := client.Connect(); err != nil {
+			tlog.Error("failed to connect to discovered gateway",
+				"serverID", event.InstanceID, "address", event.Address, "error", err)
+			return
+		}
+		tlog.Info("gateway client ready for discovered gateway", "serverID", event.InstanceID, "address", event.Address)
+	}()
+
+	pool.mu.Lock()
+	pool.clients[event.InstanceID] = client
+	pool.addressMap[event.InstanceID] = event.Address
+	pool.mu.Unlock()
+
+	tlog.Info("gateway client added to pool",
+		"serverID", event.InstanceID, "address", event.Address, "totalClients", pool.ClientCount())
+}
+
+func (pool *GatewayClientPool) handleDeregister(event etcd.ServiceEvent) {
+	pool.mu.RLock()
+	client, exists := pool.clients[event.InstanceID]
+	pool.mu.RUnlock()
+
+	if exists && client != nil {
+		if !client.IsConnected() {
+			pool.mu.Lock()
+			delete(pool.clients, event.InstanceID)
+			delete(pool.addressMap, event.InstanceID)
+			pool.mu.Unlock()
+			go client.Close()
+			tlog.Warn("gateway offline and connection already disconnected, cleaned up",
+				"serverID", event.InstanceID, "address", event.Address)
+		} else {
+			tlog.Warn("gateway deregistered from etcd, keeping gRPC connection (still connected)",
+				"serverID", event.InstanceID, "address", event.Address)
+		}
+	}
+
+	tlog.Warn("gateway client deregister event processed",
+		"serverID", event.InstanceID, "address", event.Address, "totalClients", pool.ClientCount())
+}
+
+func (pool *GatewayClientPool) ClientCount() int {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	return len(pool.clients)
+}
+
+func (pool *GatewayClientPool) IsConnected() bool {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	for _, c := range pool.clients {
+		if c.IsConnected() {
+			return true
+		}
+	}
+	return false
+}
+
+func (pool *GatewayClientPool) Close() {
+	pool.mu.Lock()
+	clients := make([]*GatewayClient, 0, len(pool.clients))
+	for _, c := range pool.clients {
+		clients = append(clients, c)
+	}
+	pool.clients = make(map[string]*GatewayClient)
+	pool.addressMap = make(map[string]string)
+	pool.mu.Unlock()
+	for _, c := range clients {
+		c.Close()
+	}
 }

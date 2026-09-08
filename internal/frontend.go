@@ -2,8 +2,11 @@ package gateway
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -37,14 +40,10 @@ type LogicClientProvider interface {
 	SendMessage(msg *protoGw.StreamData) error
 }
 
-var (
-	frameHeaderPool = sync.Pool{
-		New: func() interface{} {
-			buf := make([]byte, 4)
-			return &buf
-		},
-	}
-)
+type GatewayClientProvider interface {
+	IsConnected() bool
+	Client() protoGw.GatewayClient
+}
 
 func extractRouteAndCmd(data []byte) (string, int32) {
 	return gateway.ExtractRouteAndCmd(data)
@@ -80,8 +79,11 @@ type Gateway struct {
 	tracer            *obs.Tracer
 	logicClient       *LogicClient
 	logicClientPool   *LogicClientPool
+	gatewayClientPool *GatewayClientPool
 	serverID          string
 	serviceDiscovery  *etcd.Component
+	gatewayDiscovery  *etcd.Component // discovery for other gateways (Gateway:{zone})
+	gatewayEvents     []etcd.ServiceEvent
 	overloadProtector *OverloadProtector
 	grpcServer        *grpc.Server
 	promExporter      *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为 nil）
@@ -113,6 +115,7 @@ type Gateway struct {
 	logSanitizer  *obs.LogSanitizer           // 日志脱敏
 
 	// 转发统计计数器（用于极限压测时观测 sgate 转发能力）
+	pipeline                           *MessagePipeline
 	connectionsTotal                   atomic.Int64
 	connectionsActive                  atomic.Int64
 	messagesForwarded                  atomic.Int64
@@ -158,10 +161,8 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
 }
 
-
-
-func NewGateway() *Gateway {
-	cfg, err := config.LoadConfig()
+func NewGateway(configFiles ...string) *Gateway {
+	cfg, err := config.LoadConfig(configFiles...)
 	if err != nil {
 		tlog.Warn("load config failed, using defaults", "error", err)
 	}
@@ -222,6 +223,8 @@ func NewGateway() *Gateway {
 		TrafficMirror:      traComp.TrafficMirror,
 		Degradation:        traComp.Degradation,
 		Discovery:          clsComp.Discovery,
+		GatewayDiscovery:   clsComp.GatewayDiscovery,
+		GatewayEvents:      clsComp.GatewayEvents(),
 		Balancer:           clsComp.Balancer,
 		ConfigCenter:       clsComp.ConfigCenter,
 		ClusterNode:        clsComp.Cluster,
@@ -258,9 +261,6 @@ func NewGateway() *Gateway {
 
 	gw.cfg.Store(cfg)
 	gw.ctx = context.Background()
-
-	// Start all gateway services
-	gw.StartServices()
 
 	return gw
 }
@@ -331,6 +331,13 @@ func (g *Gateway) StartServices() {
 			return client.IsConnected()
 		})
 	}
+
+	// Gateway-to-gateway client pool uses its dedicated Gateway:{zone} watcher.
+	g.gatewayClientPool = NewGatewayClientPool(g)
+	if g.gatewayDiscovery != nil {
+		g.gatewayClientPool.SetDiscovery(g.gatewayDiscovery)
+	}
+	g.gatewayClientPool.LoadEvents(g.gatewayEvents)
 
 	// gRPC server
 	grpcPort := fmt.Sprintf(":%d", g.grpcCfg.Port)
@@ -503,7 +510,6 @@ func (g *Gateway) configWatcher() {
 }
 
 func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
-	oldCfg := g.cfg.Load().(*config.Config)
 	g.cfg.Store(newCfg)
 
 	// 动态更新限流阈值（无需重启）
@@ -572,7 +578,6 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		tlog.Info("degradation rules updated", "count", len(newCfg.Degradation.Rules))
 	}
 
-	_ = oldCfg
 	tlog.Info("config updated dynamically")
 }
 
@@ -733,13 +738,9 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 
 	ctx.FrameBuf = append(ctx.FrameBuf, data...)
 
-	// 批量路径：VerifyInbound 关闭时，将本次 OnTraffic 的完整帧打包为
-	// 单个 RouteBatch 消息，消除逐帧 protobuf 解析、深拷贝和通道发送开销。
-	if !g.protection.VerifyInbound {
-		return g.handleBatchTraffic(c, ctx)
-	}
-
-	// Slow path: per-frame processing for VerifyInbound or handshake
+	// Process each complete frame using the normal protocol path. The logic
+	// stream carries the real client command for every message; it does not
+	// define a gateway-private batch command.
 	maxFrame := g.protection.MaxFrameSize
 	for len(ctx.FrameBuf) >= 4 {
 		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
@@ -828,14 +829,24 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 
 	conn := g.connectionManager.GetConnection(ctx.ConnectionID)
 	if conn != nil && !conn.IsAuthenticated() {
-		firstLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
-		firstCmd, _, _, ok := gateway.ExtractMessageFrame(ctx.FrameBuf[4 : 4+firstLen])
-		if !ok || !g.isPreAuthCommand(firstCmd) {
-			errorResp := newErrorResponse("error", "unauthorized", "connection not authenticated", "")
-			respData, _ := proto.Marshal(errorResp)
-			writeFrame(c, respData)
-			g.messagesDroppedAuth.Add(int64(batchCount))
-			return gnet.Close
+		// Check every frame's cmd — a batch with a pre-auth first frame must not
+		// smuggle non-pre-auth commands through when the connection is unauthenticated.
+		off := 0
+		for off+4 <= len(ctx.FrameBuf) {
+			frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[off : off+4])
+			totalLen := 4 + int(frameLen)
+			if off+totalLen > len(ctx.FrameBuf) {
+				break
+			}
+			cmd, _, _, ok := gateway.ExtractMessageFrame(ctx.FrameBuf[off+4 : off+totalLen])
+			if !ok || !g.isPreAuthCommand(cmd) {
+				errorResp := newErrorResponse("error", "unauthorized", "connection not authenticated", "")
+				respData, _ := proto.Marshal(errorResp)
+				writeFrame(c, respData)
+				g.messagesDroppedAuth.Add(int64(batchCount))
+				return gnet.Close
+			}
+			off += totalLen
 		}
 	}
 
@@ -933,9 +944,34 @@ func (g *Gateway) GetLogicClient(serverID string) LogicClientProvider {
 	return g.logicClientPool.GetClient(serverID)
 }
 
-func (g *Gateway) validateLoginKey(_ string, _ string) bool {
-	// Reserved for the future login-server validation call.
-	return true
+// LookupLogicAddress queries the service discovery for a logic server address by serverID.
+func (g *Gateway) LookupLogicAddress(serverID string) string {
+	if g.logicClientPool == nil {
+		return ""
+	}
+	return g.logicClientPool.LookupAddress(serverID)
+}
+
+func (g *Gateway) GetGatewayClient(serverID string) GatewayClientProvider {
+	if g.gatewayClientPool == nil {
+		return nil
+	}
+	return g.gatewayClientPool.GetClient(serverID)
+}
+
+func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
+	mode := g.protection.LoginAuth.Mode
+	switch mode {
+	case "hmac":
+		return validateHMACLoginKey(userID, loginKey, g.protection.LoginAuth.Secret)
+	case "delegate":
+		// Delegate validation to logic server — the gateway trusts the
+		// logic response. If logic rejects the user, it will not send
+		// back a UserKey, and the connection stays unauthenticated.
+		return true
+	default: // "none" or empty
+		return true
+	}
 }
 
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
@@ -959,6 +995,13 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		return gnet.None
 	}
 	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
+	userUUID := req.UserId
+	if userUUID == "" {
+		userUUID = connectionID
+	}
+	// Keep the selected logic server in the gateway-side identity so session
+	// indexes cannot collide across logic shards.
+	g.connectionManager.UpdateConnectionUserUUID(connectionID, req.ServerId+":"+userUUID)
 	writeAck(0, "ok", req.ServerId)
 	return gnet.None
 }
@@ -984,15 +1027,6 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 
 	g.messagesReceived.Add(1)
 
-	if g.overloadProtector.IsOverloaded() {
-		g.overloadProtector.RecordDrop(1)
-		g.messagesDroppedOverload.Add(1)
-		errorResp := newErrorResponse("error", "server overload", "cpu threshold exceeded", "")
-		respData, _ := proto.Marshal(errorResp)
-		writeFrame(c, respData)
-		return
-	}
-
 	var connectionID string
 	connCtx := c.Context()
 	if ctx, ok := connCtx.(*ConnContext); ok {
@@ -1008,7 +1042,6 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		})
 	}
 
-	logicClient := g.getLogicClient()
 	message, ok := decodeClientMessage(data)
 	if !ok {
 		return gnet.Close
@@ -1017,140 +1050,14 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if cmd == gateway.CmdLoginGate {
 		return g.handleLoginGate(c, connectionID, message)
 	}
-	conn := g.connectionManager.GetConnection(connectionID)
-	if conn == nil || conn.GetServerID() == "" {
-		return gnet.Close
-	}
-	if !conn.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
-		errorResp := newErrorResponse("error", "unauthorized", "connection not authenticated", "")
+
+	result := g.pipeline.Process(c, data, message, connectionID)
+	if result.Error != nil {
+		errorResp := newErrorResponse("error", result.Error.Error(), "", "")
 		respData, _ := proto.Marshal(errorResp)
 		writeFrame(c, respData)
-		g.messagesDroppedAuth.Add(1)
-		return gnet.Close
 	}
-	logicClient = g.GetLogicClient(conn.GetServerID())
-	if logicClient == nil {
-		g.messagesDroppedNoLogicNotConnected.Add(1)
-		return
-	}
-
-	// IP 白名单/黑名单检查
-	if g.whitelistBlacklist != nil {
-		remoteIP := getRemoteIP(c)
-		if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
-			g.messagesDroppedBlacklist.Add(1)
-			return
-		}
-		// 白名单非空时，仅放行白名单 IP
-		whitelist := g.whitelistBlacklist.GetWhitelist()
-		if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
-			g.messagesDroppedBlacklist.Add(1)
-			return
-		}
-	}
-
-	// 限流检查（按 IP 维度）
-	if g.rateLimiter != nil {
-		remoteIP := getRemoteIP(c)
-		if !g.rateLimiter.Allow("ip", remoteIP) {
-			g.messagesDroppedRateLimit.Add(1)
-			return
-		}
-		if !g.rateLimiter.Allow("route", fmt.Sprintf("%d", cmd)) {
-			g.messagesDroppedRateLimit.Add(1)
-			return
-		}
-	}
-
-	// WAF 检查（SQL 注入/XSS/大 payload）
-	if g.waf != nil {
-		if !g.waf.Inspect(data) {
-			g.messagesDroppedWAF.Add(1)
-			return
-		}
-	}
-
-	// 熔断器检查（按 route 维度，自动创建）
-	if g.circuitBreakerMgr != nil {
-		breaker := g.getOrCreateBreaker(fmt.Sprintf("%d", cmd))
-		if !breaker.Allow() {
-			g.messagesDroppedCircuit.Add(1)
-			return
-		}
-	}
-
-	// 入方向消息完整性校验
-	if g.protection.VerifyInbound && g.messageIntegrity != nil {
-		// Skip integrity for now - phantom fields removed
-	}
-
-	// Tracer: 采样追踪转发延迟
-	var span *obs.TraceSpan
-	if g.tracer != nil {
-		traceID := obs.GenerateTraceID()
-		span = g.tracer.StartSpan(traceID, "forward", "")
-		g.tracer.AddAttribute(span, "cmd", fmt.Sprintf("%d", cmd))
-		g.tracer.AddAttribute(span, "connectionID", connectionID)
-	}
-
-	// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
-	// 过滤器可修改 data/userUUID，或中止请求
-	protoMsg, filterOK := g.applyForwardFilters(c, message.Data, connectionID, cmd)
-	if !filterOK {
-		if span != nil && g.tracer != nil {
-			g.tracer.EndSpan(span)
-		}
-		return
-	}
-	if protoMsg == nil {
-		// 兼容 filter chain 未启用场景：构造默认消息
-		protoMsg = &protoGw.StreamData{
-			SessionId: connectionID,
-			Data:      append([]byte(nil), message.Data...),
-			SeqId:     message.SeqId,
-		}
-		if cmd > 0 {
-			protoMsg.Cmd = cmd
-		}
-	} else if cmd > 0 && protoMsg.Cmd == 0 {
-		protoMsg.Cmd = cmd
-	}
-
-	routeKey := fmt.Sprintf("%d", cmd)
-	logicClient = g.GetLogicClient(conn.GetServerID())
-	if logicClient == nil || logicClient.SendMessage(protoMsg) != nil {
-		g.messagesDroppedFull.Add(1)
-		if g.circuitBreakerMgr != nil {
-			breaker := g.getOrCreateBreaker(routeKey)
-			breaker.RecordFailure()
-		}
-		if g.balancer != nil {
-			g.balancer.RecordFailure(routeKey)
-		}
-		if g.degradation != nil {
-			g.degradation.RecordResult(routeKey, true)
-		}
-	} else {
-		g.messagesForwarded.Add(1)
-		if g.circuitBreakerMgr != nil {
-			breaker := g.getOrCreateBreaker(routeKey)
-			breaker.RecordSuccess()
-		}
-		if g.balancer != nil {
-			g.balancer.RecordSuccess(routeKey)
-		}
-		if g.degradation != nil {
-			g.degradation.RecordResult(routeKey, false)
-		}
-	}
-
-	if span != nil && g.tracer != nil {
-		g.tracer.EndSpan(span)
-		if g.latencyTracker != nil {
-			g.latencyTracker.Record(span.Duration)
-		}
-	}
-	return
+	return result.Action
 }
 
 // getRemoteIP 从 gnet.Conn 获取客户端 IP
@@ -1179,15 +1086,9 @@ func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 }
 
 func writeFrame(c gnet.Conn, data []byte) {
-	headerPtr := frameHeaderPool.Get().(*[]byte)
-	binary.BigEndian.PutUint32(*headerPtr, uint32(len(data)))
-	c.Writev([][]byte{*headerPtr, data})
-	frameHeaderPool.Put(headerPtr)
-}
-
-func writeErrorFrame(c gnet.Conn, errMsg *commonstruct.ErrorResponse) {
-	data := marshalClientError(errMsg)
-	writeFrame(c, data)
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(data)))
+	c.Writev([][]byte{header, data})
 }
 
 func writeMsgFrame(c gnet.Conn, msg *protoGw.StreamData) {
@@ -1215,6 +1116,11 @@ func (g *Gateway) GetStreamConfig() config.StreamConfig {
 // GetGatewayID returns the stable identity advertised with every backend stream.
 func (g *Gateway) GetGatewayID() string {
 	return g.gatewayID
+}
+
+// GetServerID returns the etcd instance ID used to register this gateway.
+func (g *Gateway) GetServerID() string {
+	return g.serverID
 }
 
 func (g *Gateway) logMetrics() {
@@ -1255,15 +1161,25 @@ func (g *Gateway) Close() {
 			close(drainDone)
 		}()
 
+		drainTimer := time.NewTimer(drainTimeout)
 		select {
 		case <-drainDone:
+			if !drainTimer.Stop() {
+				select {
+				case <-drainTimer.C:
+				default:
+				}
+			}
 			tlog.Info("connection drain completed")
-		case <-time.After(drainTimeout):
+		case <-drainTimer.C:
 			tlog.Warn("connection drain timed out, forcing close")
 		}
 
 		if g.serviceDiscovery != nil {
 			g.serviceDiscovery.Destroy()
+		}
+		if g.gatewayDiscovery != nil {
+			g.gatewayDiscovery.Destroy()
 		}
 
 		if g.cluster != nil {
@@ -1274,8 +1190,18 @@ func (g *Gateway) Close() {
 			g.logicClientPool.Close()
 		}
 
+		if g.gatewayClientPool != nil {
+			g.gatewayClientPool.Close()
+		}
+
 		if g.logicClient != nil {
 			g.logicClient.Close()
+		}
+		if g.messageIntegrity != nil {
+			g.messageIntegrity.Stop()
+		}
+		if g.trafficMirror != nil {
+			g.trafficMirror.Stop()
 		}
 
 		if g.grpcServer != nil {
@@ -1330,4 +1256,16 @@ func (g *Gateway) drainConnections(timeout time.Duration) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// validateHMACLoginKey validates login_key as HMAC-SHA256(userID, secret).
+// The client is expected to compute: loginKey = hex(HMAC-SHA256(secret, userID)).
+func validateHMACLoginKey(userID, loginKey, secret string) bool {
+	if secret == "" || userID == "" || loginKey == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(userID))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(loginKey), []byte(expected))
 }

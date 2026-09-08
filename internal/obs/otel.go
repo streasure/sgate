@@ -212,20 +212,6 @@ func (f *OTelSpanFilter) Process(fc *types.FilterContext) (bool, error) {
 	return true, nil
 }
 
-// traceIDFromHeaders 从客户端传入的 trace-id（支持 W3C traceparent）
-func extractTraceID(headers map[string]string) string {
-	tp := headers["traceparent"]
-	if tp == "" {
-		return ""
-	}
-	// traceparent: 00-<trace-id>-<span-id>-<flags>
-	parts := bytes.Split([]byte(tp), []byte("-"))
-	if len(parts) >= 2 {
-		return string(parts[1])
-	}
-	return ""
-}
-
 func init() {
 	types.RegisterFilter("otel-tracer", func(cfg map[string]interface{}) (types.Filter, error) {
 		c := config.OTelTracerConfig{

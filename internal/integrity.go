@@ -15,12 +15,15 @@ type MessageIntegrity struct {
 	timeWindow  int64
 	replayCache map[string]int64
 	cacheMutex  sync.RWMutex
+	stopOnce    sync.Once
+	stopCh      chan struct{}
 }
 
 func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 	mi := &MessageIntegrity{
 		timeWindow:  timeWindow,
 		replayCache: make(map[string]int64),
+		stopCh:      make(chan struct{}),
 	}
 	go mi.cleanupCache()
 	return mi
@@ -29,16 +32,25 @@ func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 func (mi *MessageIntegrity) cleanupCache() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		mi.cacheMutex.Lock()
-		now := time.Now().UnixMilli()
-		for key, ts := range mi.replayCache {
-			if now-ts > mi.timeWindow {
-				delete(mi.replayCache, key)
+	for {
+		select {
+		case <-mi.stopCh:
+			return
+		case <-ticker.C:
+			mi.cacheMutex.Lock()
+			now := time.Now().UnixMilli()
+			for key, ts := range mi.replayCache {
+				if now-ts > mi.timeWindow {
+					delete(mi.replayCache, key)
+				}
 			}
+			mi.cacheMutex.Unlock()
 		}
-		mi.cacheMutex.Unlock()
 	}
+}
+
+func (mi *MessageIntegrity) Stop() {
+	mi.stopOnce.Do(func() { close(mi.stopCh) })
 }
 
 func (mi *MessageIntegrity) GenerateChecksum(msg proto.Message) string {

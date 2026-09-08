@@ -17,6 +17,9 @@ type TrafficMirror struct {
 	percent    int    // 镜像比例 0-100
 	targetAddr string // 镜像目标地址（逻辑服务）
 	queue      chan *types.FilterContext
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+	workersWG  sync.WaitGroup
 	enabled    atomic.Int32
 	dropped    atomic.Int64
 	forwarded  atomic.Int64
@@ -28,6 +31,7 @@ func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 		percent:    cfg.Percent,
 		targetAddr: cfg.TargetAddr,
 		queue:      make(chan *types.FilterContext, gatewayutil.MaxInt(cfg.QueueSize, 1024)),
+		stopCh:     make(chan struct{}),
 	}
 	if cfg.Enabled {
 		tm.enabled.Store(1)
@@ -38,6 +42,7 @@ func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 		workers = 2
 	}
 	for i := 0; i < workers; i++ {
+		tm.workersWG.Add(1)
 		go tm.worker()
 	}
 	return tm
@@ -62,12 +67,15 @@ func (mf *MirrorFilter) Process(fc *types.FilterContext) (bool, error) {
 
 // Mirror 异步投递镜像任务
 func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
-	if tm.percent <= 0 {
+	tm.mu.RLock()
+	percent := tm.percent
+	tm.mu.RUnlock()
+	if percent <= 0 {
 		return
 	}
 	// 按 connectionID 哈希采样（实际可换成更精确的随机）
 	h := gatewayutil.SimpleHash(fc.ConnectionID) % 100
-	if int(h) >= tm.percent {
+	if int(h) >= percent {
 		return
 	}
 	// 浅拷贝上下文，避免共享可变状态
@@ -90,14 +98,25 @@ func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
 }
 
 func (tm *TrafficMirror) worker() {
-	for fc := range tm.queue {
-		// 此处接入镜像目标（实现简化：仅日志记录）
-		// 实际生产可调用 mirror 专用 LogicClient
-		tlog.Debug("traffic mirror",
-			"route", fc.Route,
-			"conn", fc.ConnectionID,
-			"target", tm.targetAddr)
+	defer tm.workersWG.Done()
+	for {
+		select {
+		case <-tm.stopCh:
+			return
+		case fc := <-tm.queue:
+			// 此处接入镜像目标（实现简化：仅日志记录）
+			// 实际生产可调用 mirror 专用 LogicClient
+			tlog.Debug("traffic mirror",
+				"route", fc.Route,
+				"conn", fc.ConnectionID,
+				"target", tm.targetAddr)
+		}
 	}
+}
+
+func (tm *TrafficMirror) Stop() {
+	tm.stopOnce.Do(func() { close(tm.stopCh) })
+	tm.workersWG.Wait()
 }
 
 func (tm *TrafficMirror) UpdatePercent(p int) {

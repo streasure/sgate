@@ -40,13 +40,6 @@ func marshalClientMessage(msg *protoGw.StreamData) ([]byte, error) {
 	return proto.Marshal(&protoGw.MessageFrame{Cmd: msg.Cmd, SeqId: msg.SeqId, Body: body})
 }
 
-// marshalClientBytes converts an internal Message payload to the public frame
-// format. Raw non-Message payloads are left unchanged for transport helpers
-// that already provide a complete frame.
-func marshalClientBytes(data []byte) []byte {
-	return data
-}
-
 func marshalClientError(errMsg *commonstruct.ErrorResponse) []byte {
 	if errMsg == nil {
 		return nil

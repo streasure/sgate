@@ -40,7 +40,7 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID str
 	// 构造转发消息（允许过滤器修改 metadata）
 	msg := &protoGw.StreamData{
 		SessionId: connectionID,
-		Data:      append([]byte(nil), data...),
+		Data:      data,
 	}
 	if fcx.UserUUID != "" {
 		msg.UserKey = fcx.UserUUID

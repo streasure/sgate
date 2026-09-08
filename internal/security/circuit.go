@@ -159,6 +159,9 @@ func NewCircuitBreakerManager() *CircuitBreakerManager {
 }
 
 func (cbm *CircuitBreakerManager) GetCircuitBreaker(name string, failureThreshold, successThreshold int, timeout time.Duration) *CircuitBreaker {
+	if actual, ok := cbm.breakers.Load(name); ok {
+		return actual.(*CircuitBreaker)
+	}
 	breaker := NewCircuitBreaker(name, failureThreshold, successThreshold, timeout)
 	actual, _ := cbm.breakers.LoadOrStore(name, breaker)
 	return actual.(*CircuitBreaker)

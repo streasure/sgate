@@ -3,6 +3,8 @@ package gateway
 import (
 	"encoding/binary"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,19 +21,20 @@ const (
 )
 
 type Connection struct {
-	id         string
-	UserUUID   string
-	ServerID   string
-	Conn       gnet.Conn
-	RemoteAddr string
-	CreatedAt  int64
-	LastActive int64
+	id          string
+	UserUUID    string
+	ServerID    string
+	Conn        gnet.Conn
+	RemoteAddr  string
+	CreatedAt   int64
+	LastActive  int64
 	activitySeq atomic.Uint32
-	Status     int8
-	Groups     map[string]struct{}
-	IsWS       bool
-	state      atomic.Int32
-	mu         sync.Mutex
+	Status      int8
+	Groups      map[string]struct{}
+	IsWS        bool
+	state       atomic.Int32
+	mu          sync.Mutex
+	groupsMu    sync.RWMutex
 }
 
 func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
@@ -49,21 +52,29 @@ func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Conn
 	return c
 }
 
-func (c *Connection) ID() string               { return c.id }
-func (c *Connection) GetState() ConnState       { return ConnState(c.state.Load()) }
+func (c *Connection) ID() string          { return c.id }
+func (c *Connection) GetState() ConnState { return ConnState(c.state.Load()) }
 func (c *Connection) SetState(old, new ConnState) bool {
 	return c.state.CompareAndSwap(int32(old), int32(new))
 }
 
-func (c *Connection) IsBound() bool            { return c.ServerID != "" }
-func (c *Connection) IsAuthenticated() bool    { return c.UserUUID != "" && c.UserUUID[:5] != "temp_" }
-func (c *Connection) IsWebSocket() bool        { c.mu.Lock(); defer c.mu.Unlock(); return c.IsWS }
+func (c *Connection) IsBound() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ServerID != ""
+}
+func (c *Connection) IsAuthenticated() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.UserUUID != "" && !strings.HasPrefix(c.UserUUID, "temp_")
+}
+func (c *Connection) IsWebSocket() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.IsWS }
 
-func (c *Connection) SetUserUUID(uuid string)  { c.mu.Lock(); c.UserUUID = uuid; c.mu.Unlock() }
-func (c *Connection) GetUserUUID() string      { c.mu.Lock(); defer c.mu.Unlock(); return c.UserUUID }
-func (c *Connection) SetServerID(sid string)   { c.mu.Lock(); c.ServerID = sid; c.mu.Unlock() }
-func (c *Connection) GetServerID() string      { c.mu.Lock(); defer c.mu.Unlock(); return c.ServerID }
-func (c *Connection) SetWS(v bool)             { c.mu.Lock(); c.IsWS = v; c.mu.Unlock() }
+func (c *Connection) SetUserUUID(uuid string) { c.mu.Lock(); c.UserUUID = uuid; c.mu.Unlock() }
+func (c *Connection) GetUserUUID() string     { c.mu.Lock(); defer c.mu.Unlock(); return c.UserUUID }
+func (c *Connection) SetServerID(sid string)  { c.mu.Lock(); c.ServerID = sid; c.mu.Unlock() }
+func (c *Connection) GetServerID() string     { c.mu.Lock(); defer c.mu.Unlock(); return c.ServerID }
+func (c *Connection) SetWS(v bool)            { c.mu.Lock(); c.IsWS = v; c.mu.Unlock() }
 
 func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
 
@@ -93,9 +104,6 @@ func (c *Connection) SendMulti(combined []byte) error {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	if c.IsWS {
-		return c.Conn.AsyncWrite(combined, noopAsyncCallback)
-	}
 	return c.Conn.AsyncWrite(combined, noopAsyncCallback)
 }
 
@@ -123,14 +131,13 @@ func (c *Connection) sendWSFrame(data []byte) error {
 		frame = append(frame, 0x82, byte(payloadLen))
 	} else if payloadLen <= 65535 {
 		frame = make([]byte, 0, 4+payloadLen)
-		frame = append(frame, 0x82, 126)
-		frame = append(frame, byte(payloadLen>>8), byte(payloadLen))
+		frame = append(frame, 0x82, 126, byte(payloadLen>>8), byte(payloadLen))
 	} else {
 		frame = make([]byte, 0, 10+payloadLen)
 		frame = append(frame, 0x82, 127)
-		for i := 7; i >= 0; i-- {
-			frame = append(frame, byte(uint64(payloadLen)>>(uint(i)*8)))
-		}
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], uint64(payloadLen))
+		frame = append(frame, b[:]...)
 	}
 	frame = append(frame, data...)
 	return c.Conn.AsyncWrite(frame, noopAsyncCallback)
@@ -148,6 +155,53 @@ type serverUserKey struct {
 type ConnectionGroupInfo struct {
 	Name    string
 	Members map[serverUserKey]struct{}
+	mu      sync.RWMutex
+}
+
+func (g *ConnectionGroupInfo) AddMember(key serverUserKey) {
+	g.mu.Lock()
+	g.Members[key] = struct{}{}
+	g.mu.Unlock()
+}
+
+func (g *ConnectionGroupInfo) RemoveMember(key serverUserKey) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.Members, key)
+	return len(g.Members) == 0
+}
+
+func (g *ConnectionGroupInfo) HasMember(key serverUserKey) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	_, ok := g.Members[key]
+	return ok
+}
+
+func (g *ConnectionGroupInfo) MemberCount() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return len(g.Members)
+}
+
+func (g *ConnectionGroupInfo) Snapshot() []serverUserKey {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	members := make([]serverUserKey, 0, len(g.Members))
+	for key := range g.Members {
+		members = append(members, key)
+	}
+	return members
+}
+
+func (g *ConnectionGroupInfo) SnapshotUsers() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	users := make([]string, 0, len(g.Members))
+	for key := range g.Members {
+		users = append(users, key.userUUID)
+	}
+	return users
 }
 
 type ConnectionManager struct {
@@ -169,14 +223,30 @@ type ConnectionManager struct {
 
 var connectionIDCounter atomic.Uint64
 
+var connIDBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 48)
+		return &b
+	},
+}
+
 func generateConnectionID() string {
 	id := connectionIDCounter.Add(1)
-	return fmt.Sprintf("conn_%d_%d", time.Now().UnixNano(), id)
+	bufPtr := connIDBufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+	buf = append(buf, "conn_"...)
+	buf = strconv.AppendInt(buf, time.Now().UnixNano(), 10)
+	buf = append(buf, '_')
+	buf = strconv.AppendUint(buf, id, 10)
+	result := string(buf)
+	*bufPtr = buf
+	connIDBufPool.Put(bufPtr)
+	return result
 }
 
 func NewConnectionManager() *ConnectionManager {
 	return &ConnectionManager{
-		stopCh:   make(chan struct{}),
+		stopCh:    make(chan struct{}),
 		checkDone: make(chan struct{}),
 	}
 }
@@ -212,9 +282,10 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	conn := v.(*Connection)
 	cm.connections.Delete(connectionID)
 	cm.userConnections.Delete(conn.GetUserUUID())
-	cm.serverUserConnections.Delete(serverUserKey{serverID: conn.ServerID, userUUID: conn.GetUserUUID()})
-	if conn.ServerID != "" {
-		cm.serverConnections.Delete(conn.ServerID)
+	serverID := conn.GetServerID()
+	cm.serverUserConnections.Delete(serverUserKey{serverID: serverID, userUUID: conn.GetUserUUID()})
+	if serverID != "" {
+		cm.serverConnections.Delete(serverID)
 	}
 	atomic.AddInt32(&cm.count, -1)
 	cm.activeConnections.Add(-1)
@@ -270,12 +341,15 @@ func (cm *ConnectionManager) SendToUser(userUUID string, data []byte) {
 func (cm *ConnectionManager) SendToGroupBytes(groupID string, data []byte) {
 	cm.groupMutex.RLock()
 	v, ok := cm.groups.Load(groupID)
-	cm.groupMutex.RUnlock()
 	if !ok {
+		cm.groupMutex.RUnlock()
 		return
 	}
 	group := v.(*ConnectionGroupInfo)
-	for key := range group.Members {
+	cm.groupMutex.RUnlock()
+
+	members := group.Snapshot()
+	for _, key := range members {
 		v2, ok := cm.serverUserConnections.Load(key)
 		if !ok {
 			continue
@@ -302,7 +376,7 @@ func (cm *ConnectionManager) AddUserToGroup(groupID, serverID, userUUID string) 
 	} else {
 		group = v.(*ConnectionGroupInfo)
 	}
-	group.Members[serverUserKey{serverID: serverID, userUUID: userUUID}] = struct{}{}
+	group.AddMember(serverUserKey{serverID: serverID, userUUID: userUUID})
 }
 
 func (cm *ConnectionManager) RemoveUserFromGroup(groupID, serverID, userUUID string) {
@@ -314,8 +388,8 @@ func (cm *ConnectionManager) RemoveUserFromGroup(groupID, serverID, userUUID str
 		return
 	}
 	group := v.(*ConnectionGroupInfo)
-	delete(group.Members, serverUserKey{serverID: serverID, userUUID: userUUID})
-	if len(group.Members) == 0 {
+	empty := group.RemoveMember(serverUserKey{serverID: serverID, userUUID: userUUID})
+	if empty {
 		cm.groups.Delete(groupID)
 	}
 }
@@ -345,7 +419,7 @@ func (cm *ConnectionManager) GetGroupMemberCount(groupID string) int {
 	if !ok {
 		return 0
 	}
-	return len(v.(*ConnectionGroupInfo).Members)
+	return v.(*ConnectionGroupInfo).MemberCount()
 }
 
 func (cm *ConnectionManager) GetGroupName(groupID string) string {
@@ -365,12 +439,25 @@ func (cm *ConnectionManager) GetGroupUsers(groupID string) []string {
 	if !ok {
 		return nil
 	}
-	group := v.(*ConnectionGroupInfo)
-	users := make([]string, 0, len(group.Members))
-	for key := range group.Members {
-		users = append(users, key.userUUID)
+	return v.(*ConnectionGroupInfo).SnapshotUsers()
+}
+
+func (cm *ConnectionManager) GetGroupSessions(groupID string) []string {
+	cm.groupMutex.RLock()
+	defer cm.groupMutex.RUnlock()
+	v, ok := cm.groups.Load(groupID)
+	if !ok {
+		return nil
 	}
-	return users
+	group := v.(*ConnectionGroupInfo)
+	members := group.Snapshot()
+	sessions := make([]string, 0, len(members))
+	for _, key := range members {
+		if value, ok := cm.serverUserConnections.Load(key); ok {
+			sessions = append(sessions, value.(string))
+		}
+	}
+	return sessions
 }
 
 func (cm *ConnectionManager) StartConnectionChecker(connIdleTimeout, connCheckInterval time.Duration) {

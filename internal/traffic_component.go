@@ -69,5 +69,7 @@ func (c *TrafficComponent) Start() error {
 
 func (c *TrafficComponent) Destroy() {
 	tlog.Info("traffic component destroying")
-	// TrafficMirror manages its own worker goroutines
+	if c.TrafficMirror != nil {
+		c.TrafficMirror.Stop()
+	}
 }

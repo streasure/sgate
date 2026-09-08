@@ -1,6 +1,6 @@
 # sgate
 
-`sgate` 是一个基于 gnet 的高性能游戏网关。默认构建支持 TCP 和 WebSocket 客户端接入，以 gRPC 双向流连接逻辑服，并提供按会话推送、组广播和全服广播。
+`sgate` 是一个基于 gnet 的高性能游戏网关。默认构建支持 TCP 和 WebSocket 客户端接入，以 gRPC 双向流连接逻辑服，并提供按 userUUID 推送、组广播和全服广播。
 
 ## 核心特性
 
@@ -24,7 +24,7 @@
 +----------------+  TCP :48080  +------+----------------------------+  gRPC stream  +----------------+
 | TCP client     | -----------> | gnet event loops                  | <-----------> | logic server   |
 +----------------+              |                                  |                +----------------+
-                                | SessionManager / GroupManager     |
+                                 | ConnectionManager / GroupManager |
 +----------------+  TCP :48081  | ConnectionManager                |
 | WebSocket      | -----------> | TCPCodec / WebSocketCodec         |
 | client         | HTTP Upgrade | Security / Observability          |
@@ -52,18 +52,21 @@ message MessageFrame {
 
 1. 客户端发送 `cmd=1000001` (`LoginGateReq`)，指定 `server_id`。
 2. 网关在 `logicServers` 中查找同 zone 的 `server_id`，必要时建立 gRPC stream。
-3. 网关绑定 session，回送 `cmd=1000002` (`LoginGateAck`)。
-4. 后续消息被转为 `StreamData{session_id, user_key, cmd, data, client_ip}` 异步写入 logic stream。
+3. 网关绑定 connection，并回送 `cmd=1000002` (`LoginGateAck`)。
+4. 后续消息被转为 `StreamData{session_id, user_key, cmd, data, client_ip}` 异步写入 logic stream，其中协议字段 `user_key` 承载业务 `userUUID`。
 5. logic server 返回带 `session_id` 的 `StreamData` 时，网关封装为 `MessageFrame` 下行。
 6. 连接关闭时，已认证 session 发送 `cmd=1100012` 离线通知。
 
 ### Logic 推送
 
-Logic server 通过 Gateway unary RPC 推送，使用 `userKey` 或 `groupID` 标识目标：
+Logic 层单用户推送使用 `userUUID`，组推送使用 `groupID`。logic 内部维护
+`userUUID -> sessionID` 映射，但 `sessionID` 只是网关连接的内部路由标识，不要求业务调用方提供。
+logic 通过 `SendToUser(userUUID, ...)` 解析目标后，经 GatewayStream 将消息发送到 sgate。
+Gateway unary RPC 仍提供按 `session_id` 的底层 `SendToClient` 接口，主要用于网关内部或需要精确连接控制的场景。
 
 | RPC | 行为 |
 |---|---|
-| `SendToClient` | 按 session 推送 |
+| `SendToClient` | 按 session_id 的底层推送；logic 业务层优先使用 `SendToUser(userUUID, ...)` |
 | `Broadcast` | 按组广播 |
 | `BroadcastAll` | 全服广播 |
 | `JoinGroup` / `LeaveGroup` | 组管理 |
@@ -96,26 +99,37 @@ logicServers:
 | `transports[].type` | 留空为 TCP；`websocket` 为 WebSocket。 |
 | `logicServers` | `LoginGateReq.server_id` 到 logic server 的静态映射。 |
 | `grpc.port` | logic server 调用 Gateway unary RPC 的端口。 |
+| `grpc.advertiseAddr` | 注册到 etcd、供其他网关访问的 gRPC 地址。 |
 
 `config/config.yaml` 为生产配置（含 etcd、discovery），`config/bench.yaml` 为本地压测配置（关闭外部依赖）。
 
 ## 快速开始
 
 ```powershell
+# 先构建所有普通构建产物
+go build ./...
+go build -o sgate.exe ./cmd/gateway
+go build -o logic_server_min.exe ./examples/logic_server_min
+
 # 终端 1：逻辑服
-go run ./examples/logic_server_min
+.\logic_server_min.exe
 
 # 终端 2：网关
-go run ./cmd/gateway -conf config/bench.yaml
+.\sgate.exe -conf config/bench.yaml
 ```
 
 ## 构建
 
 ```powershell
 go build -o sgate.exe ./cmd/gateway
+go build -o logic_server_min.exe ./examples/logic_server_min
+go build -o tcp_bench.exe ./examples/bench
+go build -o ws_bench.exe ./examples/ws_bench
 ```
 
-无需特殊编译参数。`go build` 产出的二进制可直接用于生产。如需检测数据竞态：
+以上均为普通 `go build`，不需要 `-tags`、`simple` 或 `legacy` 参数。`sgate.exe` 是生产网关构建产物，压测必须使用该产物，不使用 `go run` 临时编译。
+
+如需检测数据竞态，可在支持 CGO 的 64 位 C 工具链环境执行：
 
 ```powershell
 go build -race -o sgate.exe ./cmd/gateway
@@ -149,11 +163,23 @@ go vet ./...
 ### 工具
 
 ```powershell
+# 构建压测产物
+go build -o sgate.exe ./cmd/gateway
+go build -o logic_server_min.exe ./examples/logic_server_min
+go build -o tcp_bench.exe ./examples/bench
+go build -o ws_bench.exe ./examples/ws_bench
+
+# 终端 1：逻辑服
+.\logic_server_min.exe
+
+# 终端 2：网关
+.\sgate.exe -conf config/bench.yaml
+
 # TCP
-go run ./examples/bench 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
+.\tcp_bench.exe 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
 
 # WebSocket
-go run ./examples/ws_bench ws://127.0.0.1:48081/ 10 10
+.\ws_bench.exe ws://127.0.0.1:48081/ 10 10
 ```
 
 TCP 与 WebSocket 必须串行运行，并发运行会使协议对比失效。
@@ -163,11 +189,9 @@ TCP 与 WebSocket 必须串行运行，并发运行会使协议对比失效。
 ```text
 cmd/gateway/                  CLI 入口
 internal/
-  frontend.go                 Gateway 主逻辑（legacy 默认构建）
+  frontend.go                 Gateway 主逻辑
   backend.go                  gRPC stream 管理
-  connection.go               ConnectionManager
-  session.go                  Session 状态管理
-  groups.go                   组管理
+  connection.go               ConnectionManager、用户与组管理
   codec/                      TCP / WebSocket codec（策略模式）
   security/                   JWT、限流、WAF、熔断
   obs/                        OpenTelemetry、延迟追踪
@@ -188,4 +212,5 @@ DESIGN.md                     设计文档
 
 - gnet v2 不原生支持 TLS，当前仅支持明文 TCP 和 WebSocket。需要 WSS 时需升级或替换网络层。
 - logic stream 重连不会恢复断线期间丢弃的消息；需要业务幂等或持久化队列。
+- logic 单用户推送以 `userUUID` 为业务目标，sgate/stream 内部再解析为 `sessionID`；同一 userUUID 在同一逻辑服上应保持唯一在线连接。
 - WebSocket 单元测试已覆盖核心场景（畸形帧、分片、Upgrade 半包），边界 case 可继续扩展。

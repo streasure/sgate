@@ -11,11 +11,7 @@ import (
 // WasmRuntime WebAssembly 插件运行时抽象
 // 用于在沙箱中加载/执行动态插件，提供接近原生的性能 + 安全隔离
 //
-// 实现：
-//   - 默认 stub（wasm_runtime_stub.go）：不引入第三方依赖，直接拒绝加载
-//   - wazero 实现（wasm_runtime_wazero.go，build tag `wasm`）：纯 Go WASM 运行时
-//
-// 启用：go build -tags wasm
+// 标准构建使用当前运行时实现，不依赖额外的 Go build tag。
 type WasmRuntime interface {
 	// LoadModule 加载 .wasm 字节码到运行时
 	// moduleName 模块名，bytes wasm 二进制
@@ -146,7 +142,7 @@ func applyWasmOutput(fc *types.FilterContext, out []byte) {
 }
 
 // ErrWasmRuntimeNotEnabled WASM 运行时未启用
-var ErrWasmRuntimeNotEnabled = fmt.Errorf("wasm runtime not enabled (build with -tags wasm)")
+var ErrWasmRuntimeNotEnabled = fmt.Errorf("wasm runtime is not available in the standard build")
 
 func init() {
 	types.RegisterFilter("wasm-filter", func(cfg map[string]interface{}) (types.Filter, error) {

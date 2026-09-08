@@ -24,7 +24,7 @@ UDP 已明确移除；项目中没有 UDP 源码、配置、说明或压测路�
 +----------------+  TCP :48080  +------+----------------------------+  gRPC stream  +----------------+
 | TCP client     | -----------> | gnet event loops                  | <-----------> | logic server   |
 +----------------+              |                                  |                +----------------+
-                                | SessionManager / GroupManager     |
+                                 | ConnectionManager / GroupManager |
 +----------------+  TCP :48081  | ConnectionManager                |
 | WebSocket      | -----------> | TCPCodec / WebSocketCodec         |
 | client         | HTTP Upgrade | Security / Observability          |
@@ -84,7 +84,7 @@ UDP 已明确移除；项目中没有 UDP 源码、配置、说明或压测路�
 
 ## 连接与 Codec
 
-`Gateway.OnOpen` 创建 `Connection`，按本地监听端口选择 codec，然后以 session ID 与 `gnet.Conn` 双索引保存。
+`Gateway.OnOpen` 创建 `Connection`，按本地监听端口选择 codec，然后以 connection ID 与 `gnet.Conn` 双索引保存；connection/session ID 只属于网关内部连接路由。
 
 `Gateway.OnTraffic` 调用 codec 的 `Decode`，转发每一个完整的 `MessageFrame` payload。`Gateway.sendToSession` 通过同一连接的 `Encode` 下行，因此回复、个人推送、组广播和全服广播都维持客户端接入协议。
 
@@ -161,7 +161,7 @@ message MessageFrame {
 ```text
 StreamData {
   session_id = connection.ID()
-  user_key   = connection.UserKey()
+   user_key   = connection.GetUserUUID() // protocol 字段名沿用 user_key，语义为 userUUID
   cmd        = MessageFrame.cmd
   data       = MessageFrame.body
   client_ip  = connection.IP()
@@ -170,7 +170,7 @@ StreamData {
 
 gRPC 双向流传输 `StreamData`。下行 `StreamData` 带有 `session_id` 时，网关将它转换为 `MessageFrame{cmd, seq_id: 0, body: data}`，再通过目标连接的 codec 下行。
 
-## Session 生命周期
+## Connection 生命周期
 
 ```text
 OnOpen
@@ -180,7 +180,7 @@ StateConnected
   | LoginGateReq (cmd 1000001)
   v
 StateBound
-  | logic response with non-empty user_key
+  | logic response with non-empty user_key (userUUID)
   v
 StateAuthenticated
   | OnClose
@@ -188,15 +188,15 @@ StateAuthenticated
 删除 connection、删除组成员；仅 authenticated 时才通知 logic
 ```
 
-`LoginGateReq` 携带目标 logic server ID。`Gateway.handleLoginGate` 在 `Config.LogicServer` 中校验 server ID，必要时以 `ConnectLogic` 建立 gRPC client stream，然后绑定连接并下行 `LoginGateAck`（`cmd=1000002`）。未绑定连接除了 `LoginGateReq` 以外的帧都会被静默忽略。
+`LoginGateReq` 携带目标 logic server ID。`Gateway.handleLoginGate` 校验目标 logic server ID，绑定连接并下行 `LoginGateAck`（`cmd=1000002`）。未绑定连接除了 `LoginGateReq` 以外的帧都会被静默忽略。
 
-gRPC 下行路径收到带非空 `user_key` 的同 session 消息时调用 `Connection.Authenticate`；连接关闭时，已认证连接会发送 `CmdUserOffline` 离线通知。
+gRPC 下行路径收到带非空 `user_key`（业务语义为 userUUID）的同 session 消息时调用 `Connection.Authenticate`；连接关闭时，已认证连接会发送 `CmdUserOffline` 离线通知。
 
 当前 logic 连接行为：
 
 - 每个 logic server ID 对应一个 `LogicClient` 和容量为 1024 的上行 channel。
 - channel 满时记录 warning 并丢弃该条上行消息。
-- gRPC 接收循环依据 session ID 分发下行消息。
+- gRPC 接收循环依据 session ID 分发下行消息；业务单用户推送由 logic 先用 userUUID 映射到该 session ID。
 - stream 断开后会移除旧连接，并按 1、2、4 秒递增、最多 30 秒的退避策略自动重连；网关关闭时会停止重连。
 
 ## Logic 主动操作
@@ -206,7 +206,7 @@ Gateway gRPC service 当前实现以下 unary RPC。
 | RPC | Gateway 行为 |
 |---|---|
 | `CloseSession`、`KickSession` | 关闭目标 gnet 连接。 |
-| `SendToClient` | 对指定 session 编码并异步写入。 |
+| `SendToClient` | 对指定 session_id 编码并异步写入；logic 业务层优先使用 `Server.SendToUser(userUUID, ...)`。 |
 | `Broadcast` | 遍历请求中的每个组并下行给组成员。 |
 | `BroadcastAll` | 遍历全部活跃 session 并下行。 |
 | `JoinGroup`、`LeaveGroup` | 更新 `GroupManager` 和连接的 group set。 |
@@ -214,7 +214,12 @@ Gateway gRPC service 当前实现以下 unary RPC。
 
 组在第一次加入时隐式创建，最后成员离开或 session 关闭时隐式清理。
 
-Logic 推送使用 `userKey` 或 `groupID` 标识目标，不直接使用 `connectionId`。`ConnectionManager` 负责 `sessionID ↔ userKey` 的映射。
+Logic 层单用户推送使用 `userUUID`，不直接要求业务代码提供 `sessionID`。
+logic 维护 `userUUID -> sessionID` 映射，推送时先根据 userUUID 找到 sessionID，再通过 GatewayStream 发送；
+sgate 的 `ConnectionManager` 负责本地 `userUUID ↔ sessionID` 映射和最终客户端写入。
+组推送使用 `groupID`，组成员内部仍由 `serverID + userUUID` 关联到连接。
+
+需要直接操作某个网关连接时，Gateway unary RPC 的 `SendToClient` 仍使用 `session_id`；这是底层管理接口，不是 logic 业务层单用户推送的首选入口。
 
 ## 配置
 
@@ -266,11 +271,16 @@ logicServers:
 命令：
 
 ```powershell
-go run ./examples/logic_server_min
-go run ./cmd/gateway -conf config/bench.yaml
+go build -o logic_server_min.exe ./examples/logic_server_min
+go build -o sgate.exe ./cmd/gateway
+go build -o tcp_bench.exe ./examples/bench
+go build -o ws_bench.exe ./examples/ws_bench
 
-go run ./examples/bench 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
-go run ./examples/ws_bench ws://127.0.0.1:48081/ 10 10
+.\logic_server_min.exe
+.\sgate.exe -conf config/bench.yaml
+
+.\tcp_bench.exe 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
+.\ws_bench.exe ws://127.0.0.1:48081/ 10 10
 ```
 
 TCP 和 WebSocket 不得并发运行；二者共享同一 gateway、logic process、gRPC stream 与 loopback socket，并发运行会使协议对比失效。
@@ -296,9 +306,14 @@ TCP 10 连接有 6 个客户端认证失败，为压测工具启动时序导致�
 go build ./...
 go test ./...
 go vet ./...
+
+go build -o sgate.exe ./cmd/gateway
+go build -o logic_server_min.exe ./examples/logic_server_min
+go build -o tcp_bench.exe ./examples/bench
+go build -o ws_bench.exe ./examples/ws_bench
 ```
 
-以上全部通过。WebSocket 单元测试覆盖：Upgrade 握手（正常、半包、缺失字段、超大 header、非 GET、X-Forwarded-For）、畸形帧（未掩码、RSV 扩展、超大消息、控制帧无 FIN、不支持 opcode）、分片（多帧、三帧、超大分片、交织数据帧、文本拒绝、孤立 continuation）、控制帧（Ping/Pong、Close）、编码（小/16bit/64bit 长度、roundtrip）。
+以上均为标准构建，不使用任何 Go build tag。压测使用上述普通构建产物，不使用 `go run` 或特殊编译参数。WebSocket 单元测试覆盖：Upgrade 握手（正常、半包、缺失字段、超大 header、非 GET、X-Forwarded-For）、畸形帧（未掩码、RSV 扩展、超大消息、控制帧无 FIN、不支持 opcode）、分片（多帧、三帧、超大分片、交织数据帧、文本拒绝、孤立 continuation）、控制帧（Ping/Pong、Close）、编码（小/16bit/64bit 长度、roundtrip）。
 
 ## 已知缺口
 

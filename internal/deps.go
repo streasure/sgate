@@ -41,11 +41,13 @@ type GatewayDeps struct {
 	Degradation   *traffic.DegradationManager
 
 	// Cluster
-	Discovery    *etcd.Component
-	Balancer     *cluster.Balancer
-	ConfigCenter cluster.ConfigCenter
-	ClusterNode  *cluster.Cluster
-	AlertWebhook *cluster.AlertWebhook
+	Discovery        *etcd.Component
+	GatewayDiscovery *etcd.Component // discovery for other gateways (Gateway:{zone})
+	GatewayEvents    []etcd.ServiceEvent
+	Balancer         *cluster.Balancer
+	ConfigCenter     cluster.ConfigCenter
+	ClusterNode      *cluster.Cluster
+	AlertWebhook     *cluster.AlertWebhook
 }
 
 // NewGatewayWithDeps constructs a Gateway from externally managed components.
@@ -114,6 +116,8 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		trafficMirror:      deps.TrafficMirror,
 		degradation:        deps.Degradation,
 		serviceDiscovery:   deps.Discovery,
+		gatewayDiscovery:   deps.GatewayDiscovery,
+		gatewayEvents:      append([]etcd.ServiceEvent(nil), deps.GatewayEvents...),
 		balancer:           deps.Balancer,
 		configCenter:       deps.ConfigCenter,
 		cluster:            deps.ClusterNode,
@@ -130,6 +134,7 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 
 	gw.cfg.Store(&deps.Config)
 	gw.ctx = context.Background()
+	gw.pipeline = NewMessagePipeline(gw)
 
 	return gw
 }

@@ -63,7 +63,7 @@ func main() {
 	}
 	tlog.Info("config loaded", "port", cfg.Port)
 
-	gw := gateway.NewGateway()
+	gw := gateway.NewGateway(*confFiles)
 
 	gw.StartServices()
 

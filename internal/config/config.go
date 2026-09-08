@@ -256,10 +256,12 @@ type DiscoveryConfig struct {
 	HeartbeatTTL      time.Duration `yaml:"heartbeatTTL"`
 	DeregisterDelay   time.Duration `yaml:"deregisterDelay"`
 	ScanInterval      time.Duration `yaml:"scanInterval"`
+	GatewayDiscovery  bool          `yaml:"gatewayDiscovery"` // enable gateway-to-gateway discovery
 }
 
 type GRPCConfig struct {
 	Port           int    `yaml:"port"`
+	AdvertiseAddr  string `yaml:"advertiseAddr"`
 	LogicAddr      string `yaml:"logicAddr"`
 	WindowSize     int    `yaml:"windowSize"`
 	MaxMessageSize int    `yaml:"maxMessageSize"`
@@ -287,10 +289,46 @@ func (c *Config) LogicServer(serverID string) (LogicServerConfig, bool) {
 	return LogicServerConfig{}, false
 }
 
+// QueuePolicy defines the behavior when the send queue is full.
+type QueuePolicy string
+
+const (
+	// QueuePolicyDrop discards the oldest message when the queue is full (default).
+	QueuePolicyDrop QueuePolicy = "drop"
+	// QueuePolicyBlock blocks the caller until space becomes available.
+	QueuePolicyBlock QueuePolicy = "block"
+	// QueuePolicyTimeout blocks the caller up to BlockTimeout, then returns error.
+	QueuePolicyTimeout QueuePolicy = "timeout"
+	// QueuePolicyBackpressure returns an error when queue fill exceeds the threshold,
+	// allowing the caller to signal the client to slow down.
+	QueuePolicyBackpressure QueuePolicy = "backpressure"
+)
+
+// StreamQueueConfig configures the behavior of the per-shard send queue and the
+// reconnect buffer (StreamMessageQueue) when the queue is full.
+type StreamQueueConfig struct {
+	// Policy determines what happens when the queue is full.
+	// Supported: "drop" (default), "block", "timeout", "backpressure".
+	Policy QueuePolicy `yaml:"policy"`
+	// MaxSize is the maximum number of messages in the reconnect buffer.
+	MaxSize int `yaml:"maxSize"`
+	// BlockTimeout is the maximum time to wait when Policy is "timeout".
+	// Parsed as Go duration string, e.g. "500ms", "2s".
+	BlockTimeout string `yaml:"blockTimeout"`
+	// BackpressureThreshold is the queue fill ratio (0.0-1.0) at which
+	// backpressure error is returned. Only used when Policy is "backpressure".
+	BackpressureThreshold float64 `yaml:"backpressureThreshold"`
+	// SendTimeout is the per-shard send channel timeout.
+	// When the shard's buffered channel is full, messages wait up to this duration
+	// before falling back to the reconnect queue. Parsed as Go duration string.
+	SendTimeout string `yaml:"sendTimeout"`
+}
+
 type StreamConfig struct {
-	ShardCount       int `yaml:"shardCount"`
-	SendChannelSize  int `yaml:"sendChannelSize"`
-	ReceiveBatchSize int `yaml:"receiveBatchSize"`
+	ShardCount       int               `yaml:"shardCount"`
+	SendChannelSize  int               `yaml:"sendChannelSize"`
+	ReceiveBatchSize int               `yaml:"receiveBatchSize"`
+	QueuePolicy      StreamQueueConfig `yaml:"queuePolicy"`
 }
 
 type ProtectionConfig struct {
@@ -311,6 +349,19 @@ type ProtectionConfig struct {
 	// PreAuthCommands are the only client commands accepted before logic
 	// authenticates the connection by returning StreamData.user_key.
 	PreAuthCommands []int32 `yaml:"preAuthCommands"`
+	// LoginAuth configures how gateway validates LoginGateReq.
+	LoginAuth LoginAuthConfig `yaml:"loginAuth"`
+}
+
+// LoginAuthConfig defines gateway-side login authentication behavior.
+type LoginAuthConfig struct {
+	// Mode controls login key validation:
+	//   "none"  — skip validation, always accept (default, for testing)
+	//   "hmac"  — validate login_key as HMAC-SHA256(userId, secret)
+	//   "delegate" — forward validation to logic server (adds latency)
+	Mode string `yaml:"mode"`
+	// Secret is the HMAC shared secret (required when Mode is "hmac").
+	Secret string `yaml:"secret"`
 }
 
 type Transport struct {
@@ -341,7 +392,7 @@ func LoadConfig(configFiles ...string) (*Config, error) {
 	// yaml 中未出现的字段保留默认；显式 false/0/"" 也算"出现"，会覆盖
 	cfg := loadDefaultConfig()
 	if err := yaml.NewDecoder(file).Decode(cfg); err != nil {
-		return loadDefaultConfig(), nil
+		return cfg, fmt.Errorf("decode config %q: %w", file.Name(), err)
 	}
 
 	return cfg, nil
@@ -363,6 +414,7 @@ func loadDefaultConfig() *Config {
 		ServerType: "Gateway",
 		Discovery: DiscoveryConfig{
 			Enabled:           true,
+			GatewayDiscovery:  true,
 			ServiceName:       "logic",
 			HeartbeatInterval: 3 * time.Second,
 			HeartbeatTTL:      10 * time.Second,
@@ -379,6 +431,13 @@ func loadDefaultConfig() *Config {
 			ShardCount:       0,
 			SendChannelSize:  DefaultStreamSendChannelSize,
 			ReceiveBatchSize: DefaultStreamReceiveBatchSize,
+			QueuePolicy: StreamQueueConfig{
+				Policy:                QueuePolicy(DefaultStreamQueuePolicy),
+				MaxSize:               DefaultStreamQueueMaxSize,
+				BlockTimeout:          DefaultStreamBlockTimeout,
+				BackpressureThreshold: DefaultBackpressureThreshold,
+				SendTimeout:           DefaultSendTimeout,
+			},
 		},
 		Protection: ProtectionConfig{
 			MaxFrameSize:       DefaultMaxFrameSize,
@@ -394,6 +453,9 @@ func loadDefaultConfig() *Config {
 			ConnIdleTimeout:    DefaultConnIdleTimeout,
 			VerifyInbound:      false,
 			PreAuthCommands:    []int32{1000001},
+			LoginAuth: LoginAuthConfig{
+				Mode: "none",
+			},
 		},
 		Security: SecurityConfig{
 			Enabled: true,

@@ -1,10 +1,4 @@
-//go:build !ebpf
-
 // 默认 stub：未启用 eBPF 内核态加速
-// 启用：go build -tags ebpf
-//   - 引入 cilium/ebpf（CGO，仅 Linux + 内核 BTF）
-//   - 实现：ebpf_hook_cilium.go
-//   - 还需预编译 BPF C 程序（XDP/TC/kprobe）
 package traffic
 
 import "errors"
@@ -19,7 +13,7 @@ func (ebpfStub) GetTCPRetransmits() (uint64, error)    { return 0, ErrEBPFNotEna
 func (ebpfStub) GetConnStats() (uint64, uint64, error) { return 0, 0, ErrEBPFNotEnabled }
 
 // ErrEBPFNotEnabled eBPF 未启用错误
-var ErrEBPFNotEnabled = errors.New("eBPF not enabled (build with -tags ebpf)")
+var ErrEBPFNotEnabled = errors.New("eBPF acceleration is not available in the standard build")
 
 func init() {
 	SetKernelHook(ebpfStub{})

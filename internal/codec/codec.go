@@ -36,9 +36,3 @@ func NewCodec(protocol string) Codec {
 		return NewTCPCodec()
 	}
 }
-
-// IPGetter is an optional capability interface for codecs that can extract
-// the real client IP (e.g., from WebSocket headers like X-Forwarded-For).
-type IPGetter interface {
-	GetIP() string
-}

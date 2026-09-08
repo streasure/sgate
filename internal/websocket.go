@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/gateway"
 	"github.com/streasure/util/tlog"
 )
@@ -254,15 +253,6 @@ func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOp
 func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload []byte) error {
 	g.messagesReceived.Add(1)
 
-	if g.overloadProtector.IsOverloaded() {
-		g.overloadProtector.RecordDrop(1)
-		g.messagesDroppedOverload.Add(1)
-		errorResp := newErrorResponse(gateway.RouteError, "server overload", "cpu threshold exceeded", "")
-		respData := marshalClientError(errorResp)
-		g.sendWebSocketMessage(wsConn, WSOpBinary, respData)
-		return nil
-	}
-
 	message, ok := decodeClientMessage(payload)
 	if !ok {
 		tlog.Error("WebSocket message unmarshal failed")
@@ -271,150 +261,34 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
-	route := fmt.Sprintf("%d", message.Cmd)
 	if message.Cmd == 0 {
 		errorMsg := newErrorResponse("error", "Invalid message format: missing cmd", "", "")
 		responseData := marshalClientError(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
-	// 安全防护链路（与 TCP 路径对齐，避免 WebSocket 绕过）
-	// 顺序：白名单/黑名单 → 限流 → WAF → 熔断 → 完整性校验 → filter chain
-	remoteIP := getRemoteIP(wsConn.Conn)
-	if g.whitelistBlacklist != nil {
-		if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
-			g.messagesDroppedBlacklist.Add(1)
-			return nil
-		}
-		whitelist := g.whitelistBlacklist.GetWhitelist()
-		if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
-			g.messagesDroppedBlacklist.Add(1)
-			return nil
-		}
-	}
-	if g.rateLimiter != nil {
-		if !g.rateLimiter.Allow("ip", remoteIP) {
-			g.messagesDroppedRateLimit.Add(1)
-			return nil
-		}
-		if !g.rateLimiter.Allow("route", route) {
-			g.messagesDroppedRateLimit.Add(1)
-			return nil
-		}
-	}
-	if g.waf != nil {
-		if !g.waf.Inspect(payload) {
-			g.messagesDroppedWAF.Add(1)
-			return nil
-		}
-	}
-	if g.circuitBreakerMgr != nil {
-		breaker := g.getOrCreateBreaker(route)
-		if !breaker.Allow() {
-			g.messagesDroppedCircuit.Add(1)
-			return nil
-		}
-	}
-
-	// C5: 入方向消息完整性校验（默认关闭以保证压测吞吐）。
-	if g.protection.VerifyInbound {
-		if err := g.messageIntegrity.ProcessMessage(message); err != nil {
-			errorMsg := newErrorResponse("error", "Message integrity check failed", err.Error(), "")
-			responseData := marshalClientError(errorMsg)
-			return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
-		}
-	}
-
+	// Ensure connection exists for WS
 	connectionID := wsConn.ConnectionID
-
 	if connectionID == "" {
 		tempUserUUID := "temp_" + generateConnectionID()
 		connectionID = g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID)
 		wsConn.ConnectionID = connectionID
 	}
-
 	if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
 		conn.SetWS(true)
 	}
+
 	if message.Cmd == gateway.CmdLoginGate {
 		g.handleLoginGate(wsConn.Conn, connectionID, message)
 		return nil
 	}
 
-	if message.UserKey != "" {
-		oldUserUUID := "temp_" + connectionID
-		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserKey)
-		tlog.Debug("received user UUID", "connectionID", connectionID, "userUUID", message.UserKey)
-	}
-
-	conn := g.connectionManager.GetConnection(connectionID)
-	if conn == nil || !conn.IsBound() {
-		return fmt.Errorf("connection is not bound to a logic server")
-	}
-	if !conn.IsAuthenticated() && !g.isPreAuthCommand(message.Cmd) {
-		errorMsg := newErrorResponse("error", "unauthorized", "connection not authenticated", "")
-		responseData := marshalClientError(errorMsg)
-		g.messagesDroppedAuth.Add(1)
-		g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
-		return fmt.Errorf("connection is not authenticated")
-	}
-
-	// SPI 过滤器链：JWT 鉴权 / 灰度 / 镜像 / OTel / 降级等
-	// 与 TCP 路径对齐，避免 WebSocket 绕过 JWT 鉴权
-	protoMsg, fcOK := g.applyForwardFilters(wsConn.Conn, payload, connectionID, message.Cmd)
-	if !fcOK {
-		return nil
-	}
-	if protoMsg == nil {
-		protoMsg = &protoGw.StreamData{
-			SessionId: connectionID,
-			UserKey:   message.UserKey,
-			Cmd:       message.Cmd,
-			Data:      message.Data,
-			SeqId:     message.SeqId,
-		}
-	} else {
-		if protoMsg.UserKey == "" {
-			protoMsg.UserKey = message.UserKey
-		}
-		if protoMsg.SeqId == 0 {
-			protoMsg.SeqId = message.SeqId
-		}
-	}
-
-	logicClient := g.GetLogicClient(conn.GetServerID())
-	if logicClient != nil {
-		if err := logicClient.SendMessage(protoMsg); err != nil {
-			g.messagesDroppedFull.Add(1)
-			if g.circuitBreakerMgr != nil {
-				g.getOrCreateBreaker(route).RecordFailure()
-			}
-			if g.balancer != nil {
-				g.balancer.RecordFailure(route)
-			}
-			if g.degradation != nil {
-				g.degradation.RecordResult(route, true)
-			}
-			errorMsg := newErrorResponse("error", "Failed to send message to logic server", err.Error(), "")
-			responseData := marshalClientError(errorMsg)
-			return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
-		}
-		g.messagesForwarded.Add(1)
-		if g.circuitBreakerMgr != nil {
-			g.getOrCreateBreaker(route).RecordSuccess()
-		}
-		if g.balancer != nil {
-			g.balancer.RecordSuccess(route)
-		}
-		if g.degradation != nil {
-			g.degradation.RecordResult(route, false)
-		}
-	} else {
-		errorMsg := newErrorResponse("error", "Logic server not connected", "", "")
-		responseData := marshalClientError(errorMsg)
+	result := g.pipeline.ProcessForWS(wsConn.Conn, payload, message, connectionID)
+	if result.Error != nil {
+		errorResp := newErrorResponse("error", result.Error.Error(), "", "")
+		responseData := marshalClientError(errorResp)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
-
 	return nil
 }
 
@@ -516,5 +390,7 @@ func (g *Gateway) sendHTTPResponse(conn gnet.Conn, statusCode int, statusText st
 
 	buf.WriteString("\r\n")
 
-	conn.Write(buf.Bytes())
+	if _, err := conn.Write(buf.Bytes()); err != nil {
+		tlog.Debug("write HTTP response failed", "error", err)
+	}
 }

@@ -82,7 +82,6 @@ func (m *DegradationManager) Process(fc *types.FilterContext) (bool, error) {
 			fc.Data = r.fallbackData
 			fc.Metadata["degraded"] = "true"
 			// 中止后续过滤器：直接走兜底
-			fc.Abort = false // 继续转发兜底数据
 			return true, nil
 		}
 		// 冷却到期，恢复

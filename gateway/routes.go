@@ -2,48 +2,11 @@ package gateway
 
 import (
 	"hash/fnv"
-	"strings"
 
 	protocol "github.com/streasure/protocol/gateway"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protowire"
 )
-
-// DispatchMeta contains sgate-only routing metadata. It is never serialized
-// into protocol/gateway.StreamData; business data travels in StreamData.data.
-type DispatchMeta struct {
-	Route     string
-	Fields    map[string]string
-	Timestamp int64
-}
-
-// StreamData is sgate's internal dispatch model. Route and Fields are local
-// routing metadata and are never serialized into protocol.StreamData.
-type StreamData struct {
-	SessionId string
-	UserKey   string
-	Cmd       int32
-	SeqId     int64
-	Data      []byte
-	ClientIp  string
-	Route     string
-	Fields    map[string]string
-	Timestamp int64
-}
-
-func FromStreamData(m *protocol.StreamData) *StreamData {
-	if m == nil {
-		return nil
-	}
-	return &StreamData{SessionId: m.SessionId, UserKey: m.UserKey, Cmd: m.Cmd, SeqId: m.SeqId, Data: m.Data, ClientIp: m.ClientIp}
-}
-
-func (m *StreamData) ToStreamData() *protocol.StreamData {
-	if m == nil {
-		return nil
-	}
-	return &protocol.StreamData{SessionId: m.SessionId, UserKey: m.UserKey, Cmd: m.Cmd, SeqId: m.SeqId, Data: m.Data, ClientIp: m.ClientIp}
-}
 
 type MessageFrame = protocol.MessageFrame
 type LoginGateReq = protocol.LoginGateReq
@@ -237,72 +200,6 @@ func ExtractRouteAndCmd(data []byte) (route string, cmd int32) {
 	return
 }
 
-func ExtractRouteCmdAndConnID(data []byte) (route string, cmd int32, connID string) {
-	offset := 0
-	for offset < len(data) {
-		b := data[offset]
-		if b < 0x80 {
-			offset++
-			fieldNum := int(b >> 3)
-			wireType := int(b & 0x7)
-
-			switch wireType {
-			case 0:
-				if fieldNum == 4 {
-					v, n := decodeVarintFast(data[offset:])
-					if n > 0 {
-						cmd = int32(v)
-					}
-				}
-				for offset < len(data) && data[offset] >= 0x80 {
-					offset++
-				}
-				if offset < len(data) {
-					offset++
-				}
-			case 1:
-				offset += 8
-			case 2:
-				if offset >= len(data) {
-					return
-				}
-				l := int(data[offset])
-				offset++
-				if l >= 0x80 {
-					if offset >= len(data) {
-						return
-					}
-					l2 := int(data[offset])
-					offset++
-					l = (l & 0x7F) | (l2 << 7)
-				}
-				if fieldNum == 1 {
-					if offset+l <= len(data) {
-						connID = string(data[offset : offset+l])
-					}
-				} else if fieldNum == 3 {
-					if offset+l <= len(data) {
-						route = string(data[offset : offset+l])
-					}
-				}
-				offset += l
-			case 5:
-				offset += 4
-			default:
-				return
-			}
-		} else {
-			offset++
-		}
-	}
-	return
-}
-
-func ExtractRouteFast(data []byte) string {
-	route, _ := ExtractRouteAndCmd(data)
-	return route
-}
-
 func decodeVarintFast(data []byte) (uint64, int) {
 	var result uint64
 	var shift uint
@@ -315,17 +212,4 @@ func decodeVarintFast(data []byte) (uint64, int) {
 		shift += 7
 	}
 	return 0, 0
-}
-
-func RespNameForReq(reqName string) string {
-	if strings.HasSuffix(reqName, "Req") {
-		return reqName[:len(reqName)-3] + "Ack"
-	}
-	return reqName + "Ack"
-}
-
-func CmdFromProto(route string, msgName string) (cmd int32, respCmd int32) {
-	cmd = CmdForMessage(route, msgName)
-	respCmd = CmdForMessage(route, RespNameForReq(msgName))
-	return
 }

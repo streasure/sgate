@@ -3,6 +3,7 @@ package cluster
 import (
 	"hash/fnv"
 	"math/rand"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -255,7 +256,7 @@ func (b *Balancer) rebuildRingLocked() {
 	// 每个节点 160 个虚拟节点
 	for _, n := range b.nodes {
 		for i := 0; i < 160; i++ {
-			vh := fnvHash32(n.ID + "-" + itoa(i))
+			vh := fnvHash32(n.ID + "-" + strconv.Itoa(i))
 			b.ring = append(b.ring, vh)
 			b.ringMap[vh] = n
 		}
@@ -337,27 +338,4 @@ func fnvHash32(s string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(s))
 	return h.Sum32()
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := false
-	if i < 0 {
-		neg = true
-		i = -i
-	}
-	buf := [20]byte{}
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
 }

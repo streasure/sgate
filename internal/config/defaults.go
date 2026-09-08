@@ -40,6 +40,21 @@ const (
 	// DefaultStreamReceiveBatchSize 反向接收批量大小（每批 ACK 数）
 	DefaultStreamReceiveBatchSize = 64
 
+	// DefaultStreamQueuePolicy 队列满时默认策略：丢弃最旧消息
+	DefaultStreamQueuePolicy = "drop"
+
+	// DefaultStreamQueueMaxSize 重连缓冲队列最大容量
+	DefaultStreamQueueMaxSize = 100000
+
+	// DefaultStreamBlockTimeout 阻塞/限时等待模式的超时时间
+	DefaultStreamBlockTimeout = "500ms"
+
+	// DefaultBackpressureThreshold 背压触发阈值（队列填充率 0.0-1.0）
+	DefaultBackpressureThreshold = 0.8
+
+	// DefaultSendTimeout 分片发送通道超时时间
+	DefaultSendTimeout = "200ms"
+
 	// DefaultMaxFrameSize 单帧 payload 上限（TCP）
 	// protobuf 业务消息一般 < 4KB；4MB 足够大业务消息
 	DefaultMaxFrameSize = 4 * 1024 * 1024
@@ -175,9 +190,8 @@ const (
 
 	// DefaultPrometheusAddr sgate Prometheus 指标端点监听地址
 	// 使用方法：在 config.yaml 的 monitoring.prometheus.addr 字段覆盖
-	// 注意：默认 :9100 是为了让出 Prometheus 自身默认的 :9090，
-	//       这样 Prometheus + Grafana 都可用各自默认端口启动，无需 --web.listen-address 参数
-	DefaultPrometheusAddr = ":9100"
+	// 注意：默认 :9101 避免与 node_exporter 默认的 :9100 冲突
+	DefaultPrometheusAddr = ":9101"
 
 	// DefaultPrometheusPath Prometheus 指标路径
 	// 使用方法：Prometheus scrape_config 的 metrics_path 必须与此一致

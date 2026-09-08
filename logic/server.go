@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
@@ -57,8 +58,8 @@ func (c *streamConn) Send(msg *protocol.StreamData) (err error) {
 	select {
 	case c.sendCh <- msg:
 		return nil
-	default:
-		return fmt.Errorf("logic: gateway send queue full")
+	case <-c.done:
+		return fmt.Errorf("logic: gateway stream ended")
 	}
 }
 
@@ -77,6 +78,39 @@ func (c *streamConn) Close() {
 
 type pushGroup struct {
 	members map[string]struct{}
+}
+
+// PushResult records the outcome of pushing to a single session.
+type PushResult struct {
+	SessionID string
+	Success   bool
+	Error     error
+}
+
+// PushMetrics tracks push operation statistics for monitoring.
+type PushMetrics struct {
+	TotalPushed     atomic.Int64
+	TotalFailed     atomic.Int64
+	GroupPushed     atomic.Int64
+	GroupFailed     atomic.Int64
+	BroadcastSent   atomic.Int64
+	BroadcastFailed atomic.Int64
+	RetryAttempts   atomic.Int64
+	ScheduledPushes atomic.Int64
+}
+
+// GetSnapshot returns a copy of the current metrics values.
+func (m *PushMetrics) GetSnapshot() map[string]int64 {
+	return map[string]int64{
+		"totalPushed":     m.TotalPushed.Load(),
+		"totalFailed":     m.TotalFailed.Load(),
+		"groupPushed":     m.GroupPushed.Load(),
+		"groupFailed":     m.GroupFailed.Load(),
+		"broadcastSent":   m.BroadcastSent.Load(),
+		"broadcastFailed": m.BroadcastFailed.Load(),
+		"retryAttempts":   m.RetryAttempts.Load(),
+		"scheduledPushes": m.ScheduledPushes.Load(),
+	}
 }
 
 type Server struct {
@@ -99,6 +133,7 @@ type Server struct {
 	streamSeq    atomic.Uint64
 	streamChSize int
 	stopOnce     sync.Once
+	metrics      PushMetrics
 }
 
 type ServerOption func(*Server)
@@ -145,6 +180,9 @@ func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 		conn.sessionMu.Lock()
 		for sessionID := range conn.sessionIDs {
 			s.sessions.CompareAndDelete(sessionID, conn)
+			if userUUID, ok := s.sessionUsers.LoadAndDelete(sessionID); ok {
+				s.userSessions.CompareAndDelete(userUUID.(string), sessionID)
+			}
 		}
 		conn.sessionMu.Unlock()
 	}()
@@ -157,6 +195,9 @@ func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 		if msg.SessionId != "" {
 			s.sessions.Store(msg.SessionId, conn)
 			conn.bindSession(msg.SessionId)
+			if msg.UserKey != "" {
+				s.RegisterUser(msg.UserKey, msg.SessionId)
+			}
 		}
 		s.dispatchMessage(msg, func(response *protocol.StreamData) {
 			if err := conn.Send(response); err != nil {
@@ -176,31 +217,38 @@ func (s *Server) SendMessage(_ context.Context, msg *protocol.StreamData) (*prot
 func (s *Server) PushToConnection(sessionID string, targetCmd int32, data []byte) error {
 	value, ok := s.sessions.Load(sessionID)
 	if !ok {
+		s.metrics.TotalFailed.Add(1)
 		return fmt.Errorf("logic: session %q not found", sessionID)
 	}
-	return value.(*streamConn).Send(&protocol.StreamData{SessionId: sessionID, Cmd: targetCmd, Data: data})
+	err := value.(*streamConn).Send(&protocol.StreamData{SessionId: sessionID, Cmd: targetCmd, Data: data})
+	if err != nil {
+		s.metrics.TotalFailed.Add(1)
+	} else {
+		s.metrics.TotalPushed.Add(1)
+	}
+	return err
 }
 
-func (s *Server) RegisterUser(userKey, sessionID string) {
-	if userKey == "" || sessionID == "" {
+func (s *Server) RegisterUser(userUUID, sessionID string) {
+	if userUUID == "" || sessionID == "" {
 		return
 	}
-	if old, ok := s.userSessions.Swap(userKey, sessionID); ok && old.(string) != sessionID {
+	if old, ok := s.userSessions.Swap(userUUID, sessionID); ok && old.(string) != sessionID {
 		s.sessionUsers.Delete(old.(string))
 	}
-	if old, ok := s.sessionUsers.Swap(sessionID, userKey); ok && old.(string) != userKey {
+	if old, ok := s.sessionUsers.Swap(sessionID, userUUID); ok && old.(string) != userUUID {
 		s.userSessions.Delete(old.(string))
 	}
 }
 
-func (s *Server) UnregisterUser(userKey string) {
-	if sessionID, ok := s.userSessions.LoadAndDelete(userKey); ok {
-		s.sessionUsers.CompareAndDelete(sessionID.(string), userKey)
+func (s *Server) UnregisterUser(userUUID string) {
+	if sessionID, ok := s.userSessions.LoadAndDelete(userUUID); ok {
+		s.sessionUsers.CompareAndDelete(sessionID.(string), userUUID)
 	}
 }
 
-func (s *Server) GetConnectionIDByUser(userKey string) (string, bool) {
-	value, ok := s.userSessions.Load(userKey)
+func (s *Server) GetConnectionIDByUser(userUUID string) (string, bool) {
+	value, ok := s.userSessions.Load(userUUID)
 	if !ok {
 		return "", false
 	}
@@ -276,13 +324,13 @@ func (s *Server) leaveAllGroups(sessionID string) {
 }
 
 // Offline clears the user, group, and session state associated with a client.
-func (s *Server) Offline(sessionID, userKey string) {
+func (s *Server) Offline(sessionID, userUUID string) {
 	if value, ok := s.sessions.Load(sessionID); ok {
 		s.sessions.CompareAndDelete(sessionID, value)
 	}
 	s.leaveAllGroups(sessionID)
-	if userKey != "" {
-		s.UnregisterUser(userKey)
+	if userUUID != "" {
+		s.UnregisterUser(userUUID)
 		return
 	}
 	if value, ok := s.sessionUsers.LoadAndDelete(sessionID); ok {
@@ -308,7 +356,7 @@ func (s *Server) sendRawControl(cmd int32, data []byte) int {
 }
 
 // SendToGroup sends a control message through the stream for gateway fan-out.
-func (s *Server) SendToGroup(groupID string, targetCmd int32, data []byte) int {
+func (s *Server) sendToGroupLegacy(groupID string, targetCmd int32, data []byte) int {
 	controlData := mustMarshal(&protocol.StreamData{
 		Cmd:  targetCmd,
 		Data: data,
@@ -317,14 +365,17 @@ func (s *Server) SendToGroup(groupID string, targetCmd int32, data []byte) int {
 }
 
 // Broadcast sends a raw control message to all gateways.
-func (s *Server) Broadcast(targetCmd int32, data []byte) int {
+func (s *Server) broadcastLegacy(targetCmd int32, data []byte) int {
 	return s.sendRawControl(int32(targetCmd), data)
 }
 
-// SendToUser finds the session by userKey and sends directly.
-func (s *Server) SendToUser(userKey string, targetCmd int32, data []byte) int {
-	if _, ok := s.GetConnectionIDByUser(userKey); ok {
-		return s.sendRawControl(int32(targetCmd), data)
+// SendToUser finds the connection by userUUID and sends directly.
+// The session ID is an internal routing detail and is not required by callers.
+func (s *Server) SendToUser(userUUID string, targetCmd int32, data []byte) int {
+	if sessionID, ok := s.GetConnectionIDByUser(userUUID); ok {
+		if s.PushToConnection(sessionID, targetCmd, data) == nil {
+			return 1
+		}
 	}
 	return 0
 }
@@ -347,6 +398,36 @@ func (s *Server) Kick(sessionID string, args ...any) int {
 	return s.sendRawControl(targetCmd, data)
 }
 
+// SendToGroup sends one StreamData to every current member of a group.
+func (s *Server) SendToGroup(groupID string, targetCmd int32, data []byte) int {
+	members := s.GetGroupMembers(groupID)
+	sent := 0
+	for _, sessionID := range members {
+		if s.PushToConnection(sessionID, targetCmd, data) == nil {
+			sent++
+			s.metrics.GroupPushed.Add(1)
+		} else {
+			s.metrics.GroupFailed.Add(1)
+		}
+	}
+	return sent
+}
+
+// Broadcast sends one StreamData to every current session.
+func (s *Server) Broadcast(targetCmd int32, data []byte) int {
+	sent := 0
+	s.sessions.Range(func(key, _ any) bool {
+		if s.PushToConnection(key.(string), targetCmd, data) == nil {
+			sent++
+			s.metrics.BroadcastSent.Add(1)
+		} else {
+			s.metrics.BroadcastFailed.Add(1)
+		}
+		return true
+	})
+	return sent
+}
+
 func mustMarshal(message proto.Message) []byte {
 	data, err := proto.Marshal(message)
 	if err != nil {
@@ -363,6 +444,110 @@ func (s *Server) GetConnectionCount() int {
 	count := 0
 	s.sessions.Range(func(_, _ any) bool { count++; return true })
 	return count
+}
+
+// GetMetrics returns a snapshot of push metrics for monitoring.
+func (s *Server) GetMetrics() map[string]int64 {
+	return s.metrics.GetSnapshot()
+}
+
+// SendToGroupWithRetry sends to every group member, retrying failed sessions.
+// Returns the number of successful sends and a list of still-failed session IDs.
+func (s *Server) SendToGroupWithRetry(groupID string, targetCmd int32, data []byte, maxRetries int) (int, []string) {
+	members := s.GetGroupMembers(groupID)
+	failedSessions := make([]string, 0)
+	for _, sessionID := range members {
+		if err := s.PushToConnection(sessionID, targetCmd, data); err != nil {
+			failedSessions = append(failedSessions, sessionID)
+		}
+	}
+	for retry := 0; retry < maxRetries && len(failedSessions) > 0; retry++ {
+		time.Sleep(10 * time.Millisecond)
+		s.metrics.RetryAttempts.Add(1)
+		var stillFailed []string
+		for _, sessionID := range failedSessions {
+			if err := s.PushToConnection(sessionID, targetCmd, data); err != nil {
+				stillFailed = append(stillFailed, sessionID)
+			}
+		}
+		failedSessions = stillFailed
+	}
+	return len(members) - len(failedSessions), failedSessions
+}
+
+// JoinGroupForUser joins a user (by userUUID) to a group. The user must have
+// an active session registered via RegisterUser.
+func (s *Server) JoinGroupForUser(userUUID, groupID string) error {
+	sessionID, ok := s.GetConnectionIDByUser(userUUID)
+	if !ok {
+		return fmt.Errorf("logic: user %q not found", userUUID)
+	}
+	s.JoinGroup(groupID, sessionID)
+	return nil
+}
+
+// LeaveGroupForUser removes a user (by userUUID) from a group.
+func (s *Server) LeaveGroupForUser(userUUID, groupID string) error {
+	sessionID, ok := s.GetConnectionIDByUser(userUUID)
+	if !ok {
+		return fmt.Errorf("logic: user %q not found", userUUID)
+	}
+	s.LeaveGroup(groupID, sessionID)
+	return nil
+}
+
+// ScheduledPush manages a periodic group push that can be stopped.
+type ScheduledPush struct {
+	GroupID  string
+	Cmd      int32
+	Data     []byte
+	Interval time.Duration
+	MaxCount int // 0 = infinite
+	stopCh   chan struct{}
+	server   *Server
+	done     chan struct{}
+}
+
+// ScheduleGroupPush starts a periodic push to a group. Returns a handle to stop it.
+func (s *Server) ScheduleGroupPush(groupID string, cmd int32, data []byte, interval time.Duration, maxCount int) *ScheduledPush {
+	sp := &ScheduledPush{
+		GroupID:  groupID,
+		Cmd:      cmd,
+		Data:     data,
+		Interval: interval,
+		MaxCount: maxCount,
+		stopCh:   make(chan struct{}),
+		done:     make(chan struct{}),
+		server:   s,
+	}
+	go sp.run()
+	return sp
+}
+
+func (sp *ScheduledPush) run() {
+	defer close(sp.done)
+	ticker := time.NewTicker(sp.Interval)
+	defer ticker.Stop()
+	count := 0
+	for {
+		select {
+		case <-sp.stopCh:
+			return
+		case <-ticker.C:
+			sp.server.SendToGroup(sp.GroupID, sp.Cmd, sp.Data)
+			sp.server.metrics.ScheduledPushes.Add(1)
+			count++
+			if sp.MaxCount > 0 && count >= sp.MaxCount {
+				return
+			}
+		}
+	}
+}
+
+// Stop terminates the scheduled push and waits for the goroutine to finish.
+func (sp *ScheduledPush) Stop() {
+	close(sp.stopCh)
+	<-sp.done
 }
 
 func (s *Server) Stop() {

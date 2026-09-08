@@ -17,6 +17,7 @@ type RateLimiter struct {
 	dimensionConfigs  map[string]DimensionConfig
 	maxBucketsPerDim  int
 	stopCh            chan struct{}
+	stopOnce          sync.Once
 }
 
 type DimensionConfig struct {
@@ -231,7 +232,7 @@ func (rl *RateLimiter) cleanup() {
 			now := time.Now()
 			for dimension, buckets := range rl.tokensByDimension {
 				for key, bucket := range buckets {
-					if now.UnixNano()-bucket.lastUpdate.Load() > 30*60*1e9 {
+					if now.UnixNano()-bucket.lastUpdate.Load() > int64(30*time.Minute) {
 						delete(buckets, key)
 					}
 				}
@@ -245,7 +246,9 @@ func (rl *RateLimiter) cleanup() {
 }
 
 func (rl *RateLimiter) Stop() {
-	close(rl.stopCh)
+	rl.stopOnce.Do(func() {
+		close(rl.stopCh)
+	})
 }
 
 func (rl *RateLimiter) GetStats() map[string]int {

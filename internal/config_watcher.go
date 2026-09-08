@@ -27,7 +27,11 @@ func (g *Gateway) startConfigCenterWatcher() {
 				tlog.Warn("config center content parse failed", "error", err)
 				continue
 			}
-			g.configUpdateChan <- &newCfg
+			select {
+			case g.configUpdateChan <- &newCfg:
+			case <-g.stopChan:
+				return
+			}
 			tlog.Info("config updated from config center",
 				"type", g.configCenter.Type())
 		}

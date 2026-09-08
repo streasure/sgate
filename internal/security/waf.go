@@ -34,7 +34,7 @@ var defaultSQLPatterns = []string{
 }
 
 // 默认 XSS 特征
-var defaultSSSPatterns = []string{
+var defaultXSSPatterns = []string{
 	`(?i)<script[^>]*>.*?</script>`,
 	`(?i)javascript:`,
 	`(?i)on(error|load|click|mouseover|focus|blur)\s*=`,
@@ -87,7 +87,7 @@ func NewWAF(cfg config.WAFConfig) *WAF {
 	xssPatterns := cfg.XSSPatterns
 	userXSSConfigured := len(xssPatterns) > 0
 	if !userXSSConfigured {
-		xssPatterns = defaultSSSPatterns
+		xssPatterns = defaultXSSPatterns
 	}
 	for _, p := range xssPatterns {
 		re, err := regexp.Compile(p)
@@ -99,7 +99,7 @@ func NewWAF(cfg config.WAFConfig) *WAF {
 	}
 	if userXSSConfigured && len(waf.xssPatterns) == 0 {
 		tlog.Warn("WAF: all user XSS patterns invalid, falling back to defaults")
-		for _, p := range defaultSSSPatterns {
+		for _, p := range defaultXSSPatterns {
 			if re, err := regexp.Compile(p); err == nil {
 				waf.xssPatterns = append(waf.xssPatterns, re)
 			}

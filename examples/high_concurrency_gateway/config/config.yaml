@@ -167,13 +167,13 @@ degradation:
 # 关闭时 sgate 单体也能正常运行（不暴露 /metrics，Prometheus 抓不到数据但不影响转发）
 # 启用时需配合本地 Prometheus + Grafana 环境使用
 # 端口规划（都用默认端口，无需任何 --web.listen-address 参数）：
-#   sgate metrics :9100  ← 默认值（让出 9090 给 Prometheus）
+#   sgate metrics :9101  ← 默认值（避免与 node_exporter 的 :9100 冲突）
 #   Prometheus    :9090  ← Prometheus 自身默认
 #   Grafana       :3000  ← Grafana 自身默认
 # 共用配置：github.com/streasure/util/config/prometheus.yaml
 monitoring:
   prometheus:
     enabled: true              # true=启动 /metrics 端点；false=不启动（单体模式）
-    addr: ":9100"             # sgate metrics 监听地址（让出 9090 给 Prometheus）
+    addr: ":9101"             # sgate metrics 监听地址（避免与 node_exporter 的 :9100 冲突）
     path: "/metrics"          # 指标路径（Prometheus scrape_config 的 metrics_path 必须与此一致）
     prefix: "app"             # 指标前缀（与 util/config/prometheus.yaml 一致）

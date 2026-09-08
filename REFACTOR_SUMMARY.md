@@ -4,7 +4,7 @@
 
 ```
 Client (TCP) ──MessageFrame{cmd,body}──▸ sgate (gnet) ──StreamData{cmd,data}──▸ Logic (gRPC)
-Logic ──Gateway.{SendToClient,Broadcast,JoinGroup,...}()──▸ sgate ──TCP write──▸ Client
+Logic ──SendToUser(userUUID)/Gateway.{Broadcast,JoinGroup,...}()──▸ sgate ──TCP write──▸ Client
 ```
 
 ## 协议层 (E:\protocol)
@@ -24,23 +24,28 @@ Logic ──Gateway.{SendToClient,Broadcast,JoinGroup,...}()──▸ sgate ─�
 ### push.proto — 仅客户端推送数据
 - PushNotify, Announcement, ChatMsg, KickNotify
 
+logic 层的单用户推送以 `userUUID` 为业务目标。logic 自动维护
+`userUUID -> sessionID` 映射，调用 `Server.SendToUser(userUUID, ...)` 后通过
+GatewayStream 投递；`sessionID` 仅是 sgate 内部连接路由标识。
+
 ## sgate 核心 (E:\sgate\internal/)
 
 | 文件 | 职责 |
 |------|------|
 | gateway.go | Gateway struct + gnet.EventHandler + wire encode/decode (4字节大端) |
-| session.go | Session/SessionManager (连接管理, 认证状态) |
-| grpc_server.go | GRPCServer (GatewayStream + Gateway 双 service 实现) |
-| groups.go | GroupManager (隐式生命周期: Join 自动建组, Leave 空组自动删) |
-| transport_component.go | gnet 传输层组件 |
+| connection.go | Connection/ConnectionManager (连接、userUUID、组管理) |
+| backend.go | GRPCServer、LogicClientPool、GatewayClientPool |
+| frontend.go | Gateway 主逻辑、TCP/WebSocket 流程 |
+| cluster_component.go | etcd 注册、Logic/Gateway 服务发现 |
 
 ## 关键设计决策
 
 1. **组生命周期隐式管理**: 无 CreateGroup/DeleteGroup, Join 自动建组, Leave 最后成员离开自动删组
-2. **连接断开**: sgate 内部 RemoveSession 清理组, 通知 logic 仅做业务清理
+2. **连接断开**: sgate 内部 ConnectionManager 清理组，通知 logic 仅做业务清理
 3. **Wire format**: 4字节大端长度前缀 + protobuf MessageFrame
-4. **组广播**: Client→ChatMsg→Logic→Gateway.Broadcast(group_id=[...])→组内全员
-5. **全服广播**: Client→ChatMsg(no target)→Logic→Gateway.BroadcastAll()→全员
+4. **单用户推送**: Logic `Server.SendToUser(userUUID, ...)`→logic 内部 `userUUID→sessionID` 映射→GatewayStream→目标客户端
+5. **组广播**: Client→ChatMsg→Logic→Gateway.Broadcast(group_id=[...])→组内全员
+6. **全服广播**: Client→ChatMsg(no target)→Logic→Gateway.BroadcastAll()→全员
 
 ## 压测结果 (12核 i5-10400F, 500连接)
 

@@ -132,7 +132,9 @@ func (c *WebSocketCodec) upgrade(conn gnet.Conn) (bool, error) {
 	if _, err := conn.Discard(headerLen); err != nil {
 		return false, err
 	}
-	conn.AsyncWrite([]byte(response), nil)
+	if err := conn.AsyncWrite([]byte(response), nil); err != nil {
+		return false, err
+	}
 	c.upgraded = true
 	return true, nil
 }

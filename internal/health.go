@@ -12,14 +12,13 @@ import (
 
 var (
 	startTime = time.Now()
-	version   = "1.0.0" // 可以通过编译时注入
 )
 
 func (g *Gateway) HealthCheck() *obs.HealthStatus {
 	status := &obs.HealthStatus{
 		Status:    "healthy",
 		Timestamp: time.Now(),
-		Version:   version,
+		Version:   BuildVersion,
 		Uptime:    time.Since(startTime),
 		Checks:    make(map[string]obs.Check),
 	}
@@ -29,7 +28,7 @@ func (g *Gateway) HealthCheck() *obs.HealthStatus {
 		fn   func() obs.Check
 	}{
 		{"gateway", g.checkGateway},
-		{"rate_limiter", g.checkRateLimiter},
+		{"overload_protector", g.checkOverloadProtector},
 		{"logic_server", g.checkWorkerPool},
 	}
 
@@ -96,7 +95,7 @@ func (g *Gateway) checkGateway() obs.Check {
 	}
 }
 
-func (g *Gateway) checkRateLimiter() obs.Check {
+func (g *Gateway) checkOverloadProtector() obs.Check {
 	if g.overloadProtector == nil {
 		return obs.Check{Status: "fail", Message: "overload protector not initialized"}
 	}
@@ -132,7 +131,7 @@ func (g *Gateway) collectMetrics() obs.HealthMetrics {
 		MemoryAlloc:    m.Alloc / 1024 / 1024,
 		MemorySys:      m.Sys / 1024 / 1024,
 		GCCount:        m.NumGC,
-		MessagesPerSec: float64(g.messagesReceived.Load()),
+		MessagesPerSec: g.msgRate.rate(),
 	}
 }
 
@@ -163,5 +162,5 @@ func (g *Gateway) ServeHealthHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }

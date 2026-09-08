@@ -44,9 +44,11 @@ func (s *Service) RegisterProto(cmd int32, reqProto proto.Message, respCmd int32
 	s.server.RegisterProto(cmd, reqProto, respCmd, handler)
 }
 
-func (s *Service) RegisterUser(userKey, sessionID string) { s.server.RegisterUser(userKey, sessionID) }
-func (s *Service) UnregisterUser(userKey string)          { s.server.UnregisterUser(userKey) }
-func (s *Service) GetCommands() []int32                   { return s.server.registeredCommands() }
+func (s *Service) RegisterUser(userUUID, sessionID string) {
+	s.server.RegisterUser(userUUID, sessionID)
+}
+func (s *Service) UnregisterUser(userUUID string) { s.server.UnregisterUser(userUUID) }
+func (s *Service) GetCommands() []int32           { return s.server.registeredCommands() }
 
 func (s *Service) Start() error {
 	listener, err := net.Listen("tcp", s.cfg.ListenAddr+":"+s.cfg.ListenPort)

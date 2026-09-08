@@ -228,8 +228,12 @@ func (g *Gateway) StartStatsServer(addr string) {
 			stats.LatencyMaxUs = latStats.Max.Microseconds()
 		}
 		w.Header().Set("Content-Type", "application/json")
-		data, _ := json.Marshal(stats)
-		w.Write(data)
+		data, err := json.Marshal(stats)
+		if err != nil {
+			http.Error(w, "failed to encode stats", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(data)
 	})
 	mux.HandleFunc("/health", g.ServeHealthHTTP)
 	mux.HandleFunc("/ready", g.ServeHealthHTTP)

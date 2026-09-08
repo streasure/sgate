@@ -11,11 +11,7 @@ import (
 // 目标：把高频低层规则匹配（IP 黑名单、限流计数、TCP 重传统计）下沉到
 // XDP/TC 层，在包进入用户态前完成丢弃/统计，降低 user/kernel 上下文切换。
 //
-// 实现策略：
-//   - 默认 stub（ebpf_hook_stub.go）：所有方法 NoOp，不引入任何依赖
-//   - cilium/ebpf 实现（ebpf_hook_cilium.go，build tag `ebpf`）：
-//     需要 CGO + 内核 BTF + clang 编译 BPF C 程序，仅 Linux 可用
-//   - 启用：go build -tags ebpf
+// 标准构建使用 stub，不引入平台相关的 eBPF 依赖。
 //
 // 适配层网关：用户态逻辑仍由 SPI Filter 链处理，KernelHook 仅做加速/早期丢弃
 type KernelHook interface {

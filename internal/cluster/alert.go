@@ -38,6 +38,7 @@ type AlertEvent struct {
 // 支持：企业微信群机器人、钉钉群机器人、通用 Webhook
 type AlertWebhook struct {
 	mu          sync.RWMutex
+	rateMu      sync.Mutex
 	webhooks    []webhookConfig
 	httpClient  *http.Client
 	enabled     atomic.Int32
@@ -83,6 +84,7 @@ func (a *AlertWebhook) Send(ctx context.Context, event AlertEvent) error {
 		return nil
 	}
 	// 限流：每分钟 rateLimit 条
+	a.rateMu.Lock()
 	min := time.Now().Unix() / 60
 	last := a.lastSentMin.Load()
 	if min != last {
@@ -91,8 +93,11 @@ func (a *AlertWebhook) Send(ctx context.Context, event AlertEvent) error {
 	}
 	if int(a.sent.Load()) >= a.rateLimit {
 		a.dropped.Add(1)
+		a.rateMu.Unlock()
 		return fmt.Errorf("alert rate limited")
 	}
+	a.sent.Add(1)
+	a.rateMu.Unlock()
 	if event.Timestamp == 0 {
 		event.Timestamp = time.Now().Unix()
 	}
@@ -106,7 +111,6 @@ func (a *AlertWebhook) Send(ctx context.Context, event AlertEvent) error {
 		payload := a.buildPayload(h, event)
 		go a.sendOne(h, payload)
 	}
-	a.sent.Add(1)
 	return nil
 }
 
@@ -138,13 +142,6 @@ func (a *AlertWebhook) buildPayload(h webhookConfig, event AlertEvent) []byte {
 	switch h.typ {
 	case "wecom":
 		// 企业微信群机器人：{ "msgtype": "markdown", "markdown": { "content": "..." } }
-		color := "info"
-		switch event.Level {
-		case AlertWarn:
-			color = "warning"
-		case AlertError, AlertFatal:
-			color = "warning"
-		}
 		content := fmt.Sprintf("## %s\n> **级别**: %s\n> **来源**: %s\n> **时间**: %s\n> **内容**: %s",
 			event.Title, event.Level, event.Source,
 			time.Unix(event.Timestamp, 0).Format("2006-01-02 15:04:05"),
@@ -153,7 +150,6 @@ func (a *AlertWebhook) buildPayload(h webhookConfig, event AlertEvent) []byte {
 			"msgtype":  "markdown",
 			"markdown": map[string]string{"content": content},
 		})
-		_ = color
 		return body
 	case "dingtalk":
 		// 钉钉群机器人：{ "msgtype": "markdown", "markdown": { "title": "...", "text": "..." } }
