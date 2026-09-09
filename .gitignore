@@ -8,6 +8,12 @@
 # 编译出来的二进制文件
 sgate
 sgate.exe
+logic_server_min.exe
+tcp_bench.exe
+ws_bench.exe
+push_driver.exe
+forward_bench.exe
+logic_noop.exe
 
 # 日志文件
 *.log
