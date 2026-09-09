@@ -68,3 +68,15 @@ protection:
   # Authentication is logic-owned. Only these command IDs are accepted until
   # logic replies with a non-empty StreamData.user_key.
   preAuthCommands: [1000001]
+
+security:
+  enabled: true
+  rateLimit:
+    enabled: true
+    maxTokens: 1000000
+    tokenRefresh: "1s"
+  circuitBreaker:
+    enabled: false
+
+waf:
+  enabled: false

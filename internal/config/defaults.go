@@ -88,8 +88,8 @@ const (
 
 const (
 	// DefaultRateLimitMaxTokens 每秒令牌数（per IP/route）
-	// 10000 = 单 IP 每秒最多 1 万请求，可按业务调整
-	DefaultRateLimitMaxTokens = 10000
+	// 1000000 = 单 IP/route 每秒最多 100 万请求，可按业务调整
+	DefaultRateLimitMaxTokens = 1000000
 
 	// DefaultRateLimitTokenRefresh 令牌桶补充周期
 	DefaultRateLimitTokenRefresh = "1s"

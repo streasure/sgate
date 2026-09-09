@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -17,17 +18,38 @@ type noopLogic struct {
 	protoGw.UnimplementedGatewayStreamServer
 }
 
-// OnData is a raw sink for forward-only gateway benchmarks. It receives and
-// discards every StreamData without decoding payloads, logging, or responding.
+// OnData decouples recv and send: recv loop pushes into a buffered channel,
+// a sender goroutine drains it and calls stream.Send. This avoids blocking
+// the recv loop on gRPC transport back-pressure.
 func (noopLogic) OnData(stream protoGw.GatewayStream_OnDataServer) error {
+	ch := make(chan *protoGw.StreamData, 1<<20) // 1M buffer
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for msg := range ch {
+			_ = stream.Send(msg)
+		}
+	}()
+
 	for {
-		if _, err := stream.Recv(); err != nil {
+		msg, err := stream.Recv()
+		if err != nil {
+			close(ch)
+			<-done
 			return err
+		}
+		select {
+		case ch <- msg:
+		default:
+			// buffer full, drop under back-pressure
 		}
 	}
 }
 
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	address := ":50052"
 	if value := os.Getenv("LOGIC_ADDR"); value != "" {
 		address = value

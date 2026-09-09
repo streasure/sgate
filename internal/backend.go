@@ -298,8 +298,12 @@ func (s *StreamShard) startSendLoop() {
 			fmt.Fprintf(os.Stderr, "startSendLoop shard %d panic recovered: %v\n", s.index, r)
 		}
 	}()
+
 	const maxBatchCount = 256
 	batch := make([]*protoGw.StreamData, 0, maxBatchCount)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		var msg *protoGw.StreamData
 		select {
@@ -309,6 +313,9 @@ func (s *StreamShard) startSendLoop() {
 			if msg == nil {
 				continue
 			}
+		case <-ticker.C:
+			// Periodic flush for low-throughput scenarios
+			continue
 		}
 
 		batch = batch[:0]
@@ -330,23 +337,23 @@ func (s *StreamShard) startSendLoop() {
 			}
 		}
 
-		func() {
-			s.mu.Lock()
-			stream := s.stream
-			s.mu.Unlock()
+		// Get stream once for the entire batch
+		s.mu.Lock()
+		stream := s.stream
+		s.mu.Unlock()
 
-			if stream == nil {
-				return
-			}
+		if stream == nil {
+			continue
+		}
 
-			for _, message := range batch {
-				if err := safeStreamSend(stream, message); err != nil {
-					tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
-					s.markShardBroken()
-					break
-				}
+		// Send entire batch with single stream reference
+		for _, message := range batch {
+			if err := safeStreamSend(stream, message); err != nil {
+				tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
+				s.markShardBroken()
+				break
 			}
-		}()
+		}
 	}
 }
 
@@ -366,6 +373,15 @@ func (s *StreamShard) SendMessage(msg *protoGw.StreamData) (err error) {
 	if s.closed.Load() {
 		return ErrNotConnected
 	}
+
+	// Try non-blocking send first (most common case)
+	select {
+	case s.sendCh <- msg:
+		return nil
+	default:
+		// Channel full, try with timeout
+	}
+
 	func() {
 		defer func() {
 			if r := recover(); r != nil {

@@ -33,5 +33,6 @@ logic向sgate的推送没有session这个概念。只走userUuid和groupId。
 
 待测试
 没有执行双 Gateway 的 GatewayClientPool 跨网关压测，因为当前测试环境没有同时运行两个完整 gateway 实例
+还需要正常长时间稳定性测试
 
 
