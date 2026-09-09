@@ -225,7 +225,7 @@ sgate 的 `ConnectionManager` 负责本地 `userUUID ↔ sessionID` 映射和最
 
 `config.LoadConfig` 先创建硬编码默认值，再将所选 YAML 解码到该结构中。单个 YAML 字段没有环境变量覆盖；`PORT`、`LOG_LEVEL`、`GATEWAY_SERVER_ID` 仅在默认值构造时使用。
 
-本地压测使用 `config/bench.yaml`：
+本地压测使用唯一网关配置 `config/config.yaml`：
 
 ```yaml
 transports:
@@ -245,11 +245,11 @@ logicServers:
     address: "localhost:50052"
 ```
 
-该文件关闭 `etcd`、`discovery`、`configCenter`、`cluster` 和 monitoring。`config/config.yaml` 含外部集成配置，不能假定在未部署其依赖时可直接运行。
+该配置默认关闭 `etcd`、`discovery`、`configCenter`、`cluster` 和 monitoring，可直接运行；生产部署在同一配置文件中覆盖外部依赖和安全参数。
 
 ## 性能特征
 
-默认路径利用 gnet event loop、单次流量事件的多帧解析、protobuf wire envelope 提取和异步客户端写入。当前未实现写合并、批量 gRPC 转发、客户端背压反馈或 TLS/WSS；TCP/WS 帧大小限制、空闲连接回收、stream 退避重连已实现。
+默认路径利用 gnet event loop、单次流量事件的多帧解析、protobuf wire envelope 提取、按连接写合并和 gRPC stream 分片；仍需要在多机环境验证客户端背压、TLS/WSS、跨网关 fan-out 和故障恢复。
 
 因此容量由本地 logic server、gRPC stream、codec 分配、内核缓冲和客户端发送行为共同决定，不能仅根据 gnet 推导。
 
@@ -257,11 +257,11 @@ logicServers:
 
 ### 方法
 
-记录日期：2026-09-08。环境：Windows、12 logical CPUs、Go 1.22.5。gateway、`examples/logic_server_min` 与压测客户端运行在同一主机。逻辑服对登录请求应答，对收到的 stream 消息回显。此次测试使用 `config/bench.yaml`，关闭 etcd/discovery/cluster。
+记录日期：2026-09-08。环境：Windows、12 logical CPUs、Go 1.22.5。gateway、`examples/logic_server_min` 与压测客户端运行在同一主机。逻辑服对登录请求应答，对收到的 stream 消息回显。此次测试使用 `config/config.yaml`，关闭 etcd/discovery/cluster。
 
 | 项目 | TCP | WebSocket |
 |---|---|---|
-| Gateway 配置 | `config/bench.yaml` | `config/bench.yaml` |
+| Gateway 配置 | `config/config.yaml` | `config/config.yaml` |
 | 监听地址 | `127.0.0.1:48080` | `ws://127.0.0.1:48081/` |
 | 登录 server ID | `logic-1` | `logic-1` |
 | 负载 | 登录后心跳双向回显 | HTTP Upgrade、登录后心跳双向回显 |
@@ -277,7 +277,7 @@ go build -o tcp_bench.exe ./examples/bench
 go build -o ws_bench.exe ./examples/ws_bench
 
 .\logic_server_min.exe
-.\sgate.exe -conf config/bench.yaml
+.\sgate.exe -conf config/config.yaml
 
 .\tcp_bench.exe 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
 .\ws_bench.exe ws://127.0.0.1:48081/ 10 10
@@ -295,7 +295,7 @@ TCP 和 WebSocket 不得并发运行；二者共享同一 gateway、logic proces
 
 TCP 稳定档的 sgate 统计为：接收 12,708、转发 10,000、转发丢弃 2,698、回推 10,000、回推无连接丢弃 0。TCP 高 inflight 档为：接收 51,028、转发 10,000、转发丢弃 41,018、回推无连接丢弃 10。WebSocket 客户端结果为发送 91,920、接收 10,000，认证失败 0。高 inflight 结果受 `logic_server_min` echo 能力和网关队列限制影响。
 
-旧版 `push_bench` 的 personal、group、broadcast 结果只是 stream echo，不代表主动 fan-out 性能。真实主动推送使用 `examples/push_driver`，结果如下：10 个客户端、10 秒、1,000 个逻辑事件/s，`SendToUser` 收到 6,530 条、约 653 QPS；10 人组 `SendToGroup` 收到 66,125 条、约 6,609 QPS；10 人 `Broadcast` 收到 65,731 条、约 6,569 QPS。
+真实主动推送使用 `examples/push_driver`，结果如下：10 个客户端、10 秒、1,000 个逻辑事件/s，`SendToUser` 收到 6,530 条、约 653 QPS；10 人组 `SendToGroup` 收到 66,125 条、约 6,609 QPS；10 人 `Broadcast` 收到 65,731 条、约 6,569 QPS。
 
 `examples/logic_noop` + `examples/forward_bench` 的 no-op 纯转发速率阶梯结果为：目标 5,000 msg/s 时实际 offered 3,312、转发 3,314、丢弃 0；目标 10,000 时实际 offered 6,631、转发 6,633、丢弃 0；目标 20,000 时实际 offered 13,300、转发 10,287、丢弃 15,110。Windows 10ms 批量调度使实际 offered load 约为目标的 2/3，本次无丢弃稳定转发约为 6.6K msg/s。
 
@@ -303,7 +303,7 @@ TCP 稳定档的 sgate 统计为：接收 12,708、转发 10,000、转发丢弃 
 
 使用生产配置启动 gateway 的验证中，gnet TCP、WebSocket 和 Prometheus 监听均成功；由于未启动 logic，`/health` 与 `/ready` 返回 503。etcd 可访问，但未启动两个 gateway 实例，因此没有执行 GatewayClientPool 的跨网关吞吐测试。
 
-这些数据仅用于同机 loopback 的协议量级比较，不能作为生产 QPS 承诺，也不能外推到不同主机、网络、payload、并发、logic 实现或业务逻辑。测试没有测量 Pxx 延迟、CPU、内存、NIC 吞吐、TLS/WSS、GC pause、长稳泄漏或真实主动推送 fan-out。
+这些数据仅用于同机 loopback 的协议量级比较，不能作为生产 QPS 承诺，也不能外推到不同主机、网络、payload、并发、logic 实现或业务逻辑。完整判定标准和测试矩阵见 `docs/performance.md`。
 
 ## 可观测性
 

@@ -1,9 +1,0 @@
-time=2026-09-07T18:36:37.7856104+08:00 level=INFO msg="logic server started" addr=:50052
-time=2026-09-07T18:36:40.8832504+08:00 level=INFO msg="gateway connected" gatewayID=YFZ-21-10-06-32-50051
-time=2026-09-07T18:36:40.8832504+08:00 level=INFO msg="gateway connected" gatewayID=YFZ-21-10-06-32-50051
-time=2026-09-07T18:36:40.8837624+08:00 level=INFO msg="connected to gateway for service calls" addr=localhost:50051
-time=2026-09-07T18:36:40.8837624+08:00 level=INFO msg="connected to gateway for service calls" addr=localhost:50051
-time=2026-09-07T18:36:40.8832504+08:00 level=INFO msg="gateway connected" gatewayID=YFZ-21-10-06-32-50051
-time=2026-09-07T18:36:40.8837624+08:00 level=INFO msg="connected to gateway for service calls" addr=localhost:50051
-time=2026-09-07T18:36:40.8832504+08:00 level=INFO msg="gateway connected" gatewayID=YFZ-21-10-06-32-50051
-time=2026-09-07T18:36:40.8837624+08:00 level=INFO msg="connected to gateway for service calls" addr=localhost:50051

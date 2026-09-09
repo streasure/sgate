@@ -1,0 +1,42 @@
+log:
+  level: info
+  format: json
+  async:
+    enabled: true
+    buffer_size: 5000
+    batch_size: 50
+    flush_interval: 50
+    workers: 4
+  console:
+    enabled: true
+    format: text
+  file:
+    enabled: true
+    path: ./logs/app.log
+    rotate:
+      max_size: 100
+      max_backups: 10
+      max_age: 30
+      compress: true
+  network:
+    enabled: false
+    type: tcp
+    address: localhost:9200
+    timeout: 5
+    retry: 3
+    tls: false
+  stacktrace:
+    enabled: true
+    level: error
+    depth: 10
+  sampling:
+    enabled: false
+    initial: 1000
+    thereafter: 100
+  field_cache:
+    enabled: true
+    size: 1000
+  performance:
+    lock_free: true
+    use_pool: true
+    prealloc: true

@@ -1,2 +1,0 @@
-[gnet] 2026-09-07T18:36:40.8746246+08:00	INFO	logging/logger.go:256	Launching gnet with 12 event-loops, listening on: tcp://:48080
-[gnet] 2026-09-07T18:36:40.8746246+08:00	INFO	logging/logger.go:256	Launching gnet with 12 event-loops, listening on: tcp://:48081

@@ -101,21 +101,23 @@ logicServers:
 | `grpc.port` | logic server 调用 Gateway unary RPC 的端口。 |
 | `grpc.advertiseAddr` | 注册到 etcd、供其他网关访问的 gRPC 地址。 |
 
-`config/config.yaml` 为生产配置（含 etcd、discovery），`config/bench.yaml` 为本地压测配置（关闭外部依赖）。
+`config/config.yaml` 是唯一网关配置，默认关闭 etcd、discovery、cluster、configCenter 和 Prometheus，可直接用于本地验证。生产环境在部署时覆盖同一文件的外部依赖和安全参数。
 
 ## 快速开始
 
 ```powershell
-# 先构建所有普通构建产物
+# 构建源码；压测二进制放到临时目录
 go build ./...
-go build -o sgate.exe ./cmd/gateway
-go build -o logic_server_min.exe ./examples/logic_server_min
+$out = Join-Path $env:TEMP "sgate-bench"
+New-Item -ItemType Directory -Force $out | Out-Null
+go build -o "$out\sgate.exe" ./cmd/gateway
+go build -o "$out\logic_server_min.exe" ./examples/logic_server_min
 
 # 终端 1：逻辑服
 .\logic_server_min.exe
 
 # 终端 2：网关
-.\sgate.exe -conf config/bench.yaml
+.\sgate.exe -conf config/config.yaml
 ```
 
 ## 构建
@@ -148,7 +150,7 @@ go vet ./...
 
 - Windows，12 logical CPUs，Go 1.22.5
 - gateway、`logic_server_min`、压测客户端同一主机
-- 使用 `config/bench.yaml`（关闭 etcd/discovery/cluster）
+- 使用 `config/config.yaml`（默认关闭 etcd/discovery/cluster）
 - 逻辑服对登录请求应答，对心跳请求回显
 
 ### 结果
@@ -162,16 +164,6 @@ go vet ./...
 | WebSocket | 10 | 10.02s | 91,920 | 10,000 | 9,174 | 998 | 0 |
 
 TCP 稳定档对应的 sgate `/stats` 为：接收 12,708、转发 10,000、客户端回推 10,000、转发丢弃 2,698、回推无连接丢弃 0。高 inflight 档对应：接收 51,028、转发 10,000、转发丢弃 41,018、回推无连接丢弃 10。高 inflight 档说明示例 logic echo 处理能力不足时会触发网关队列丢弃，不能作为无丢包性能结果。
-
-`push_bench` 在 `personal`、`group`、`broadcast` 三种模式下均得到相近结果：
-
-| 模式 | 连接数 | 时长 | 客户端发送 | 客户端接收 | 平均发送 QPS | 平均接收 QPS |
-|---|---:|---:|---:|---:|---:|---:|
-| personal | 10 | 10.02s | 12,656 | 9,990 | 1,263 | 997 |
-| group | 10 | 10.02s | 12,704 | 9,990 | 1,268 | 997 |
-| broadcast | 10 | 10.02s | 12,656 | 9,990 | 1,263 | 997 |
-
-上述三个模式是旧版 `push_bench` 的 stream echo 结果，不代表主动 fan-out 性能。真实主动推送结果见下方“纯 sgate 转发与主动推送”部分。
 
 ### 纯 sgate 转发与主动推送
 
@@ -197,38 +189,35 @@ TCP 稳定档对应的 sgate `/stats` 为：接收 12,708、转发 10,000、客�
 
 这些结果是实际 sgate 下行写出和 fan-out 结果，不是 logic echo 性能。另用 `ghz v0.120.0` 对 Gateway unary `GetGroupInfo` 做 5 秒、20 并发测试：225,191 请求，45,040 req/s，平均延迟 0.28ms，P95 1.00ms，P99 2.02ms；关闭连接阶段产生的 12 次错误不计入正常请求。
 
-启用 `config/config.yaml` 的 etcd 配置启动验证时，gateway 成功监听 TCP `:48080`、WebSocket `:48081` 和 Prometheus `:9101`；由于本次未启动 logic server，HTTP `/health` 和 `/ready` 均返回 `503`，与当前 readiness 语义一致。未进行双 gateway 的 GatewayClientPool 吞吐压测。
+此前启用外部依赖配置的验证结果不作为本地默认配置的判定；跨 gateway 的 GatewayClientPool 吞吐仍需按 `docs/performance.md` 执行。
 
 > 这些数字是本机 loopback 测试，不是生产容量承诺。测试未覆盖多机网络、TLS/WSS、长稳运行和更大 payload。
 
 ### 工具
 
 ```powershell
-# 构建压测产物
-go build -o sgate.exe ./cmd/gateway
-go build -o logic_server_min.exe ./examples/logic_server_min
-go build -o tcp_bench.exe ./examples/bench
-go build -o ws_bench.exe ./examples/ws_bench
-go build -o logic_noop.exe ./examples/logic_noop
-go build -o forward_bench.exe ./examples/forward_bench
-go build -o push_driver.exe ./examples/push_driver
+# 构建压测产物到临时目录，避免污染仓库
+$out = Join-Path $env:TEMP "sgate-bench"
+New-Item -ItemType Directory -Force $out | Out-Null
+go build -o "$out\sgate.exe" ./cmd/gateway
+go build -o "$out\logic_server_min.exe" ./examples/logic_server_min
+go build -o "$out\tcp_bench.exe" ./examples/bench
+go build -o "$out\ws_bench.exe" ./examples/ws_bench
+go build -o "$out\logic_noop.exe" ./examples/logic_noop
+go build -o "$out\forward_bench.exe" ./examples/forward_bench
+go build -o "$out\push_driver.exe" ./examples/push_driver
 
 # 终端 1：逻辑服
 .\logic_server_min.exe
 
 # 终端 2：网关
-.\sgate.exe -conf config/bench.yaml
+.\sgate.exe -conf config/config.yaml
 
 # TCP
 .\tcp_bench.exe 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
 
 # WebSocket
 .\ws_bench.exe ws://127.0.0.1:48081/ 10 10
-
-# push stream echo 场景；personal/group/broadcast 依次串行执行
-.\push_bench.exe 127.0.0.1:48080 10 10 personal 16 256
-.\push_bench.exe 127.0.0.1:48080 10 10 group 16 256
-.\push_bench.exe 127.0.0.1:48080 10 10 broadcast 16 256
 
 # 纯转发：先启动 logic_noop 和 sgate，再执行
 .\logic_noop.exe
@@ -240,7 +229,7 @@ go build -o push_driver.exe ./examples/push_driver
 .\push_driver.exe 127.0.0.1:48080 127.0.0.1:50052 broadcast 10 10 1000
 ```
 
-TCP 与 WebSocket 必须串行运行，并发运行会使协议对比失效。
+TCP 与 WebSocket 必须串行运行，并发运行会使协议对比失效。完整压测矩阵、长稳测试和千万级部署要求见 `docs/performance.md`。
 
 ## 项目结构
 
@@ -264,8 +253,7 @@ examples/
   forward_bench/              纯 sgate 上行转发压测工具
   push_driver/                真实主动推送压测工具
 config/
-  config.yaml                 生产配置
-  bench.yaml                  压测配置
+  config.yaml                 唯一网关配置（本地默认基线）
 DESIGN.md                     设计文档
 ```
 

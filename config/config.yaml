@@ -1,0 +1,70 @@
+port: 8081
+logLevel: warn
+serverId: "gateway-1"
+serverType: "Gateway"
+zone: "default"
+
+etcd:
+  enabled: false
+
+discovery:
+  enabled: false
+  serviceName: "logic"
+  zone: "default"
+
+transports:
+  - protocol: tcp
+    port: 48080
+  - protocol: tcp
+    port: 48081
+    type: websocket
+
+grpc:
+  port: 50051
+  logicAddr: "localhost:50052"
+  windowSize: 67108864
+
+# login gate binds each client session to one of these logic server IDs.
+# A bound session never uses round-robin forwarding.
+logicServers:
+  - serverId: "logic-1"
+    serverType: "Logic"
+    zone: "default"
+    address: "localhost:50052"
+
+monitoring:
+  pprofAddr: ""
+  prometheus:
+    enabled: false
+    addr: ":9101"
+    path: "/metrics"
+    prefix: "app"
+  maxMessageSize: 8388608
+
+configCenter:
+  enabled: false
+
+cluster:
+  enabled: false
+
+stream:
+  shardCount: 96
+  sendChannelSize: 1048576
+  receiveBatchSize: 128
+
+protection:
+  maxFrameSize: 4194304
+  maxFrameBufSize: 4194304
+  maxWSFrameSize: 4194304
+  maxWSBufferSize: 4194304
+  memoryThreshold: 92
+  cpuThreshold: 92
+  dropOnOverload: true
+  checkIntervalMs: 200
+  wsHeartbeatTimeout: 60
+  wsCheckInterval: 30
+  connCheckInterval: "5m"
+  connIdleTimeout: "30s"
+  # Authentication is logic-owned. Only these command IDs are accepted until
+  # logic replies with a non-empty StreamData.user_key.
+  preAuthCommands: [1000001]
