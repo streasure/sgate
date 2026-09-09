@@ -4,8 +4,25 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync"
 
 	"github.com/panjf2000/gnet/v2"
+)
+
+// Buffer pools for reducing GC pressure
+var (
+	decodeBufPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 0, 64*1024) // 64KB
+			return &buf
+		},
+	}
+	encodeBufPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 0, 64*1024) // 64KB
+			return &buf
+		},
+	}
 )
 
 const (
@@ -47,16 +64,33 @@ func (c *TCPCodec) Decode(ctx context.Context, conn gnet.Conn) ([][]byte, error)
 		if err != nil {
 			return nil, err
 		}
-		data := make([]byte, dataLen)
-		copy(data, dataWithLen[TCPHeaderLen:])
-		messages = append(messages, data)
+		// Use pool for small messages, direct allocation for large ones
+		if dataLen <= 64*1024 {
+			bufPtr := decodeBufPool.Get().(*[]byte)
+			buf := (*bufPtr)[:dataLen]
+			copy(buf, dataWithLen[TCPHeaderLen:])
+			messages = append(messages, buf)
+		} else {
+			data := make([]byte, dataLen)
+			copy(data, dataWithLen[TCPHeaderLen:])
+			messages = append(messages, data)
+		}
 	}
 	return messages, nil
 }
 
 // Encode wraps raw bytes with a 4-byte length prefix.
 func (c *TCPCodec) Encode(buf []byte) []byte {
-	data := make([]byte, TCPHeaderLen+len(buf))
+	totalLen := TCPHeaderLen + len(buf)
+	// Use pool for small messages
+	if totalLen <= 64*1024 {
+		bufPtr := encodeBufPool.Get().(*[]byte)
+		data := (*bufPtr)[:totalLen]
+		binary.BigEndian.PutUint32(data, uint32(len(buf)))
+		copy(data[TCPHeaderLen:], buf)
+		return data
+	}
+	data := make([]byte, totalLen)
 	binary.BigEndian.PutUint32(data, uint32(len(buf)))
 	copy(data[TCPHeaderLen:], buf)
 	return data

@@ -133,8 +133,8 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		wsConn.ConnectionID = connectionID
 	}
 
-	if conn := g.connectionManager.GetConnection(wsConn.ConnectionID); conn != nil && !conn.IsWS {
-		conn.IsWS = true
+	if conn := g.connectionManager.GetConnection(wsConn.ConnectionID); conn != nil && !conn.IsWebSocket() {
+		conn.SetWS(true)
 	}
 
 	tlog.Debug("WebSocket handshake success", "connectionID", wsConn.ConnectionID)

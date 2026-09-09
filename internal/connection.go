@@ -21,33 +21,34 @@ const (
 )
 
 type Connection struct {
-	id          string
-	UserUUID    string
-	ServerID    string
-	Conn        gnet.Conn
-	RemoteAddr  string
-	CreatedAt   int64
-	LastActive  int64
+	id         string
+	Conn       gnet.Conn
+	RemoteAddr string
+	CreatedAt  int64
+	LastActive int64
 	activitySeq atomic.Uint32
-	Status      int8
-	Groups      map[string]struct{}
-	IsWS        bool
-	state       atomic.Int32
-	mu          sync.Mutex
-	groupsMu    sync.RWMutex
+	Status     int8
+	Groups     map[string]struct{}
+	state      atomic.Int32
+	groupsMu   sync.RWMutex
+
+	// Atomic fields for lock-free access
+	userUUID atomic.Value // string
+	serverID atomic.Value // string
+	isWS     atomic.Bool
 }
 
 func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
 	now := time.Now().UnixMilli()
 	c := &Connection{
 		id:         id,
-		UserUUID:   userUUID,
 		Conn:       conn,
 		RemoteAddr: remoteAddr,
 		CreatedAt:  now,
 		LastActive: now,
 		Groups:     make(map[string]struct{}),
 	}
+	c.userUUID.Store(userUUID)
 	c.state.Store(int32(StateForward))
 	return c
 }
@@ -59,22 +60,41 @@ func (c *Connection) SetState(old, new ConnState) bool {
 }
 
 func (c *Connection) IsBound() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.ServerID != ""
+	return c.serverID.Load().(string) != ""
 }
-func (c *Connection) IsAuthenticated() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.UserUUID != "" && !strings.HasPrefix(c.UserUUID, "temp_")
-}
-func (c *Connection) IsWebSocket() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.IsWS }
 
-func (c *Connection) SetUserUUID(uuid string) { c.mu.Lock(); c.UserUUID = uuid; c.mu.Unlock() }
-func (c *Connection) GetUserUUID() string     { c.mu.Lock(); defer c.mu.Unlock(); return c.UserUUID }
-func (c *Connection) SetServerID(sid string)  { c.mu.Lock(); c.ServerID = sid; c.mu.Unlock() }
-func (c *Connection) GetServerID() string     { c.mu.Lock(); defer c.mu.Unlock(); return c.ServerID }
-func (c *Connection) SetWS(v bool)            { c.mu.Lock(); c.IsWS = v; c.mu.Unlock() }
+func (c *Connection) IsAuthenticated() bool {
+	uuid := c.userUUID.Load().(string)
+	return uuid != "" && !strings.HasPrefix(uuid, "temp_")
+}
+
+func (c *Connection) IsWebSocket() bool { return c.isWS.Load() }
+
+func (c *Connection) SetUserUUID(uuid string) { c.userUUID.Store(uuid) }
+func (c *Connection) GetUserUUID() string {
+	if v := c.userUUID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+func (c *Connection) SetServerID(sid string) { c.serverID.Store(sid) }
+func (c *Connection) GetServerID() string {
+	if v := c.serverID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+func (c *Connection) SetWS(v bool) { c.isWS.Store(v) }
+
+// Header pool for reducing allocations
+var headerPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 4)
+		return &buf
+	},
+}
 
 func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
 
@@ -91,12 +111,15 @@ func (c *Connection) Send(data []byte) error {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	if c.IsWS {
+	if c.IsWebSocket() {
 		return c.sendWSFrame(data)
 	}
-	header := make([]byte, 4)
+	headerPtr := headerPool.Get().(*[]byte)
+	header := *headerPtr
 	binary.BigEndian.PutUint32(header, uint32(len(data)))
-	return c.Conn.AsyncWritev([][]byte{header, data}, noopAsyncCallback)
+	err := c.Conn.AsyncWritev([][]byte{header, data}, noopAsyncCallback)
+	// Note: header is reused across calls, but AsyncWritev copies the data
+	return err
 }
 
 func (c *Connection) SendMulti(combined []byte) error {
@@ -112,7 +135,7 @@ func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	if c.IsWS {
+	if c.IsWebSocket() {
 		return c.Conn.AsyncWrite(combined, noopAsyncCallback)
 	}
 	return c.Conn.AsyncWrite(combined, func(_ gnet.Conn, _ error) error {

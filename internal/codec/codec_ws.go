@@ -10,8 +10,25 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/panjf2000/gnet/v2"
+)
+
+// Buffer pools for WebSocket messages
+var (
+	wsDecodeBufPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 0, 64*1024) // 64KB
+			return &buf
+		},
+	}
+	wsEncodeBufPool = sync.Pool{
+		New: func() interface{} {
+			buf := make([]byte, 0, 64*1024) // 64KB
+			return &buf
+		},
+	}
 )
 
 const maxWebSocketMessageSize = 4 * 1024 * 1024
@@ -70,9 +87,30 @@ func (c *WebSocketCodec) Decode(ctx context.Context, conn gnet.Conn) ([][]byte, 
 }
 
 func (c *WebSocketCodec) Encode(buf []byte) []byte {
-	frame := make([]byte, 0, 10+len(buf))
+	// Calculate frame size
+	headerLen := 2
+	n := len(buf)
+	switch {
+	case n < 126:
+		headerLen = 2
+	case n <= 0xffff:
+		headerLen = 4
+	default:
+		headerLen = 10
+	}
+	totalLen := headerLen + n
+
+	// Use pool for small messages
+	var frame []byte
+	if totalLen <= 64*1024 {
+		bufPtr := wsEncodeBufPool.Get().(*[]byte)
+		frame = (*bufPtr)[:0]
+	} else {
+		frame = make([]byte, 0, totalLen)
+	}
+
 	frame = append(frame, 0x82)
-	switch n := len(buf); {
+	switch {
 	case n < 126:
 		frame = append(frame, byte(n))
 	case n <= 0xffff:
@@ -179,7 +217,14 @@ func (c *WebSocketCodec) readFrame(conn gnet.Conn, data []byte) ([]byte, bool, e
 		return nil, false, errors.New("invalid websocket control frame")
 	}
 	mask := data[headerLen : headerLen+4]
-	payload := make([]byte, int(length))
+	// Use pool for small messages
+	var payload []byte
+	if length <= 64*1024 {
+		bufPtr := wsDecodeBufPool.Get().(*[]byte)
+		payload = (*bufPtr)[:length]
+	} else {
+		payload = make([]byte, int(length))
+	}
 	for i, value := range data[headerLen+4 : headerLen+4+int(length)] {
 		payload[i] = value ^ mask[i&3]
 	}
