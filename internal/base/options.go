@@ -14,7 +14,6 @@ type Option func(*Options)
 // Options caches derived values from Config for fast access.
 type Options struct {
 	GRPCPort           int
-	GRPCLogicAddr      string
 	GRPCWindowSize     int
 	GRPCMaxMessageSize int
 
@@ -68,7 +67,6 @@ func GetOptions() *Options {
 func deriveOptions(cfg *config.Config) *Options {
 	return &Options{
 		GRPCPort:           cfg.GRPC.Port,
-		GRPCLogicAddr:      cfg.GRPC.LogicAddr,
 		GRPCWindowSize:     cfg.GRPC.WindowSize,
 		GRPCMaxMessageSize: cfg.GRPC.MaxMessageSize,
 
@@ -102,11 +100,6 @@ func deriveOptions(cfg *config.Config) *Options {
 // WithGRPCPort sets the gRPC port.
 func WithGRPCPort(port int) Option {
 	return func(o *Options) { o.GRPCPort = port }
-}
-
-// WithGRPCLogicAddr sets the logic server address.
-func WithGRPCLogicAddr(addr string) Option {
-	return func(o *Options) { o.GRPCLogicAddr = addr }
 }
 
 // WithDiscoveryEnabled sets whether service discovery is enabled.

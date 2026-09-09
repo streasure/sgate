@@ -74,6 +74,19 @@ Gateway unary RPC 仍提供按 `session_id` 的底层 `SendToClient` 接口，�
 ## 配置
 
 ```yaml
+etcd:
+  enabled: true
+  endpoints: ["http://127.0.0.1:2379"]
+  servicePrefix: "/services"
+  leaseTTL: "10s"
+
+discovery:
+  enabled: true
+  serviceName: "logic"
+  zone: "default"
+
+logicServerType: "Logic"
+
 transports:
   - protocol: tcp
     port: 48080
@@ -84,24 +97,19 @@ transports:
 grpc:
   port: 50051
   windowSize: 67108864
-
-logicServers:
-  - serverId: "logic-1"
-    serverType: "Logic"
-    zone: "default"
-    address: "localhost:50052"
 ```
 
 | 配置 | 含义 |
 |---|---|
+| `etcd.enabled` | 启用 etcd 服务注册与发现。 |
+| `etcd.endpoints` | etcd 集群地址。 |
+| `discovery.enabled` | 启用 logic 服务发现，gateway 从 etcd 动态获取 logic 连接。 |
+| `logicServerType` | etcd 中 logic 服务的类型前缀（ServiceID = `logicServerType:zone`）。 |
 | `transports[].protocol` | 必须为 `tcp`；WebSocket 通过 `type: websocket` 区分。 |
 | `transports[].port` | 客户端监听端口。 |
-| `transports[].type` | 留空为 TCP；`websocket` 为 WebSocket。 |
-| `logicServers` | `LoginGateReq.server_id` 到 logic server 的静态映射。 |
 | `grpc.port` | logic server 调用 Gateway unary RPC 的端口。 |
-| `grpc.advertiseAddr` | 注册到 etcd、供其他网关访问的 gRPC 地址。 |
 
-`config/config.yaml` 是唯一网关配置，默认关闭 etcd、discovery、cluster、configCenter 和 Prometheus，可直接用于本地验证。生产环境在部署时覆盖同一文件的外部依赖和安全参数。
+logic 连接全部通过 etcd 动态发现，无需静态配置 `logicServers`。logic server 启动时注册到 etcd（ServiceID = `Logic:default`），gateway 自动发现并建立 gRPC stream。
 
 ## 快速开始
 
@@ -149,87 +157,76 @@ go vet ./...
 ### 环境
 
 - Windows，12 logical CPUs，Go 1.22.5
-- gateway、`logic_server_min`、压测客户端同一主机
+- gateway、logic、压测客户端同一主机
 - 使用 `config/config.yaml`（默认关闭 etcd/discovery/cluster）
-- 逻辑服对登录请求应答，对心跳请求回显
 
-### 结果
+### 纯转发性能（logic_noop + forward_bench，测网关上限）
 
-本次实际执行日期：2026-09-08。环境为 Windows、12 logical CPUs、Go 1.22.5，gateway、logic 和压测工具运行在同一主机。TCP/WS 测试均使用 10 个连接、10 秒、batchSize=16；TCP 稳定档使用 inflight=256。结果中的 `Recv QPS` 是客户端成功收到的回包速率，不是网关理论最大吞吐。
+logic_noop 做零拷贝 echo（`stream.Recv()` → `stream.Send()`），不解析、不回包。限流 `maxTokens: 1000000`。
 
-| 场景 | 连接数 | 时长 | 客户端发送 | 客户端接收 | 发送 QPS | 接收 QPS | 认证失败 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| TCP，inflight=8192 | 10 | 10.03s | 51,008 | 9,995 | 5,085 | 997 | 5 |
-| TCP，inflight=256 | 10 | 10.02s | 12,688 | 9,990 | 1,266 | 997 | 0 |
-| WebSocket | 10 | 10.02s | 91,920 | 10,000 | 9,174 | 998 | 0 |
+| 连接数 | 目标速率 | 实际 QPS | 转发 | 丢弃 |
+|--------|----------|----------|------|------|
+| 100 | 200K/s | **160,728** | 2,493,860 | 0 |
+| 500 | 300K/s | **374,969** | 6,750,646 | 0 |
+| 500 | 500K/s | **233,324** | 4,205,930 | 0 |
+| 1000 | 500K/s | ~350K | 10,403,889 | 84,979 (0.8%) |
 
-TCP 稳定档对应的 sgate `/stats` 为：接收 12,708、转发 10,000、客户端回推 10,000、转发丢弃 2,698、回推无连接丢弃 0。高 inflight 档对应：接收 51,028、转发 10,000、转发丢弃 41,018、回推无连接丢弃 10。高 inflight 档说明示例 logic echo 处理能力不足时会触发网关队列丢弃，不能作为无丢包性能结果。
+**网关纯转发上限约 375K QPS**（500 连接，0 丢弃）。此前 11K QPS 瓶颈是默认限流 10K tokens/s 导致 92% 被丢弃。
 
-### 纯 sgate 转发与主动推送
+### 双向通信（logic_server_min 回显）
 
-为隔离 logic 性能，新增 `examples/logic_noop` 和 `examples/forward_bench`。no-op logic 只接收并丢弃 `StreamData`，不解析、不回包；转发结果以 sgate `/stats` 的 `forwarded` 和 `dropped` 为准。
+| 连接数 | 客户端发送 | 客户端接收 | 接收 QPS | 认证失败 |
+|--------|-----------|-----------|----------|----------|
+| 10 | 91,968 | 9,990 | **997** | 0 |
+| 50 | 343,232 | 10,466 | **1,046** | 39 |
 
-10 个 TCP 客户端、5 秒速率阶梯测试：
+logic_server_min 单线程回显 ~1K QPS 是瓶颈。50 连接时 39 个认证失败：LogicLogin 2s 超时。
 
-| Driver 目标 | 实际 offered load | sgate 转发 | 转发丢弃 |
-|---:|---:|---:|---:|
-| 5,000 msg/s | 3,312 msg/s | 3,314 msg/s | 0 |
-| 10,000 msg/s | 6,631 msg/s | 6,633 msg/s | 0 |
-| 20,000 msg/s | 13,300 msg/s | 10,287 msg/s | 15,110 |
+### 主动推送
 
-本次无丢弃稳定转发约为 6.6K msg/s；Windows 10ms 批量调度使实际 offered load 约为目标值的 2/3。目标 100,000 msg/s 的过载轮实际 offered 70,976 msg/s，sgate 转发 10,341 msg/s，丢弃 606,851，因此不作为稳定性能结果。
-
-真实主动推送使用 `examples/push_driver`，10 个客户端登录后建立 `userUUID -> sessionID` 映射，连续 10 秒、目标 1,000 个逻辑事件/s：
-
-| 模式 | 实际发送到客户端 | 客户端收到 | 接收 QPS |
-|---|---:|---:|---:|
+| 模式 | 发送到客户端 | 客户端收到 | 接收 QPS |
+|------|-------------|-----------|----------|
 | `SendToUser` 单用户 | 6,540 | 6,530 | 653 |
 | `SendToGroup` 10 人组 | 66,200 | 66,125 | 6,609 |
 | `Broadcast` 10 人全体 | 65,800 | 65,731 | 6,569 |
 
-这些结果是实际 sgate 下行写出和 fan-out 结果，不是 logic echo 性能。另用 `ghz v0.120.0` 对 Gateway unary `GetGroupInfo` 做 5 秒、20 并发测试：225,191 请求，45,040 req/s，平均延迟 0.28ms，P95 1.00ms，P99 2.02ms；关闭连接阶段产生的 12 次错误不计入正常请求。
-
-此前启用外部依赖配置的验证结果不作为本地默认配置的判定；跨 gateway 的 GatewayClientPool 吞吐仍需按 `docs/performance.md` 执行。
-
-> 这些数字是本机 loopback 测试，不是生产容量承诺。测试未覆盖多机网络、TLS/WSS、长稳运行和更大 payload。
+> 本机 loopback 测试，不是生产容量承诺。
 
 ### 工具
 
 ```powershell
-# 构建压测产物到临时目录，避免污染仓库
-$out = Join-Path $env:TEMP "sgate-bench"
-New-Item -ItemType Directory -Force $out | Out-Null
-go build -o "$out\sgate.exe" ./cmd/gateway
-go build -o "$out\logic_server_min.exe" ./examples/logic_server_min
-go build -o "$out\tcp_bench.exe" ./examples/bench
-go build -o "$out\ws_bench.exe" ./examples/ws_bench
-go build -o "$out\logic_noop.exe" ./examples/logic_noop
-go build -o "$out\forward_bench.exe" ./examples/forward_bench
-go build -o "$out\push_driver.exe" ./examples/push_driver
+# 构建
+go build -o sgate.exe ./cmd/gateway
+go build -o logic_noop.exe ./examples/logic_noop
+go build -o logic_server_min.exe ./examples/logic_server_min
+go build -o tcp_bench.exe ./examples/bench
+go build -o ws_bench.exe ./examples/ws_bench
+go build -o forward_bench.exe ./examples/forward_bench
+go build -o push_driver.exe ./examples/push_driver
 
-# 终端 1：逻辑服
-.\logic_server_min.exe
+# 纯转发压测（推荐，测网关上限）
+.\logic_noop.exe                           # 终端 1
+.\sgate.exe -conf config/config.yaml       # 终端 2
+.\forward_bench.exe 127.0.0.1:48080 500 15 127.0.0.1:8081 300000
 
-# 终端 2：网关
-.\sgate.exe -conf config/config.yaml
-
-# TCP
+# 双向通信压测（测 logic + 网关）
+.\logic_server_min.exe                     # 终端 1
+.\sgate.exe -conf config/config.yaml       # 终端 2
 .\tcp_bench.exe 127.0.0.1:48080 10 10 16 8192 127.0.0.1:8081 logic-1
 
 # WebSocket
 .\ws_bench.exe ws://127.0.0.1:48081/ 10 10
 
-# 纯转发：先启动 logic_noop 和 sgate，再执行
-.\logic_noop.exe
-.\forward_bench.exe 127.0.0.1:48080 10 5 127.0.0.1:8081 10000
-
-# 真实主动推送：driver 内嵌 logic，先启动 sgate
+# 主动推送（driver 内嵌 logic，先启动 sgate）
 .\push_driver.exe 127.0.0.1:48080 127.0.0.1:50052 personal 10 10 1000
 .\push_driver.exe 127.0.0.1:48080 127.0.0.1:50052 group 10 10 1000
 .\push_driver.exe 127.0.0.1:48080 127.0.0.1:50052 broadcast 10 10 1000
+
+# 查看统计
+Invoke-RestMethod -Uri "http://127.0.0.1:8081/stats" | ConvertTo-Json
 ```
 
-TCP 与 WebSocket 必须串行运行，并发运行会使协议对比失效。完整压测矩阵、长稳测试和千万级部署要求见 `docs/performance.md`。
+完整压测矩阵、长稳测试和千万级部署要求见 `BENCHMARK_GUIDE.md`。
 
 ## 项目结构
 
@@ -239,6 +236,8 @@ internal/
   frontend.go                 Gateway 主逻辑
   backend.go                  gRPC stream 管理
   connection.go               ConnectionManager、用户与组管理
+  gateway/                    协议常量、MessageFrame 解析
+  types/                      Filter/FilterChain 接口（SPI）
   codec/                      TCP / WebSocket codec（策略模式）
   security/                   JWT、限流、WAF、熔断
   obs/                        OpenTelemetry、延迟追踪

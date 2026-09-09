@@ -3,7 +3,7 @@ package gateway
 import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/traffic"
-	"github.com/streasure/sgate/types"
+	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 )

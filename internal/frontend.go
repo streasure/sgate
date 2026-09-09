@@ -20,13 +20,13 @@ import (
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
-	"github.com/streasure/sgate/gateway"
+	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
-	"github.com/streasure/sgate/types"
+	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/etcd"
 	"github.com/streasure/util/prometheus"
@@ -301,19 +301,6 @@ func (g *Gateway) StartServices() {
 
 	g.logicClient.gateway = g
 	g.logicClientPool = NewLogicClientPool(g)
-	for _, server := range cfg.LogicServers {
-		if server.ServerID == "" || server.Address == "" || (server.Zone != "" && server.Zone != cfg.Zone) {
-			continue
-		}
-		client := NewLogicClient(g)
-		client.SetServerID(server.ServerID)
-		g.logicClientPool.RegisterClient(server.ServerID, client)
-		go func(c *LogicClient, address string) {
-			if err := c.Connect(address); err != nil {
-				tlog.Error("failed to connect configured logic server", "serverID", c.serverID, "address", address, "error", err)
-			}
-		}(client, server.Address)
-	}
 
 	if g.serviceDiscovery != nil {
 		g.logicClientPool.SetDiscovery(g.serviceDiscovery)

@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"runtime"
 	"sync"
+	"syscall"
 
 	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/util/etcd"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -175,6 +178,16 @@ func main() {
 		addr = ":" + v
 	}
 
+ serverID := "logic-1"
+	if v := os.Getenv("LOGIC_SERVER_ID"); v != "" {
+		serverID = v
+	}
+
+	etcdEndpoint := "http://127.0.0.1:2379"
+	if v := os.Getenv("ETCD_ENDPOINT"); v != "" {
+		etcdEndpoint = v
+	}
+
 	if _, err := tlog.New("config/tlog.yaml"); err != nil {
 		if _, err := tlog.New("../config/tlog.yaml"); err != nil {
 			tlog.New("")
@@ -198,9 +211,39 @@ func main() {
 	protoGw.RegisterGatewayStreamServer(srv, s)
 	protoGw.RegisterGatewayServer(srv, s)
 
-	tlog.Info("logic server started", "addr", addr, "workers", workerCount)
-	if err := srv.Serve(lis); err != nil {
-		fmt.Fprintf(os.Stderr, "serve failed: %v\n", err)
-		os.Exit(1)
+	// Register to etcd for gateway discovery
+	registry := etcd.New(etcd.ComponentConfig{
+		Enabled: true,
+		Etcd:    etcd.Config{Endpoints: []string{etcdEndpoint}, ServicePrefix: "/services"},
+		Registration: etcd.RegistrationConfig{
+			Enabled:   true,
+			ServiceID: "Logic:default",
+			InstanceID: serverID,
+			Address:   addr,
+			LeaseTTL:  "10s",
+		},
+	})
+	if err := registry.Start(); err != nil {
+		tlog.Warn("etcd registration failed, running without discovery", "error", err)
+		registry = nil
+	} else {
+		tlog.Info("registered to etcd", "serviceID", "Logic:default", "instanceID", serverID, "address", addr)
 	}
+
+	go func() {
+		if err := srv.Serve(lis); err != nil {
+			tlog.Error("gRPC server stopped", "error", err)
+		}
+	}()
+
+	tlog.Info("logic server started", "addr", addr, "workers", workerCount)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	if registry != nil {
+		registry.Destroy()
+	}
+	srv.GracefulStop()
 }

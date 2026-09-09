@@ -100,9 +100,6 @@ func (c *ClusterComponent) Start() error {
 	}
 	c.Cluster = clusterPkg.NewCluster(c.cfg.Cluster, c.cfg.ServerID, c.cfg.ServerType, c.cfg.Zone)
 	c.Cluster.Start()
-	if c.Discovery == nil && c.grpcFunc != nil && c.cfg.GRPC.LogicAddr != "" {
-		go c.grpcFunc(c.cfg.GRPC.LogicAddr)
-	}
 	tlog.Info("cluster component started", "serverType", c.cfg.ServerType, "serverID", c.cfg.ServerID, "zone", c.cfg.Zone)
 	return nil
 }

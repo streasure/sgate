@@ -11,7 +11,7 @@ import (
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
-	"github.com/streasure/sgate/types"
+	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/etcd"
 )
 

@@ -5,12 +5,20 @@ serverType: "Gateway"
 zone: "default"
 
 etcd:
-  enabled: false
+  enabled: true
+  endpoints: ["http://127.0.0.1:2379"]
+  servicePrefix: "/services"
+  leaseTTL: "10s"
 
 discovery:
-  enabled: false
+  enabled: true
   serviceName: "logic"
   zone: "default"
+  heartbeatInterval: 3s
+  heartbeatTTL: 10s
+
+# logic server type for etcd service discovery (ServiceID = logicServerType + ":" + zone)
+logicServerType: "Logic"
 
 transports:
   - protocol: tcp
@@ -21,16 +29,7 @@ transports:
 
 grpc:
   port: 50051
-  logicAddr: "localhost:50052"
   windowSize: 67108864
-
-# login gate binds each client session to one of these logic server IDs.
-# A bound session never uses round-robin forwarding.
-logicServers:
-  - serverId: "logic-1"
-    serverType: "Logic"
-    zone: "default"
-    address: "localhost:50052"
 
 monitoring:
   pprofAddr: ""

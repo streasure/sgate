@@ -14,7 +14,7 @@ import (
 
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/gateway"
+	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/etcd"

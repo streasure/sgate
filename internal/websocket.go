@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/sgate/gateway"
+	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/util/tlog"
 )
 

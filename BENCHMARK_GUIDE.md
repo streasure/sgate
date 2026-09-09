@@ -50,10 +50,13 @@ go build -o push_driver.exe ./examples/push_driver
 ### 2. 启动服务
 
 ```powershell
-# 终端 1: 启动逻辑服
+# 终端 0: 启动 etcd（如未运行）
+etcd.exe
+
+# 终端 1: 启动逻辑服（自动注册到 etcd）
 .\logic_server_min.exe
 
-# 终端 2: 启动网关
+# 终端 2: 启动网关（从 etcd 发现 logic）
 .\sgate.exe -conf config/config.yaml
 ```
 

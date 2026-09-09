@@ -5,7 +5,7 @@ import (
 
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
-	routes "github.com/streasure/sgate/gateway"
+	routes "github.com/streasure/sgate/internal/gateway"
 	"google.golang.org/protobuf/proto"
 )
 

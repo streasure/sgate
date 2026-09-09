@@ -3,7 +3,7 @@ package traffic
 import (
 	"sync/atomic"
 
-	"github.com/streasure/sgate/types"
+	"github.com/streasure/sgate/internal/types"
 )
 
 // KernelHook eBPF 内核态下沉接口

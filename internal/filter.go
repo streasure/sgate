@@ -3,7 +3,7 @@ package gateway
 import (
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/types"
+	"github.com/streasure/sgate/internal/types"
 )
 
 // buildFilterContext 从原始请求构造过滤器上下文

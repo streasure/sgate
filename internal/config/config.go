@@ -11,33 +11,32 @@ import (
 )
 
 type Config struct {
-	Port         int                 `yaml:"port"`
-	LogLevel     string              `yaml:"logLevel"`
-	ServerID     string              `yaml:"serverId"`
-	ServerType   string              `yaml:"serverType"`
-	Zone         string              `yaml:"zone"`
-	Discovery    DiscoveryConfig     `yaml:"discovery"`
-	Transports   []Transport         `yaml:"transports"`
-	GRPC         GRPCConfig          `yaml:"grpc"`
-	LogicServers []LogicServerConfig `yaml:"logicServers"`
-	Etcd         EtcdConfig          `yaml:"etcd"`
-	Stream       StreamConfig        `yaml:"stream"`
-	Protection   ProtectionConfig    `yaml:"protection"`
-	Security     SecurityConfig      `yaml:"security"`
-	WAF          WAFConfig           `yaml:"waf"`
-	TLS          TLSConfig           `yaml:"tls"`
-	Cluster      ClusterConfig       `yaml:"cluster"`
-	// 企业级网关扩展能力
-	Balancer      BalancerConfig      `yaml:"balancer"`
-	JWTAuth       JWTAuthConfig       `yaml:"jwtAuth"`
-	Canary        CanaryConfig        `yaml:"canary"`
-	TrafficMirror TrafficMirrorConfig `yaml:"trafficMirror"`
-	OTelTracer    OTelTracerConfig    `yaml:"otelTracer"`
-	ConfigCenter  ConfigCenterConfig  `yaml:"configCenter"`
-	Alert         AlertWebhookConfig  `yaml:"alert"`
-	Degradation   DegradationConfig   `yaml:"degradation"`
-	FilterChain   FilterChainConfig   `yaml:"filterChain"`
-	Monitoring    MonitoringConfig    `yaml:"monitoring"`
+	Port           int                 `yaml:"port"`
+	LogLevel       string              `yaml:"logLevel"`
+	ServerID       string              `yaml:"serverId"`
+	ServerType     string              `yaml:"serverType"`
+	Zone           string              `yaml:"zone"`
+	Discovery      DiscoveryConfig     `yaml:"discovery"`
+	Transports     []Transport         `yaml:"transports"`
+	GRPC           GRPCConfig          `yaml:"grpc"`
+	LogicServerType string             `yaml:"logicServerType"`
+	Etcd           EtcdConfig          `yaml:"etcd"`
+	Stream         StreamConfig        `yaml:"stream"`
+	Protection     ProtectionConfig    `yaml:"protection"`
+	Security       SecurityConfig      `yaml:"security"`
+	WAF            WAFConfig           `yaml:"waf"`
+	TLS            TLSConfig           `yaml:"tls"`
+	Cluster        ClusterConfig       `yaml:"cluster"`
+	Balancer       BalancerConfig      `yaml:"balancer"`
+	JWTAuth        JWTAuthConfig       `yaml:"jwtAuth"`
+	Canary         CanaryConfig        `yaml:"canary"`
+	TrafficMirror  TrafficMirrorConfig `yaml:"trafficMirror"`
+	OTelTracer     OTelTracerConfig    `yaml:"otelTracer"`
+	ConfigCenter   ConfigCenterConfig  `yaml:"configCenter"`
+	Alert          AlertWebhookConfig  `yaml:"alert"`
+	Degradation    DegradationConfig   `yaml:"degradation"`
+	FilterChain    FilterChainConfig   `yaml:"filterChain"`
+	Monitoring     MonitoringConfig    `yaml:"monitoring"`
 }
 
 func (c *Config) Validate() error {
@@ -262,31 +261,8 @@ type DiscoveryConfig struct {
 type GRPCConfig struct {
 	Port           int    `yaml:"port"`
 	AdvertiseAddr  string `yaml:"advertiseAddr"`
-	LogicAddr      string `yaml:"logicAddr"`
 	WindowSize     int    `yaml:"windowSize"`
 	MaxMessageSize int    `yaml:"maxMessageSize"`
-}
-
-// LogicServerConfig is the authoritative static serverID-to-address mapping.
-// Discovery may add dynamic instances, but a login gate request is accepted
-// only for a known, connected server ID in the gateway's zone.
-type LogicServerConfig struct {
-	ServerID   string `yaml:"serverId"`
-	ServerType string `yaml:"serverType"`
-	Zone       string `yaml:"zone"`
-	Address    string `yaml:"address"`
-}
-
-func (c *Config) LogicServer(serverID string) (LogicServerConfig, bool) {
-	for _, server := range c.LogicServers {
-		if server.ServerType == "" {
-			server.ServerType = "Logic"
-		}
-		if server.ServerType == "Logic" && server.ServerID == serverID && (server.Zone == "" || server.Zone == c.Zone) {
-			return server, true
-		}
-	}
-	return LogicServerConfig{}, false
 }
 
 // QueuePolicy defines the behavior when the send queue is full.
@@ -412,6 +388,7 @@ func loadDefaultConfig() *Config {
 		LogLevel:   logLevel,
 		ServerID:   getEnvString("GATEWAY_SERVER_ID", "gateway-1"),
 		ServerType: "Gateway",
+		Zone:       "default",
 		Discovery: DiscoveryConfig{
 			Enabled:           true,
 			GatewayDiscovery:  true,
@@ -426,6 +403,13 @@ func loadDefaultConfig() *Config {
 			Port:           50051,
 			WindowSize:     DefaultGRPCWindowSize,
 			MaxMessageSize: DefaultGRPCMaxMessageSize,
+		},
+		LogicServerType: "Logic",
+		Etcd: EtcdConfig{
+			Enabled:       true,
+			Endpoints:     []string{"http://127.0.0.1:2379"},
+			ServicePrefix: "/services",
+			LeaseTTL:      "10s",
 		},
 		Stream: StreamConfig{
 			ShardCount:       0,

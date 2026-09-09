@@ -14,7 +14,7 @@ import (
 	"time"
 
 	protoLogic "github.com/streasure/protocol/logic"
-	"github.com/streasure/sgate/gateway"
+	"github.com/streasure/sgate/internal/gateway"
 	"google.golang.org/protobuf/proto"
 )
 
