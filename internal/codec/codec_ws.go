@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	ws "github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
 )
 
@@ -225,9 +226,10 @@ func (c *WebSocketCodec) readFrame(conn gnet.Conn, data []byte) ([]byte, bool, e
 	} else {
 		payload = make([]byte, int(length))
 	}
-	for i, value := range data[headerLen+4 : headerLen+4+int(length)] {
-		payload[i] = value ^ mask[i&3]
-	}
+	copy(payload, data[headerLen+4:headerLen+4+int(length)])
+	var maskArr [4]byte
+	copy(maskArr[:], mask)
+	ws.Cipher(payload, maskArr, 0)
 	if _, err := conn.Discard(headerLen + 4 + int(length)); err != nil {
 		return nil, false, err
 	}

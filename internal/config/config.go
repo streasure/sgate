@@ -11,32 +11,32 @@ import (
 )
 
 type Config struct {
-	Port           int                 `yaml:"port"`
-	LogLevel       string              `yaml:"logLevel"`
-	ServerID       string              `yaml:"serverId"`
-	ServerType     string              `yaml:"serverType"`
-	Zone           string              `yaml:"zone"`
-	Discovery      DiscoveryConfig     `yaml:"discovery"`
-	Transports     []Transport         `yaml:"transports"`
-	GRPC           GRPCConfig          `yaml:"grpc"`
-	LogicServerType string             `yaml:"logicServerType"`
-	Etcd           EtcdConfig          `yaml:"etcd"`
-	Stream         StreamConfig        `yaml:"stream"`
-	Protection     ProtectionConfig    `yaml:"protection"`
-	Security       SecurityConfig      `yaml:"security"`
-	WAF            WAFConfig           `yaml:"waf"`
-	TLS            TLSConfig           `yaml:"tls"`
-	Cluster        ClusterConfig       `yaml:"cluster"`
-	Balancer       BalancerConfig      `yaml:"balancer"`
-	JWTAuth        JWTAuthConfig       `yaml:"jwtAuth"`
-	Canary         CanaryConfig        `yaml:"canary"`
-	TrafficMirror  TrafficMirrorConfig `yaml:"trafficMirror"`
-	OTelTracer     OTelTracerConfig    `yaml:"otelTracer"`
-	ConfigCenter   ConfigCenterConfig  `yaml:"configCenter"`
-	Alert          AlertWebhookConfig  `yaml:"alert"`
-	Degradation    DegradationConfig   `yaml:"degradation"`
-	FilterChain    FilterChainConfig   `yaml:"filterChain"`
-	Monitoring     MonitoringConfig    `yaml:"monitoring"`
+	Port            int                 `yaml:"port"`
+	LogLevel        string              `yaml:"logLevel"`
+	ServerID        string              `yaml:"serverId"`
+	ServerType      string              `yaml:"serverType"`
+	Zone            string              `yaml:"zone"`
+	Discovery       DiscoveryConfig     `yaml:"discovery"`
+	Transports      []Transport         `yaml:"transports"`
+	GRPC            GRPCConfig          `yaml:"grpc"`
+	LogicServerType string              `yaml:"logicServerType"`
+	Etcd            EtcdConfig          `yaml:"etcd"`
+	Stream          StreamConfig        `yaml:"stream"`
+	Protection      ProtectionConfig    `yaml:"protection"`
+	Security        SecurityConfig      `yaml:"security"`
+	WAF             WAFConfig           `yaml:"waf"`
+	TLS             TLSConfig           `yaml:"tls"`
+	Cluster         ClusterConfig       `yaml:"cluster"`
+	Balancer        BalancerConfig      `yaml:"balancer"`
+	JWTAuth         JWTAuthConfig       `yaml:"jwtAuth"`
+	Canary          CanaryConfig        `yaml:"canary"`
+	TrafficMirror   TrafficMirrorConfig `yaml:"trafficMirror"`
+	OTelTracer      OTelTracerConfig    `yaml:"otelTracer"`
+	ConfigCenter    ConfigCenterConfig  `yaml:"configCenter"`
+	Alert           AlertWebhookConfig  `yaml:"alert"`
+	Degradation     DegradationConfig   `yaml:"degradation"`
+	FilterChain     FilterChainConfig   `yaml:"filterChain"`
+	Monitoring      MonitoringConfig    `yaml:"monitoring"`
 }
 
 func (c *Config) Validate() error {
@@ -259,10 +259,9 @@ type DiscoveryConfig struct {
 }
 
 type GRPCConfig struct {
-	Port           int    `yaml:"port"`
-	AdvertiseAddr  string `yaml:"advertiseAddr"`
-	WindowSize     int    `yaml:"windowSize"`
-	MaxMessageSize int    `yaml:"maxMessageSize"`
+	Port           int `yaml:"port"`
+	WindowSize     int `yaml:"windowSize"`
+	MaxMessageSize int `yaml:"maxMessageSize"`
 }
 
 // QueuePolicy defines the behavior when the send queue is full.

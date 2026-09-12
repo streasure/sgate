@@ -127,5 +127,4 @@ func (w *WazeroRuntime) UnloadModule(name string) error {
 
 func init() {
 	SetWasmRuntime(NewWazeroRuntime())
-	tlog.Info("wasm runtime initialized (wazero)")
 }

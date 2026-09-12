@@ -301,8 +301,6 @@ func (s *StreamShard) startSendLoop() {
 
 	const maxBatchCount = 256
 	batch := make([]*protoGw.StreamData, 0, maxBatchCount)
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
 
 	for {
 		var msg *protoGw.StreamData
@@ -313,9 +311,6 @@ func (s *StreamShard) startSendLoop() {
 			if msg == nil {
 				continue
 			}
-		case <-ticker.C:
-			// Periodic flush for low-throughput scenarios
-			continue
 		}
 
 		batch = batch[:0]
@@ -343,29 +338,29 @@ func (s *StreamShard) startSendLoop() {
 		s.mu.Unlock()
 
 		if stream == nil {
+			// Return all messages to pool when stream unavailable
+			for _, m := range batch {
+				putStreamData(m)
+			}
 			continue
 		}
 
 		// Send entire batch with single stream reference
-		for _, message := range batch {
-			if err := safeStreamSend(stream, message); err != nil {
+		sendIdx := 0
+		for sendIdx < len(batch) {
+			if err := stream.Send(batch[sendIdx]); err != nil {
 				tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
 				s.markShardBroken()
 				break
 			}
+			putStreamData(batch[sendIdx])
+			sendIdx++
+		}
+		// Return unsent messages to pool
+		for i := sendIdx; i < len(batch); i++ {
+			putStreamData(batch[i])
 		}
 	}
-}
-
-// safeStreamSend wraps stream.Send() to recover from panics caused by
-// concurrent close operations on the gRPC stream.
-func safeStreamSend(stream protoGw.GatewayStream_OnDataClient, msg *protoGw.StreamData) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("stream send panic: %v", r)
-		}
-	}()
-	return stream.Send(msg)
 }
 
 func (s *StreamShard) SendMessage(msg *protoGw.StreamData) (err error) {

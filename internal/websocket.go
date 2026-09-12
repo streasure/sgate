@@ -5,16 +5,32 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	ws "github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
+	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/util/tlog"
+	"google.golang.org/protobuf/proto"
 )
+
+var wsDebugLog *os.File
+
+func wsDebug(msg string) {
+	if wsDebugLog == nil {
+		wsDebugLog, _ = os.OpenFile("E:\\sgate\\ws_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	}
+	if wsDebugLog != nil {
+		fmt.Fprintln(wsDebugLog, msg)
+		wsDebugLog.Sync()
+	}
+}
 
 type WSOpCode byte
 
@@ -178,12 +194,12 @@ func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payl
 		return 0, nil, 0, fmt.Errorf("frame too large: %d bytes", length)
 	}
 
-	var mask []byte
+	var mask [4]byte
 	if masked {
 		if len(buffer) < frameSize+4 {
 			return 0, nil, 0, nil
 		}
-		mask = buffer[frameSize : frameSize+4]
+		copy(mask[:], buffer[frameSize:frameSize+4])
 		frameSize += 4
 	}
 
@@ -193,16 +209,17 @@ func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payl
 
 	payload = buffer[frameSize : frameSize+int(length)]
 
-	if masked && len(mask) == 4 {
-		for i := range payload {
-			payload[i] ^= mask[i%4]
-		}
+	if masked {
+		ws.Cipher(payload, mask, 0)
 	}
+
+	wsDebug(fmt.Sprintf("ws frame: opCode=%d masked=%v len=%d payloadLen=%d", opCode, masked, length, len(payload)))
 
 	return opCode, payload, frameSize + int(length), nil
 }
 
 func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byte) (action gnet.Action) {
+	wsDebug(fmt.Sprintf("handleWebSocketMessage: state=%d dataLen=%d", atomic.LoadInt32(&wsConn.State), len(data)))
 	if atomic.LoadInt32(&wsConn.State) == int32(WSStateHandshake) {
 		return g.handleWebSocketHandshake(wsConn, data)
 	}
@@ -253,6 +270,8 @@ func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOp
 func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload []byte) error {
 	g.messagesReceived.Add(1)
 
+	wsDebug(fmt.Sprintf("wsDataFrame: payloadLen=%d first8=%x", len(payload), payload[:min(len(payload), 8)]))
+
 	message, ok := decodeClientMessage(payload)
 	if !ok {
 		tlog.Error("WebSocket message unmarshal failed")
@@ -279,8 +298,35 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	}
 
 	if message.Cmd == gateway.CmdLoginGate {
-		g.handleLoginGate(wsConn.Conn, connectionID, message)
-		return nil
+		req := new(protoGw.LoginGateReq)
+		if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
+			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 400, "invalid login gate request", req.ServerId)
+		}
+		if !g.validateLoginKey(req.UserId, req.LoginKey) {
+			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 401, "invalid login key", req.ServerId)
+		}
+		g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
+		userUUID := req.UserId
+		if userUUID == "" {
+			userUUID = connectionID
+		}
+		g.connectionManager.UpdateConnectionUserUUID(connectionID, req.ServerId+":"+userUUID)
+
+		// Forward login to logic so it can register session
+		connObj := g.connectionManager.GetConnection(connectionID)
+		if connObj != nil {
+			if lc := g.GetLogicClient(req.ServerId); lc != nil {
+				_ = lc.SendMessage(&protoGw.StreamData{
+					SessionId: connectionID,
+					UserKey:   connObj.GetUserUUID(),
+					Data:      append([]byte(nil), message.Data...),
+					Cmd:       message.Cmd,
+					SeqId:     message.SeqId,
+				})
+			}
+		}
+
+		return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 0, "ok", req.ServerId)
 	}
 
 	result := g.pipeline.ProcessForWS(wsConn.Conn, payload, message, connectionID)
@@ -290,6 +336,18 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 	return nil
+}
+
+func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionID string, seqID int64, code int32, text, serverID string) error {
+	body, err := proto.Marshal(&protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID})
+	if err != nil {
+		return err
+	}
+	data, err := marshalClientMessage(&protoGw.StreamData{Cmd: gateway.CmdLoginGateAck, Data: body, SeqId: seqID})
+	if err != nil {
+		return err
+	}
+	return g.sendWebSocketMessage(wsConn, WSOpBinary, data)
 }
 
 func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {

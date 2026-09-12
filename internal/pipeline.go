@@ -3,12 +3,28 @@ package gateway
 import (
 	"fmt"
 	"strconv"
+	"sync"
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/util/tlog"
 )
+
+var streamDataPool = sync.Pool{
+	New: func() interface{} {
+		return &protoGw.StreamData{}
+	},
+}
+
+func getStreamData() *protoGw.StreamData {
+	return streamDataPool.Get().(*protoGw.StreamData)
+}
+
+func putStreamData(msg *protoGw.StreamData) {
+	msg.Reset()
+	streamDataPool.Put(msg)
+}
 
 // PipelineResult carries the outcome of processing a client message through the
 // shared pipeline. The caller (TCP or WebSocket handler) uses this to decide
@@ -84,110 +100,137 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 	}
 
-	logicClient := g.GetLogicClient(connObj.GetServerID())
-	if logicClient == nil {
-		g.messagesDroppedNoLogicNotConnected.Add(1)
-		return PipelineResult{Action: gnet.None}
+	// Try cached LogicClient first (lock-free), fallback to pool lookup
+	logicClient := connObj.GetCachedLogicClient()
+	if logicClient == nil || !logicClient.IsConnected() {
+		logicClient = g.GetLogicClient(connObj.GetServerID())
+		if logicClient == nil {
+			g.messagesDroppedNoLogicNotConnected.Add(1)
+			return PipelineResult{Action: gnet.None}
+		}
+		connObj.SetCachedLogicClient(logicClient)
 	}
 
-	routeKey := strconv.FormatInt(int64(cmd), 10)
+	// Fast path: skip security/filter chain for authenticated connections
+	// when no security components are enabled or all are nil.
+	securityDisabled := g.whitelistBlacklist == nil &&
+		g.rateLimiter == nil &&
+		g.waf == nil &&
+		g.circuitBreakerMgr == nil &&
+		!g.protection.VerifyInbound
 
-	// Compute remote IP for security checks and forwarding to logic
-	remoteIP := getRemoteIP(conn)
+	var remoteIP string
+	var routeKey string
+	var span *obs.TraceSpan
+	var protoMsg *protoGw.StreamData
+	filterOK := true
 
-	// Stage 3: Security chain (blacklist -> rate limit -> WAF -> circuit breaker)
-	if g.whitelistBlacklist != nil {
-		if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
-			g.messagesDroppedBlacklist.Add(1)
-			return PipelineResult{Action: gnet.None}
-		}
-		whitelist := g.whitelistBlacklist.GetWhitelist()
-		if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
-			g.messagesDroppedBlacklist.Add(1)
-			return PipelineResult{Action: gnet.None}
-		}
-	}
-	if g.rateLimiter != nil {
-		if !g.rateLimiter.Allow("ip", remoteIP) {
-			g.messagesDroppedRateLimit.Add(1)
-			return PipelineResult{Action: gnet.None}
-		}
-		if !g.rateLimiter.Allow("route", routeKey) {
-			g.messagesDroppedRateLimit.Add(1)
-			return PipelineResult{Action: gnet.None}
-		}
-	}
-	if g.waf != nil {
-		if !g.waf.Inspect(data) {
-			g.messagesDroppedWAF.Add(1)
-			return PipelineResult{Action: gnet.None}
-		}
-	}
-	if g.circuitBreakerMgr != nil {
-		breaker := g.getOrCreateBreaker(routeKey)
-		if !breaker.Allow() {
-			g.messagesDroppedCircuit.Add(1)
-			return PipelineResult{Action: gnet.None}
-		}
-	}
+	if securityDisabled && g.tracer == nil && g.balancer == nil && g.degradation == nil {
+		// Ultra-fast path: no security, no tracing, no balancing
+		remoteIP = ""
+		protoMsg = getStreamData()
+		protoMsg.SessionId = connectionID
+		protoMsg.UserKey = connObj.GetUserUUID()
+		protoMsg.Data = message.Data
+		protoMsg.SeqId = message.SeqId
+		protoMsg.Cmd = cmd
+	} else {
+		// Full path with security chain
+		routeKey = strconv.FormatInt(int64(cmd), 10)
+		remoteIP = getRemoteIP(conn)
 
-	// Stage 4: Message integrity check (optional)
-	if g.protection.VerifyInbound {
-		if err := g.messageIntegrity.ProcessMessage(message); err != nil {
-			return PipelineResult{
-				Action: gnet.None,
-				Error:  fmt.Errorf("message integrity check failed: %w", err),
+		// Stage 3: Security chain (blacklist -> rate limit -> WAF -> circuit breaker)
+		if g.whitelistBlacklist != nil {
+			if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
+				g.messagesDroppedBlacklist.Add(1)
+				return PipelineResult{Action: gnet.None}
+			}
+			whitelist := g.whitelistBlacklist.GetWhitelist()
+			if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
+				g.messagesDroppedBlacklist.Add(1)
+				return PipelineResult{Action: gnet.None}
+			}
+		}
+		if g.rateLimiter != nil {
+			if !g.rateLimiter.Allow("ip", remoteIP) {
+				g.messagesDroppedRateLimit.Add(1)
+				return PipelineResult{Action: gnet.None}
+			}
+			if !g.rateLimiter.Allow("route", routeKey) {
+				g.messagesDroppedRateLimit.Add(1)
+				return PipelineResult{Action: gnet.None}
+			}
+		}
+		if g.waf != nil {
+			if !g.waf.Inspect(data) {
+				g.messagesDroppedWAF.Add(1)
+				return PipelineResult{Action: gnet.None}
+			}
+		}
+		if g.circuitBreakerMgr != nil {
+			breaker := g.getOrCreateBreaker(routeKey)
+			if !breaker.Allow() {
+				g.messagesDroppedCircuit.Add(1)
+				return PipelineResult{Action: gnet.None}
+			}
+		}
+
+		// Stage 4: Message integrity check (optional)
+		if g.protection.VerifyInbound {
+			if err := g.messageIntegrity.ProcessMessage(message); err != nil {
+				return PipelineResult{
+					Action: gnet.None,
+					Error:  fmt.Errorf("message integrity check failed: %w", err),
+				}
+			}
+		}
+
+		// Trace span for latency tracking
+		if g.tracer != nil {
+			traceID := obs.GenerateTraceID()
+			span = g.tracer.StartSpan(traceID, "forward", "")
+			g.tracer.AddAttribute(span, "cmd", routeKey)
+			g.tracer.AddAttribute(span, "connectionID", connectionID)
+		}
+
+		// Stage 5: Filter chain (JWT, canary, mirror, OTel, degradation)
+		protoMsg, filterOK = g.applyForwardFilters(conn, message.Data, connectionID, cmd)
+		if !filterOK {
+			if span != nil && g.tracer != nil {
+				g.tracer.EndSpan(span)
+			}
+			return PipelineResult{Action: gnet.None}
+		}
+		if protoMsg == nil {
+			protoMsg = &protoGw.StreamData{
+				SessionId: connectionID,
+				UserKey:   connObj.GetUserUUID(),
+				ClientIp:  remoteIP,
+				Data:      append([]byte(nil), message.Data...),
+				SeqId:     message.SeqId,
+			}
+			if cmd > 0 {
+				protoMsg.Cmd = cmd
+			}
+		} else {
+			if protoMsg.UserKey == "" {
+				protoMsg.UserKey = connObj.GetUserUUID()
+			}
+			if protoMsg.ClientIp == "" {
+				protoMsg.ClientIp = remoteIP
+			}
+			if cmd > 0 && protoMsg.Cmd == 0 {
+				protoMsg.Cmd = cmd
 			}
 		}
 	}
 
-	// Trace span for latency tracking
-	var span *obs.TraceSpan
-	if g.tracer != nil {
-		traceID := obs.GenerateTraceID()
-		span = g.tracer.StartSpan(traceID, "forward", "")
-		g.tracer.AddAttribute(span, "cmd", routeKey)
-		g.tracer.AddAttribute(span, "connectionID", connectionID)
-	}
-
-	// Stage 5: Filter chain (JWT, canary, mirror, OTel, degradation)
-	protoMsg, filterOK := g.applyForwardFilters(conn, message.Data, connectionID, cmd)
-	if !filterOK {
-		if span != nil && g.tracer != nil {
-			g.tracer.EndSpan(span)
-		}
-		return PipelineResult{Action: gnet.None}
-	}
-	if protoMsg == nil {
-		protoMsg = &protoGw.StreamData{
-			SessionId: connectionID,
-			UserKey:   connObj.GetUserUUID(),
-			ClientIp:  remoteIP,
-			Data:      append([]byte(nil), message.Data...),
-			SeqId:     message.SeqId,
-		}
-		if cmd > 0 {
-			protoMsg.Cmd = cmd
-		}
-	} else {
-		if protoMsg.UserKey == "" {
-			protoMsg.UserKey = connObj.GetUserUUID()
-		}
-		if protoMsg.ClientIp == "" {
-			protoMsg.ClientIp = remoteIP
-		}
-		if cmd > 0 && protoMsg.Cmd == 0 {
-			protoMsg.Cmd = cmd
-		}
-	}
-
-	// Stage 6: Forward to LogicClient
-	lc := g.GetLogicClient(connObj.GetServerID())
+	// Stage 6: Forward to LogicClient (use cached client from Stage 2)
 	var sendErr error
-	if lc == nil {
+	if logicClient == nil {
 		sendErr = ErrNotConnected
 	} else {
-		sendErr = lc.SendMessage(protoMsg)
+		sendErr = logicClient.SendMessage(protoMsg)
 	}
 
 	// Stage 7: Metrics recording

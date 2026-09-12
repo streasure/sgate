@@ -33,9 +33,10 @@ type Connection struct {
 	groupsMu   sync.RWMutex
 
 	// Atomic fields for lock-free access
-	userUUID atomic.Value // string
-	serverID atomic.Value // string
-	isWS     atomic.Bool
+	userUUID       atomic.Value // string
+	serverID       atomic.Value // string
+	isWS           atomic.Bool
+	logicClient    atomic.Value // LogicClientProvider - cached to avoid pool lookup per message
 }
 
 func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
@@ -76,6 +77,17 @@ func (c *Connection) GetUserUUID() string {
 		return v.(string)
 	}
 	return ""
+}
+
+func (c *Connection) GetCachedLogicClient() LogicClientProvider {
+	if v := c.logicClient.Load(); v != nil {
+		return v.(LogicClientProvider)
+	}
+	return nil
+}
+
+func (c *Connection) SetCachedLogicClient(lc LogicClientProvider) {
+	c.logicClient.Store(lc)
 }
 
 func (c *Connection) SetServerID(sid string) { c.serverID.Store(sid) }

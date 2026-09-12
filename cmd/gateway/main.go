@@ -15,6 +15,7 @@ import (
 
 var (
 	confFiles = flag.String("conf", "config/config.yaml", "config file path")
+	logConfig = flag.String("config", "config/log.yaml", "log configuration file")
 	showVer   = flag.Bool("version", false, "show version")
 )
 
@@ -45,6 +46,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer logComp.Destroy()
+	_ = logConfig
 
 	tlog.Info("gateway starting...",
 		"version", "1.0.0",

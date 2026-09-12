@@ -6,6 +6,7 @@ import (
 
 	clusterPkg "github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/netutil"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/etcd"
 	"github.com/streasure/util/tlog"
@@ -46,10 +47,7 @@ func (c *ClusterComponent) Init() error {
 func (c *ClusterComponent) Start() error {
 	etcdCfg := etcd.Config{Endpoints: c.cfg.Etcd.Endpoints, Endpoint: c.cfg.Etcd.Endpoint, Username: c.cfg.Etcd.Username, Password: c.cfg.Etcd.Password, ServicePrefix: c.cfg.Etcd.ServicePrefix}
 	if c.cfg.Etcd.Enabled {
-		advertiseAddr := c.cfg.GRPC.AdvertiseAddr
-		if advertiseAddr == "" {
-			advertiseAddr = fmt.Sprintf("localhost:%d", c.grpcPort)
-		}
+		advertiseAddr := fmt.Sprintf("%s:%d", netutil.GetOutboundIPv4(), c.grpcPort)
 		compCfg := etcd.ComponentConfig{Enabled: true, Etcd: etcdCfg}
 		if c.cfg.Discovery.Enabled {
 			compCfg.Discovery = etcd.DiscoveryConfig{Enabled: true, ServiceID: "Logic:" + c.cfg.Zone}

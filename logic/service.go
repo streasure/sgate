@@ -10,6 +10,7 @@ import (
 	"time"
 
 	protocol "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/netutil"
 	"github.com/streasure/util/etcd"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
@@ -32,7 +33,7 @@ func NewService(opts ...ServiceOption) *Service {
 		opt(&cfg)
 	}
 	if cfg.AdvertiseAddr == "" {
-		cfg.AdvertiseAddr = "localhost:" + cfg.ListenPort
+		cfg.AdvertiseAddr = netutil.GetOutboundIPv4() + ":" + cfg.ListenPort
 	}
 	serverOpts := []ServerOption{WithServerID(cfg.ServiceID), WithStreamChSize(cfg.StreamSendChSize)}
 	return &Service{server: NewServer(serverOpts...), cfg: cfg}

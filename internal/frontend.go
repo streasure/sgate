@@ -19,10 +19,9 @@ import (
 	"github.com/spf13/cast"
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
-	protoLogic "github.com/streasure/protocol/logic"
-	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
@@ -685,6 +684,7 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 }
 
 func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
+	wsDebug(fmt.Sprintf("handleNormalTraffic enter: fd=%d", c.Fd()))
 	defer func() {
 		if r := recover(); r != nil {
 			tlog.Error("handleNormalTraffic panic recovered", "error", cast.ToString(r))
@@ -702,6 +702,7 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 		return gnet.Close
 
 	}
+	wsDebug(fmt.Sprintf("handleNormalTraffic: connCtx type=%T dataLen=%d", connCtx, len(data)))
 	if wsConn, ok := connCtx.(*WebSocketConnection); ok {
 		return g.handleWebSocketMessage(wsConn, data)
 	}
@@ -976,11 +977,6 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		writeAck(401, "invalid login key", req.ServerId)
 		return gnet.None
 	}
-	logicClient := g.GetLogicClient(req.ServerId)
-	if logicClient == nil || !logicClient.IsConnected() {
-		writeAck(503, "logic server unavailable", req.ServerId)
-		return gnet.None
-	}
 	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
 	userUUID := req.UserId
 	if userUUID == "" {
@@ -990,6 +986,23 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	// indexes cannot collide across logic shards.
 	g.connectionManager.UpdateConnectionUserUUID(connectionID, req.ServerId+":"+userUUID)
 	writeAck(0, "ok", req.ServerId)
+
+	// Forward login StreamData to logic so it can register session and
+	// handle login-specific logic (e.g. joining groups, setting up state).
+	connObj := g.connectionManager.GetConnection(connectionID)
+	if connObj != nil {
+		if lc := g.GetLogicClient(req.ServerId); lc != nil {
+			forwardMsg := &protoGw.StreamData{
+				SessionId: connectionID,
+				UserKey:   connObj.GetUserUUID(),
+				Data:      append([]byte(nil), message.Data...),
+				Cmd:       message.Cmd,
+				SeqId:     message.SeqId,
+			}
+			_ = lc.SendMessage(forwardMsg)
+		}
+	}
+
 	return gnet.None
 }
 
@@ -1002,7 +1015,7 @@ func (g *Gateway) notifyLogicOffline(conn *Connection) {
 	if client == nil {
 		return
 	}
-	ntf := &protoLogic.UserOfflineNtf{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), ServerId: serverID, OfflineTime: time.Now().UnixMilli()}
+	ntf := &protoGw.UserOfflineNtf{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), ServerId: serverID, OfflineTime: time.Now().UnixMilli()}
 	body, _ := proto.Marshal(ntf)
 	_ = client.SendMessage(&protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: gateway.CmdUserOffline, Data: body})
 }

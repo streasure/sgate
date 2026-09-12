@@ -1,0 +1,12 @@
+log:
+  level: info
+  format: json
+  console:
+    enabled: false
+  file:
+    enabled: true
+    path: logs/logic1_ws.log
+    rotate:
+      max_size: 100
+      max_backups: 3
+      max_age: 7

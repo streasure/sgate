@@ -1,0 +1,17 @@
+log:
+  level: info
+  format: json
+  console:
+    enabled: false
+  file:
+    enabled: true
+    path: logs/logic2_ws.log
+    rotate:
+      max_size: 100
+      max_backups: 3
+      max_age: 7
+  async:
+    enabled: true
+    buffer_size: 100000
+    batch_size: 1000
+    flush_interval: 100
