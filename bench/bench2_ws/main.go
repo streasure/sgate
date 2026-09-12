@@ -22,6 +22,7 @@ import (
 const (
 	cmdLoginGate    int32 = 1000001
 	cmdLoginGateAck int32 = 1000002
+	cmdPushBatch    int32 = 9000002
 )
 
 func main() {
@@ -151,7 +152,7 @@ func runWSClient(addr *string, duration time.Duration, idx int, serverID string,
 	conn.SetReadDeadline(deadline)
 
 	for {
-		_, err := readWSBinary(conn)
+		frame, err := readWSBinary(conn)
 		if err != nil {
 			break
 		}
@@ -162,7 +163,14 @@ func runWSClient(addr *string, duration time.Duration, idx int, serverID string,
 		if now.Sub(time.Unix(0, measureStart.Load())) >= duration {
 			return nil
 		}
-		totalRecv.Add(1)
+		if frame.Cmd == cmdPushBatch {
+			var batch protocol.PushBatch
+			if proto.Unmarshal(frame.Body, &batch) == nil {
+				totalRecv.Add(int64(len(batch.Items)))
+			}
+		} else {
+			totalRecv.Add(1)
+		}
 	}
 
 	return nil

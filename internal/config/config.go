@@ -303,6 +303,7 @@ type StreamConfig struct {
 	ShardCount       int               `yaml:"shardCount"`
 	SendChannelSize  int               `yaml:"sendChannelSize"`
 	ReceiveBatchSize int               `yaml:"receiveBatchSize"`
+	BatchPush        bool              `yaml:"batchPush"`
 	QueuePolicy      StreamQueueConfig `yaml:"queuePolicy"`
 }
 

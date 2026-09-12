@@ -741,15 +741,71 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		return
 	}
 
-	for {
-		select {
-		case <-lc.closed:
-			return
-		case <-s.ctx.Done():
-			return
-		default:
-		}
+	batchPush := false
+	if lc.gateway != nil {
+		batchPush = lc.gateway.GetStreamConfig().BatchPush
+	}
 
+	// batchPush mode: collect messages and flush as PushBatch
+	const batchFlushSize = 128
+	batch := make([]*protoGw.StreamData, 0, batchFlushSize)
+
+	flushBatch := func() {
+		if len(batch) == 0 || lc.gateway == nil {
+			batch = batch[:0]
+			return
+		}
+		type connBatch struct {
+			conn  *Connection
+			items []*protoGw.PushItem
+		}
+		connMap := make(map[string]*connBatch)
+		for _, m := range batch {
+			if m.SessionId == "" {
+				continue
+			}
+			cb, ok := connMap[m.SessionId]
+			if !ok {
+				conn := lc.gateway.GetConnectionManager().GetConnection(m.SessionId)
+				if conn == nil {
+					lc.gateway.AddPushDroppedNoConn(1)
+					continue
+				}
+				cb = &connBatch{conn: conn}
+				connMap[m.SessionId] = cb
+			}
+			cb.items = append(cb.items, &protoGw.PushItem{
+				SessionId: m.SessionId,
+				Cmd:       m.Cmd,
+				Data:      m.Data,
+				SeqId:     m.SeqId,
+			})
+		}
+		for _, cb := range connMap {
+			batchMsg := &protoGw.PushBatch{Items: cb.items}
+			batchData, err := proto.Marshal(batchMsg)
+			if err != nil {
+				lc.gateway.AddPushDroppedNoConn(int64(len(cb.items)))
+				continue
+			}
+			responseData, err := marshalClientMessage(&protoGw.StreamData{
+				Cmd:  int32(gateway.CmdPushBatch),
+				Data: batchData,
+			})
+			if err != nil {
+				lc.gateway.AddPushDroppedNoConn(int64(len(cb.items)))
+				continue
+			}
+			if sendErr := cb.conn.Send(responseData); sendErr != nil {
+				tlog.Warn("batch push to client failed", "sessionID", cb.items[0].SessionId, "error", sendErr)
+			} else {
+				lc.gateway.AddPushedToClient(int64(len(cb.items)))
+			}
+		}
+		batch = batch[:0]
+	}
+
+	for {
 		msg, err := stream.Recv()
 		if err != nil {
 			lc.mu.RLock()
@@ -765,7 +821,35 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			return
 		}
 
-		if lc.gateway != nil && msg.SessionId != "" {
+		if lc.gateway == nil {
+			continue
+		}
+
+		// Broadcast: empty SessionId means send to all connections on this gateway.
+		if msg.SessionId == "" {
+			if batchPush {
+				flushBatch()
+			}
+			lc.gateway.GetConnectionManager().connections.Range(func(_, value any) bool {
+				conn := value.(*Connection)
+				respData, err := marshalClientMessage(msg)
+				if err != nil {
+					return true
+				}
+				if sendErr := conn.Send(respData); sendErr == nil {
+					lc.gateway.AddPushedToClient(1)
+				}
+				return true
+			})
+			continue
+		}
+
+		if batchPush {
+			batch = append(batch, msg)
+			if len(batch) >= batchFlushSize {
+				flushBatch()
+			}
+		} else {
 			conn := lc.gateway.GetConnectionManager().GetConnection(msg.SessionId)
 			if conn != nil {
 				if msg.UserKey != "" {

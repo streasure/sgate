@@ -23,7 +23,7 @@ const cmdPush int32 = 9000001
 func main() {
 	port := flag.String("port", "50061", "gRPC listen port")
 	id := flag.String("id", "logic2-ws", "service instance ID")
-	pushInterval := flag.Duration("push-interval", 100*time.Millisecond, "interval between group pushes")
+	pushInterval := flag.Duration("push-interval", 1*time.Millisecond, "interval between group pushes")
 	pushSize := flag.Int("push-size", 64, "payload size in bytes")
 	pushWorkers := flag.Int("push-workers", runtime.NumCPU(), "parallel group push workers")
 	expectedMembers := flag.Int("expected-members", 0, "wait for this many logged-in group members before pushing")
@@ -101,6 +101,7 @@ func main() {
 			for _, sessionID := range members {
 				jobs <- sessionID
 			}
+			time.Sleep(*pushInterval)
 		}
 	}()
 

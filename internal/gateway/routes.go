@@ -34,6 +34,7 @@ const (
 	CmdHeartbeatReq  int32 = 1100010
 	CmdHeartbeatAck  int32 = 1100011
 	CmdUserOffline   int32 = 1100012
+	CmdPushBatch     int32 = 9000002
 )
 
 const (

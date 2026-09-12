@@ -1,0 +1,79 @@
+port: 8081
+logLevel: warn
+serverId: "gateway-1"
+serverType: "Gateway"
+zone: "default"
+
+etcd:
+  enabled: true
+  endpoints: ["http://127.0.0.1:2379"]
+  servicePrefix: "/services"
+  leaseTTL: "10s"
+
+discovery:
+  enabled: true
+  serviceName: "logic"
+  zone: "default"
+  heartbeatInterval: 3s
+  heartbeatTTL: 10s
+
+logicServerType: "Logic"
+
+transports:
+  - protocol: tcp
+    port: 48080
+  - protocol: tcp
+    port: 48081
+    type: websocket
+
+grpc:
+  port: 50051
+  windowSize: 67108864
+
+monitoring:
+  pprofAddr: ""
+  prometheus:
+    enabled: false
+    addr: ":9101"
+    path: "/metrics"
+    prefix: "app"
+  maxMessageSize: 8388608
+
+configCenter:
+  enabled: false
+
+cluster:
+  enabled: false
+
+stream:
+  shardCount: 96
+  sendChannelSize: 1048576
+  receiveBatchSize: 128
+  batchPush: true
+
+protection:
+  maxFrameSize: 4194304
+  maxFrameBufSize: 4194304
+  maxWSFrameSize: 4194304
+  maxWSBufferSize: 4194304
+  memoryThreshold: 92
+  cpuThreshold: 92
+  dropOnOverload: true
+  checkIntervalMs: 200
+  wsHeartbeatTimeout: 60
+  wsCheckInterval: 30
+  connCheckInterval: "5m"
+  connIdleTimeout: "30s"
+  preAuthCommands: [1000001]
+
+security:
+  enabled: true
+  rateLimit:
+    enabled: true
+    maxTokens: 1000000
+    tokenRefresh: "1s"
+  circuitBreaker:
+    enabled: false
+
+waf:
+  enabled: false
