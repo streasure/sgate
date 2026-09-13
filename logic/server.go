@@ -14,19 +14,22 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// DisconnectCallback 连接断开时的回调函数类型
 type DisconnectCallback func(connectionID string)
 
+// streamConn 表示与网关的 gRPC 流连接
 type streamConn struct {
-	stream     protocol.GatewayStream_OnDataServer
-	sendCh     chan *protocol.StreamData
-	done       chan struct{}
-	closed     atomic.Bool
-	closeOnce  sync.Once
-	gatewayID  string
-	sessionMu  sync.Mutex
-	sessionIDs map[string]struct{}
+	stream     protocol.GatewayStream_OnDataServer // gRPC 流对象
+	sendCh     chan *protocol.StreamData            // 发送通道
+	done       chan struct{}                        // 流结束信号
+	closed     atomic.Bool                         // 连接是否已关闭
+	closeOnce  sync.Once                           // 确保只关闭一次
+	gatewayID  string                              // 网关标识
+	sessionMu  sync.Mutex                          // 会话列表互斥锁
+	sessionIDs map[string]struct{}                 // 关联的会话 ID 集合
 }
 
+// newStreamConn 创建新的流连接，启动发送协程
 func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gatewayID string) *streamConn {
 	if size <= 0 {
 		size = 1024
@@ -46,6 +49,7 @@ func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gateway
 	return c
 }
 
+// Send 向流连接发送消息，连接已关闭时返回错误
 func (c *streamConn) Send(msg *protocol.StreamData) (err error) {
 	if c.closed.Load() {
 		return fmt.Errorf("logic: gateway stream closed")
@@ -63,12 +67,14 @@ func (c *streamConn) Send(msg *protocol.StreamData) (err error) {
 	}
 }
 
+// bindSession 将会话 ID 绑定到此连接
 func (c *streamConn) bindSession(sessionID string) {
 	c.sessionMu.Lock()
 	c.sessionIDs[sessionID] = struct{}{}
 	c.sessionMu.Unlock()
 }
 
+// Close 关闭流连接，确保只执行一次
 func (c *streamConn) Close() {
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
@@ -76,30 +82,31 @@ func (c *streamConn) Close() {
 	})
 }
 
+// pushGroup 推送组，维护组内成员会话
 type pushGroup struct {
-	members map[string]struct{}
+	members map[string]struct{} // 组成员会话 ID 集合
 }
 
-// PushResult records the outcome of pushing to a single session.
+// PushResult 记录向单个会话推送的结果
 type PushResult struct {
 	SessionID string
 	Success   bool
 	Error     error
 }
 
-// PushMetrics tracks push operation statistics for monitoring.
+// PushMetrics 推送操作统计指标，用于监控
 type PushMetrics struct {
-	TotalPushed     atomic.Int64
-	TotalFailed     atomic.Int64
-	GroupPushed     atomic.Int64
-	GroupFailed     atomic.Int64
-	BroadcastSent   atomic.Int64
-	BroadcastFailed atomic.Int64
-	RetryAttempts   atomic.Int64
-	ScheduledPushes atomic.Int64
+	TotalPushed     atomic.Int64 // 总推送成功数
+	TotalFailed     atomic.Int64 // 总推送失败数
+	GroupPushed     atomic.Int64 // 组推送成功数
+	GroupFailed     atomic.Int64 // 组推送失败数
+	BroadcastSent   atomic.Int64 // 广播成功数
+	BroadcastFailed atomic.Int64 // 广播失败数
+	RetryAttempts   atomic.Int64 // 重试次数
+	ScheduledPushes atomic.Int64 // 定时推送次数
 }
 
-// GetSnapshot returns a copy of the current metrics values.
+// GetSnapshot 获取当前监控指标的快照副本
 func (m *PushMetrics) GetSnapshot() map[string]int64 {
 	return map[string]int64{
 		"totalPushed":     m.TotalPushed.Load(),
@@ -113,37 +120,45 @@ func (m *PushMetrics) GetSnapshot() map[string]int64 {
 	}
 }
 
+// Server 逻辑层服务端，管理网关流连接、会话、分组和消息分发
 type Server struct {
 	protocol.UnimplementedGatewayStreamServer
-	handlers sync.Map // int32 -> *protoEntry
+	handlers sync.Map // 命令码 -> *protoEntry，已注册的协议处理器
 
-	streams  sync.Map // gateway stream ID -> *streamConn
-	sessions sync.Map // session ID -> *streamConn
+	streams  sync.Map // 流 ID -> *streamConn，所有活跃的网关流连接
+	sessions sync.Map // 会话 ID -> *streamConn，会话到流的映射
 
-	userSessions sync.Map // user key -> session ID
-	sessionUsers sync.Map // session ID -> user key
+	userSessions sync.Map // 用户 UUID -> 会话 ID，用户到会话的映射
+	sessionUsers sync.Map // 会话 ID -> 用户 UUID，会话到用户的映射
 
-	groupMu       sync.RWMutex
-	groups        map[string]*pushGroup
-	sessionGroups map[string]map[string]struct{}
+	groupMu       sync.RWMutex                     // 分组操作互斥锁
+	groups        map[string]*pushGroup            // 组 ID -> 推送组
+	sessionGroups map[string]map[string]struct{}   // 会话 ID -> 所属组 ID 集合
 
-	mu           sync.Mutex
-	onDisconnect []DisconnectCallback
-	serverID     string
-	streamSeq    atomic.Uint64
-	streamChSize int
-	stopOnce     sync.Once
-	metrics      PushMetrics
+	mu           sync.Mutex           // 回调列表互斥锁
+	onDisconnect []DisconnectCallback // 断连回调函数列表
+	serverID     string               // 逻辑服务端标识
+	streamSeq    atomic.Uint64        // 流连接序号生成器
+	streamChSize int                  // 流发送通道大小
+	stopOnce     sync.Once            // 确保只停止一次
+	metrics      PushMetrics          // 推送监控指标
 }
 
+// ServerOption 服务端配置选项函数
 type ServerOption func(*Server)
 
+// WithServerID 设置服务端 ID
 func WithServerID(serverID string) ServerOption { return func(s *Server) { s.serverID = serverID } }
+// WithDispatchWorkers 设置分发工作协程数（已废弃，保留兼容）
 func WithDispatchWorkers(int) ServerOption      { return func(*Server) {} }
+// WithDispatchChSize 设置分发通道大小（已废弃，保留兼容）
 func WithDispatchChSize(int) ServerOption       { return func(*Server) {} }
+// WithStreamChSize 设置流发送通道大小
 func WithStreamChSize(n int) ServerOption       { return func(s *Server) { s.streamChSize = n } }
+// WithServerPassthrough 设置直通模式（已废弃，保留兼容）
 func WithServerPassthrough() ServerOption       { return func(*Server) {} }
 
+// NewServer 创建逻辑层服务端实例
 func NewServer(opts ...ServerOption) *Server {
 	s := &Server{
 		groups:        make(map[string]*pushGroup),
@@ -158,13 +173,14 @@ func NewServer(opts ...ServerOption) *Server {
 
 func (s *Server) GetServerID() string { return s.serverID }
 
+// OnDisconnect 注册连接断开时的回调函数
 func (s *Server) OnDisconnect(cb DisconnectCallback) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onDisconnect = append(s.onDisconnect, cb)
 }
 
-// OnData dispatches every incoming StreamData solely by Cmd.
+// OnData 处理来自网关的流数据，按命令码分发到注册的处理器
 func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 	streamID := fmt.Sprintf("stream_%s_%d", s.serverID, s.streamSeq.Add(1))
 	gatewayID := streamID
@@ -207,13 +223,14 @@ func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 	}
 }
 
+// SendMessage 处理单条消息的同步分发
 func (s *Server) SendMessage(_ context.Context, msg *protocol.StreamData) (*protocol.StreamData, error) {
 	var response *protocol.StreamData
 	s.dispatchMessage(msg, func(resp *protocol.StreamData) { response = resp })
 	return response, nil
 }
 
-// PushToConnection sends a business message to one known session.
+// PushToConnection 向指定会话推送业务消息
 func (s *Server) PushToConnection(sessionID string, targetCmd int32, data []byte) error {
 	value, ok := s.sessions.Load(sessionID)
 	if !ok {
@@ -229,6 +246,7 @@ func (s *Server) PushToConnection(sessionID string, targetCmd int32, data []byte
 	return err
 }
 
+// RegisterUser 注册用户与会话的双向映射
 func (s *Server) RegisterUser(userUUID, sessionID string) {
 	if userUUID == "" || sessionID == "" {
 		return
@@ -241,12 +259,14 @@ func (s *Server) RegisterUser(userUUID, sessionID string) {
 	}
 }
 
+// UnregisterUser 注销用户与会话的映射关系
 func (s *Server) UnregisterUser(userUUID string) {
 	if sessionID, ok := s.userSessions.LoadAndDelete(userUUID); ok {
 		s.sessionUsers.CompareAndDelete(sessionID.(string), userUUID)
 	}
 }
 
+// GetConnectionIDByUser 根据用户 UUID 获取会话 ID
 func (s *Server) GetConnectionIDByUser(userUUID string) (string, bool) {
 	value, ok := s.userSessions.Load(userUUID)
 	if !ok {
@@ -255,6 +275,7 @@ func (s *Server) GetConnectionIDByUser(userUUID string) (string, bool) {
 	return value.(string), true
 }
 
+// JoinGroup 将会话加入指定组，返回组当前成员数
 func (s *Server) JoinGroup(groupID, sessionID string) int {
 	if groupID == "" || sessionID == "" {
 		return 0
@@ -274,6 +295,7 @@ func (s *Server) JoinGroup(groupID, sessionID string) int {
 	return len(group.members)
 }
 
+// LeaveGroup 将会话移出指定组，返回组剩余成员数
 func (s *Server) LeaveGroup(groupID, sessionID string) int {
 	s.groupMu.Lock()
 	defer s.groupMu.Unlock()
@@ -294,6 +316,7 @@ func (s *Server) LeaveGroup(groupID, sessionID string) int {
 	return len(group.members)
 }
 
+// GetGroupMembers 获取指定组的所有成员会话 ID 列表
 func (s *Server) GetGroupMembers(groupID string) []string {
 	s.groupMu.RLock()
 	defer s.groupMu.RUnlock()
@@ -308,8 +331,10 @@ func (s *Server) GetGroupMembers(groupID string) []string {
 	return members
 }
 
+// GetGroupCount 获取指定组的成员数量
 func (s *Server) GetGroupCount(groupID string) int { return len(s.GetGroupMembers(groupID)) }
 
+// leaveAllGroups 将会话从所有组中移除
 func (s *Server) leaveAllGroups(sessionID string) {
 	s.groupMu.Lock()
 	defer s.groupMu.Unlock()
@@ -323,7 +348,7 @@ func (s *Server) leaveAllGroups(sessionID string) {
 	delete(s.sessionGroups, sessionID)
 }
 
-// Offline clears the user, group, and session state associated with a client.
+// Offline 清除与客户端关联的用户、组和会话状态
 func (s *Server) Offline(sessionID, userUUID string) {
 	if value, ok := s.sessions.Load(sessionID); ok {
 		s.sessions.CompareAndDelete(sessionID, value)
@@ -338,6 +363,7 @@ func (s *Server) Offline(sessionID, userUUID string) {
 	}
 }
 
+// sendRawControl 向所有网关连接发送控制消息
 func (s *Server) sendRawControl(cmd int32, data []byte) int {
 	count := 0
 	sent := make(map[string]struct{})
@@ -355,7 +381,7 @@ func (s *Server) sendRawControl(cmd int32, data []byte) int {
 	return count
 }
 
-// SendToGroup sends a control message through the stream for gateway fan-out.
+// sendToGroupLegacy 通过流发送组控制消息（旧版兼容接口）
 func (s *Server) sendToGroupLegacy(groupID string, targetCmd int32, data []byte) int {
 	controlData := mustMarshal(&protocol.StreamData{
 		Cmd:  targetCmd,
@@ -364,13 +390,12 @@ func (s *Server) sendToGroupLegacy(groupID string, targetCmd int32, data []byte)
 	return s.sendRawControl(int32(targetCmd), controlData)
 }
 
-// Broadcast sends a raw control message to all gateways.
+// broadcastLegacy 向所有网关广播控制消息（旧版兼容接口）
 func (s *Server) broadcastLegacy(targetCmd int32, data []byte) int {
 	return s.sendRawControl(int32(targetCmd), data)
 }
 
-// SendToUser finds the connection by userUUID and sends directly.
-// The session ID is an internal routing detail and is not required by callers.
+// SendToUser 根据用户 UUID 查找连接并直接发送消息
 func (s *Server) SendToUser(userUUID string, targetCmd int32, data []byte) int {
 	if sessionID, ok := s.GetConnectionIDByUser(userUUID); ok {
 		if s.PushToConnection(sessionID, targetCmd, data) == nil {
@@ -380,7 +405,7 @@ func (s *Server) SendToUser(userUUID string, targetCmd int32, data []byte) int {
 	return 0
 }
 
-// Kick sends a kick notification through the stream.
+// Kick 发送踢下线通知
 func (s *Server) Kick(sessionID string, args ...any) int {
 	var targetCmd int32
 	var data []byte
@@ -393,12 +418,12 @@ func (s *Server) Kick(sessionID string, args ...any) int {
 		}
 	}
 	if targetCmd == 0 {
-		targetCmd = 1100012 // CmdUserOffline
+		targetCmd = 1100012 // 用户下线通知命令。
 	}
 	return s.sendRawControl(targetCmd, data)
 }
 
-// SendToGroup sends one StreamData to every current member of a group.
+// SendToGroup 向组内所有成员发送消息
 func (s *Server) SendToGroup(groupID string, targetCmd int32, data []byte) int {
 	members := s.GetGroupMembers(groupID)
 	sent := 0
@@ -413,7 +438,7 @@ func (s *Server) SendToGroup(groupID string, targetCmd int32, data []byte) int {
 	return sent
 }
 
-// Broadcast sends one StreamData to every current session.
+// Broadcast 向所有活跃会话广播消息
 func (s *Server) Broadcast(targetCmd int32, data []byte) int {
 	sent := 0
 	s.sessions.Range(func(key, _ any) bool {
@@ -428,6 +453,7 @@ func (s *Server) Broadcast(targetCmd int32, data []byte) int {
 	return sent
 }
 
+// mustMarshal 将 protobuf 消息序列化为字节数组，失败时返回 nil
 func mustMarshal(message proto.Message) []byte {
 	data, err := proto.Marshal(message)
 	if err != nil {
@@ -436,23 +462,25 @@ func mustMarshal(message proto.Message) []byte {
 	return data
 }
 
+// RegisterGatewayStreamServer 将逻辑服务端注册为网关流服务实现
 func (s *Server) RegisterGatewayStreamServer(grpcServer *grpc.Server) {
 	protocol.RegisterGatewayStreamServer(grpcServer, s)
 }
 
+// GetConnectionCount 获取当前活跃连接数
 func (s *Server) GetConnectionCount() int {
 	count := 0
 	s.sessions.Range(func(_, _ any) bool { count++; return true })
 	return count
 }
 
-// GetMetrics returns a snapshot of push metrics for monitoring.
+// GetMetrics 获取推送监控指标快照
 func (s *Server) GetMetrics() map[string]int64 {
 	return s.metrics.GetSnapshot()
 }
 
-// SendToGroupWithRetry sends to every group member, retrying failed sessions.
-// Returns the number of successful sends and a list of still-failed session IDs.
+// SendToGroupWithRetry 向组内所有成员发送消息，失败时重试
+// 返回成功发送数量和仍失败的会话 ID 列表
 func (s *Server) SendToGroupWithRetry(groupID string, targetCmd int32, data []byte, maxRetries int) (int, []string) {
 	members := s.GetGroupMembers(groupID)
 	failedSessions := make([]string, 0)
@@ -475,8 +503,7 @@ func (s *Server) SendToGroupWithRetry(groupID string, targetCmd int32, data []by
 	return len(members) - len(failedSessions), failedSessions
 }
 
-// JoinGroupForUser joins a user (by userUUID) to a group. The user must have
-// an active session registered via RegisterUser.
+// JoinGroupForUser 将用户加入组（通过用户 UUID），用户必须已通过 RegisterUser 注册会话
 func (s *Server) JoinGroupForUser(userUUID, groupID string) error {
 	sessionID, ok := s.GetConnectionIDByUser(userUUID)
 	if !ok {
@@ -486,7 +513,7 @@ func (s *Server) JoinGroupForUser(userUUID, groupID string) error {
 	return nil
 }
 
-// LeaveGroupForUser removes a user (by userUUID) from a group.
+// LeaveGroupForUser 将用户从组中移除（通过用户 UUID）
 func (s *Server) LeaveGroupForUser(userUUID, groupID string) error {
 	sessionID, ok := s.GetConnectionIDByUser(userUUID)
 	if !ok {
@@ -496,19 +523,19 @@ func (s *Server) LeaveGroupForUser(userUUID, groupID string) error {
 	return nil
 }
 
-// ScheduledPush manages a periodic group push that can be stopped.
+// ScheduledPush 定时推送任务，可定期向组推送消息
 type ScheduledPush struct {
-	GroupID  string
-	Cmd      int32
-	Data     []byte
-	Interval time.Duration
-	MaxCount int // 0 = infinite
-	stopCh   chan struct{}
-	server   *Server
-	done     chan struct{}
+	GroupID  string        // 目标组 ID
+	Cmd      int32         // 命令码
+	Data     []byte        // 消息数据
+	Interval time.Duration // 推送间隔
+	MaxCount int           // 最大推送次数（0 = 无限）
+	stopCh   chan struct{} // 停止信号
+	server   *Server      // 服务端引用
+	done     chan struct{} // 任务结束信号
 }
 
-// ScheduleGroupPush starts a periodic push to a group. Returns a handle to stop it.
+// ScheduleGroupPush 启动定时组推送任务，返回可停止的句柄
 func (s *Server) ScheduleGroupPush(groupID string, cmd int32, data []byte, interval time.Duration, maxCount int) *ScheduledPush {
 	sp := &ScheduledPush{
 		GroupID:  groupID,
@@ -524,6 +551,7 @@ func (s *Server) ScheduleGroupPush(groupID string, cmd int32, data []byte, inter
 	return sp
 }
 
+// run 定时推送任务的执行循环
 func (sp *ScheduledPush) run() {
 	defer close(sp.done)
 	ticker := time.NewTicker(sp.Interval)
@@ -544,12 +572,13 @@ func (sp *ScheduledPush) run() {
 	}
 }
 
-// Stop terminates the scheduled push and waits for the goroutine to finish.
+// Stop 停止定时推送任务并等待协程结束
 func (sp *ScheduledPush) Stop() {
 	close(sp.stopCh)
 	<-sp.done
 }
 
+// Stop 关闭所有流连接，停止服务端
 func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		s.streams.Range(func(_, value any) bool {

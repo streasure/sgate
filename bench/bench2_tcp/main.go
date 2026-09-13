@@ -21,6 +21,7 @@ const (
 	cmdPushBatch    int32 = 9000002
 )
 
+// main TCP推送基准测试入口，启动多个客户端接收服务端推送
 func main() {
 	addr := flag.String("addr", "127.0.0.1:48080", "sgate TCP address")
 	duration := flag.Duration("duration", 30*time.Second, "benchmark duration")
@@ -96,6 +97,7 @@ func main() {
 	}
 }
 
+// runClient 运行单个TCP客户端，登录后持续接收推送数据
 func runClient(addr *string, duration time.Duration, idx int, serverID string, ready chan<- bool, start, abort <-chan struct{}, measureStart, totalRecv, totalAck *atomic.Int64) error {
 	conn, err := net.DialTimeout("tcp", *addr, 5*time.Second)
 	if err != nil {
@@ -167,6 +169,7 @@ func runClient(addr *string, duration time.Duration, idx int, serverID string, r
 	return nil
 }
 
+// sendTCPFrame 向TCP连接发送一个消息帧
 func sendTCPFrame(conn net.Conn, frame *protocol.MessageFrame) error {
 	data, err := proto.Marshal(frame)
 	if err != nil {
@@ -179,6 +182,7 @@ func sendTCPFrame(conn net.Conn, frame *protocol.MessageFrame) error {
 	return err
 }
 
+// readTCPFrame 从TCP连接读取一个消息帧
 func readTCPFrame(conn net.Conn) (*protocol.MessageFrame, error) {
 	header := make([]byte, 4)
 	if _, err := readFull(conn, header); err != nil {
@@ -199,6 +203,7 @@ func readTCPFrame(conn net.Conn) (*protocol.MessageFrame, error) {
 	return frame, nil
 }
 
+// readFull 从连接中读取指定字节数的数据
 func readFull(conn net.Conn, buf []byte) (int, error) {
 	total := 0
 	for total < len(buf) {

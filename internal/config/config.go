@@ -10,6 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Config 网关服务的完整配置结构体，包含所有模块配置
 type Config struct {
 	Port            int                 `yaml:"port"`
 	LogLevel        string              `yaml:"logLevel"`
@@ -39,6 +40,7 @@ type Config struct {
 	Monitoring      MonitoringConfig    `yaml:"monitoring"`
 }
 
+// Validate 校验配置参数的合法性，返回错误信息
 func (c *Config) Validate() error {
 	if c.GRPC.Port <= 0 || c.GRPC.Port > 65535 {
 		return fmt.Errorf("grpc.port must be between 1 and 65535")
@@ -65,6 +67,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// PortAddress 返回格式化的监听地址（如 ":8080"），端口无效时返回空字符串
 func (c *Config) PortAddress() string {
 	if c.Port <= 0 {
 		return ""
@@ -73,7 +76,7 @@ func (c *Config) PortAddress() string {
 }
 
 // MonitoringConfig 监控接入配置（可插拔）
-// 通过 enabled 开关控制是否启动 Prometheus metrics server
+	// 通过 enabled 开关控制是否启动 Prometheus 指标服务
 // 关闭时 sgate 单体也能正常运行，只是不暴露 /metrics 端点
 type MonitoringConfig struct {
 	Prometheus PrometheusConfig `yaml:"prometheus"`
@@ -90,7 +93,7 @@ type PrometheusConfig struct {
 
 // BalancerConfig 负载均衡配置
 type BalancerConfig struct {
-	Algorithm        string `yaml:"algorithm"`        // roundRobin | weighted | leastConn | consistent
+	Algorithm        string `yaml:"algorithm"`        // 支持 roundRobin、weighted、leastConn、consistent
 	FailureThreshold int    `yaml:"failureThreshold"` // 连续失败次数后摘除
 	RecoverInterval  string `yaml:"recoverInterval"`  // 恢复探测间隔
 }
@@ -132,7 +135,7 @@ type OTelTracerConfig struct {
 	Workers     int    `yaml:"workers"`
 }
 
-// ConfigCenterConfig is retained for HTTP-based dynamic configuration.
+// ConfigCenterConfig 配置中心配置（保留用于基于 HTTP 的动态配置）
 type ConfigCenterConfig struct {
 	Enabled      bool   `yaml:"enabled"`
 	Type         string `yaml:"type"`
@@ -145,6 +148,7 @@ type ConfigCenterConfig struct {
 	PollInterval string `yaml:"pollInterval"`
 }
 
+// EtcdConfig etcd 服务注册与发现配置
 type EtcdConfig struct {
 	Enabled       bool     `yaml:"enabled"`
 	Endpoints     []string `yaml:"endpoints"`
@@ -167,7 +171,7 @@ type AlertWebhookConfig struct {
 type WebhookItemConfig struct {
 	Name   string `yaml:"name"`
 	URL    string `yaml:"url"`
-	Type   string `yaml:"type"` // wecom | dingtalk | generic
+	Type   string `yaml:"type"` // 支持 wecom、dingtalk、generic
 	Secret string `yaml:"secret"`
 }
 
@@ -247,6 +251,7 @@ type ClusterConfig struct {
 	LockTTL        string `yaml:"lockTTL"`
 }
 
+// DiscoveryConfig 服务发现配置
 type DiscoveryConfig struct {
 	Enabled           bool          `yaml:"enabled"`
 	ServiceName       string        `yaml:"serviceName"`
@@ -255,47 +260,41 @@ type DiscoveryConfig struct {
 	HeartbeatTTL      time.Duration `yaml:"heartbeatTTL"`
 	DeregisterDelay   time.Duration `yaml:"deregisterDelay"`
 	ScanInterval      time.Duration `yaml:"scanInterval"`
-	GatewayDiscovery  bool          `yaml:"gatewayDiscovery"` // enable gateway-to-gateway discovery
+	GatewayDiscovery  bool          `yaml:"gatewayDiscovery"` // 启用网关间服务发现
 }
 
+// GRPCConfig gRPC 服务端配置
 type GRPCConfig struct {
 	Port           int `yaml:"port"`
 	WindowSize     int `yaml:"windowSize"`
 	MaxMessageSize int `yaml:"maxMessageSize"`
 }
 
-// QueuePolicy defines the behavior when the send queue is full.
+// QueuePolicy 发送队列满时的行为策略
 type QueuePolicy string
 
 const (
-	// QueuePolicyDrop discards the oldest message when the queue is full (default).
+	// QueuePolicyDrop 队列满时丢弃最旧消息（默认策略）
 	QueuePolicyDrop QueuePolicy = "drop"
-	// QueuePolicyBlock blocks the caller until space becomes available.
+	// QueuePolicyBlock 阻塞调用者直到队列有空间
 	QueuePolicyBlock QueuePolicy = "block"
-	// QueuePolicyTimeout blocks the caller up to BlockTimeout, then returns error.
+	// QueuePolicyTimeout 阻塞调用者最多等待 BlockTimeout 时长，然后返回错误
 	QueuePolicyTimeout QueuePolicy = "timeout"
-	// QueuePolicyBackpressure returns an error when queue fill exceeds the threshold,
-	// allowing the caller to signal the client to slow down.
+	// QueuePolicyBackpressure 当队列填充率超过阈值时返回错误，通知调用者减速
 	QueuePolicyBackpressure QueuePolicy = "backpressure"
 )
 
-// StreamQueueConfig configures the behavior of the per-shard send queue and the
-// reconnect buffer (StreamMessageQueue) when the queue is full.
+// StreamQueueConfig 分片发送队列和重连缓冲队列的配置
 type StreamQueueConfig struct {
-	// Policy determines what happens when the queue is full.
-	// Supported: "drop" (default), "block", "timeout", "backpressure".
+	// Policy 队列满时的策略：支持 "drop"（默认）、"block"、"timeout"、"backpressure"
 	Policy QueuePolicy `yaml:"policy"`
-	// MaxSize is the maximum number of messages in the reconnect buffer.
+	// MaxSize 重连缓冲队列的最大消息数
 	MaxSize int `yaml:"maxSize"`
-	// BlockTimeout is the maximum time to wait when Policy is "timeout".
-	// Parsed as Go duration string, e.g. "500ms", "2s".
+	// BlockTimeout 使用 "timeout" 策略时的最大等待时间（Go 时长格式，如 "500ms"、"2s"）
 	BlockTimeout string `yaml:"blockTimeout"`
-	// BackpressureThreshold is the queue fill ratio (0.0-1.0) at which
-	// backpressure error is returned. Only used when Policy is "backpressure".
+	// BackpressureThreshold 背压触发阈值（队列填充率 0.0-1.0），仅 "backpressure" 策略生效
 	BackpressureThreshold float64 `yaml:"backpressureThreshold"`
-	// SendTimeout is the per-shard send channel timeout.
-	// When the shard's buffered channel is full, messages wait up to this duration
-	// before falling back to the reconnect queue. Parsed as Go duration string.
+	// SendTimeout 分片发送通道超时时间（Go 时长格式），超时后消息转入重连队列
 	SendTimeout string `yaml:"sendTimeout"`
 }
 
@@ -322,30 +321,32 @@ type ProtectionConfig struct {
 	// VerifyInbound 是否对入方向消息执行完整性校验（checksum/timestamp/重放）。
 	// 默认 true：对带 checksum 的入站消息做完整校验，未携带 checksum 的消息零开销直通。
 	VerifyInbound bool `yaml:"verifyInbound"`
-	// PreAuthCommands are the only client commands accepted before logic
-	// authenticates the connection by returning StreamData.user_key.
+	// PreAuthCommands 是逻辑层通过返回 StreamData.user_key 完成认证前，客户端唯一允许发送的命令。
 	PreAuthCommands []int32 `yaml:"preAuthCommands"`
-	// LoginAuth configures how gateway validates LoginGateReq.
+	// LoginAuth 配置网关校验 LoginGateReq 的方式。
 	LoginAuth LoginAuthConfig `yaml:"loginAuth"`
 }
 
-// LoginAuthConfig defines gateway-side login authentication behavior.
+// LoginAuthConfig 定义网关侧的登录认证行为。
 type LoginAuthConfig struct {
-	// Mode controls login key validation:
-	//   "none"  — skip validation, always accept (default, for testing)
-	//   "hmac"  — validate login_key as HMAC-SHA256(userId, secret)
-	//   "delegate" — forward validation to logic server (adds latency)
+	// Mode 控制登录密钥校验方式：
+	//   "none"：跳过校验，始终接受（默认，用于测试）
+	//   "hmac"：按 HMAC-SHA256(userId, secret) 校验 login_key
+	//   "delegate"：转发到逻辑服校验（会增加延迟）
 	Mode string `yaml:"mode"`
-	// Secret is the HMAC shared secret (required when Mode is "hmac").
+	// Secret 是 HMAC 共享密钥（Mode 为 "hmac" 时必填）。
 	Secret string `yaml:"secret"`
 }
 
+// Transport 网络传输配置
 type Transport struct {
 	Protocol string `yaml:"protocol"`
 	Port     int    `yaml:"port"`
 	Type     string `yaml:"type"`
 }
 
+// LoadConfig 从指定的 YAML 文件加载配置，若未找到则使用默认配置
+// 采用合并语义：默认配置 + YAML 覆盖
 func LoadConfig(configFiles ...string) (*Config, error) {
 	var file *os.File
 	candidates := configFiles
@@ -374,6 +375,7 @@ func LoadConfig(configFiles ...string) (*Config, error) {
 	return cfg, nil
 }
 
+// loadDefaultConfig 创建并返回包含所有默认值的配置对象
 func loadDefaultConfig() *Config {
 	port := getEnvInt("PORT", 8080)
 	logLevel := getEnvString("LOG_LEVEL", "info")
@@ -521,6 +523,7 @@ func loadDefaultConfig() *Config {
 	}
 }
 
+// getEnvString 从环境变量读取字符串，不存在时返回默认值
 func getEnvString(key, defaultValue string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value
@@ -528,6 +531,7 @@ func getEnvString(key, defaultValue string) string {
 	return defaultValue
 }
 
+// getEnvInt 从环境变量读取整数，不存在或解析失败时返回默认值
 func getEnvInt(key string, defaultValue int) int {
 	if value, exists := os.LookupEnv(key); exists {
 		if intValue, err := strconv.Atoi(value); err == nil {

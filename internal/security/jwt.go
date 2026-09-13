@@ -188,7 +188,7 @@ func init() {
 			Issuer:      gatewayutil.GetString(cfg, "issuer"),
 			HeaderField: gatewayutil.GetString(cfg, "headerField"),
 		}
-		// SkipRoutes
+		// 跳过配置中指定的路由。
 		if v, ok := cfg["skipRoutes"]; ok {
 			if arr, ok := v.([]interface{}); ok {
 				for _, x := range arr {

@@ -50,7 +50,7 @@ func StartPProfServer(addr string) {
 	})
 }
 
-// StopPProfServer 停止 pprof server
+// StopPProfServer 停止 pprof 性能剖析服务。
 func StopPProfServer() {
 	pprofStopOnce.Do(func() {
 		if pprofServer != nil {

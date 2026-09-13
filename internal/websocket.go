@@ -20,8 +20,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// wsDebugLog WebSocket调试日志文件
 var wsDebugLog *os.File
 
+// wsDebug 写入WebSocket调试日志
 func wsDebug(msg string) {
 	if wsDebugLog == nil {
 		wsDebugLog, _ = os.OpenFile("E:\\sgate\\ws_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -32,16 +34,18 @@ func wsDebug(msg string) {
 	}
 }
 
+// WSOpCode 表示WebSocket操作码
 type WSOpCode byte
 
 const (
-	WSOpText   WSOpCode = 0x1
-	WSOpBinary WSOpCode = 0x2
-	WSOpClose  WSOpCode = 0x8
-	WSOpPing   WSOpCode = 0x9
-	WSOpPong   WSOpCode = 0xA
+	WSOpText   WSOpCode = 0x1 // 文本帧
+	WSOpBinary WSOpCode = 0x2 // 二进制帧
+	WSOpClose  WSOpCode = 0x8 // 关闭帧
+	WSOpPing   WSOpCode = 0x9 // 心跳探测帧
+	WSOpPong   WSOpCode = 0xA // 心跳回复帧
 )
 
+// wsMagicString WebSocket协议握手用的魔术字符串
 const wsMagicString = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 func (g *Gateway) getMaxWSFrameSize() int {
@@ -58,6 +62,7 @@ func (g *Gateway) getMaxWSBufferSize() int {
 	return g.protection.MaxWSBufferSize
 }
 
+// wsConnectionPool WebSocket连接对象池，减少内存分配
 var wsConnectionPool = sync.Pool{
 	New: func() interface{} {
 		return &WebSocketConnection{
@@ -66,6 +71,7 @@ var wsConnectionPool = sync.Pool{
 	},
 }
 
+// WebSocketConnection 表示WebSocket连接，包含缓冲区和状态信息。
 type WebSocketConnection struct {
 	Conn         gnet.Conn
 	State        int32
@@ -74,13 +80,15 @@ type WebSocketConnection struct {
 	LastPingTime time.Time
 }
 
+// WebSocket连接状态常量
 const (
-	WSStateHandshake = iota
-	WSStateOpen
-	WSStateClosing
-	WSStateClosed
+	WSStateHandshake = iota // 握手中
+	WSStateOpen             // 已打开
+	WSStateClosing          // 关闭中
+	WSStateClosed           // 已关闭
 )
 
+// NewWebSocketConnection 从对象池获取WebSocket连接并初始化状态。
 func NewWebSocketConnection(conn gnet.Conn) *WebSocketConnection {
 	wsConn := wsConnectionPool.Get().(*WebSocketConnection)
 	wsConn.Conn = conn
@@ -91,6 +99,7 @@ func NewWebSocketConnection(conn gnet.Conn) *WebSocketConnection {
 	return wsConn
 }
 
+// handleWebSocketHandshake 处理WebSocket协议升级握手，验证请求头并返回101响应。
 func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []byte) (action gnet.Action) {
 	lines := strings.Split(string(data), "\r\n")
 	if len(lines) < 2 {
@@ -158,12 +167,15 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	return gnet.None
 }
 
+// calculateWebSocketAccept 根据WebSocket密钥计算Sec-WebSocket-Accept值。
 func calculateWebSocketAccept(key string) string {
 	combined := key + wsMagicString
 	hash := sha1.Sum([]byte(combined))
 	return base64.StdEncoding.EncodeToString(hash[:])
 }
 
+// parseWebSocketFrame 从缓冲区解析WebSocket帧，提取操作码和载荷数据。
+// 支持不同长度的载荷（7位、16位、64位长度编码）和掩码解码。
 func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payload []byte, frameSize int, err error) {
 	if len(buffer) < 2 {
 		return 0, nil, 0, nil
@@ -218,6 +230,7 @@ func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payl
 	return opCode, payload, frameSize + int(length), nil
 }
 
+// handleWebSocketMessage 处理接收到的WebSocket数据，将其追加到缓冲区并逐帧解析处理。
 func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byte) (action gnet.Action) {
 	wsDebug(fmt.Sprintf("handleWebSocketMessage: state=%d dataLen=%d", atomic.LoadInt32(&wsConn.State), len(data)))
 	if atomic.LoadInt32(&wsConn.State) == int32(WSStateHandshake) {
@@ -251,6 +264,7 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 	return gnet.None
 }
 
+// processWebSocketFrame 根据操作码分派处理WebSocket帧（关闭、心跳、数据帧等）。
 func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOpCode, payload []byte) error {
 	switch opCode {
 	case WSOpClose:
@@ -267,6 +281,7 @@ func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOp
 	return nil
 }
 
+// handleWebSocketDataFrame 处理WebSocket数据帧，解码消息并通过消息管道转发到逻辑层。
 func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload []byte) error {
 	g.messagesReceived.Add(1)
 
@@ -286,7 +301,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
-	// Ensure connection exists for WS
+	// 确保WebSocket连接已建立
 	connectionID := wsConn.ConnectionID
 	if connectionID == "" {
 		tempUserUUID := "temp_" + generateConnectionID()
@@ -312,7 +327,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		}
 		g.connectionManager.UpdateConnectionUserUUID(connectionID, req.ServerId+":"+userUUID)
 
-		// Forward login to logic so it can register session
+		// 转发登录请求到逻辑层，以便注册会话
 		connObj := g.connectionManager.GetConnection(connectionID)
 		if connObj != nil {
 			if lc := g.GetLogicClient(req.ServerId); lc != nil {
@@ -338,6 +353,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	return nil
 }
 
+// sendWebSocketLoginAck 发送WebSocket登录确认响应。
 func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionID string, seqID int64, code int32, text, serverID string) error {
 	body, err := proto.Marshal(&protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID})
 	if err != nil {
@@ -350,6 +366,7 @@ func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionI
 	return g.sendWebSocketMessage(wsConn, WSOpBinary, data)
 }
 
+// handleWebSocketCloseFrame 处理WebSocket关闭帧，发送关闭响应并清理连接资源。
 func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 	closeFrame := []byte{0x88, 0x02, 0x03, 0xE8}
 	if _, err := wsConn.Conn.Write(closeFrame); err != nil {
@@ -365,6 +382,7 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 	return nil
 }
 
+// handleWebSocketPingFrame 处理WebSocket心跳探测帧，返回心跳回复帧并更新最后活跃时间。
 func (g *Gateway) handleWebSocketPingFrame(wsConn *WebSocketConnection, payload []byte) error {
 	var pongFrame []byte
 	payloadLen := len(payload)
@@ -385,10 +403,12 @@ func (g *Gateway) handleWebSocketPingFrame(wsConn *WebSocketConnection, payload 
 	return nil
 }
 
+// handleWebSocketPongFrame 处理WebSocket心跳回复帧，更新最后活跃时间。
 func (g *Gateway) handleWebSocketPongFrame(wsConn *WebSocketConnection) {
 	wsConn.LastPingTime = time.Now()
 }
 
+// sendWebSocketMessage 向WebSocket连接发送指定操作码的消息帧，自动处理不同长度载荷的帧头编码。
 func (g *Gateway) sendWebSocketMessage(wsConn *WebSocketConnection, opCode WSOpCode, payload []byte) error {
 	if atomic.LoadInt32(&wsConn.State) != int32(WSStateOpen) {
 		return fmt.Errorf("websocket connection not open")
@@ -419,6 +439,7 @@ func (g *Gateway) sendWebSocketMessage(wsConn *WebSocketConnection, opCode WSOpC
 	return nil
 }
 
+// sendHTTPResponse 发送HTTP响应，用于WebSocket握手失败时返回错误响应。
 func (g *Gateway) sendHTTPResponse(conn gnet.Conn, statusCode int, statusText string, headers map[string]string) {
 	var buf bytes.Buffer
 

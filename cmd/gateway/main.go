@@ -19,6 +19,7 @@ var (
 	showVer   = flag.Bool("version", false, "show version")
 )
 
+// main 启动网关服务，初始化日志、加载配置、启动所有组件并等待信号退出
 func main() {
 	flag.Parse()
 	if *showVer {

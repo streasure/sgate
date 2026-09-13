@@ -20,6 +20,7 @@ const (
 	cmdHeartbeatReq int32 = 1100010
 )
 
+// main TCP基准测试入口，执行登录阶段和数据发送阶段
 func main() {
 	addr := flag.String("addr", "127.0.0.1:48080", "sgate TCP address")
 	duration := flag.Duration("duration", 10*time.Second, "benchmark duration")
@@ -32,14 +33,14 @@ func main() {
 	var totalAck atomic.Int64
 	var connectionsFailed atomic.Int64
 
-	// Phase 1: login all connections sequentially to avoid event-loop saturation
+	// 阶段1：按顺序登录所有连接，避免事件循环过载
 	type connResult struct {
 		conn net.Conn
 		err  error
 	}
 	results := make([]connResult, *parallel)
 
-	fmt.Println("Phase 1: logging in...")
+	fmt.Println("阶段1：登录中...")
 	for i := 0; i < *parallel; i++ {
 		conn, err := net.DialTimeout("tcp", *addr, 5*time.Second)
 		if err != nil {
@@ -89,14 +90,14 @@ func main() {
 
 	loggedIn := totalAck.Load()
 	failed := connectionsFailed.Load()
-	fmt.Printf("Phase 1 done: %d logged in, %d failed\n", loggedIn, failed)
+	fmt.Printf("阶段1完成：%d个登录成功，%d个失败\n", loggedIn, failed)
 
 	if loggedIn == 0 {
-		fmt.Println("no connections, exiting")
+		fmt.Println("无连接，退出")
 		return
 	}
 
-	// Collect live connections
+	// 收集活跃连接
 	conns := make([]net.Conn, 0, loggedIn)
 	for _, r := range results {
 		if r.conn != nil {
@@ -109,7 +110,7 @@ func main() {
 		}
 	}()
 
-	// Start background readers (discard all responses)
+	// 启动后台读取协程（丢弃所有响应）
 	var readerWg sync.WaitGroup
 	stopReaders := make(chan struct{})
 	for _, c := range conns {
@@ -130,8 +131,8 @@ func main() {
 		}(c)
 	}
 
-	// Phase 2: flood all connections simultaneously
-	fmt.Printf("Phase 2: flooding %d connections for %s...\n", len(conns), duration)
+	// 阶段2：同时向所有连接发送大量数据
+	fmt.Printf("阶段2：向%d个连接发送数据，持续时间：%s...\n", len(conns), duration)
 
 	var floodWg sync.WaitGroup
 	for _, c := range conns {
@@ -156,7 +157,7 @@ func main() {
 		}(c)
 	}
 
-	// Stats ticker
+	// 统计定时器
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	start := time.Now()
@@ -187,6 +188,7 @@ func main() {
 	}
 }
 
+// sendTCPFrame 向TCP连接发送一个消息帧
 func sendTCPFrame(conn net.Conn, frame *protocol.MessageFrame) error {
 	data, err := proto.Marshal(frame)
 	if err != nil {
@@ -199,6 +201,7 @@ func sendTCPFrame(conn net.Conn, frame *protocol.MessageFrame) error {
 	return err
 }
 
+// readTCPFrame 从TCP连接读取一个消息帧
 func readTCPFrame(conn net.Conn) (*protocol.MessageFrame, error) {
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	defer conn.SetReadDeadline(time.Time{})
@@ -222,6 +225,7 @@ func readTCPFrame(conn net.Conn) (*protocol.MessageFrame, error) {
 	return frame, nil
 }
 
+// readFull 从连接中读取指定字节数的数据
 func readFull(conn net.Conn, buf []byte) (int, error) {
 	total := 0
 	for total < len(buf) {

@@ -2,7 +2,7 @@ package logutil
 
 import "github.com/streasure/util/tlog"
 
-// Init loads the process-specific structured log configuration.
+// Init 加载进程级别的结构化日志配置
 func Init(path string) func() {
 	logger, err := tlog.New(path)
 	if err != nil {

@@ -18,7 +18,7 @@ type ClusterComponent struct {
 	grpcPort         int
 	grpcFunc         func(addr string)
 	Discovery        *etcd.Component
-	GatewayDiscovery *etcd.Component // discovery for other gateways (Gateway:{zone})
+	GatewayDiscovery *etcd.Component // 发现同一可用区内的其他网关。
 	gatewayEvents    []etcd.ServiceEvent
 	gatewayEventsMu  sync.RWMutex
 	Balancer         *clusterPkg.Balancer
@@ -52,7 +52,7 @@ func (c *ClusterComponent) Start() error {
 		if c.cfg.Discovery.Enabled {
 			compCfg.Discovery = etcd.DiscoveryConfig{Enabled: true, ServiceID: "Logic:" + c.cfg.Zone}
 		}
-		// Register gateway itself so other services can discover it
+		// 注册网关自身，供其他服务发现。
 		compCfg.Registration = etcd.RegistrationConfig{
 			Enabled:    true,
 			ServiceID:  c.cfg.ServerType + ":" + c.cfg.Zone,
@@ -69,7 +69,7 @@ func (c *ClusterComponent) Start() error {
 			"instanceID", c.cfg.ServerID,
 			"address", advertiseAddr)
 
-		// Gateway-to-gateway discovery (optional, watches Gateway:{zone})
+		// 可选的网关间发现，监听 Gateway:{zone} 服务变化。
 		if c.cfg.Discovery.GatewayDiscovery {
 			gwCompCfg := etcd.ComponentConfig{
 				Enabled: true,
@@ -78,11 +78,10 @@ func (c *ClusterComponent) Start() error {
 					Enabled:   true,
 					ServiceID: "Gateway:" + c.cfg.Zone,
 				},
-				// No registration — this component only discovers, doesn't register itself.
+				// 此组件只负责发现其他网关，不重复注册自身。
 			}
 			c.GatewayDiscovery = etcd.New(gwCompCfg)
-			// Capture the initial snapshot because Gateway is constructed only
-			// after lifecycle components have started.
+			// 保存服务变化快照，因为网关对象会在生命周期组件启动后才构造。
 			c.GatewayDiscovery.OnServiceChange(func(event etcd.ServiceEvent) {
 				c.gatewayEventsMu.Lock()
 				c.gatewayEvents = append(c.gatewayEvents, event)

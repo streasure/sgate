@@ -20,6 +20,7 @@ import (
 
 const cmdPush int32 = 9000001
 
+// main 启动logic2 WebSocket服务，注册登录处理并启动推送工作协程
 func main() {
 	port := flag.String("port", "50061", "gRPC listen port")
 	id := flag.String("id", "logic2-ws", "service instance ID")
@@ -41,6 +42,7 @@ func main() {
 
 	var totalPushed atomic.Int64
 
+	// 注册登录请求处理函数，将用户加入测试组
 	svc.RegisterProto(1000001, &protocol.LoginGateReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
 		_ = req.(*protocol.LoginGateReq)
 		sessionID := ctx.ConnectionID
@@ -67,6 +69,7 @@ func main() {
 		payload[i] = byte(i % 256)
 	}
 
+	// 启动推送工作协程，向组内所有成员发送消息
 	go func() {
 		if *expectedMembers > 0 {
 			for svc.Server().GetGroupCount("bench_group") < *expectedMembers {

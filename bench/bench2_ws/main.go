@@ -25,6 +25,7 @@ const (
 	cmdPushBatch    int32 = 9000002
 )
 
+// main WebSocket推送基准测试入口，启动多个客户端接收服务端推送
 func main() {
 	addr := flag.String("addr", "127.0.0.1:48081", "sgate WebSocket address")
 	duration := flag.Duration("duration", 30*time.Second, "benchmark duration")
@@ -100,6 +101,7 @@ func main() {
 	}
 }
 
+// runWSClient 运行单个WebSocket客户端，登录后持续接收推送数据
 func runWSClient(addr *string, duration time.Duration, idx int, serverID string, ready chan<- bool, start, abort <-chan struct{}, measureStart, totalRecv, totalAck *atomic.Int64) error {
 	conn, err := net.DialTimeout("tcp", *addr, 5*time.Second)
 	if err != nil {
@@ -176,6 +178,7 @@ func runWSClient(addr *string, duration time.Duration, idx int, serverID string,
 	return nil
 }
 
+// wsUpgrade 执行WebSocket握手升级
 func wsUpgrade(conn net.Conn, host string) error {
 	key := base64.StdEncoding.EncodeToString([]byte(strconv.FormatInt(rand.Int63(), 16)))
 	req := fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", host, key)
@@ -205,6 +208,7 @@ func wsUpgrade(conn net.Conn, host string) error {
 	return nil
 }
 
+// sendWSBinary 向WebSocket连接发送二进制消息帧
 func sendWSBinary(conn net.Conn, frame *protocol.MessageFrame) error {
 	data, err := proto.Marshal(frame)
 	if err != nil {
@@ -237,6 +241,7 @@ func sendWSBinary(conn net.Conn, frame *protocol.MessageFrame) error {
 	return err
 }
 
+// readWSBinary 从WebSocket连接读取二进制消息帧
 func readWSBinary(conn net.Conn) (*protocol.MessageFrame, error) {
 	header := make([]byte, 2)
 	if _, err := readFull(conn, header); err != nil {
@@ -268,6 +273,7 @@ func readWSBinary(conn net.Conn) (*protocol.MessageFrame, error) {
 	return frame, nil
 }
 
+// readFull 从连接中读取指定字节数的数据
 func readFull(conn net.Conn, buf []byte) (int, error) {
 	total := 0
 	for total < len(buf) {

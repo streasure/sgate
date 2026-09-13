@@ -9,7 +9,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 )
 
-// Buffer pools for reducing GC pressure
+// 缓冲区对象池，用于降低垃圾回收压力。
 var (
 	decodeBufPool = sync.Pool{
 		New: func() interface{} {
@@ -26,11 +26,11 @@ var (
 )
 
 const (
-	TCPHeaderLen = 4 // 4-byte big-endian length prefix
+	TCPHeaderLen = 4 // 4 字节大端长度前缀。
 )
 
-// TCPCodec implements Length-Value binary protocol decoding.
-// Wire format: [4-byte length][payload]
+// TCPCodec 实现长度加数据格式的二进制协议编解码。
+// 线路格式为：[4 字节长度][载荷]。
 type TCPCodec struct{ maxMessageSize int }
 
 func NewTCPCodec() *TCPCodec {
@@ -44,7 +44,7 @@ func NewTCPCodecWithLimit(maxSize int) *TCPCodec {
 	return &TCPCodec{maxMessageSize: maxSize}
 }
 
-// Decode reads a single Length-Value frame from the connection.
+// Decode 从连接中读取并解码一个长度加数据格式的帧。
 func (c *TCPCodec) Decode(ctx context.Context, conn gnet.Conn) ([][]byte, error) {
 	var messages [][]byte
 	for conn.InboundBuffered() >= TCPHeaderLen {
@@ -64,7 +64,7 @@ func (c *TCPCodec) Decode(ctx context.Context, conn gnet.Conn) ([][]byte, error)
 		if err != nil {
 			return nil, err
 		}
-		// Use pool for small messages, direct allocation for large ones
+		// 小消息使用对象池，大消息直接分配，避免污染对象池。
 		if dataLen <= 64*1024 {
 			bufPtr := decodeBufPool.Get().(*[]byte)
 			buf := (*bufPtr)[:dataLen]
@@ -79,10 +79,10 @@ func (c *TCPCodec) Decode(ctx context.Context, conn gnet.Conn) ([][]byte, error)
 	return messages, nil
 }
 
-// Encode wraps raw bytes with a 4-byte length prefix.
+// Encode 为原始字节增加 4 字节长度前缀。
 func (c *TCPCodec) Encode(buf []byte) []byte {
 	totalLen := TCPHeaderLen + len(buf)
-	// Use pool for small messages
+	// 小消息使用对象池。
 	if totalLen <= 64*1024 {
 		bufPtr := encodeBufPool.Get().(*[]byte)
 		data := (*bufPtr)[:totalLen]

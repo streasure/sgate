@@ -69,6 +69,7 @@ func applyGOMEMLIMIT() int64 {
 	return limit
 }
 
+// parseIntDefault 将字符串解析为整数，解析失败时返回默认值
 func parseIntDefault(s string, def int) int {
 	n := 0
 	for _, c := range s {

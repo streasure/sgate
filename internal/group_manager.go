@@ -7,7 +7,7 @@ import (
 
 const groupShardCount = 256
 
-// GroupManager provides sharded lock for better concurrency
+// GroupManager 使用分片锁管理组成员，降低并发访问时的锁竞争。
 type GroupManager struct {
 	shards [groupShardCount]groupShard
 }

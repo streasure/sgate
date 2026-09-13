@@ -8,10 +8,10 @@ import (
 
 var _options atomic.Pointer[Options]
 
-// Option is a functional option for Options.
+// Option 是用于修改派生选项的函数式选项。
 type Option func(*Options)
 
-// Options caches derived values from Config for fast access.
+// Options 保存从完整配置派生出的高频访问参数，减少业务路径上的配置查找和锁竞争。
 type Options struct {
 	GRPCPort           int
 	GRPCWindowSize     int
@@ -43,7 +43,7 @@ type Options struct {
 	MonitoringPath    string
 }
 
-// RefreshOptions forces a re-derive from the current Config.
+// RefreshOptions 根据当前全局配置重新生成并缓存派生选项。
 func RefreshOptions() *Options {
 	_config := GetConfig()
 	if _config == nil {
@@ -55,7 +55,7 @@ func RefreshOptions() *Options {
 	return opts
 }
 
-// GetOptions returns the cached Options, deriving from Config if needed.
+// GetOptions 返回缓存的派生选项；缓存不存在时先根据全局配置生成。
 func GetOptions() *Options {
 	opts := _options.Load()
 	if opts != nil {
@@ -97,17 +97,17 @@ func deriveOptions(cfg *config.Config) *Options {
 	}
 }
 
-// WithGRPCPort sets the gRPC port.
+// WithGRPCPort 设置 gRPC 监听端口。
 func WithGRPCPort(port int) Option {
 	return func(o *Options) { o.GRPCPort = port }
 }
 
-// WithDiscoveryEnabled sets whether service discovery is enabled.
+// WithDiscoveryEnabled 设置是否启用服务发现。
 func WithDiscoveryEnabled(enabled bool) Option {
 	return func(o *Options) { o.DiscoveryEnabled = enabled }
 }
 
-// WithMonitoringEnabled sets whether monitoring is enabled.
+// WithMonitoringEnabled 设置是否启用监控。
 func WithMonitoringEnabled(enabled bool) Option {
 	return func(o *Options) { o.MonitoringEnabled = enabled }
 }

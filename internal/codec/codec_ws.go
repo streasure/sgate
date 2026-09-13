@@ -16,7 +16,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 )
 
-// Buffer pools for WebSocket messages
+// WebSocket 消息缓冲区对象池。
 var (
 	wsDecodeBufPool = sync.Pool{
 		New: func() interface{} {
@@ -36,8 +36,8 @@ const maxWebSocketMessageSize = 4 * 1024 * 1024
 
 var ErrWebSocketClose = errors.New("websocket close frame received")
 
-// WebSocketCodec handles an RFC 6455 upgrade and binary WebSocket messages.
-// A codec belongs to exactly one client connection.
+// WebSocketCodec 处理 RFC 6455 协议升级和二进制 WebSocket 消息。
+// 每个编解码器只绑定一个客户端连接。
 type WebSocketCodec struct {
 	upgraded       bool
 	ip             string
@@ -88,7 +88,7 @@ func (c *WebSocketCodec) Decode(ctx context.Context, conn gnet.Conn) ([][]byte, 
 }
 
 func (c *WebSocketCodec) Encode(buf []byte) []byte {
-	// Calculate frame size
+	// 计算 WebSocket 帧头和载荷的总长度。
 	headerLen := 2
 	n := len(buf)
 	switch {
@@ -101,7 +101,7 @@ func (c *WebSocketCodec) Encode(buf []byte) []byte {
 	}
 	totalLen := headerLen + n
 
-	// Use pool for small messages
+	// 小消息使用对象池。
 	var frame []byte
 	if totalLen <= 64*1024 {
 		bufPtr := wsEncodeBufPool.Get().(*[]byte)
@@ -218,7 +218,7 @@ func (c *WebSocketCodec) readFrame(conn gnet.Conn, data []byte) ([]byte, bool, e
 		return nil, false, errors.New("invalid websocket control frame")
 	}
 	mask := data[headerLen : headerLen+4]
-	// Use pool for small messages
+	// 小消息使用对象池。
 	var payload []byte
 	if length <= 64*1024 {
 		bufPtr := wsDecodeBufPool.Get().(*[]byte)

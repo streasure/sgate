@@ -8,8 +8,7 @@ import (
 	"github.com/streasure/util/tlog"
 )
 
-// TrafficComponent manages the lifecycle of all traffic sub-modules:
-// CanaryFilter, TrafficMirror, DegradationManager, eBPF, Wasm.
+// TrafficComponent 管理灰度、流量镜像、降级、eBPF 和 Wasm 等流量组件的生命周期。
 type TrafficComponent struct {
 	component.BaseComponent
 
@@ -38,19 +37,19 @@ func (c *TrafficComponent) Order() int   { return 300 }
 func (c *TrafficComponent) Init() error {
 	tlog.Info("traffic component init")
 
-	// Canary
+	// 灰度过滤器。
 	if c.canaryCfg.Enabled {
 		c.CanaryFilter = traffic.NewCanaryFilter(c.canaryCfg)
 		c.filterChain.AddFilter(c.CanaryFilter)
 	}
 
-	// Traffic Mirror
+	// 流量镜像。
 	if c.mirrorCfg.Enabled {
 		c.TrafficMirror = traffic.NewTrafficMirror(c.mirrorCfg)
 		c.filterChain.AddFilter(&traffic.MirrorFilter{TM: c.TrafficMirror})
 	}
 
-	// Degradation
+	// 降级管理器。
 	if c.degradationCfg.Enabled {
 		c.Degradation = traffic.NewDegradationManager(c.degradationCfg.Rules)
 		c.filterChain.AddFilter(c.Degradation)

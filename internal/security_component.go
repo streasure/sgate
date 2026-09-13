@@ -10,8 +10,7 @@ import (
 	"github.com/streasure/util/tlog"
 )
 
-// SecurityComponent manages the lifecycle of all security sub-modules:
-// WhitelistBlacklist, WAF, RateLimiter, JWTAuthFilter, CircuitBreakerManager.
+// SecurityComponent 管理白黑名单、WAF、限流、JWT 认证和熔断器等安全组件的生命周期。
 type SecurityComponent struct {
 	component.BaseComponent
 
@@ -45,7 +44,7 @@ func (c *SecurityComponent) Init() error {
 	c.WhitelistBlacklist = security.NewWhitelistBlacklist()
 	c.CircuitBreakerMgr = security.NewCircuitBreakerManager()
 
-	// Whitelist / Blacklist
+	// 白名单和黑名单。
 	if c.cfg.Enabled {
 		for _, ip := range c.cfg.Whitelist {
 			c.WhitelistBlacklist.AddToWhitelist(ip)
@@ -55,13 +54,13 @@ func (c *SecurityComponent) Init() error {
 		}
 	}
 
-	// JWT
+	// JWT 认证。
 	if c.jwt.Enabled {
 		c.JWTAuth = security.NewJWTAuthFilter(c.jwt)
 		c.FilterChain.AddFilter(c.JWTAuth)
 	}
 
-	// Rate Limiter
+	// 限流器。
 	if c.cfg.RateLimit.Enabled {
 		refresh := time.Second
 		if d, err := time.ParseDuration(c.cfg.RateLimit.TokenRefresh); err == nil {
@@ -74,7 +73,7 @@ func (c *SecurityComponent) Init() error {
 		c.RateLimiter = security.NewRateLimiter(tokens, refresh)
 	}
 
-	// WAF
+	// Web 应用防火墙。
 	if c.waf.Enabled {
 		c.WAF = security.NewWAF(c.waf)
 	}

@@ -7,7 +7,7 @@
 //	  modules:
 //	    - name: "auth-plugin"
 //	      path: "./plugins/auth.wasm"
-//	      function: "process"
+//	      函数名："process"
 //
 // 插件 WAT 示例（process(data_ptr, data_len) -> (out_ptr, out_len, status)）：
 //
@@ -84,7 +84,7 @@ func (w *WazeroRuntime) LoadModuleFromFile(name, path string) error {
 	return w.LoadModule(name, bytes)
 }
 
-// Invoke 调用 process(data_ptr, data_len) -> (out_ptr, out_len, status)
+// Invoke 调用 process(data_ptr, data_len) -> (out_ptr, out_len, status)。
 func (w *WazeroRuntime) Invoke(name, funcName string, input []byte) ([]byte, int, error) {
 	v, ok := w.modules.Load(name)
 	if !ok {

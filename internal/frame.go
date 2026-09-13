@@ -9,8 +9,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// decodeClientMessage accepts the public MessageFrame protocol. The body is
-// the business protobuf payload; StreamData is only the backend envelope.
+// decodeClientMessage 解码公共MessageFrame协议数据，提取业务protobuf负载。
+// body是业务protobuf载荷，StreamData仅作为后端信封。
 func decodeClientMessage(data []byte) (*protoGw.StreamData, bool) {
 	cmd, seqID, body, ok := routes.ExtractMessageFrame(data)
 	if !ok {
@@ -23,8 +23,8 @@ func decodeClientMessage(data []byte) (*protoGw.StreamData, bool) {
 	}, true
 }
 
-// marshalClientMessage emits the public MessageFrame envelope. Internal
-// control messages without a body use their serialized Message as body.
+// marshalClientMessage 将StreamData序列化为公共MessageFrame信封格式。
+// 没有body的内部控制消息使用其序列化后的Message作为body。
 func marshalClientMessage(msg *protoGw.StreamData) ([]byte, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("nil message")
@@ -40,6 +40,7 @@ func marshalClientMessage(msg *protoGw.StreamData) ([]byte, error) {
 	return proto.Marshal(&protoGw.MessageFrame{Cmd: msg.Cmd, SeqId: msg.SeqId, Body: body})
 }
 
+// marshalClientError 将错误响应序列化为MessageFrame格式的字节数据。
 func marshalClientError(errMsg *commonstruct.ErrorResponse) []byte {
 	if errMsg == nil {
 		return nil

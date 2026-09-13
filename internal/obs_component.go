@@ -10,7 +10,7 @@ import (
 	"github.com/streasure/util/tlog"
 )
 
-// ObservabilityComponent manages the lifecycle of all observability sub-modules:
+// ObservabilityComponent 管理所有可观测性子模块的生命周期：
 // Tracer, OTelTracer, PProfServer, LogSanitizer, LatencyTracker.
 type ObservabilityComponent struct {
 	component.BaseComponent
@@ -43,7 +43,7 @@ func (c *ObservabilityComponent) Init() error {
 	c.LatencyTracker = obs.NewLatencyTracker(10000)
 	c.LogSanitizer = obs.NewLogSanitizer()
 
-	// OTel distributed tracing
+	// OpenTelemetry 分布式追踪。
 	if c.otelCfg.Enabled {
 		c.OTelTracer = obs.NewOTelTracer(c.otelCfg)
 		c.FilterChain.AddFilter(&obs.OTelSpanFilter{Tracer: c.OTelTracer})
@@ -53,7 +53,7 @@ func (c *ObservabilityComponent) Init() error {
 }
 
 func (c *ObservabilityComponent) Start() error {
-	// PProf server
+	// pprof 性能剖析服务。
 	if c.pprofAddr != "" {
 		obs.StartPProfServer(c.pprofAddr)
 	}

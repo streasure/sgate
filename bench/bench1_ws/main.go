@@ -24,6 +24,7 @@ const (
 	cmdHeartbeatReq int32 = 1100010
 )
 
+// main WebSocket基准测试入口，执行登录阶段和数据发送阶段
 func main() {
 	addr := flag.String("addr", "127.0.0.1:48081", "sgate WebSocket address")
 	duration := flag.Duration("duration", 10*time.Second, "benchmark duration")
@@ -42,7 +43,7 @@ func main() {
 	}
 	results := make([]connResult, *parallel)
 
-	fmt.Println("Phase 1: logging in...")
+	fmt.Println("阶段1：登录中...")
 	loginDeadline := time.Now().Add(30 * time.Second)
 	for i := 0; i < *parallel; i++ {
 		if time.Now().After(loginDeadline) {
@@ -111,10 +112,10 @@ func main() {
 
 	loggedIn := totalAck.Load()
 	failed := connectionsFailed.Load()
-	fmt.Printf("Phase 1 done: %d logged in, %d failed\n", loggedIn, failed)
+	fmt.Printf("阶段1完成：%d个登录成功，%d个失败\n", loggedIn, failed)
 
 	if loggedIn == 0 {
-		fmt.Println("no connections, exiting")
+		fmt.Println("无连接，退出")
 		return
 	}
 
@@ -150,7 +151,7 @@ func main() {
 		}(c)
 	}
 
-	fmt.Printf("Phase 2: flooding %d connections for %s...\n", len(conns), *duration)
+	fmt.Printf("阶段2：向%d个连接发送数据，持续时间：%s...\n", len(conns), *duration)
 
 	var floodWg sync.WaitGroup
 	for _, c := range conns {
@@ -205,6 +206,7 @@ func main() {
 	}
 }
 
+// wsUpgrade 执行WebSocket握手升级
 func wsUpgrade(conn net.Conn, host string) error {
 	key := base64.StdEncoding.EncodeToString([]byte(strconv.FormatInt(rand.Int63(), 16)))
 
@@ -235,6 +237,7 @@ func wsUpgrade(conn net.Conn, host string) error {
 	return nil
 }
 
+// sendWSBinary 向WebSocket连接发送二进制消息帧
 func sendWSBinary(conn net.Conn, frame *protocol.MessageFrame) error {
 	data, err := proto.Marshal(frame)
 	if err != nil {
@@ -269,6 +272,7 @@ func sendWSBinary(conn net.Conn, frame *protocol.MessageFrame) error {
 	return err
 }
 
+// readWSBinary 从WebSocket连接读取二进制消息帧
 func readWSBinary(conn net.Conn) (*protocol.MessageFrame, error) {
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	defer conn.SetReadDeadline(time.Time{})
@@ -307,6 +311,7 @@ func readWSBinary(conn net.Conn) (*protocol.MessageFrame, error) {
 	return frame, nil
 }
 
+// readFull 从连接中读取指定字节数的数据
 func readFull(conn net.Conn, buf []byte) (int, error) {
 	total := 0
 	for total < len(buf) {

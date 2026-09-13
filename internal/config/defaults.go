@@ -25,7 +25,7 @@ package config
 // --- 网络与协议 ---
 
 const (
-	// DefaultGRPCWindowSize gRPC flow-control 窗口大小（字节）
+	// DefaultGRPCWindowSize gRPC 流量控制窗口大小（字节）
 	// 调大可提升吞吐，但占用内存更多。一般 16MB 足够千万 QPS
 	DefaultGRPCWindowSize = 16 * 1024 * 1024
 
@@ -87,7 +87,7 @@ const (
 // --- 安全防护 ---
 
 const (
-	// DefaultRateLimitMaxTokens 每秒令牌数（per IP/route）
+	// DefaultRateLimitMaxTokens 每秒令牌数（按 IP/路由）
 	// 1000000 = 单 IP/route 每秒最多 100 万请求，可按业务调整
 	DefaultRateLimitMaxTokens = 1000000
 
@@ -113,8 +113,8 @@ const (
 // --- 集群 ---
 
 const (
-	// DefaultClusterServiceName is the gateway service identity prefix.
-	// 集群 Leader 选举基于该服务的实例列表：同 zone 内按 ip:port 字典序排序，排名第一者为 Leader
+	// DefaultClusterServiceName 是网关服务身份标识前缀。
+	// 集群 Leader 选举基于该服务的实例列表：同 zone 内按 ip:port 字典序排序，排名第一者为 Leader。
 	DefaultClusterServiceName = "sgate-gateway"
 
 	// DefaultClusterLockTTL 集群心跳/选举 TTL
@@ -171,7 +171,7 @@ const (
 
 const (
 	// DefaultConfigCenterPollInterval 配置中心拉取间隔
-	// Polling is retained only for legacy HTTP configuration backends; etcd uses watch.
+	// 轮询仅保留用于旧版 HTTP 配置后端，etcd 使用 watch 机制
 	DefaultConfigCenterPollInterval = "5s"
 )
 
@@ -194,7 +194,7 @@ const (
 	DefaultPrometheusAddr = ":9101"
 
 	// DefaultPrometheusPath Prometheus 指标路径
-	// 使用方法：Prometheus scrape_config 的 metrics_path 必须与此一致
+	// 使用方法：Prometheus 抓取配置的 metrics_path 必须与此一致
 	DefaultPrometheusPath = "/metrics"
 
 	// DefaultPrometheusPrefix Prometheus 指标前缀

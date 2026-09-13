@@ -18,15 +18,17 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Service 逻辑层服务封装，管理 gRPC 服务器、etcd 注册和生命周期
 type Service struct {
-	server     *Server
-	registry   *etcd.Component
-	listener   net.Listener
-	grpcServer *grpc.Server
-	cfg        ServiceConfig
-	stopOnce   sync.Once
+	server     *Server           // 逻辑层服务端
+	registry   *etcd.Component   // etcd 注册组件
+	listener   net.Listener      // TCP 监听器
+	grpcServer *grpc.Server      // gRPC 服务器
+	cfg        ServiceConfig     // 服务配置
+	stopOnce   sync.Once         // 确保只停止一次
 }
 
+// NewService 创建逻辑层服务实例，应用配置选项
 func NewService(opts ...ServiceOption) *Service {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -39,18 +41,24 @@ func NewService(opts ...ServiceOption) *Service {
 	return &Service{server: NewServer(serverOpts...), cfg: cfg}
 }
 
+// Server 获取底层逻辑层服务端实例
 func (s *Service) Server() *Server { return s.server }
 
+// RegisterProto 注册 protobuf 协议处理器
 func (s *Service) RegisterProto(cmd int32, reqProto proto.Message, respCmd int32, handler ProtoHandler) {
 	s.server.RegisterProto(cmd, reqProto, respCmd, handler)
 }
 
+// RegisterUser 注册用户与会话的映射
 func (s *Service) RegisterUser(userUUID, sessionID string) {
 	s.server.RegisterUser(userUUID, sessionID)
 }
+// UnregisterUser 注销用户与会话的映射
 func (s *Service) UnregisterUser(userUUID string) { s.server.UnregisterUser(userUUID) }
+// GetCommands 获取已注册的所有命令码列表
 func (s *Service) GetCommands() []int32           { return s.server.registeredCommands() }
 
+// Start 启动 gRPC 服务器和 etcd 注册
 func (s *Service) Start() error {
 	listener, err := net.Listen("tcp", s.cfg.ListenAddr+":"+s.cfg.ListenPort)
 	if err != nil {
@@ -81,6 +89,7 @@ func (s *Service) Start() error {
 	return nil
 }
 
+// initRegistry 初始化 etcd 服务注册
 func (s *Service) initRegistry() {
 	if s.cfg.ServiceID == "" || s.cfg.EtcdEndpoint == "" {
 		return
@@ -103,6 +112,7 @@ func (s *Service) initRegistry() {
 	}
 }
 
+// Stop 优雅停止服务（等待连接关闭）
 func (s *Service) Stop() {
 	s.stopOnce.Do(func() {
 		if s.registry != nil {
@@ -118,8 +128,8 @@ func (s *Service) Stop() {
 	})
 }
 
-// StopImmediate stops the gRPC server without waiting for long-lived gateway
-// streams to finish. It is intended for benchmark drivers and forced shutdown.
+// StopImmediate 立即停止 gRPC 服务器，不等待长时间流连接完成
+// 适用于基准测试驱动和强制关闭场景
 func (s *Service) StopImmediate() {
 	s.stopOnce.Do(func() {
 		if s.registry != nil {
@@ -135,6 +145,7 @@ func (s *Service) StopImmediate() {
 	})
 }
 
+// Run 启动服务并监听系统信号，收到 SIGINT/SIGTERM 时优雅停止
 func (s *Service) Run() error {
 	if err := s.Start(); err != nil {
 		return err

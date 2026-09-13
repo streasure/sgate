@@ -34,11 +34,13 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// LogicClientProvider 定义逻辑客户端的连接状态和消息发送能力。
 type LogicClientProvider interface {
 	IsConnected() bool
 	SendMessage(msg *protoGw.StreamData) error
 }
 
+// GatewayClientProvider 定义网关客户端的连接状态和客户端访问能力。
 type GatewayClientProvider interface {
 	IsConnected() bool
 	Client() protoGw.GatewayClient
@@ -60,6 +62,7 @@ func newErrorResponse(route, message, details, data string) *commonstruct.ErrorR
 	}
 }
 
+// Gateway 表示网关实例，负责连接接入、协议处理、逻辑转发和组件生命周期。
 type Gateway struct {
 	connectionManager *ConnectionManager
 	stopChan          chan struct{}
@@ -81,11 +84,11 @@ type Gateway struct {
 	gatewayClientPool *GatewayClientPool
 	serverID          string
 	serviceDiscovery  *etcd.Component
-	gatewayDiscovery  *etcd.Component // discovery for other gateways (Gateway:{zone})
+	gatewayDiscovery  *etcd.Component // 发现其他网关（Gateway:{zone}）
 	gatewayEvents     []etcd.ServiceEvent
 	overloadProtector *OverloadProtector
 	grpcServer        *grpc.Server
-	promExporter      *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为 nil）
+	promExporter      *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为空）。
 	statsServer       *http.Server
 	msgRate           *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
 	zone              string
@@ -99,7 +102,7 @@ type Gateway struct {
 	waf                *security.WAF
 	cluster            *cluster.Cluster
 	latencyTracker     *obs.LatencyTracker
-	engine             *gnet.Engine // stored on boot for graceful shutdown
+	engine             *gnet.Engine // 启动时保存，用于优雅关闭
 
 	// 企业级扩展组件
 	filterChain   *types.FilterChain          // SPI 过滤器链
@@ -146,11 +149,12 @@ type Gateway struct {
 	alertDropped           atomic.Int64
 }
 
+// SetTransportType 设置监听端口对应的传输类型。
 func (g *Gateway) SetTransportType(port string, transportType string) {
 	g.transportType.Store(port, transportType)
 }
 
-// AddPushedToClient 增加已推送到客户端的消息计数（接收方向：logic->sgate->client）
+// AddPushedToClient 增加已推送到客户端的消息计数（接收方向：逻辑服到网关再到客户端）。
 func (g *Gateway) AddPushedToClient(n int64) {
 	g.messagesPushedToClient.Add(n)
 }
@@ -160,6 +164,7 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
 }
 
+// NewGateway 加载配置并创建、初始化、启动网关组件。
 func NewGateway(configFiles ...string) *Gateway {
 	cfg, err := config.LoadConfig(configFiles...)
 	if err != nil {
@@ -177,16 +182,16 @@ func NewGateway(configFiles ...string) *Gateway {
 		tlog.SetLevel("error")
 	}
 
-	// Create shared FilterChain
+	// 创建共享过滤器链
 	fc := types.NewFilterChain()
 
-	// Create all lifecycle components
+	// 创建所有生命周期组件
 	secComp := NewSecurityComponent(cfg.Security, cfg.WAF, cfg.JWTAuth, fc)
 	obsComp := NewObservabilityComponent(cfg.OTelTracer, pprofAddrFromEnv(), fc)
 	traComp := NewTrafficComponent(cfg.Canary, cfg.TrafficMirror, cfg.Degradation, fc)
 	clsComp := NewClusterComponent(*cfg, cfg.GRPC.Port, nil)
 
-	// Init + Start all components
+	// 初始化并启动所有组件
 	for _, comp := range []component.Component{secComp, obsComp, traComp, clsComp} {
 		if err := comp.Init(); err != nil {
 			panic(fmt.Sprintf("component %s init failed: %v", comp.Name(), err))
@@ -198,14 +203,14 @@ func NewGateway(configFiles ...string) *Gateway {
 		}
 	}
 
-	// Load SPI filters from config
+	// 从配置加载 SPI 过滤器
 	for _, fi := range cfg.FilterChain.Filters {
 		if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
 			tlog.Warn("failed to load filter from config", "name", fi.Name, "error", err)
 		}
 	}
 
-	// Build Gateway via dependency injection
+	// 通过依赖注入构建网关
 	gw := NewGatewayWithDeps(GatewayDeps{
 		Config:             *cfg,
 		FilterChain:        fc,
@@ -230,7 +235,7 @@ func NewGateway(configFiles ...string) *Gateway {
 		AlertWebhook:       clsComp.AlertWebhook,
 	})
 
-	// TLS
+	// TLS加密配置
 	gw.tlsConfig = &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		MaxVersion: tls.VersionTLS13,
@@ -264,8 +269,8 @@ func NewGateway(configFiles ...string) *Gateway {
 	return gw
 }
 
-// StartServices launches gateway-specific services: gRPC server, stats HTTP,
-// Prometheus metrics, overload protector, WebSocket heartbeat, config watcher.
+// StartServices 启动网关特定服务：gRPC服务器、统计HTTP服务、
+// Prometheus监控指标、过载保护器、WebSocket心跳检测、配置文件监听
 func (g *Gateway) StartServices() {
 	cfg := g.cfg.Load().(*config.Config)
 
@@ -318,14 +323,14 @@ func (g *Gateway) StartServices() {
 		})
 	}
 
-	// Gateway-to-gateway client pool uses its dedicated Gateway:{zone} watcher.
+	// 网关到网关客户端池使用专用的 Gateway:{zone} 监听器
 	g.gatewayClientPool = NewGatewayClientPool(g)
 	if g.gatewayDiscovery != nil {
 		g.gatewayClientPool.SetDiscovery(g.gatewayDiscovery)
 	}
 	g.gatewayClientPool.LoadEvents(g.gatewayEvents)
 
-	// gRPC server
+	// gRPC服务器
 	grpcPort := fmt.Sprintf(":%d", g.grpcCfg.Port)
 	tlog.Info("starting gRPC server", "port", grpcPort)
 	go func() {
@@ -337,13 +342,13 @@ func (g *Gateway) StartServices() {
 		}
 	}()
 
-	// Stats HTTP server
+	// 统计HTTP服务器
 	g.StartStatsServer(fmt.Sprintf(":%d", cfg.Port))
 
-	// Start TCP/WS transports
+	// 启动TCP/WebSocket传输层
 	g.startTransports(cfg)
 
-	// Prometheus
+	// Prometheus监控指标导出
 	if cfg.Monitoring.Prometheus.Enabled {
 		g.promExporter = prometheus.NewExporter(prometheus.ExporterConfig{
 			Enabled: true,
@@ -726,9 +731,7 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 
 	ctx.FrameBuf = append(ctx.FrameBuf, data...)
 
-	// Process each complete frame using the normal protocol path. The logic
-	// stream carries the real client command for every message; it does not
-	// define a gateway-private batch command.
+	// 使用正常协议路径处理每个完整帧。逻辑流携带每条消息的真实客户端命令；它不定义网关私有的批处理命令。
 	maxFrame := g.protection.MaxFrameSize
 	for len(ctx.FrameBuf) >= 4 {
 		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
@@ -757,31 +760,29 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	return
 }
 
-// handleBatchTraffic collects all complete frames from FrameBuf into a single
-// RouteBatch message and forwards it via one SendMessage call. This reduces
-// per-frame overhead (proto parse, deep copy, alloc, channel send) to per-batch.
+// handleBatchTraffic 将 FrameBuf 中的所有完整帧收集到单个 RouteBatch 消息中，
+// 并通过一次 SendMessage 调用转发。这将每帧开销（proto解析、深拷贝、分配、通道发送）
+// 降低到每批次。
 //
-// Zero-copy optimization: FrameBuf already contains [4-byte frameLen][frameData]
-// repeated, which is exactly the RouteBatch Data format. Instead of copying
-// frames into a separate batch buffer, we transfer ownership of the FrameBuf
-// slice to the batch message and let the next OnTraffic call allocate a fresh
-// buffer. This eliminates the per-batch 256KB allocation + copy that caused
-// GC pressure at 20M QPS.
+// 零拷贝优化：FrameBuf 已包含 [4字节帧长度][帧数据] 的重复结构，
+// 这恰好是 RouteBatch 数据格式。我们不需要将帧复制到单独的批处理缓冲区中，
+// 而是将 FrameBuf 切片的所有权转移给批处理消息，让下一次 OnTraffic 调用分配
+// 新缓冲区。这消除了在2000万QPS时导致GC压力的每批256KB分配和拷贝。
 //
-// Batch format (single-conn): RouteBatch message with:
+// 批处理格式（单连接）：RouteBatch 消息包含：
 //
-//	ConnectionId = ctx.ConnectionID (shared by all frames from this connection)
-//	Data = FrameBuf[:offset] (transferred ownership, zero copy)
-//	Cmd = frame count
+//	ConnectionId = ctx.ConnectionID（此连接的所有帧共享）
+//	Data = FrameBuf[:offset]（转移所有权，零拷贝）
+//	Cmd = 帧数量
 //
-// The logic server unmarshals each payload to get route and dispatches individually.
-// ConnectionId is set from the outer message if the inner message doesn't have one.
+// 逻辑服反序列化每个负载以获取路由并分别分发。
+// 如果内部消息没有 ConnectionId，则从外部消息设置。
 func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet.Action) {
 	maxFrame := g.protection.MaxFrameSize
 
-	// Count complete frames and find the split point.
-	// FrameBuf format: [4-byte frameLen][frameData] repeated
-	// = exactly the batch format needed by the logic server.
+	// 统计完整帧数并找到分割点。
+	// FrameBuf 格式：[4字节帧长度][帧数据] 重复
+	// = 逻辑服所需的批处理格式。
 	offset := 0
 	batchCount := 0
 	for offset+4 <= len(ctx.FrameBuf) {
@@ -792,7 +793,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 		}
 		totalLen := 4 + int(frameLen)
 		if offset+totalLen > len(ctx.FrameBuf) {
-			break // incomplete frame, wait for more data
+			break // 不完整帧，等待更多数据
 		}
 		if batchCount == 0 {
 			cmd, _, _, ok := gateway.ExtractMessageFrame(ctx.FrameBuf[offset+4 : offset+totalLen])
@@ -801,6 +802,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 				return gnet.Close
 			}
 			if cmd == gateway.CmdLoginGate {
+				// 登录命令不能被批处理，需要立即处理
 				frameData := append([]byte(nil), ctx.FrameBuf[offset+4:offset+totalLen]...)
 				ctx.FrameBuf = append(ctx.FrameBuf[:0], ctx.FrameBuf[offset+totalLen:]...)
 				return g.handleTCPRequest(c, frameData)
@@ -817,8 +819,7 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 
 	conn := g.connectionManager.GetConnection(ctx.ConnectionID)
 	if conn != nil && !conn.IsAuthenticated() {
-		// Check every frame's cmd — a batch with a pre-auth first frame must not
-		// smuggle non-pre-auth commands through when the connection is unauthenticated.
+		// 检查每帧的命令——未认证连接的批处理中，如果首帧是预认证命令，不允许混入非预认证命令。
 		off := 0
 		for off+4 <= len(ctx.FrameBuf) {
 			frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[off : off+4])
@@ -840,11 +841,8 @@ func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet
 
 	g.messagesReceived.Add(int64(batchCount))
 
-	// Split FrameBuf FIRST: transfer complete frames to batchData, keep
-	// incomplete tail in FrameBuf. This must happen before any early return
-	// (overload, no logic client) to prevent frames from being recounted
-	// on the next OnTraffic call — which would cause unbounded growth of
-	// messagesReceived/dropped counters and FrameBuf memory.
+	// 首先分割 FrameBuf：将完整帧转移到 batchData，不完整尾部保留在 FrameBuf 中。
+	// 这必须在任何提前返回（过载、无逻辑服）之前发生，以防止帧在下次 OnTraffic 调用时被重复计数。
 	var batchData []byte
 	if offset == len(ctx.FrameBuf) {
 		batchData = ctx.FrameBuf
@@ -901,9 +899,8 @@ func (g *Gateway) isLogicConnected() bool {
 }
 
 func (g *Gateway) isPreAuthCommand(cmd int32) bool {
-	// The logic login command is the stable protocol boundary. Keep it as a
-	// built-in fallback so an older dynamic configuration cannot lock out all
-	// newly connected sessions after a command-range migration.
+	// 逻辑登录命令是稳定的协议边界。将其作为内置回退保留，
+	// 以便旧的动态配置在命令范围迁移后不会锁定所有新连接的会话。
 	if cmd == gateway.CmdLogicLoginReq {
 		return true
 	}
@@ -932,7 +929,7 @@ func (g *Gateway) GetLogicClient(serverID string) LogicClientProvider {
 	return g.logicClientPool.GetClient(serverID)
 }
 
-// LookupLogicAddress queries the service discovery for a logic server address by serverID.
+// LookupLogicAddress 通过 serverID 在服务发现中查询逻辑服地址。
 func (g *Gateway) LookupLogicAddress(serverID string) string {
 	if g.logicClientPool == nil {
 		return ""
@@ -953,11 +950,9 @@ func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
 	case "hmac":
 		return validateHMACLoginKey(userID, loginKey, g.protection.LoginAuth.Secret)
 	case "delegate":
-		// Delegate validation to logic server — the gateway trusts the
-		// logic response. If logic rejects the user, it will not send
-		// back a UserKey, and the connection stays unauthenticated.
+		// 将验证委托给逻辑服——网关信任逻辑服的响应。如果逻辑服拒绝用户，它不会返回 UserKey。
 		return true
-	default: // "none" or empty
+	default: // "none" 或空值
 		return true
 	}
 }
@@ -982,13 +977,11 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	if userUUID == "" {
 		userUUID = connectionID
 	}
-	// Keep the selected logic server in the gateway-side identity so session
-	// indexes cannot collide across logic shards.
+	// 保持选中的逻辑服在网关侧的身份标识中，以防止逻辑分片之间的会话索引冲突。
 	g.connectionManager.UpdateConnectionUserUUID(connectionID, req.ServerId+":"+userUUID)
 	writeAck(0, "ok", req.ServerId)
 
-	// Forward login StreamData to logic so it can register session and
-	// handle login-specific logic (e.g. joining groups, setting up state).
+	// 将登录 StreamData 转发给逻辑服，以便它注册会话并处理登录特定逻辑（如加入群组、设置状态）。
 	connObj := g.connectionManager.GetConnection(connectionID)
 	if connObj != nil {
 		if lc := g.GetLogicClient(req.ServerId); lc != nil {
@@ -1113,12 +1106,12 @@ func (g *Gateway) GetStreamConfig() config.StreamConfig {
 	return g.streamCfg
 }
 
-// GetGatewayID returns the stable identity advertised with every backend stream.
+// GetGatewayID 返回在每个后端流中通告的稳定身份标识。
 func (g *Gateway) GetGatewayID() string {
 	return g.gatewayID
 }
 
-// GetServerID returns the etcd instance ID used to register this gateway.
+// GetServerID 返回用于注册此网关的 etcd 实例ID。
 func (g *Gateway) GetServerID() string {
 	return g.serverID
 }
@@ -1148,12 +1141,12 @@ func (g *Gateway) Close() {
 	g.closeOnce.Do(func() {
 		close(g.stopChan)
 
-		// Phase 1: Stop accepting new connections (engine.Stop)
+		// 阶段1：停止接受新连接（engine.Stop）
 		if g.engine != nil {
 			g.engine.Stop(context.Background())
 		}
 
-		// Phase 2: Drain in-flight messages (max 2min)
+		// 阶段2：排空进行中的消息（最多2分钟）
 		drainTimeout := 2 * time.Minute
 		drainDone := make(chan struct{})
 		go func() {
@@ -1234,13 +1227,11 @@ func (g *Gateway) Close() {
 	})
 }
 
-// drainConnections waits for all connections to finish in-flight work.
-// It transitions each connection to StateClosed and waits for the
-// connection manager to clean up.
+// drainConnections 等待所有连接完成进行中的工作。它将每个连接转换为 StateClosed 状态并等待连接管理器清理。
 func (g *Gateway) drainConnections(timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 
-	// Transition all Forward connections to Closed (reject new messages)
+	// 将所有 Forward 状态的连接转换为 Closed（拒绝新消息）
 	g.connectionManager.connections.Range(func(key, value interface{}) bool {
 		conn := value.(*Connection)
 		if conn.GetState() == StateForward {
@@ -1249,7 +1240,7 @@ func (g *Gateway) drainConnections(timeout time.Duration) {
 		return true
 	})
 
-	// Wait for connection count to drop to 0 or timeout
+	// 等待连接数降为0或超时
 	for time.Now().Before(deadline) {
 		if g.connectionManager.GetConnectionCount() == 0 {
 			return
@@ -1258,8 +1249,8 @@ func (g *Gateway) drainConnections(timeout time.Duration) {
 	}
 }
 
-// validateHMACLoginKey validates login_key as HMAC-SHA256(userID, secret).
-// The client is expected to compute: loginKey = hex(HMAC-SHA256(secret, userID)).
+// validateHMACLoginKey 验证 login_key 是否为 HMAC-SHA256(userID, secret) 的值。
+// 客户端应计算：loginKey = hex(HMAC-SHA256(secret, userID))。
 func validateHMACLoginKey(userID, loginKey, secret string) bool {
 	if secret == "" || userID == "" || loginKey == "" {
 		return false

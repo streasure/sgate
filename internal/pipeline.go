@@ -26,50 +26,46 @@ func putStreamData(msg *protoGw.StreamData) {
 	streamDataPool.Put(msg)
 }
 
-// PipelineResult carries the outcome of processing a client message through the
-// shared pipeline. The caller (TCP or WebSocket handler) uses this to decide
-// how to send the error response and which gnet.Action to return.
+// PipelineResult 携带通过共享消息管道处理客户端消息的结果。
+// 调用方（TCP或WebSocket处理器）使用此结构决定如何发送错误响应以及返回哪个gnet.Action。
 type PipelineResult struct {
 	Action   gnet.Action
 	Error    error
 	ProtoMsg *protoGw.StreamData
 }
 
-// MessagePipeline implements the shared message processing logic for both TCP
-// and WebSocket paths. It eliminates code duplication for overload check,
-// authentication, security chain, filter chain, and forward-to-logic steps.
+// MessagePipeline 实现TCP和WebSocket共享的消息处理逻辑。
+// 消除了过载检查、认证、安全链、过滤器链和转发到逻辑层等步骤的代码重复。
 type MessagePipeline struct {
 	gw *Gateway
 }
 
-// NewMessagePipeline creates a pipeline bound to the given gateway.
+// NewMessagePipeline 创建绑定到指定网关的消息管道。
 func NewMessagePipeline(gw *Gateway) *MessagePipeline {
 	return &MessagePipeline{gw: gw}
 }
 
-// Process runs the common message processing pipeline:
-//  1. Overload check
-//  2. Connection/auth state
-//  3. Security chain (blacklist, rate limit, WAF, circuit breaker)
-//  4. Message integrity (optional)
-//  5. Filter chain
-//  6. Forward to LogicClient
-//  7. Metrics recording
+// Process 运行通用消息处理管道：
+//  1. 过载检查
+//  2. 连接/认证状态检查
+//  3. 安全链（黑名单、限流、WAF、熔断器）
+//  4. 消息完整性检查（可选）
+//  5. 过滤器链
+//  6. 转发到逻辑客户端
+//  7. 指标记录
 //
-// Parameters:
-//   - conn: the raw gnet.Conn (TCP or WS underlying)
-//   - data: the raw frame payload (for WAF inspection)
-//   - message: decoded StreamData
-//   - connectionID: the connection identifier
-//   - isPreAuth: whether this command is allowed before full authentication
+// 参数：
+//   - conn：原始gnet.Conn连接（TCP或WebSocket底层连接）
+//   - data：原始帧负载（用于WAF检测）
+//   - message：解码后的 StreamData 消息。
+//   - connectionID：连接标识符
 //
-// Returns a PipelineResult. On success, Result.ProtoMsg contains the message
-// to forward. On failure, Result.Error is non-nil and the caller should send
-// the error response using its protocol-specific method.
+// 返回PipelineResult。成功时，Result.ProtoMsg包含要转发的消息；
+// 失败时，Result.Error非空，调用方应使用协议特定的方法发送错误响应。
 func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.StreamData, connectionID string) PipelineResult {
 	g := p.gw
 
-	// Stage 1: Overload check
+	// 阶段1：过载检查
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
@@ -87,7 +83,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 	}
 
-	// Stage 2: Connection/auth state
+	// 阶段2：连接/认证状态检查
 	connObj := g.connectionManager.GetConnection(connectionID)
 	if connObj == nil || connObj.GetServerID() == "" {
 		return PipelineResult{Action: gnet.Close}
@@ -100,7 +96,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 	}
 
-	// Try cached LogicClient first (lock-free), fallback to pool lookup
+	// 优先使用缓存的LogicClient（无锁），未命中则回退到连接池查找
 	logicClient := connObj.GetCachedLogicClient()
 	if logicClient == nil || !logicClient.IsConnected() {
 		logicClient = g.GetLogicClient(connObj.GetServerID())
@@ -111,8 +107,8 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		connObj.SetCachedLogicClient(logicClient)
 	}
 
-	// Fast path: skip security/filter chain for authenticated connections
-	// when no security components are enabled or all are nil.
+	// 快速路径：当没有启用安全组件或全部为nil时，
+	// 跳过已认证连接的安全/过滤器链检查
 	securityDisabled := g.whitelistBlacklist == nil &&
 		g.rateLimiter == nil &&
 		g.waf == nil &&
@@ -125,8 +121,8 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	var protoMsg *protoGw.StreamData
 	filterOK := true
 
-	if securityDisabled && g.tracer == nil && g.balancer == nil && g.degradation == nil {
-		// Ultra-fast path: no security, no tracing, no balancing
+		if securityDisabled && g.tracer == nil && g.balancer == nil && g.degradation == nil {
+		// 超级快速路径：无安全检查、无追踪、无负载均衡
 		remoteIP = ""
 		protoMsg = getStreamData()
 		protoMsg.SessionId = connectionID
@@ -135,11 +131,11 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		protoMsg.SeqId = message.SeqId
 		protoMsg.Cmd = cmd
 	} else {
-		// Full path with security chain
+		// 完整路径，包含安全链处理
 		routeKey = strconv.FormatInt(int64(cmd), 10)
 		remoteIP = getRemoteIP(conn)
 
-		// Stage 3: Security chain (blacklist -> rate limit -> WAF -> circuit breaker)
+		// 阶段3：安全链（黑名单 -> 限流 -> WAF -> 熔断器）
 		if g.whitelistBlacklist != nil {
 			if g.whitelistBlacklist.IsInBlacklist(remoteIP) {
 				g.messagesDroppedBlacklist.Add(1)
@@ -175,7 +171,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			}
 		}
 
-		// Stage 4: Message integrity check (optional)
+		// 阶段4：消息完整性检查（可选）
 		if g.protection.VerifyInbound {
 			if err := g.messageIntegrity.ProcessMessage(message); err != nil {
 				return PipelineResult{
@@ -185,7 +181,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			}
 		}
 
-		// Trace span for latency tracking
+		// 创建追踪Span用于延迟跟踪
 		if g.tracer != nil {
 			traceID := obs.GenerateTraceID()
 			span = g.tracer.StartSpan(traceID, "forward", "")
@@ -193,7 +189,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			g.tracer.AddAttribute(span, "connectionID", connectionID)
 		}
 
-		// Stage 5: Filter chain (JWT, canary, mirror, OTel, degradation)
+		// 阶段5：过滤器链（JWT、金丝雀、镜像、OpenTelemetry、降级）
 		protoMsg, filterOK = g.applyForwardFilters(conn, message.Data, connectionID, cmd)
 		if !filterOK {
 			if span != nil && g.tracer != nil {
@@ -225,7 +221,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 	}
 
-	// Stage 6: Forward to LogicClient (use cached client from Stage 2)
+	// 阶段6：转发到LogicClient（使用阶段2缓存的客户端）
 	var sendErr error
 	if logicClient == nil {
 		sendErr = ErrNotConnected
@@ -233,7 +229,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		sendErr = logicClient.SendMessage(protoMsg)
 	}
 
-	// Stage 7: Metrics recording
+	// 阶段7：指标记录
 	if sendErr != nil {
 		tlog.Warn("client message forward failed", "sessionID", connectionID, "serverID", connObj.GetServerID(), "cmd", cmd, "error", sendErr)
 		g.messagesDroppedFull.Add(1)
@@ -277,13 +273,12 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	return PipelineResult{Action: gnet.None, ProtoMsg: protoMsg}
 }
 
-// ProcessForWS is a thin wrapper for WebSocket callers that also handles
-// user key mapping from the message. It delegates to Process for the core
-// pipeline logic.
+// ProcessForWS 是WebSocket调用者的轻量级封装，
+// 同时处理消息中的用户标识映射。核心管道逻辑委托给Process处理。
 func (p *MessagePipeline) ProcessForWS(conn gnet.Conn, data []byte, message *protoGw.StreamData, connectionID string) PipelineResult {
 	g := p.gw
 
-	// WebSocket-specific: update user UUID mapping if present
+	// WebSocket特定：如果存在用户UUID则更新映射
 	if message.UserKey != "" {
 		oldUserUUID := "temp_" + connectionID
 		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserKey)
@@ -292,7 +287,7 @@ func (p *MessagePipeline) ProcessForWS(conn gnet.Conn, data []byte, message *pro
 
 	result := p.Process(conn, data, message, connectionID)
 
-	// For WS, inject UserKey into the proto message if the filter chain didn't set it
+	// 对于WebSocket，如果过滤器链未设置UserKey，则注入到协议消息中
 	if result.ProtoMsg != nil {
 		if result.ProtoMsg.UserKey == "" && message.UserKey != "" {
 			result.ProtoMsg.UserKey = message.UserKey

@@ -27,13 +27,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// LogicConnectionState 逻辑服连接状态
 type LogicConnectionState int32
 
 const (
-	LogicStateDisconnected LogicConnectionState = iota
-	LogicStateConnecting
-	LogicStateConnected
-	LogicStateReconnecting
+	LogicStateDisconnected  LogicConnectionState = iota // 未连接
+	LogicStateConnecting                                // 连接中
+	LogicStateConnected                                 // 已连接
+	LogicStateReconnecting                              // 重连中
 )
 
 func (s LogicConnectionState) String() string {
@@ -51,21 +52,24 @@ func (s LogicConnectionState) String() string {
 	}
 }
 
+// 错误定义
 var (
-	ErrNotConnected      = errors.New("not connected to logic server")
-	ErrConnectionClosing = errors.New("connection is closing")
-	ErrQueueFull         = errors.New("send queue full")
-	ErrSendTimeout       = errors.New("send timeout")
-	ErrBackpressure      = errors.New("backpressure activated")
+	ErrNotConnected      = errors.New("未连接到逻辑服")
+	ErrConnectionClosing = errors.New("连接正在关闭")
+	ErrQueueFull         = errors.New("发送队列已满")
+	ErrSendTimeout       = errors.New("发送超时")
+	ErrBackpressure      = errors.New("背压已激活")
 )
 
+// ReconnectConfig 重连配置，控制指数退避策略
 type ReconnectConfig struct {
-	InitialInterval time.Duration
-	MaxInterval     time.Duration
-	MaxAttempts     int
-	Multiplier      float64
+	InitialInterval time.Duration // 初始重连间隔
+	MaxInterval     time.Duration // 最大重连间隔
+	MaxAttempts     int           // 最大重连尝试次数（0表示无限）
+	Multiplier      float64       // 退避倍数
 }
 
+// DefaultReconnectConfig 默认重连配置
 var DefaultReconnectConfig = ReconnectConfig{
 	InitialInterval: 1 * time.Second,
 	MaxInterval:     30 * time.Second,
@@ -73,15 +77,17 @@ var DefaultReconnectConfig = ReconnectConfig{
 	Multiplier:      2.0,
 }
 
+// HealthCheckConfig 健康检查配置
 type HealthCheckConfig struct {
-	Interval    time.Duration
-	Timeout     time.Duration
-	MaxFailures int
+	Interval    time.Duration // 检查间隔
+	Timeout     time.Duration // 超时时间
+	MaxFailures int           // 最大失败次数，超过则触发重连
 	// Enabled 控制是否对逻辑服做主动健康检查（ping）。
 	// 默认 true：主动 ping 并在连续失败超阈值后重连，保障容灾切换。
 	Enabled bool
 }
 
+// DefaultHealthCheckConfig 默认健康检查配置
 var DefaultHealthCheckConfig = HealthCheckConfig{
 	Interval:    5 * time.Second,
 	Timeout:     3 * time.Second,
@@ -89,25 +95,28 @@ var DefaultHealthCheckConfig = HealthCheckConfig{
 	Enabled:     true,
 }
 
+// StreamShard 单个流分片，封装一个 gRPC 流连接及其发送通道
 type StreamShard struct {
-	stream      protoGw.GatewayStream_OnDataClient
-	mu          sync.Mutex
-	sendCh      chan *protoGw.StreamData
-	stopCh      chan struct{}
-	stopOnce    sync.Once
-	ctx         context.Context
-	cancel      context.CancelFunc
-	index       int
-	lc          *LogicClient
-	closed      atomic.Bool
-	sendTimeout time.Duration
+	stream      protoGw.GatewayStream_OnDataClient // gRPC 流客户端
+	mu          sync.Mutex                         // 保护 stream 引用的互斥锁
+	sendCh      chan *protoGw.StreamData            // 发送通道
+	stopCh      chan struct{}                       // 停止信号通道
+	stopOnce    sync.Once                          // 确保只关闭一次 stopCh
+	ctx         context.Context                    // 流上下文
+	cancel      context.CancelFunc                 // 取消函数
+	index       int                                // 分片索引
+	lc          *LogicClient                       // 所属的逻辑服客户端
+	closed      atomic.Bool                        // 是否已关闭
+	sendTimeout time.Duration                      // 发送超时
 }
 
+// StreamManager 流连接管理器，通过分片减少并发竞争
 type StreamManager struct {
-	shards      []*StreamShard
-	sendTimeout time.Duration
+	shards      []*StreamShard  // 分片数组
+	sendTimeout time.Duration   // 发送超时
 }
 
+// NewStreamManager 创建流管理器，根据 CPU 核心数和配置初始化分片
 func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Duration) *StreamManager {
 	if shardCount <= 0 {
 		shardCount = runtime.NumCPU() * 4
@@ -135,12 +144,12 @@ func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Dura
 
 // writeCoalescer 按连接合并后一次性 flush。
 // 目的：减少 gnet AsyncWrite 调用次数。每次 AsyncWrite 向 event-loop channel 发送一个 task，
-// 在 Windows 上 channel send 竞争 runtime 互斥锁（runtime.lock2），94 个 receiveMessages
-// goroutine 同时发送时 lock 竞争达 74% CPU。通过跨 batch 合并，将 N 次 SendMulti
-// 降为 M 次（M=不同连接数），减少 channel send 约 10-50 倍。
+	// 在 Windows 上向通道发送数据会竞争 runtime 互斥锁（runtime.lock2），94 个消息接收
+	// 协程同时发送时锁竞争达到 74% CPU。通过跨批次合并，将 N 次 SendMulti
+	// 降为 M 次（M 为不同连接数），减少通道发送约 10-50 倍。
 //
 // 内存优化：每个 entry 的 data buffer 从 coalescerBufPool 获取，在 AsyncWrite 完成后
-// 通过 callback 归还到池，避免每帧分配导致 GC 压力（千万级 QPS 下 GC 无法跟上分配速度）。
+	// 通过回调归还到对象池，避免每帧分配导致 GC 压力（千万级 QPS 下 GC 无法跟上分配速度）。
 type writeCoalescer struct {
 	entries   []coalescedEntry // 每个连接一个 entry，存储累积的帧数据
 	index     map[string]int   // connID -> entries 下标，避免重复 GetConnection
@@ -150,7 +159,7 @@ type writeCoalescer struct {
 }
 
 // coalescedEntry 累积一个连接的帧数据。
-// bufPtr 持有指向池化 buffer 的指针，在 flush 后通过 AsyncWrite callback 归还。
+	// bufPtr 持有指向池化缓冲区的指针，在刷新后通过 AsyncWrite 回调归还。
 type coalescedEntry struct {
 	conn   *Connection
 	data   []byte  // [4字节 len][payload] 重复格式，底层数组来自 coalescerBufPool
@@ -172,6 +181,7 @@ const (
 	coalescerMaxBufCap    = 1 << 20              // 1MB：归还到池的 buffer 容量上限，避免持有过大 buffer
 )
 
+// newWriteCoalescer 创建写合并器
 func newWriteCoalescer(cm *ConnectionManager) *writeCoalescer {
 	return &writeCoalescer{
 		entries:   make([]coalescedEntry, 0, 64),
@@ -191,7 +201,7 @@ func (wc *writeCoalescer) getBuf(idx int) {
 }
 
 // addMulti 将 multi-conn 格式的一条消息加入 coalescer。
-// payload 是已序列化的单条消息 bytes。
+	// payload 是已序列化的单条消息字节数据。
 func (wc *writeCoalescer) addMulti(connID string, payload []byte) bool {
 	idx, ok := wc.index[connID]
 	if !ok {
@@ -212,7 +222,7 @@ func (wc *writeCoalescer) addMulti(connID string, payload []byte) bool {
 	return true
 }
 
-// addSingle 将 single-conn 格式的整个 batch data 加入 coalescer。
+	// addSingle 将单连接格式的整批数据加入写合并器。
 // data 已是 [4字节 len][payload] 重复格式，直接追加。
 func (wc *writeCoalescer) addSingle(connID string, data []byte, count int) bool {
 	idx, ok := wc.index[connID]
@@ -231,12 +241,13 @@ func (wc *writeCoalescer) addSingle(connID string, data []byte, count int) bool 
 	return true
 }
 
+// shouldFlush 判断是否应该触发刷新
 func (wc *writeCoalescer) shouldFlush() bool {
 	return wc.count >= coalesceFlushCount || time.Since(wc.lastFlush) >= coalesceFlushInterval
 }
 
 // flush 将所有连接的累积数据通过一次 SendMultiWithCallback 发送，然后重置。
-// buffer 在 gnet AsyncWrite 完成后通过 callback 归还到 coalescerBufPool。
+	// 缓冲区在 gnet AsyncWrite 完成后通过回调归还到 coalescerBufPool。
 // 返回 pushed（成功推送的消息数）。
 func (wc *writeCoalescer) flush() int64 {
 	var pushed int64
@@ -270,6 +281,7 @@ func (wc *writeCoalescer) flush() int64 {
 	return pushed
 }
 
+// GetShard 根据连接 ID 的哈希值获取对应的分片
 func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
 	h := uint32(2166136261)
 	for i := 0; i < len(connectionID); i++ {
@@ -280,9 +292,9 @@ func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
 }
 
 // markShardBroken 分片流失效后的统一处理：触发整体重连。
-// 没有这一步，logic 重启/网络闪断后 shard.stream 永远为 nil，
-// 正向消息静默丢弃、反向推送归零，且 health check 的 ping 也只会
-// 塞进已死的 sendCh 而永远探测不出故障。
+	// 没有这一步，逻辑服重启或网络闪断后 shard.stream 永远为 nil，
+	// 正向消息会静默丢弃、反向推送归零，健康检查的 ping 也只会
+	// 塞进已失效的 sendCh，永远无法探测出故障。
 func (s *StreamShard) markShardBroken() {
 	s.mu.Lock()
 	s.stream = nil
@@ -292,6 +304,7 @@ func (s *StreamShard) markShardBroken() {
 	}
 }
 
+// startSendLoop 启动发送循环，批量消费 sendCh 中的消息并发送到流
 func (s *StreamShard) startSendLoop() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -332,20 +345,20 @@ func (s *StreamShard) startSendLoop() {
 			}
 		}
 
-		// Get stream once for the entire batch
+	// 获取整批消息共用的流引用。
 		s.mu.Lock()
 		stream := s.stream
 		s.mu.Unlock()
 
 		if stream == nil {
-			// Return all messages to pool when stream unavailable
+			// 流不可用时，将所有消息归还到对象池。
 			for _, m := range batch {
 				putStreamData(m)
 			}
 			continue
 		}
 
-		// Send entire batch with single stream reference
+		// 使用单个流引用发送整批消息。
 		sendIdx := 0
 		for sendIdx < len(batch) {
 			if err := stream.Send(batch[sendIdx]); err != nil {
@@ -356,25 +369,26 @@ func (s *StreamShard) startSendLoop() {
 			putStreamData(batch[sendIdx])
 			sendIdx++
 		}
-		// Return unsent messages to pool
+		// 将未发送的消息归还到对象池。
 		for i := sendIdx; i < len(batch); i++ {
 			putStreamData(batch[i])
 		}
 	}
 }
 
+// SendMessage 向分片发送消息，支持快速路径和超时机制
 func (s *StreamShard) SendMessage(msg *protoGw.StreamData) (err error) {
-	// Fast path: check closed flag atomically, skip defer/recover overhead
+	// 快速路径：原子检查关闭标志，避免 defer/recover 开销。
 	if s.closed.Load() {
 		return ErrNotConnected
 	}
 
-	// Try non-blocking send first (most common case)
+	// 先尝试非阻塞发送（最常见情况）。
 	select {
 	case s.sendCh <- msg:
 		return nil
 	default:
-		// Channel full, try with timeout
+		// 通道已满，尝试带超时的发送。
 	}
 
 	func() {
@@ -397,6 +411,7 @@ func (s *StreamShard) SendMessage(msg *protoGw.StreamData) (err error) {
 	return
 }
 
+// stop 停止分片的发送和接收
 func (s *StreamShard) stop() {
 	s.stopOnce.Do(func() {
 		s.closed.Store(true)
@@ -404,27 +419,29 @@ func (s *StreamShard) stop() {
 	})
 }
 
+// LogicClient 逻辑服客户端，管理与单个逻辑服实例的连接和流通信
 type LogicClient struct {
-	client            protoGw.GatewayStreamClient
-	conn              *grpc.ClientConn
-	mu                sync.RWMutex
-	state             int32
-	address           string
-	streamManager     *StreamManager
-	streamCtx         context.Context
-	streamCancel      context.CancelFunc
-	reconnectConfig   ReconnectConfig
-	healthCheckConfig HealthCheckConfig
-	healthChecker     *HealthChecker
-	reconnectManager  *ReconnectManager
-	messageQueue      *StreamMessageQueue
-	gateway           GatewayInterface
-	closing           bool
-	closed            chan struct{}
-	shardCount        int
-	serverID          string
+	client            protoGw.GatewayStreamClient // gRPC 流客户端
+	conn              *grpc.ClientConn            // gRPC 连接
+	mu                sync.RWMutex                // 保护状态和连接的读写锁
+	state             int32                       // 连接状态（原子操作）
+	address           string                      // 逻辑服地址
+	streamManager     *StreamManager              // 流分片管理器
+	streamCtx         context.Context             // 流上下文
+	streamCancel      context.CancelFunc          // 取消流上下文
+	reconnectConfig   ReconnectConfig             // 重连配置
+	healthCheckConfig HealthCheckConfig           // 健康检查配置
+	healthChecker     *HealthChecker              // 健康检查器
+	reconnectManager  *ReconnectManager           // 重连管理器
+	messageQueue      *StreamMessageQueue         // 断线期间的消息缓存队列
+	gateway           GatewayInterface            // 网关接口引用
+	closing           bool                        // 是否正在关闭
+	closed            chan struct{}                // 关闭完成信号
+	shardCount        int                         // 分片数量
+	serverID          string                      // 逻辑服标识
 }
 
+// NewLogicClient 创建逻辑服客户端实例
 func NewLogicClient(gateway GatewayInterface) *LogicClient {
 	queuePolicy := config.StreamQueueConfig{}
 	var sendTimeout time.Duration
@@ -449,10 +466,12 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 
 func (lc *LogicClient) SetServerID(serverID string) { lc.serverID = serverID }
 
+// getState 原子获取连接状态
 func (lc *LogicClient) getState() LogicConnectionState {
 	return LogicConnectionState(atomic.LoadInt32(&lc.state))
 }
 
+// setState 原子设置连接状态并通知状态变更
 func (lc *LogicClient) setState(newState LogicConnectionState) {
 	oldState := LogicConnectionState(atomic.LoadInt32(&lc.state))
 	if oldState == newState {
@@ -462,6 +481,7 @@ func (lc *LogicClient) setState(newState LogicConnectionState) {
 	lc.notifyStateChange(oldState, newState)
 }
 
+// notifyStateChange 记录连接状态变更日志
 func (lc *LogicClient) notifyStateChange(oldState, newState LogicConnectionState) {
 	tlog.Info("logic connection state changed",
 		"oldState", oldState.String(),
@@ -469,6 +489,7 @@ func (lc *LogicClient) notifyStateChange(oldState, newState LogicConnectionState
 	)
 }
 
+// Connect 连接到逻辑服
 func (lc *LogicClient) Connect(address string) error {
 	lc.mu.Lock()
 	if lc.closing {
@@ -480,6 +501,7 @@ func (lc *LogicClient) Connect(address string) error {
 	return lc.doConnect(false)
 }
 
+// doConnect 执行实际的连接/重连操作
 func (lc *LogicClient) doConnect(isReconnect bool) error {
 	lc.mu.Lock()
 	if lc.closing {
@@ -536,7 +558,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		return err
 	}
 
-	// Re-check closing after blocking dial — Close() may have been called during dial
+	// 在阻塞的 dial 之后重新检查关闭状态，dial 期间可能已调用 Close()。
 	lc.mu.RLock()
 	if lc.closing {
 		lc.mu.RUnlock()
@@ -558,8 +580,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	lc.streamCtx, lc.streamCancel = context.WithCancel(context.Background())
 	lc.mu.Unlock()
 
-	// Shut down old stream shards: nil out the stream reference and close send channels
-	// so that startSendLoop goroutines stop using the old (now-closed) streams.
+	// 关闭旧的流分片：置空流引用并关闭发送通道，使 startSendLoop 协程停止使用旧的（已关闭的）流。
 	if lc.streamManager != nil {
 		for i := 0; i < len(lc.streamManager.shards); i++ {
 			if shard := lc.streamManager.shards[i]; shard != nil {
@@ -623,7 +644,8 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			shard.mu.Unlock()
 
 			tlog.Info("stream shard established", "shard", idx)
-		}(i)
+		// 流分片建立成功
+	}(i)
 	}
 	wg.Wait()
 
@@ -659,7 +681,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		go lc.streamManager.shards[i].receiveMessages(lc, i)
 	}
 
-	// Flush buffered messages from disconnect period
+	// 冲刷断线期间缓存的消息。
 	if lc.messageQueue != nil {
 		go lc.messageQueue.Flush(lc)
 	}
@@ -679,6 +701,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	return nil
 }
 
+// Close 关闭逻辑服客户端，释放所有资源
 func (lc *LogicClient) Close() {
 	lc.mu.Lock()
 	if lc.closing {
@@ -723,6 +746,7 @@ func (lc *LogicClient) Close() {
 	tlog.Info("closed logic server connection")
 }
 
+// receiveMessages 从流中接收消息并推送到客户端连接
 func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -746,7 +770,8 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		batchPush = lc.gateway.GetStreamConfig().BatchPush
 	}
 
-	// batchPush mode: collect messages and flush as PushBatch
+	// batchPush 模式：收集消息并以 PushBatch 形式刷新。
+	// 批量推送模式：收集消息并以 PushBatch 形式批量刷新
 	const batchFlushSize = 128
 	batch := make([]*protoGw.StreamData, 0, batchFlushSize)
 
@@ -812,6 +837,10 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			closing := lc.closing
 			lc.mu.RUnlock()
 
+			if batchPush {
+				flushBatch()
+			}
+
 			if closing {
 				return
 			}
@@ -825,7 +854,8 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			continue
 		}
 
-		// Broadcast: empty SessionId means send to all connections on this gateway.
+		// Broadcast：空 SessionId 表示发送到此网关上的所有连接。
+		// 广播：空 SessionId 表示发送到此网关上的所有连接
 		if msg.SessionId == "" {
 			if batchPush {
 				flushBatch()
@@ -845,6 +875,9 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		}
 
 		if batchPush {
+			if msg.UserKey != "" {
+				lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
+			}
 			batch = append(batch, msg)
 			if len(batch) >= batchFlushSize {
 				flushBatch()
@@ -870,6 +903,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	}
 }
 
+// handleDisconnection 处理断线事件，触发重连
 func (lc *LogicClient) handleDisconnection() {
 	lc.mu.RLock()
 	closing := lc.closing
@@ -903,8 +937,10 @@ func (lc *LogicClient) handleDisconnection() {
 	}
 }
 
+// SendMessage 发送消息到逻辑服，支持断线缓存
 func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
-	// Fast path: check state atomically without lock
+	// 快速路径：无锁原子检查连接状态。
+	// 快速路径：原子检查状态，无需加锁
 	if lc.getState() != LogicStateConnected {
 		lc.mu.RLock()
 		closing := lc.closing
@@ -934,6 +970,7 @@ func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 	return nil
 }
 
+// SendMessageDirect 直接发送消息，不经过断线缓存队列
 func (lc *LogicClient) SendMessageDirect(msg *protoGw.StreamData) error {
 	lc.mu.RLock()
 	state := lc.getState()
@@ -960,17 +997,19 @@ func (lc *LogicClient) GetState() LogicConnectionState {
 	return lc.getState()
 }
 
+// HealthChecker 健康检查器，定期向逻辑服发送心跳探测
 type HealthChecker struct {
-	lc          *LogicClient
-	interval    time.Duration
-	timeout     time.Duration
-	maxFailures int
-	failCount   int
-	enabled     bool
-	stopCh      chan struct{}
-	wg          sync.WaitGroup
+	lc          *LogicClient   // 逻辑服客户端引用
+	interval    time.Duration  // 检查间隔
+	timeout     time.Duration  // 超时时间
+	maxFailures int            // 最大允许失败次数
+	failCount   int            // 当前连续失败次数
+	enabled     bool           // 是否启用主动健康检查
+	stopCh      chan struct{}   // 停止信号
+	wg          sync.WaitGroup // 等待检查循环退出
 }
 
+// NewHealthChecker 创建健康检查器实例
 func NewHealthChecker(lc *LogicClient, config HealthCheckConfig) *HealthChecker {
 	return &HealthChecker{
 		lc:          lc,
@@ -982,16 +1021,19 @@ func NewHealthChecker(lc *LogicClient, config HealthCheckConfig) *HealthChecker 
 	}
 }
 
+// Start 启动健康检查循环
 func (hc *HealthChecker) Start() {
 	hc.wg.Add(1)
 	go hc.checkLoop()
 }
 
+// Stop 停止健康检查循环并等待退出
 func (hc *HealthChecker) Stop() {
 	close(hc.stopCh)
 	hc.wg.Wait()
 }
 
+// checkLoop 健康检查定时循环
 func (hc *HealthChecker) checkLoop() {
 	defer hc.wg.Done()
 	ticker := time.NewTicker(hc.interval)
@@ -1006,6 +1048,7 @@ func (hc *HealthChecker) checkLoop() {
 	}
 }
 
+// doCheck 执行一次健康检查，发送心跳包
 func (hc *HealthChecker) doCheck() {
 	hc.lc.mu.RLock()
 	state := hc.lc.getState()
@@ -1038,6 +1081,7 @@ func (hc *HealthChecker) doCheck() {
 	}
 }
 
+// startHealthChecker 启动健康检查器
 func (lc *LogicClient) startHealthChecker() {
 	if lc.healthChecker != nil {
 		lc.healthChecker.Stop()
@@ -1046,15 +1090,17 @@ func (lc *LogicClient) startHealthChecker() {
 	lc.healthChecker.Start()
 }
 
+// ReconnectManager 重连管理器，处理断线后的自动重连逻辑
 type ReconnectManager struct {
-	lc            *LogicClient
-	config        ReconnectConfig
-	stopCh        chan struct{}
-	doneCh        chan struct{}
-	disconnectCh  chan struct{}
-	lookupAddress func(serverID string) string // optional: query etcd for replacement address
+	lc            *LogicClient                      // 逻辑服客户端引用
+	config        ReconnectConfig                   // 重连配置
+	stopCh        chan struct{}                      // 停止信号
+	doneCh        chan struct{}                      // 运行完成信号
+	disconnectCh  chan struct{}                      // 断线通知通道
+	lookupAddress func(serverID string) string      // 可选：通过 etcd 查询替换地址
 }
 
+// NewReconnectManager 创建重连管理器
 func NewReconnectManager(lc *LogicClient, config ReconnectConfig) *ReconnectManager {
 	return &ReconnectManager{
 		lc:           lc,
@@ -1065,10 +1111,12 @@ func NewReconnectManager(lc *LogicClient, config ReconnectConfig) *ReconnectMana
 	}
 }
 
+// SetLookupAddress 设置地址查询函数，用于 etcd 服务发现
 func (rm *ReconnectManager) SetLookupAddress(fn func(serverID string) string) {
 	rm.lookupAddress = fn
 }
 
+// Run 运行重连管理器事件循环
 func (rm *ReconnectManager) Run() {
 	defer close(rm.doneCh)
 	for {
@@ -1081,11 +1129,13 @@ func (rm *ReconnectManager) Run() {
 	}
 }
 
+// Stop 停止重连管理器
 func (rm *ReconnectManager) Stop() {
 	close(rm.stopCh)
 	<-rm.doneCh
 }
 
+// NotifyDisconnection 通知发生断线，触发重连
 func (rm *ReconnectManager) NotifyDisconnection() {
 	select {
 	case rm.disconnectCh <- struct{}{}:
@@ -1093,6 +1143,7 @@ func (rm *ReconnectManager) NotifyDisconnection() {
 	}
 }
 
+// doReconnect 执行重连逻辑，支持指数退避和 etcd 服务发现
 func (rm *ReconnectManager) doReconnect() {
 	interval := rm.config.InitialInterval
 	attempt := 0
@@ -1109,8 +1160,9 @@ func (rm *ReconnectManager) doReconnect() {
 			tlog.Error("max reconnect attempts reached, trying etcd discovery",
 				"maxAttempts", rm.config.MaxAttempts, "serverID", rm.lc.serverID)
 
-			// Try etcd discovery for a replacement node
-			if rm.lookupAddress != nil {
+		// 尝试通过 etcd 服务发现查找替代节点。
+		// 尝试通过 etcd 发现替代节点
+		if rm.lookupAddress != nil {
 				if newAddr := rm.lookupAddress(rm.lc.serverID); newAddr != "" && newAddr != originalAddress {
 					tlog.Info("discovered replacement address from etcd",
 						"serverID", rm.lc.serverID, "oldAddress", originalAddress, "newAddress", newAddr)
@@ -1151,16 +1203,18 @@ func (rm *ReconnectManager) doReconnect() {
 	}
 }
 
+// StreamMessageQueue 流消息队列，断线期间缓存消息，重连后冲刷
 type StreamMessageQueue struct {
-	queue                 []*protoGw.StreamData
-	mu                    sync.Mutex
-	cond                  *sync.Cond
-	maxSize               int
-	policy                config.QueuePolicy
-	blockTimeout          time.Duration
-	backpressureThreshold float64
+	queue                 []*protoGw.StreamData // 消息队列
+	mu                    sync.Mutex             // 互斥锁
+	cond                  *sync.Cond             // 条件变量，用于阻塞等待
+	maxSize               int                    // 队列最大容量
+	policy                config.QueuePolicy     // 队列策略
+	blockTimeout          time.Duration          // 阻塞超时
+	backpressureThreshold float64                // 背压阈值
 }
 
+// NewStreamMessageQueue 创建消息队列
 func NewStreamMessageQueue(cfg config.StreamQueueConfig) *StreamMessageQueue {
 	maxSize := cfg.MaxSize
 	if maxSize <= 0 {
@@ -1187,6 +1241,7 @@ func NewStreamMessageQueue(cfg config.StreamQueueConfig) *StreamMessageQueue {
 	return mq
 }
 
+// Enqueue 将消息入队，根据策略选择阻塞/超时/背压/丢弃
 func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 	mq.mu.Lock()
 	switch mq.policy {
@@ -1230,7 +1285,7 @@ func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 		mq.mu.Unlock()
 		return nil
 
-	default: // config.QueuePolicyDrop or unknown
+	default: // config.QueuePolicyDrop 或未知策略
 		if len(mq.queue) >= mq.maxSize {
 			mq.queue = mq.queue[1:]
 		}
@@ -1241,6 +1296,7 @@ func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 	}
 }
 
+// Dequeue 从队列头部取出一条消息
 func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 	mq.mu.Lock()
 	if len(mq.queue) == 0 {
@@ -1253,6 +1309,7 @@ func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 	return msg, true
 }
 
+// Flush 冲刷队列中的消息，重连后调用以恢复转发
 func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 	maxRetries := 100
 	for i := 0; i < maxRetries; i++ {
@@ -1283,6 +1340,7 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 	}
 }
 
+// GatewayInterface 网关接口，定义后端网关提供的能力
 type GatewayInterface interface {
 	GetConnectionManager() *ConnectionManager
 	GetGRPCConfig() config.GRPCConfig
@@ -1296,6 +1354,7 @@ type GatewayInterface interface {
 	GetGatewayClient(serverID string) GatewayClientProvider
 }
 
+// GRPCServer gRPC 服务端，处理逻辑服的流式推送和 RPC 请求
 type GRPCServer struct {
 	protoGw.UnimplementedGatewayStreamServer
 	protoGw.UnimplementedGatewayServer
@@ -1303,12 +1362,14 @@ type GRPCServer struct {
 	mu      sync.Mutex
 }
 
+// NewGRPCServer 创建 gRPC 服务端实例
 func NewGRPCServer(gateway GatewayInterface) *GRPCServer {
 	return &GRPCServer{
 		gateway: gateway,
 	}
 }
 
+// OnData 处理来自逻辑服的流式数据（服务端流 RPC）
 func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 	connectionID := generateConnectionID()
 
@@ -1336,6 +1397,7 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 	}
 }
 
+// connection 根据会话 ID 获取客户端连接
 func (s *GRPCServer) connection(sessionID string) (*Connection, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("session_id is required")
@@ -1347,6 +1409,7 @@ func (s *GRPCServer) connection(sessionID string) (*Connection, error) {
 	return conn, nil
 }
 
+// CloseSession 关闭指定会话的客户端连接
 func (s *GRPCServer) CloseSession(_ context.Context, req *protoGw.CloseSessionReq) (*protoGw.CloseSessionAck, error) {
 	conn, err := s.connection(req.GetSessionId())
 	if err != nil {
@@ -1358,6 +1421,7 @@ func (s *GRPCServer) CloseSession(_ context.Context, req *protoGw.CloseSessionRe
 	return &protoGw.CloseSessionAck{}, nil
 }
 
+// KickSession 踢出会话，强制关闭客户端连接
 func (s *GRPCServer) KickSession(ctx context.Context, req *protoGw.KickSessionReq) (*protoGw.KickSessionAck, error) {
 	conn, err := s.connection(req.GetSessionId())
 	if err != nil {
@@ -1369,6 +1433,7 @@ func (s *GRPCServer) KickSession(ctx context.Context, req *protoGw.KickSessionRe
 	return &protoGw.KickSessionAck{}, nil
 }
 
+// SendToClient 向指定会话推送消息
 func (s *GRPCServer) SendToClient(_ context.Context, req *protoGw.SendToClientReq) (*protoGw.SendToClientAck, error) {
 	conn, err := s.connection(req.GetSessionId())
 	if err != nil {
@@ -1381,6 +1446,7 @@ func (s *GRPCServer) SendToClient(_ context.Context, req *protoGw.SendToClientRe
 	return &protoGw.SendToClientAck{}, nil
 }
 
+// Broadcast 向指定分组广播消息
 func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*protoGw.BroadcastAck, error) {
 	var totalSent, totalFailed int
 	for _, groupID := range req.GetGroupId() {
@@ -1397,6 +1463,7 @@ func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*p
 	return &protoGw.BroadcastAck{}, nil
 }
 
+// BroadcastAll 向所有客户端广播消息
 func (s *GRPCServer) BroadcastAll(_ context.Context, req *protoGw.BroadcastAllReq) (*protoGw.BroadcastAllAck, error) {
 	var firstErr error
 	s.gateway.GetConnectionManager().connections.Range(func(_, value any) bool {
@@ -1414,6 +1481,7 @@ func (s *GRPCServer) BroadcastAll(_ context.Context, req *protoGw.BroadcastAllRe
 	return &protoGw.BroadcastAllAck{}, nil
 }
 
+// JoinGroup 将会话加入指定分组
 func (s *GRPCServer) JoinGroup(_ context.Context, req *protoGw.JoinGroupReq) (*protoGw.JoinGroupAck, error) {
 	conn, err := s.connection(req.GetSessionId())
 	if err != nil {
@@ -1429,6 +1497,7 @@ func (s *GRPCServer) JoinGroup(_ context.Context, req *protoGw.JoinGroupReq) (*p
 	return &protoGw.JoinGroupAck{Code: 0, MemberCount: counts}, nil
 }
 
+// LeaveGroup 将会话移出指定分组
 func (s *GRPCServer) LeaveGroup(_ context.Context, req *protoGw.LeaveGroupReq) (*protoGw.LeaveGroupAck, error) {
 	conn, err := s.connection(req.GetSessionId())
 	if err != nil {
@@ -1444,6 +1513,7 @@ func (s *GRPCServer) LeaveGroup(_ context.Context, req *protoGw.LeaveGroupReq) (
 	return &protoGw.LeaveGroupAck{Code: 0, MemberCount: counts}, nil
 }
 
+// GetGroupInfo 获取分组信息，包括成员数量和会话列表
 func (s *GRPCServer) GetGroupInfo(_ context.Context, req *protoGw.GetGroupInfoReq) (*protoGw.GetGroupInfoAck, error) {
 	cm := s.gateway.GetConnectionManager()
 	return &protoGw.GetGroupInfoAck{
@@ -1453,6 +1523,7 @@ func (s *GRPCServer) GetGroupInfo(_ context.Context, req *protoGw.GetGroupInfoRe
 	}, nil
 }
 
+// broadcastGroup 向指定分组的所有成员推送消息
 func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sent int, failed int) {
 	if groupID == "" {
 		return 0, 1
@@ -1481,11 +1552,13 @@ func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sen
 	return sent, failed
 }
 
+// encodePushMessage 编码推送消息为字节流
 func encodePushMessage(cmd int32, data []byte) []byte {
 	msg, _ := proto.Marshal(&protoGw.MessageFrame{Cmd: cmd, Body: data})
 	return msg
 }
 
+// SendMessage 处理来自逻辑服的单条消息请求（Unary RPC）
 func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (*protoGw.StreamData, error) {
 	connectionID := generateConnectionID()
 
@@ -1513,6 +1586,7 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (
 	return response, nil
 }
 
+// handleGRPCMessage 处理 gRPC 消息，返回错误提示（网关不直接处理命令）
 func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamData, callback func(interface{}), ctx map[string]interface{}) {
 	if msg.Cmd == 0 {
 		callback(newErrorResponse("error", "Missing cmd", "", ""))
@@ -1521,6 +1595,7 @@ func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamD
 	callback(newErrorResponse("error", "Gateway does not handle commands locally, forward to logic server", "", ""))
 }
 
+// StartGRPCServer 启动 gRPC 服务器，监听指定端口
 func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSize int) (*grpc.Server, error) {
 	if maxMsgSize <= 0 {
 		maxMsgSize = 4 * 1024 * 1024
@@ -1557,20 +1632,22 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 	return server, nil
 }
 
+// LogicClientPool 逻辑服客户端池，管理多个逻辑服实例的连接
 type LogicClientPool struct {
-	clients    map[string]*LogicClient
-	ordered    []string // deterministic round-robin: ordered list of service IDs
-	mu         sync.RWMutex
-	gateway    GatewayInterface
-	discovery  *etcd.Component
-	balancer   *cluster.Balancer
-	stopCh     chan struct{}
-	wg         sync.WaitGroup
-	rrIndex    uint64
-	fastClient atomic.Pointer[LogicClient]
-	addressMap map[string]string // serverID -> address (from etcd)
+	clients    map[string]*LogicClient // 逻辑服客户端映射（serverID -> client）
+	ordered    []string                // 有序的服务 ID 列表，用于确定性轮询
+	mu         sync.RWMutex            // 读写锁
+	gateway    GatewayInterface        // 网关接口引用
+	discovery  *etcd.Component         // 服务发现组件
+	balancer   *cluster.Balancer       // 负载均衡器
+	stopCh     chan struct{}            // 停止信号
+	wg         sync.WaitGroup          // 等待协程退出
+	rrIndex    uint64                  // 轮询索引（原子操作）
+	fastClient atomic.Pointer[LogicClient] // 快速路径：单客户端时的原子指针
+	addressMap map[string]string       // 地址映射（serverID -> address，来自 etcd）
 }
 
+// RegisterClient 注册逻辑服客户端到池中
 func (pool *LogicClientPool) RegisterClient(serverID string, client *LogicClient) {
 	if serverID == "" || client == nil {
 		return
@@ -1585,6 +1662,7 @@ func (pool *LogicClientPool) RegisterClient(serverID string, client *LogicClient
 	pool.mu.Unlock()
 }
 
+// GetClient 根据 serverID 获取已连接的逻辑服客户端
 func (pool *LogicClientPool) GetClient(serverID string) LogicClientProvider {
 	pool.mu.RLock()
 	client := pool.clients[serverID]
@@ -1595,6 +1673,7 @@ func (pool *LogicClientPool) GetClient(serverID string) LogicClientProvider {
 	return client
 }
 
+// NewLogicClientPool 创建逻辑服客户端池
 func NewLogicClientPool(gateway GatewayInterface) *LogicClientPool {
 	return &LogicClientPool{
 		clients:    make(map[string]*LogicClient),
@@ -1604,8 +1683,8 @@ func NewLogicClientPool(gateway GatewayInterface) *LogicClientPool {
 	}
 }
 
-// updateFastClient must be called while holding pool.mu.
-// Sets fastClient to the single client when exactly 1 client is connected, nil otherwise.
+// updateFastClient 更新快速路径指针，必须在持有 pool.mu 时调用。
+// 当且仅当有 1 个客户端连接时设置 fastClient，否则置 nil。
 func (pool *LogicClientPool) updateFastClient() {
 	if len(pool.clients) == 1 {
 		for _, c := range pool.clients {
@@ -1616,22 +1695,25 @@ func (pool *LogicClientPool) updateFastClient() {
 	pool.fastClient.Store(nil)
 }
 
-// LookupAddress returns the address for a given serverID from the etcd-maintained map.
+// LookupAddress 从 etcd 维护的映射中获取指定 serverID 的地址
 func (pool *LogicClientPool) LookupAddress(serverID string) string {
 	pool.mu.RLock()
 	defer pool.mu.RUnlock()
 	return pool.addressMap[serverID]
 }
 
+// SetDiscovery 设置服务发现组件并监听服务变更
 func (pool *LogicClientPool) SetDiscovery(discovery *etcd.Component) {
 	pool.discovery = discovery
 	discovery.OnServiceChange(pool.handleServiceChange)
 }
 
+// SetBalancer 设置负载均衡器
 func (pool *LogicClientPool) SetBalancer(balancer *cluster.Balancer) {
 	pool.balancer = balancer
 }
 
+// handleServiceChange 处理服务注册/注销事件
 func (pool *LogicClientPool) handleServiceChange(event etcd.ServiceEvent) {
 	switch event.Type {
 	case etcd.EventRegister:
@@ -1641,6 +1723,7 @@ func (pool *LogicClientPool) handleServiceChange(event etcd.ServiceEvent) {
 	}
 }
 
+// handleServiceRegister 处理服务注册事件，创建新的逻辑服客户端连接
 func (pool *LogicClientPool) handleServiceRegister(event etcd.ServiceEvent) {
 	pool.mu.RLock()
 	existing, exists := pool.clients[event.InstanceID]
@@ -1651,7 +1734,7 @@ func (pool *LogicClientPool) handleServiceRegister(event etcd.ServiceEvent) {
 		return
 	}
 
-	// 已存在但连接已断开，先清理旧 client
+	// 已存在但连接已断开，先清理旧客户端
 	if exists && existing != nil && !existing.IsConnected() {
 		pool.mu.Lock()
 		delete(pool.clients, event.InstanceID)
@@ -1703,9 +1786,12 @@ func (pool *LogicClientPool) handleServiceRegister(event etcd.ServiceEvent) {
 	)
 }
 
+// handleServiceDeregister 处理服务注销事件
+// 注意：不立即删除和关闭连接，避免 etcd 租约过期但 gRPC 连接仍可用时的误判
+// 让健康检查器和 gRPC 流自身错误检测来处理真正的连接断开
 func (pool *LogicClientPool) handleServiceDeregister(event etcd.ServiceEvent) {
-	// A discovery lease may expire while an existing gRPC connection is still usable.
-	// 不立即从 pool 删除和关闭连接，避免误判导致转发中断。
+	// 服务发现租约可能在现有 gRPC 连接仍可用时过期。
+	// 不立即从连接池删除和关闭连接，避免误判导致转发中断。
 	// 让 HealthChecker 和 gRPC 流自身错误检测来处理真正的连接断开。
 	pool.mu.RLock()
 	client, exists := pool.clients[event.InstanceID]
@@ -1744,16 +1830,18 @@ func (pool *LogicClientPool) handleServiceDeregister(event etcd.ServiceEvent) {
 	)
 }
 
+// SendMessage 发送消息到逻辑服，优先使用快速路径
 func (pool *LogicClientPool) SendMessage(msg *protoGw.StreamData) error {
-	// Fast path: single client, no lock needed
+	// 快速路径：只有一个客户端，无需加锁。
+	// 快速路径：单客户端时无需加锁
 	if c := pool.fastClient.Load(); c != nil {
 		return c.SendMessage(msg)
 	}
 	return pool.RoundRobinSendMessage(msg)
 }
 
-// SendMessageTo sends a session-bound message to exactly one logic server.
-// It never falls back to round-robin because that could cross server shards.
+// SendMessageTo 向指定逻辑服发送会话绑定消息
+// 不会回退到轮询，因为那样可能跨服务器分片
 func (pool *LogicClientPool) SendMessageTo(serverID string, msg *protoGw.StreamData) error {
 	if serverID == "" {
 		return ErrNotConnected
@@ -1767,6 +1855,7 @@ func (pool *LogicClientPool) SendMessageTo(serverID string, msg *protoGw.StreamD
 	return client.SendMessage(msg)
 }
 
+// RoundRobinSendMessage 使用轮询方式发送消息到逻辑服
 func (pool *LogicClientPool) RoundRobinSendMessage(msg *protoGw.StreamData) error {
 	pool.mu.RLock()
 	n := len(pool.ordered)
@@ -1786,6 +1875,7 @@ func (pool *LogicClientPool) RoundRobinSendMessage(msg *protoGw.StreamData) erro
 	return client.SendMessage(msg)
 }
 
+// Close 关闭客户端池中所有连接
 func (pool *LogicClientPool) Close() {
 	close(pool.stopCh)
 	pool.wg.Wait()
@@ -1800,12 +1890,14 @@ func (pool *LogicClientPool) Close() {
 	pool.ordered = pool.ordered[:0]
 }
 
+// ClientCount 获取客户端池中的客户端数量
 func (pool *LogicClientPool) ClientCount() int {
 	pool.mu.RLock()
 	defer pool.mu.RUnlock()
 	return len(pool.clients)
 }
 
+// RemoveService 移除指定服务的客户端
 func (pool *LogicClientPool) RemoveService(serviceID string) {
 	pool.mu.Lock()
 	client, exists := pool.clients[serviceID]
@@ -1826,8 +1918,10 @@ func (pool *LogicClientPool) RemoveService(serviceID string) {
 	}
 }
 
+// IsConnected 检查池中是否有已连接的客户端
 func (pool *LogicClientPool) IsConnected() bool {
-	// Fast path: single client, no lock needed
+	// 快速路径：只有一个客户端，无需加锁。
+	// 快速路径：单客户端时无需加锁
 	if c := pool.fastClient.Load(); c != nil {
 		return c.IsConnected()
 	}
@@ -1842,6 +1936,7 @@ func (pool *LogicClientPool) IsConnected() bool {
 	return false
 }
 
+// containsString 检查字符串切片是否包含指定字符串
 func containsString(slice []string, s string) bool {
 	for _, v := range slice {
 		if v == s {
@@ -1851,6 +1946,7 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
+// removeString 从字符串切片中移除指定字符串
 func removeString(slice []string, s string) []string {
 	for i, v := range slice {
 		if v == s {
@@ -1861,19 +1957,20 @@ func removeString(slice []string, s string) []string {
 }
 
 // ---------------------------------------------------------------------------
-// GatewayClient / GatewayClientPool – gateway-to-gateway gRPC client pool
+// GatewayClient / GatewayClientPool – 网关间 gRPC 客户端池
 // ---------------------------------------------------------------------------
 
-// GatewayClient wraps a single gRPC connection to another gateway instance.
+// GatewayClient 封装到另一个网关实例的单个 gRPC 连接
 type GatewayClient struct {
-	client   protoGw.GatewayClient
-	conn     *grpc.ClientConn
-	address  string
-	serverID string
-	mu       sync.RWMutex
-	closing  bool
+	client   protoGw.GatewayClient // gRPC 客户端
+	conn     *grpc.ClientConn     // gRPC 连接
+	address  string               // 目标网关地址
+	serverID string               // 目标网关标识
+	mu       sync.RWMutex         // 读写锁
+	closing  bool                 // 是否正在关闭
 }
 
+// NewGatewayClient 创建网关客户端实例
 func NewGatewayClient(serverID, address string) *GatewayClient {
 	return &GatewayClient{
 		address:  address,
@@ -1881,6 +1978,7 @@ func NewGatewayClient(serverID, address string) *GatewayClient {
 	}
 }
 
+// Connect 建立到目标网关的 gRPC 连接
 func (gc *GatewayClient) Connect() error {
 	conn, err := grpc.NewClient(gc.address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -1908,18 +2006,21 @@ func (gc *GatewayClient) Connect() error {
 	return nil
 }
 
+// IsConnected 检查网关客户端连接状态
 func (gc *GatewayClient) IsConnected() bool {
 	gc.mu.RLock()
 	defer gc.mu.RUnlock()
 	return gc.conn != nil && !gc.closing && gc.conn.GetState() != connectivity.Shutdown
 }
 
+// Client 获取底层 gRPC 客户端
 func (gc *GatewayClient) Client() protoGw.GatewayClient {
 	gc.mu.RLock()
 	defer gc.mu.RUnlock()
 	return gc.client
 }
 
+// Close 关闭网关客户端连接
 func (gc *GatewayClient) Close() {
 	gc.mu.Lock()
 	defer gc.mu.Unlock()
@@ -1932,15 +2033,14 @@ func (gc *GatewayClient) Close() {
 	}
 }
 
-// GatewayClientPool manages gRPC clients to other gateway instances discovered
-// via etcd. The pool mirrors the structure of LogicClientPool but is simpler
-// because gateway-to-gateway communication uses unary RPCs (no streams).
+// GatewayClientPool 网关客户端池，管理通过 etcd 发现的其他网关实例的连接
+// 结构类似于 LogicClientPool，但更简单，因为网关间通信使用 Unary RPC（无流）
 type GatewayClientPool struct {
-	clients    map[string]*GatewayClient
-	mu         sync.RWMutex
-	discovery  *etcd.Component
-	addressMap map[string]string // serverID → address (from etcd)
-	selfID     string            // this gateway's instance ID (excluded from pool)
+	clients    map[string]*GatewayClient // 网关客户端映射
+	mu         sync.RWMutex              // 读写锁
+	discovery  *etcd.Component           // 服务发现组件
+	addressMap map[string]string         // 地址映射（serverID → address）
+	selfID     string                    // 本实例 ID（排除自身）
 }
 
 func NewGatewayClientPool(gateway GatewayInterface) *GatewayClientPool {
@@ -1979,7 +2079,7 @@ func (pool *GatewayClientPool) SetDiscovery(discovery *etcd.Component) {
 }
 
 func (pool *GatewayClientPool) handleServiceChange(event etcd.ServiceEvent) {
-	// The dedicated discovery component watches Gateway:{zone}. Skip self.
+	// 专用发现组件监听 Gateway:{zone}，忽略当前网关实例自身。
 	if event.InstanceID == pool.selfID {
 		return
 	}
@@ -2000,7 +2100,7 @@ func (pool *GatewayClientPool) handleRegister(event etcd.ServiceEvent) {
 		return
 	}
 
-	// Clean up stale entry
+	// 清理已经失效的旧条目。
 	if exists && existing != nil && !existing.IsConnected() {
 		pool.mu.Lock()
 		delete(pool.clients, event.InstanceID)

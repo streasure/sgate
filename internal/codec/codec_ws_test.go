@@ -16,7 +16,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 )
 
-// mockConn implements gnet.Conn for unit testing.
+// mockConn 是用于单元测试的 gnet.Conn 模拟对象。
 type mockConn struct {
 	mu        sync.Mutex
 	inbound   []byte
@@ -422,7 +422,7 @@ func TestMalformedControlFrameNoFIN(t *testing.T) {
 	codec := NewWebSocketCodec()
 	completeUpgrade(t, codec, conn)
 
-	// Build a ping control frame WITHOUT FIN bit (opcode=0x9, FIN=0)
+	// 构造不带 FIN 位的 ping 控制帧（操作码为 0x9，FIN 为 0）。
 	var mask [4]byte
 	rand.Read(mask[:])
 	frame := []byte{0x09, byte(0x80 | 4)} // FIN=0, opcode=ping, masked, len=4
@@ -598,7 +598,7 @@ func TestCloseFrame(t *testing.T) {
 	}
 }
 
-// --- Encode tests ---
+// --- 编码测试 ---
 
 func TestEncodeSmallPayload(t *testing.T) {
 	codec := NewWebSocketCodec()

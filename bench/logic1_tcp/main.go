@@ -11,6 +11,7 @@ import (
 	"github.com/streasure/sgate/logic"
 )
 
+// main 启动logic1 TCP服务，注册gRPC服务并等待信号退出
 func main() {
 	port := flag.String("port", "50052", "gRPC listen port")
 	id := flag.String("id", "logic1-tcp", "service instance ID")

@@ -15,34 +15,33 @@ import (
 	"github.com/streasure/util/etcd"
 )
 
-// GatewayDeps holds all external dependencies for Gateway construction.
-// Each dependency is owned by its respective Component and passed here
-// for Gateway to reference during request processing.
+// GatewayDeps 汇总构造网关所需的外部依赖。
+// 各依赖由对应组件负责生命周期管理，再注入网关供请求处理使用。
 type GatewayDeps struct {
 	Config       config.Config
 	FilterChain  *types.FilterChain
 	LogSanitizer *obs.LogSanitizer
 
-	// Security
+	// 安全组件。
 	WhitelistBlacklist *security.WhitelistBlacklist
 	WAF                *security.WAF
 	RateLimiter        *security.RateLimiter
 	JWTAuth            *security.JWTAuthFilter
 	CircuitBreakerMgr  *security.CircuitBreakerManager
 
-	// Observability
+	// 可观测性组件。
 	Tracer         *obs.Tracer
 	OTelTracer     *obs.OTelTracer
 	LatencyTracker *obs.LatencyTracker
 
-	// Traffic
+	// 流量治理组件。
 	CanaryFilter  *traffic.CanaryFilter
 	TrafficMirror *traffic.TrafficMirror
 	Degradation   *traffic.DegradationManager
 
-	// Cluster
+	// 集群组件。
 	Discovery        *etcd.Component
-	GatewayDiscovery *etcd.Component // discovery for other gateways (Gateway:{zone})
+	GatewayDiscovery *etcd.Component // 发现同一可用区内的其他网关。
 	GatewayEvents    []etcd.ServiceEvent
 	Balancer         *cluster.Balancer
 	ConfigCenter     cluster.ConfigCenter
@@ -50,8 +49,7 @@ type GatewayDeps struct {
 	AlertWebhook     *cluster.AlertWebhook
 }
 
-// NewGatewayWithDeps constructs a Gateway from externally managed components.
-// This is the preferred constructor when using the Component lifecycle.
+// NewGatewayWithDeps 使用外部组件构造网关，是采用组件生命周期时推荐的构造方法。
 func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 	protection := deps.Config.Protection
 	if protection.MaxFrameSize <= 0 {
@@ -101,7 +99,7 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		serverID:          deps.Config.ServerID,
 		zone:              deps.Config.Zone,
 
-		// From components
+		// 以下依赖来自各生命周期组件。
 		filterChain:        deps.FilterChain,
 		logSanitizer:       deps.LogSanitizer,
 		whitelistBlacklist: deps.WhitelistBlacklist,

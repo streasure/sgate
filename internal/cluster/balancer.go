@@ -48,8 +48,8 @@ type Balancer struct {
 	recoverInterval  time.Duration
 	stopChan         chan struct{}
 	stopOnce         sync.Once
-	// HealthCheckFunc probes node liveness: returns true if healthy.
-	// Injected by the gateway layer; nil means no probe (legacy behavior).
+	// HealthCheckFunc 探测节点是否存活，返回 true 表示节点健康。
+	// 由网关层注入；为空时表示不执行探测，保持兼容行为。
 	healthCheckFunc func(id, addr string) bool
 }
 
@@ -309,7 +309,7 @@ func (b *Balancer) recoverLoop() {
 // Stop 停止 balancer
 func (b *Balancer) Stop() { b.stopOnce.Do(func() { close(b.stopChan) }) }
 
-// SetHealthCheckFunc injects a probe function for recoverLoop to use.
+// SetHealthCheckFunc 注入供恢复循环使用的健康探测函数。
 func (b *Balancer) SetHealthCheckFunc(fn func(id, addr string) bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
