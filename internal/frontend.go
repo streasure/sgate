@@ -187,7 +187,7 @@ func NewGateway(configFiles ...string) *Gateway {
 
 	// 创建所有生命周期组件
 	secComp := NewSecurityComponent(cfg.Security, cfg.WAF, cfg.JWTAuth, fc)
-	obsComp := NewObservabilityComponent(cfg.OTelTracer, pprofAddrFromEnv(), fc)
+	obsComp := NewObservabilityComponent(cfg.OTelTracer, cfg.Monitoring.PprofAddr, fc)
 	traComp := NewTrafficComponent(cfg.Canary, cfg.TrafficMirror, cfg.Degradation, fc)
 	clsComp := NewClusterComponent(*cfg, cfg.GRPC.Port, nil)
 
@@ -323,12 +323,12 @@ func (g *Gateway) StartServices() {
 		})
 	}
 
-	// 网关到网关客户端池使用专用的 Gateway:{zone} 监听器
-	g.gatewayClientPool = NewGatewayClientPool(g)
+	// 网关到网关客户端池仅在集群模式下创建
 	if g.gatewayDiscovery != nil {
+		g.gatewayClientPool = NewGatewayClientPool(g)
 		g.gatewayClientPool.SetDiscovery(g.gatewayDiscovery)
+		g.gatewayClientPool.LoadEvents(g.gatewayEvents)
 	}
-	g.gatewayClientPool.LoadEvents(g.gatewayEvents)
 
 	// gRPC服务器
 	grpcPort := fmt.Sprintf(":%d", g.grpcCfg.Port)
@@ -359,13 +359,6 @@ func (g *Gateway) StartServices() {
 		g.promExporter.Init()
 		g.promExporter.Start()
 	}
-}
-
-func pprofAddrFromEnv() string {
-	if addr := os.Getenv("SGATE_PPROF_ADDR"); addr != "" {
-		return addr
-	}
-	return ":6060"
 }
 
 func (g *Gateway) startTransports(cfg *config.Config) {

@@ -45,32 +45,50 @@ func (c *ClusterComponent) Init() error {
 }
 
 func (c *ClusterComponent) Start() error {
+	clusterMode := c.cfg.Cluster.Mode
+	if clusterMode == "" {
+		clusterMode = "standalone"
+	}
+
 	etcdCfg := etcd.Config{Endpoints: c.cfg.Etcd.Endpoints, Endpoint: c.cfg.Etcd.Endpoint, Username: c.cfg.Etcd.Username, Password: c.cfg.Etcd.Password, ServicePrefix: c.cfg.Etcd.ServicePrefix}
 	if c.cfg.Etcd.Enabled {
-		advertiseAddr := fmt.Sprintf("%s:%d", netutil.GetOutboundIPv4(), c.grpcPort)
 		compCfg := etcd.ComponentConfig{Enabled: true, Etcd: etcdCfg}
+
+		// 逻辑服务发现（单体和集群模式均需要）
 		if c.cfg.Discovery.Enabled {
 			compCfg.Discovery = etcd.DiscoveryConfig{Enabled: true, ServiceID: "Logic:" + c.cfg.Zone}
 		}
-		// 注册网关自身，供其他服务发现。
-		compCfg.Registration = etcd.RegistrationConfig{
-			Enabled:    true,
-			ServiceID:  c.cfg.ServerType + ":" + c.cfg.Zone,
-			InstanceID: c.cfg.ServerID,
-			Address:    advertiseAddr,
-			LeaseTTL:   c.cfg.Etcd.LeaseTTL,
+
+		// 集群模式下注册网关自身，供其他网关发现
+		if clusterMode == "cluster" {
+			advertiseAddr := fmt.Sprintf("%s:%d", netutil.GetOutboundIPv4(), c.grpcPort)
+			compCfg.Registration = etcd.RegistrationConfig{
+				Enabled:    true,
+				ServiceID:  c.cfg.ServerType + ":" + c.cfg.Zone,
+				InstanceID: c.cfg.ServerID,
+				Address:    advertiseAddr,
+				LeaseTTL:   c.cfg.Etcd.LeaseTTL,
+			}
 		}
+
 		c.Discovery = etcd.New(compCfg)
 		if err := c.Discovery.Start(); err != nil {
 			return fmt.Errorf("start etcd: %w", err)
 		}
-		tlog.Info("etcd registration succeeded",
-			"serviceID", c.cfg.ServerType+":"+c.cfg.Zone,
-			"instanceID", c.cfg.ServerID,
-			"address", advertiseAddr)
 
-		// 可选的网关间发现，监听 Gateway:{zone} 服务变化。
-		if c.cfg.Discovery.GatewayDiscovery {
+		if clusterMode == "cluster" {
+			advertiseAddr := fmt.Sprintf("%s:%d", netutil.GetOutboundIPv4(), c.grpcPort)
+			tlog.Info("etcd 注册成功（集群模式）",
+				"serviceID", c.cfg.ServerType+":"+c.cfg.Zone,
+				"instanceID", c.cfg.ServerID,
+				"address", advertiseAddr)
+		} else {
+			tlog.Info("etcd 逻辑服务发现已启动（单体模式，网关自身不注册）",
+				"serviceID", "Logic:"+c.cfg.Zone)
+		}
+
+		// 网关间发现仅在集群模式下启用
+		if clusterMode == "cluster" && c.cfg.Discovery.GatewayDiscovery {
 			gwCompCfg := etcd.ComponentConfig{
 				Enabled: true,
 				Etcd:    etcdCfg,
@@ -78,26 +96,33 @@ func (c *ClusterComponent) Start() error {
 					Enabled:   true,
 					ServiceID: "Gateway:" + c.cfg.Zone,
 				},
-				// 此组件只负责发现其他网关，不重复注册自身。
 			}
 			c.GatewayDiscovery = etcd.New(gwCompCfg)
-			// 保存服务变化快照，因为网关对象会在生命周期组件启动后才构造。
 			c.GatewayDiscovery.OnServiceChange(func(event etcd.ServiceEvent) {
 				c.gatewayEventsMu.Lock()
 				c.gatewayEvents = append(c.gatewayEvents, event)
 				c.gatewayEventsMu.Unlock()
 			})
 			if err := c.GatewayDiscovery.Start(); err != nil {
-				tlog.Warn("gateway discovery etcd start failed, gateway-to-gateway disabled", "error", err)
+				tlog.Warn("网关间发现启动失败，网关间协作已禁用", "error", err)
 				c.GatewayDiscovery = nil
 			} else {
-				tlog.Info("gateway discovery started", "serviceID", "Gateway:"+c.cfg.Zone)
+				tlog.Info("网关间发现已启动", "serviceID", "Gateway:"+c.cfg.Zone)
 			}
 		}
 	}
-	c.Cluster = clusterPkg.NewCluster(c.cfg.Cluster, c.cfg.ServerID, c.cfg.ServerType, c.cfg.Zone)
-	c.Cluster.Start()
-	tlog.Info("cluster component started", "serverType", c.cfg.ServerType, "serverID", c.cfg.ServerID, "zone", c.cfg.Zone)
+
+	// Leader 选举仅在集群模式下启用
+	if clusterMode == "cluster" {
+		c.Cluster = clusterPkg.NewCluster(c.cfg.Cluster, c.cfg.ServerID, c.cfg.ServerType, c.cfg.Zone)
+		c.Cluster.Start()
+	}
+
+	tlog.Info("集群组件已启动",
+		"mode", clusterMode,
+		"serverType", c.cfg.ServerType,
+		"serverID", c.cfg.ServerID,
+		"zone", c.cfg.Zone)
 	return nil
 }
 

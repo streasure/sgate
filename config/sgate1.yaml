@@ -17,7 +17,6 @@ discovery:
   heartbeatInterval: 3s
   heartbeatTTL: 10s
 
-# logic server type for etcd service discovery (ServiceID = logicServerType + ":" + zone)
 logicServerType: "Logic"
 
 transports:
@@ -32,7 +31,7 @@ grpc:
   windowSize: 67108864
 
 monitoring:
-  pprofAddr: ""
+  pprofAddr: ":6060"
   prometheus:
     enabled: false
     addr: ":9101"
@@ -44,8 +43,8 @@ configCenter:
   enabled: false
 
 cluster:
-  enabled: false
-  mode: "standalone"   # standalone: 单体模式（默认）, cluster: 集群协作模式
+  enabled: true
+  mode: "cluster"
 
 stream:
   shardCount: 96
@@ -65,8 +64,6 @@ protection:
   wsCheckInterval: 30
   connCheckInterval: "5m"
   connIdleTimeout: "30s"
-  # Authentication is logic-owned. Only these command IDs are accepted until
-  # logic replies with a non-empty StreamData.user_key.
   preAuthCommands: [1000001]
 
 security:

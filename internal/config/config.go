@@ -246,6 +246,7 @@ type TLSConfig struct {
 // ClusterConfig 集群配置
 type ClusterConfig struct {
 	Enabled        bool   `yaml:"enabled"`
+	Mode           string `yaml:"mode"` // standalone: 单体模式（默认）, cluster: 集群协作模式
 	NodeID         string `yaml:"nodeID"`
 	LeaderElection bool   `yaml:"leaderElection"`
 	LockTTL        string `yaml:"lockTTL"`
@@ -467,9 +468,10 @@ func loadDefaultConfig() *Config {
 			MinVersion: "TLS1.2",
 		},
 		Cluster: ClusterConfig{
-			Enabled:        true,
+			Enabled:        false,
+			Mode:           "standalone",
 			NodeID:         "",
-			LeaderElection: true,
+			LeaderElection: false,
 			LockTTL:        DefaultClusterLockTTL,
 		},
 		Balancer: BalancerConfig{

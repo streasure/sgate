@@ -1962,12 +1962,13 @@ func removeString(slice []string, s string) []string {
 
 // GatewayClient 封装到另一个网关实例的单个 gRPC 连接
 type GatewayClient struct {
-	client   protoGw.GatewayClient // gRPC 客户端
-	conn     *grpc.ClientConn     // gRPC 连接
-	address  string               // 目标网关地址
-	serverID string               // 目标网关标识
-	mu       sync.RWMutex         // 读写锁
-	closing  bool                 // 是否正在关闭
+	client     protoGw.GatewayClient // gRPC 客户端
+	conn       *grpc.ClientConn     // gRPC 连接
+	address    string               // 目标网关地址
+	serverID   string               // 目标网关标识
+	mu         sync.RWMutex         // 读写锁
+	closing    bool                 // 是否正在关闭
+	connecting bool                 // 是否正在连接中（Connect 期间）
 }
 
 // NewGatewayClient 创建网关客户端实例
@@ -1980,6 +1981,22 @@ func NewGatewayClient(serverID, address string) *GatewayClient {
 
 // Connect 建立到目标网关的 gRPC 连接
 func (gc *GatewayClient) Connect() error {
+	// 标记正在连接中，阻止 Close() 在连接过程中直接关闭
+	gc.mu.Lock()
+	gc.connecting = true
+	gc.mu.Unlock()
+
+	defer func() {
+		gc.mu.Lock()
+		gc.connecting = false
+		wasClosing := gc.closing
+		gc.mu.Unlock()
+		// 如果 Connect 期间有 Close() 被调用，这里完成实际关闭
+		if wasClosing && gc.conn != nil {
+			gc.conn.Close()
+		}
+	}()
+
 	conn, err := grpc.NewClient(gc.address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -1996,13 +2013,14 @@ func (gc *GatewayClient) Connect() error {
 	if gc.closing {
 		gc.mu.Unlock()
 		conn.Close()
-		return fmt.Errorf("client %s is closing", gc.serverID)
+		// 连接期间被关闭属于正常生命周期事件，不返回错误
+		return nil
 	}
 	gc.conn = conn
 	gc.client = protoGw.NewGatewayClient(conn)
 	gc.mu.Unlock()
 
-	tlog.Info("gateway client created", "serverID", gc.serverID, "address", gc.address)
+	tlog.Info("网关客户端已创建", "serverID", gc.serverID, "address", gc.address)
 	return nil
 }
 
@@ -2028,6 +2046,10 @@ func (gc *GatewayClient) Close() {
 		return
 	}
 	gc.closing = true
+	// 如果正在连接中，由 Connect() 的 defer 完成实际关闭
+	if gc.connecting {
+		return
+	}
 	if gc.conn != nil {
 		gc.conn.Close()
 	}
@@ -2037,15 +2059,18 @@ func (gc *GatewayClient) Close() {
 // 结构类似于 LogicClientPool，但更简单，因为网关间通信使用 Unary RPC（无流）
 type GatewayClientPool struct {
 	clients    map[string]*GatewayClient // 网关客户端映射
+	gens       map[string]uint64         // 每个 serverID 的注册代次，防止 deregister 误关新 client
 	mu         sync.RWMutex              // 读写锁
 	discovery  *etcd.Component           // 服务发现组件
 	addressMap map[string]string         // 地址映射（serverID → address）
 	selfID     string                    // 本实例 ID（排除自身）
+	nextGen    uint64                    // 全局递增代次计数器
 }
 
 func NewGatewayClientPool(gateway GatewayInterface) *GatewayClientPool {
 	return &GatewayClientPool{
 		clients:    make(map[string]*GatewayClient),
+		gens:       make(map[string]uint64),
 		addressMap: make(map[string]string),
 		selfID:     gateway.GetServerID(),
 	}
@@ -2105,51 +2130,72 @@ func (pool *GatewayClientPool) handleRegister(event etcd.ServiceEvent) {
 		pool.mu.Lock()
 		delete(pool.clients, event.InstanceID)
 		delete(pool.addressMap, event.InstanceID)
+		delete(pool.gens, event.InstanceID)
 		pool.mu.Unlock()
 		go existing.Close()
 	}
 
+	// 递增代次，后续 deregister 事件只能关闭此代次之前的 client
+	pool.mu.Lock()
+	pool.nextGen++
+	gen := pool.nextGen
+	pool.gens[event.InstanceID] = gen
+	pool.mu.Unlock()
+
 	client := NewGatewayClient(event.InstanceID, event.Address)
 	go func() {
-		tlog.Info("connecting to discovered gateway", "serverID", event.InstanceID, "address", event.Address)
+		tlog.Info("正在连接已发现的网关", "serverID", event.InstanceID, "address", event.Address)
 		if err := client.Connect(); err != nil {
-			tlog.Error("failed to connect to discovered gateway",
+			tlog.Error("连接已发现的网关失败",
 				"serverID", event.InstanceID, "address", event.Address, "error", err)
 			return
 		}
-		tlog.Info("gateway client ready for discovered gateway", "serverID", event.InstanceID, "address", event.Address)
+		tlog.Info("已发现的网关连接就绪", "serverID", event.InstanceID, "address", event.Address)
 	}()
 
 	pool.mu.Lock()
-	pool.clients[event.InstanceID] = client
-	pool.addressMap[event.InstanceID] = event.Address
+	// 如果代次已被更新（新的 register 已到来），不再覆盖
+	if pool.gens[event.InstanceID] == gen {
+		pool.clients[event.InstanceID] = client
+		pool.addressMap[event.InstanceID] = event.Address
+	}
 	pool.mu.Unlock()
 
-	tlog.Info("gateway client added to pool",
-		"serverID", event.InstanceID, "address", event.Address, "totalClients", pool.ClientCount())
+	tlog.Info("网关客户端已加入池",
+		"serverID", event.InstanceID, "address", event.Address, "gen", gen, "totalClients", pool.ClientCount())
 }
 
 func (pool *GatewayClientPool) handleDeregister(event etcd.ServiceEvent) {
-	pool.mu.RLock()
+	// 取出当前注册的 client 和代次
+	pool.mu.Lock()
 	client, exists := pool.clients[event.InstanceID]
-	pool.mu.RUnlock()
+	gen := pool.gens[event.InstanceID]
+	if exists {
+		delete(pool.clients, event.InstanceID)
+		delete(pool.addressMap, event.InstanceID)
+		delete(pool.gens, event.InstanceID)
+	}
+	// 记录当前全局代次，用于判断是否有新的 register 已到来
+	currentGen := pool.nextGen
+	pool.mu.Unlock()
 
-	if exists && client != nil {
+	if client != nil {
 		if !client.IsConnected() {
-			pool.mu.Lock()
-			delete(pool.clients, event.InstanceID)
-			delete(pool.addressMap, event.InstanceID)
-			pool.mu.Unlock()
 			go client.Close()
-			tlog.Warn("gateway offline and connection already disconnected, cleaned up",
+			tlog.Warn("网关下线且连接已断开，安全清理",
 				"serverID", event.InstanceID, "address", event.Address)
+		} else if gen < currentGen {
+			// 此 client 对应的代次已过时（有新的 register 已到来），关闭旧 client
+			go client.Close()
+			tlog.Warn("网关代次已更新，关闭旧连接",
+				"serverID", event.InstanceID, "address", event.Address, "gen", gen, "currentGen", currentGen)
 		} else {
-			tlog.Warn("gateway deregistered from etcd, keeping gRPC connection (still connected)",
+			tlog.Warn("网关已从 etcd 注销，但 gRPC 连接仍存活，保留连接",
 				"serverID", event.InstanceID, "address", event.Address)
 		}
 	}
 
-	tlog.Warn("gateway client deregister event processed",
+	tlog.Warn("网关注销事件处理完成",
 		"serverID", event.InstanceID, "address", event.Address, "totalClients", pool.ClientCount())
 }
 

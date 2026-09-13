@@ -44,6 +44,7 @@ configCenter:
 
 cluster:
   enabled: false
+  mode: "standalone"
 
 stream:
   shardCount: 96
