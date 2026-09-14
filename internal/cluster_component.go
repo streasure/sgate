@@ -84,16 +84,18 @@ func (c *ClusterComponent) Start() error {
 
 		// 逻辑服务发现（单体和集群模式均需要）
 		if c.cfg.Discovery.Enabled {
-			compCfg.Discovery = etcd.DiscoveryConfig{Enabled: true, ServiceID: "Logic:" + c.cfg.Zone}
+			compCfg.Discovery = etcd.DiscoveryConfig{Enabled: true, ServiceID: c.cfg.Belong + "/Logic:" + c.cfg.Zone}
 		}
 
 		// 注册网关自身，供 loginserver 等服务发现连接地址
 		// cluster 模式始终注册；standalone 模式由 RegisterSelf 控制
 		if clusterMode == "cluster" || c.cfg.Discovery.RegisterSelf {
 			advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
+			// ServiceID 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
+			serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
 			compCfg.Registration = etcd.RegistrationConfig{
 				Enabled:    true,
-				ServiceID:  c.cfg.ServerType + ":" + c.cfg.Zone,
+				ServiceID:  serviceID,
 				InstanceID: c.cfg.ServerID,
 				Address:    advertiseAddr,
 				LeaseTTL:   c.cfg.Etcd.LeaseTTL,
@@ -107,14 +109,15 @@ func (c *ClusterComponent) Start() error {
 
 		if compCfg.Registration.Enabled {
 			advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
+			serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
 			tlog.Info("etcd 注册成功",
-				"serviceID", c.cfg.ServerType+":"+c.cfg.Zone,
+				"serviceID", serviceID,
 				"instanceID", c.cfg.ServerID,
 				"address", advertiseAddr,
 				"mode", clusterMode)
 		} else {
 			tlog.Info("etcd 逻辑服务发现已启动（网关自身不注册）",
-				"serviceID", "Logic:"+c.cfg.Zone)
+				"serviceID", c.cfg.Belong+"/Logic:"+c.cfg.Zone)
 		}
 
 		// 网关间发现仅在集群模式下启用
@@ -124,7 +127,7 @@ func (c *ClusterComponent) Start() error {
 				Etcd:    etcdCfg,
 				Discovery: etcd.DiscoveryConfig{
 					Enabled:   true,
-					ServiceID: "Gateway:" + c.cfg.Zone,
+					ServiceID: c.cfg.Belong + "/Gateway:" + c.cfg.Zone,
 				},
 			}
 			c.GatewayDiscovery = etcd.New(gwCompCfg)
@@ -137,7 +140,7 @@ func (c *ClusterComponent) Start() error {
 				tlog.Warn("网关间发现启动失败，网关间协作已禁用", "error", err)
 				c.GatewayDiscovery = nil
 			} else {
-				tlog.Info("网关间发现已启动", "serviceID", "Gateway:"+c.cfg.Zone)
+				tlog.Info("网关间发现已启动", "serviceID", c.cfg.Belong+"/Gateway:"+c.cfg.Zone)
 			}
 		}
 	}

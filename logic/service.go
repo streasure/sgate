@@ -98,14 +98,20 @@ func (s *Service) initRegistry() {
 	if zone == "" {
 		zone = "default"
 	}
+	belong := s.cfg.Belong
+	if belong == "" {
+		belong = "default"
+	}
 	endpoints := s.cfg.EtcdEndpoints
 	if len(endpoints) == 0 {
 		endpoints = []string{s.cfg.EtcdEndpoint}
 	}
+	// ServiceID 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
+	serviceID := belong + "/" + s.cfg.ServerType + ":" + zone
 	s.registry = etcd.New(etcd.ComponentConfig{
 		Enabled:      true,
 		Etcd:         etcd.Config{Endpoints: endpoints, Endpoint: s.cfg.EtcdEndpoint, Username: s.cfg.EtcdUsername, Password: s.cfg.EtcdPassword, ServicePrefix: s.cfg.EtcdServicePrefix},
-		Registration: etcd.RegistrationConfig{Enabled: true, ServiceID: fmt.Sprintf("%s:%s", s.cfg.ServerType, zone), InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},
+		Registration: etcd.RegistrationConfig{Enabled: true, ServiceID: serviceID, InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},
 	})
 	if err := s.registry.Start(); err != nil {
 		tlog.Error("service registration failed", "error", err)

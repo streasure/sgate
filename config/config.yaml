@@ -1,5 +1,6 @@
 port: 8081
 logLevel: warn
+belong: "default"       # 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
 serverId: "gateway-1"
 serverType: "Gateway"
 zone: "default"

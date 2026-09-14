@@ -13,6 +13,7 @@ type ServiceConfig struct {
 	ListenAddr         string        `yaml:"listenAddr"`         // 监听地址
 	ListenPort         string        `yaml:"listenPort"`         // 监听端口
 	AdvertiseAddr      string        `yaml:"advertiseAddr"`      // 对外暴露地址
+	Belong             string        `yaml:"belong"`             // 所属应用/团队标识
 	ServiceID          string        `yaml:"serverId"`           // 服务实例 ID
 	ServerType         string        `yaml:"serverType"`         // 服务类型
 	ServiceName        string        `yaml:"serviceName"`        // 服务名称
@@ -49,7 +50,7 @@ func LoadConfig(name string) (ServiceConfig, error) {
 // defaultConfig 返回逻辑层服务的默认配置
 func defaultConfig() ServiceConfig {
 	return ServiceConfig{
-		ListenAddr: "0.0.0.0", ListenPort: "50052", ServiceID: "", ServerType: "Logic",
+		ListenAddr: "0.0.0.0", ListenPort: "50052", Belong: "default", ServiceID: "", ServerType: "Logic",
 		ServiceName: "logic", Zone: "default", EtcdEndpoint: "http://127.0.0.1:2379",
 		EtcdServicePrefix: "/services", EtcdLeaseTTL: "10s", HeartbeatInterval: 3 * time.Second,
 		HeartbeatTTL: 10 * time.Second, GRPCWindowSize: 524288, GRPCMaxMessageSize: 4 * 1024 * 1024,
@@ -66,6 +67,10 @@ func WithListenPort(port string) ServiceOption   { return func(c *ServiceConfig)
 // WithAdvertiseAddr 设置对外暴露地址
 func WithAdvertiseAddr(addr string) ServiceOption {
 	return func(c *ServiceConfig) { c.AdvertiseAddr = addr }
+}
+// WithBelong 设置所属应用/团队标识
+func WithBelong(belong string) ServiceOption {
+	return func(c *ServiceConfig) { c.Belong = belong }
 }
 // WithServiceID 设置服务实例 ID
 func WithServiceID(id string) ServiceOption { return func(c *ServiceConfig) { c.ServiceID = id } }

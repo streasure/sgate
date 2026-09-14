@@ -14,6 +14,7 @@ import (
 type Config struct {
 	Port            int                 `yaml:"port"`
 	LogLevel        string              `yaml:"logLevel"`
+	Belong          string              `yaml:"belong"`          // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
 	ServerID        string              `yaml:"serverId"`
 	ServerType      string              `yaml:"serverType"`
 	Zone            string              `yaml:"zone"`
@@ -389,6 +390,7 @@ func loadDefaultConfig() *Config {
 	return &Config{
 		Port:       port,
 		LogLevel:   logLevel,
+		Belong:     getEnvString("GATEWAY_BELONG", "default"),
 		ServerID:   getEnvString("GATEWAY_SERVER_ID", "gateway-1"),
 		ServerType: "Gateway",
 		Zone:       "default",

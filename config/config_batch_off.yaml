@@ -1,5 +1,6 @@
 port: 8081
 logLevel: warn
+belong: "default"
 serverId: "gateway-1"
 serverType: "Gateway"
 zone: "default"
