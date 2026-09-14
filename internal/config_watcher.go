@@ -1,4 +1,4 @@
-package gateway
+package internal
 
 import (
 	"github.com/streasure/sgate/internal/config"

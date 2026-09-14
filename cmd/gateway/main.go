@@ -8,8 +8,9 @@ import (
 	"runtime"
 	"syscall"
 
-	gateway "github.com/streasure/sgate/internal"
+	"github.com/streasure/sgate/internal"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/gc"
 	"github.com/streasure/util/tlog"
 )
 
@@ -23,15 +24,11 @@ var (
 func main() {
 	flag.Parse()
 	if *showVer {
-		fmt.Printf("sgate gateway version: %s\n", "1.0.0")
+		fmt.Printf("sgate gateway version: %s\n", internal.Version)
 		return
 	}
 
-	runtime.GOMAXPROCS(runtime.NumCPU())
-	if v := os.Getenv("GOGC"); v == "" {
-		os.Setenv("GOGC", "200")
-		debugSetGCPercent(200)
-	}
+	gc.InitGCTuning(200)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -44,15 +41,15 @@ func main() {
 	logComp := tlog.NewLogComponent()
 	if err := logComp.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
-		os.Exit(1)
+		return
 	}
 	defer logComp.Destroy()
 	_ = logConfig
 
 	tlog.Info("gateway starting...",
-		"version", "1.0.0",
+		"version", internal.Version,
 		"cpu", runtime.NumCPU(),
-		"GOMAXPROCS", runtime.GOMAXPROCS(0),
+		"GOMAXPROCS", runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
 
 	cfg, err := config.LoadConfig(*confFiles)
@@ -66,10 +63,7 @@ func main() {
 	}
 	tlog.Info("config loaded", "port", cfg.Port)
 
-	// P0: 启动时检查文件描述符限制
-	checkFDLimit(cfg.Protection.MaxConnections)
-
-	gw := gateway.NewGateway(*confFiles)
+	gw := internal.NewGateway(*confFiles)
 
 	gw.StartServices()
 

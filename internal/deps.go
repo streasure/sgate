@@ -1,4 +1,4 @@
-package gateway
+package internal
 
 import (
 	"context"
@@ -121,13 +121,13 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		cluster:            deps.ClusterNode,
 		alertWebhook:       deps.AlertWebhook,
 
-		configUpdateChan:  make(chan *config.Config),
-		overloadProtector: NewOverloadProtector(protection),
-		logicClient:       NewLogicClient(GatewayInterface(nil)),
-		msgRate:           newMessageRateTracker(60 * time.Second),
-		clusterID:         "sgate-cluster",
-		gatewayID:         gatewayInstanceID(deps.Config),
-		isLeader:          false,
+		configUpdateChan:          make(chan *config.Config),
+		overloadProtector:         NewOverloadProtector(protection),
+		logicClient:               NewLogicClient(GatewayInterface(nil)),
+		msgRate:                   newMessageRateTracker(60 * time.Second),
+		clusterID:                 "sgate-cluster",
+		gatewayID:                 gatewayInstanceID(deps.Config),
+		isLeader:                  false,
 		connectionDurationTracker: obs.NewLatencyTracker(10000),
 	}
 

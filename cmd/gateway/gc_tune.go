@@ -2,21 +2,10 @@ package main
 
 import (
 	"os"
-	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
 )
-
-// debugSetGCPercent 设置 GCPercent（runtime/debug.SetGCPercent 各 Go 版本均支持）
-// 用于调优 GC 频率，降低千万级吞吐下的 STW
-func debugSetGCPercent(percent int) {
-	if percent > 0 {
-		runtime.GC() // 触发一次 GC，确保启动时清理
-		old := debug.SetGCPercent(percent)
-		_ = old
-	}
-}
 
 // applyGOMEMLIMIT 显式将 GOMEMLIMIT 环境变量应用到 runtime。
 //

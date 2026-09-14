@@ -1,4 +1,4 @@
-package gateway
+package internal
 
 import (
 	"context"
@@ -149,8 +149,8 @@ type Gateway struct {
 	alertDropped           atomic.Int64
 
 	// 连接生命周期指标
-	connectionDurationSum   atomic.Int64 // 连接总存活时长（毫秒），用于计算平均值
-	connectionDurationCount atomic.Int64 // 已关闭连接数，用于计算平均值
+	connectionDurationSum     atomic.Int64        // 连接总存活时长（毫秒），用于计算平均值
+	connectionDurationCount   atomic.Int64        // 已关闭连接数，用于计算平均值
 	connectionDurationTracker *obs.LatencyTracker // 连接时长分位数追踪器
 }
 

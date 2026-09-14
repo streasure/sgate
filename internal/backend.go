@@ -1,4 +1,4 @@
-package gateway
+package internal
 
 import (
 	"context"
@@ -13,9 +13,9 @@ import (
 
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/util/etcd"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
@@ -30,10 +30,10 @@ import (
 type LogicConnectionState int32
 
 const (
-	LogicStateDisconnected  LogicConnectionState = iota // 未连接
-	LogicStateConnecting                                // 连接中
-	LogicStateConnected                                 // 已连接
-	LogicStateReconnecting                              // 重连中
+	LogicStateDisconnected LogicConnectionState = iota // 未连接
+	LogicStateConnecting                               // 连接中
+	LogicStateConnected                                // 已连接
+	LogicStateReconnecting                             // 重连中
 )
 
 func (s LogicConnectionState) String() string {
@@ -98,8 +98,8 @@ var DefaultHealthCheckConfig = HealthCheckConfig{
 type StreamShard struct {
 	stream      protoGw.GatewayStream_OnDataClient // gRPC 流客户端
 	mu          sync.Mutex                         // 保护 stream 引用的互斥锁
-	sendCh      chan *protoGw.StreamData            // 发送通道
-	stopCh      chan struct{}                       // 停止信号通道
+	sendCh      chan *protoGw.StreamData           // 发送通道
+	stopCh      chan struct{}                      // 停止信号通道
 	stopOnce    sync.Once                          // 确保只关闭一次 stopCh
 	ctx         context.Context                    // 流上下文
 	cancel      context.CancelFunc                 // 取消函数
@@ -111,8 +111,8 @@ type StreamShard struct {
 
 // StreamManager 流连接管理器，通过分片减少并发竞争
 type StreamManager struct {
-	shards      []*StreamShard  // 分片数组
-	sendTimeout time.Duration   // 发送超时
+	shards      []*StreamShard // 分片数组
+	sendTimeout time.Duration  // 发送超时
 }
 
 // NewStreamManager 创建流管理器，根据 CPU 核心数和配置初始化分片
@@ -143,12 +143,12 @@ func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Dura
 
 // writeCoalescer 按连接合并后一次性 flush。
 // 目的：减少 gnet AsyncWrite 调用次数。每次 AsyncWrite 向 event-loop channel 发送一个 task，
-	// 在 Windows 上向通道发送数据会竞争 runtime 互斥锁（runtime.lock2），94 个消息接收
-	// 协程同时发送时锁竞争达到 74% CPU。通过跨批次合并，将 N 次 SendMulti
-	// 降为 M 次（M 为不同连接数），减少通道发送约 10-50 倍。
+// 在 Windows 上向通道发送数据会竞争 runtime 互斥锁（runtime.lock2），94 个消息接收
+// 协程同时发送时锁竞争达到 74% CPU。通过跨批次合并，将 N 次 SendMulti
+// 降为 M 次（M 为不同连接数），减少通道发送约 10-50 倍。
 //
 // 内存优化：每个 entry 的 data buffer 从 coalescerBufPool 获取，在 AsyncWrite 完成后
-	// 通过回调归还到对象池，避免每帧分配导致 GC 压力（千万级 QPS 下 GC 无法跟上分配速度）。
+// 通过回调归还到对象池，避免每帧分配导致 GC 压力（千万级 QPS 下 GC 无法跟上分配速度）。
 type writeCoalescer struct {
 	entries   []coalescedEntry // 每个连接一个 entry，存储累积的帧数据
 	index     map[string]int   // connID -> entries 下标，避免重复 GetConnection
@@ -158,7 +158,7 @@ type writeCoalescer struct {
 }
 
 // coalescedEntry 累积一个连接的帧数据。
-	// bufPtr 持有指向池化缓冲区的指针，在刷新后通过 AsyncWrite 回调归还。
+// bufPtr 持有指向池化缓冲区的指针，在刷新后通过 AsyncWrite 回调归还。
 type coalescedEntry struct {
 	conn   *Connection
 	data   []byte  // [4字节 len][payload] 重复格式，底层数组来自 coalescerBufPool
@@ -200,7 +200,7 @@ func (wc *writeCoalescer) getBuf(idx int) {
 }
 
 // addMulti 将 multi-conn 格式的一条消息加入 coalescer。
-	// payload 是已序列化的单条消息字节数据。
+// payload 是已序列化的单条消息字节数据。
 func (wc *writeCoalescer) addMulti(connID string, payload []byte) bool {
 	idx, ok := wc.index[connID]
 	if !ok {
@@ -221,7 +221,7 @@ func (wc *writeCoalescer) addMulti(connID string, payload []byte) bool {
 	return true
 }
 
-	// addSingle 将单连接格式的整批数据加入写合并器。
+// addSingle 将单连接格式的整批数据加入写合并器。
 // data 已是 [4字节 len][payload] 重复格式，直接追加。
 func (wc *writeCoalescer) addSingle(connID string, data []byte, count int) bool {
 	idx, ok := wc.index[connID]
@@ -246,7 +246,7 @@ func (wc *writeCoalescer) shouldFlush() bool {
 }
 
 // flush 将所有连接的累积数据通过一次 SendMultiWithCallback 发送，然后重置。
-	// 缓冲区在 gnet AsyncWrite 完成后通过回调归还到 coalescerBufPool。
+// 缓冲区在 gnet AsyncWrite 完成后通过回调归还到 coalescerBufPool。
 // 返回 pushed（成功推送的消息数）。
 func (wc *writeCoalescer) flush() int64 {
 	var pushed int64
@@ -291,9 +291,9 @@ func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
 }
 
 // markShardBroken 分片流失效后的统一处理：触发整体重连。
-	// 没有这一步，逻辑服重启或网络闪断后 shard.stream 永远为 nil，
-	// 正向消息会静默丢弃、反向推送归零，健康检查的 ping 也只会
-	// 塞进已失效的 sendCh，永远无法探测出故障。
+// 没有这一步，逻辑服重启或网络闪断后 shard.stream 永远为 nil，
+// 正向消息会静默丢弃、反向推送归零，健康检查的 ping 也只会
+// 塞进已失效的 sendCh，永远无法探测出故障。
 func (s *StreamShard) markShardBroken() {
 	s.mu.Lock()
 	s.stream = nil
@@ -344,7 +344,7 @@ func (s *StreamShard) startSendLoop() {
 			}
 		}
 
-	// 获取整批消息共用的流引用。
+		// 获取整批消息共用的流引用。
 		s.mu.Lock()
 		stream := s.stream
 		s.mu.Unlock()
@@ -435,7 +435,7 @@ type LogicClient struct {
 	messageQueue      *StreamMessageQueue         // 断线期间的消息缓存队列
 	gateway           GatewayInterface            // 网关接口引用
 	closing           bool                        // 是否正在关闭
-	closed            chan struct{}                // 关闭完成信号
+	closed            chan struct{}               // 关闭完成信号
 	shardCount        int                         // 分片数量
 	serverID          string                      // 逻辑服标识
 }
@@ -643,8 +643,8 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			shard.mu.Unlock()
 
 			tlog.Info("stream shard established", "shard", idx)
-		// 流分片建立成功
-	}(i)
+			// 流分片建立成功
+		}(i)
 	}
 	wg.Wait()
 
@@ -1003,7 +1003,7 @@ type HealthChecker struct {
 	maxFailures int            // 最大允许失败次数
 	failCount   int            // 当前连续失败次数
 	enabled     bool           // 是否启用主动健康检查
-	stopCh      chan struct{}   // 停止信号
+	stopCh      chan struct{}  // 停止信号
 	wg          sync.WaitGroup // 等待检查循环退出
 }
 
@@ -1090,12 +1090,12 @@ func (lc *LogicClient) startHealthChecker() {
 
 // ReconnectManager 重连管理器，处理断线后的自动重连逻辑
 type ReconnectManager struct {
-	lc            *LogicClient                      // 逻辑服客户端引用
-	config        ReconnectConfig                   // 重连配置
-	stopCh        chan struct{}                      // 停止信号
-	doneCh        chan struct{}                      // 运行完成信号
-	disconnectCh  chan struct{}                      // 断线通知通道
-	lookupAddress func(serverID string) string      // 可选：通过 etcd 查询替换地址
+	lc            *LogicClient                 // 逻辑服客户端引用
+	config        ReconnectConfig              // 重连配置
+	stopCh        chan struct{}                // 停止信号
+	doneCh        chan struct{}                // 运行完成信号
+	disconnectCh  chan struct{}                // 断线通知通道
+	lookupAddress func(serverID string) string // 可选：通过 etcd 查询替换地址
 }
 
 // NewReconnectManager 创建重连管理器
@@ -1158,9 +1158,9 @@ func (rm *ReconnectManager) doReconnect() {
 			tlog.Error("max reconnect attempts reached, trying etcd discovery",
 				"maxAttempts", rm.config.MaxAttempts, "serverID", rm.lc.serverID)
 
-		// 尝试通过 etcd 服务发现查找替代节点。
-		// 尝试通过 etcd 发现替代节点
-		if rm.lookupAddress != nil {
+			// 尝试通过 etcd 服务发现查找替代节点。
+			// 尝试通过 etcd 发现替代节点
+			if rm.lookupAddress != nil {
 				if newAddr := rm.lookupAddress(rm.lc.serverID); newAddr != "" && newAddr != originalAddress {
 					tlog.Info("discovered replacement address from etcd",
 						"serverID", rm.lc.serverID, "oldAddress", originalAddress, "newAddress", newAddr)
@@ -1204,12 +1204,12 @@ func (rm *ReconnectManager) doReconnect() {
 // StreamMessageQueue 流消息队列，断线期间缓存消息，重连后冲刷
 type StreamMessageQueue struct {
 	queue                 []*protoGw.StreamData // 消息队列
-	mu                    sync.Mutex             // 互斥锁
-	cond                  *sync.Cond             // 条件变量，用于阻塞等待
-	maxSize               int                    // 队列最大容量
-	policy                config.QueuePolicy     // 队列策略
-	blockTimeout          time.Duration          // 阻塞超时
-	backpressureThreshold float64                // 背压阈值
+	mu                    sync.Mutex            // 互斥锁
+	cond                  *sync.Cond            // 条件变量，用于阻塞等待
+	maxSize               int                   // 队列最大容量
+	policy                config.QueuePolicy    // 队列策略
+	blockTimeout          time.Duration         // 阻塞超时
+	backpressureThreshold float64               // 背压阈值
 }
 
 // NewStreamMessageQueue 创建消息队列
@@ -1631,17 +1631,17 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 
 // LogicClientPool 逻辑服客户端池，管理多个逻辑服实例的连接
 type LogicClientPool struct {
-	clients    map[string]*LogicClient // 逻辑服客户端映射（serverID -> client）
-	ordered    []string                // 有序的服务 ID 列表，用于确定性轮询
-	mu         sync.RWMutex            // 读写锁
-	gateway    GatewayInterface        // 网关接口引用
-	discovery  *etcd.Component         // 服务发现组件
-	balancer   *cluster.Balancer       // 负载均衡器
-	stopCh     chan struct{}            // 停止信号
-	wg         sync.WaitGroup          // 等待协程退出
-	rrIndex    uint64                  // 轮询索引（原子操作）
+	clients    map[string]*LogicClient     // 逻辑服客户端映射（serverID -> client）
+	ordered    []string                    // 有序的服务 ID 列表，用于确定性轮询
+	mu         sync.RWMutex                // 读写锁
+	gateway    GatewayInterface            // 网关接口引用
+	discovery  *etcd.Component             // 服务发现组件
+	balancer   *cluster.Balancer           // 负载均衡器
+	stopCh     chan struct{}               // 停止信号
+	wg         sync.WaitGroup              // 等待协程退出
+	rrIndex    uint64                      // 轮询索引（原子操作）
 	fastClient atomic.Pointer[LogicClient] // 快速路径：单客户端时的原子指针
-	addressMap map[string]string       // 地址映射（serverID -> address，来自 etcd）
+	addressMap map[string]string           // 地址映射（serverID -> address，来自 etcd）
 }
 
 // RegisterClient 注册逻辑服客户端到池中
@@ -1960,12 +1960,12 @@ func removeString(slice []string, s string) []string {
 // GatewayClient 封装到另一个网关实例的单个 gRPC 连接
 type GatewayClient struct {
 	client     protoGw.GatewayClient // gRPC 客户端
-	conn       *grpc.ClientConn     // gRPC 连接
-	address    string               // 目标网关地址
-	serverID   string               // 目标网关标识
-	mu         sync.RWMutex         // 读写锁
-	closing    bool                 // 是否正在关闭
-	connecting bool                 // 是否正在连接中（Connect 期间）
+	conn       *grpc.ClientConn      // gRPC 连接
+	address    string                // 目标网关地址
+	serverID   string                // 目标网关标识
+	mu         sync.RWMutex          // 读写锁
+	closing    bool                  // 是否正在关闭
+	connecting bool                  // 是否正在连接中（Connect 期间）
 }
 
 // NewGatewayClient 创建网关客户端实例

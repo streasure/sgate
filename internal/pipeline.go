@@ -1,4 +1,4 @@
-package gateway
+package internal
 
 import (
 	"fmt"
@@ -130,7 +130,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	var protoMsg *protoGw.StreamData
 	filterOK := true
 
-		if securityDisabled && g.tracer == nil && g.balancer == nil && g.degradation == nil {
+	if securityDisabled && g.tracer == nil && g.balancer == nil && g.degradation == nil {
 		// 超级快速路径：无安全检查、无追踪、无负载均衡
 		remoteIP = ""
 		protoMsg = getStreamData()

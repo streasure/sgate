@@ -1,4 +1,4 @@
-package gateway
+package internal
 
 import (
 	"context"
@@ -171,11 +171,11 @@ type statsPayload struct {
 	LatencyP99Us          int64   `json:"latencyP99Us"`
 	LatencyMaxUs          int64   `json:"latencyMaxUs"`
 	// P1: 连接生命周期指标
-	AvgConnectionDurationMs float64 `json:"avgConnectionDurationMs"` // 平均连接存活时长（毫秒）
-	ConnectionDurationP50Ms  float64 `json:"connectionDurationP50Ms"`  // 连接存活时长 P50（毫秒）
-	ConnectionDurationP95Ms  float64 `json:"connectionDurationP95Ms"`  // 连接存活时长 P95（毫秒）
-	ConnectionDurationP99Ms  float64 `json:"connectionDurationP99Ms"`  // 连接存活时长 P99（毫秒）
-	IPConnectionCount        int     `json:"ipConnectionCount,omitempty"` // 当前 IP 连接数（调试用）
+	AvgConnectionDurationMs float64 `json:"avgConnectionDurationMs"`     // 平均连接存活时长（毫秒）
+	ConnectionDurationP50Ms float64 `json:"connectionDurationP50Ms"`     // 连接存活时长 P50（毫秒）
+	ConnectionDurationP95Ms float64 `json:"connectionDurationP95Ms"`     // 连接存活时长 P95（毫秒）
+	ConnectionDurationP99Ms float64 `json:"connectionDurationP99Ms"`     // 连接存活时长 P99（毫秒）
+	IPConnectionCount       int     `json:"ipConnectionCount,omitempty"` // 当前 IP 连接数（调试用）
 }
 
 func (g *Gateway) StartStatsServer(addr string) {

@@ -1,9 +1,9 @@
-package gateway
+package internal
 
 import (
 	"encoding/binary"
-	"hash/fnv"
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,26 +104,26 @@ const (
 
 // Connection 表示客户端与网关之间的连接，封装了连接状态、用户信息和发送逻辑。
 type Connection struct {
-	id         string
-	Conn       gnet.Conn
-	RemoteAddr string
-	CreatedAt  int64
-	LastActive int64
+	id          string
+	Conn        gnet.Conn
+	RemoteAddr  string
+	CreatedAt   int64
+	LastActive  int64
 	activitySeq atomic.Uint32
-	Status     int8
-	Groups     map[string]struct{}
-	state      atomic.Int32
-	groupsMu   sync.RWMutex
+	Status      int8
+	Groups      map[string]struct{}
+	state       atomic.Int32
+	groupsMu    sync.RWMutex
 
 	// 原子字段，用于无锁并发访问
-	userUUID       atomic.Value // 保存用户唯一标识。
-	serverID       atomic.Value // 保存绑定的逻辑服标识。
-	isWS           atomic.Bool
-	logicClient    atomic.Value // LogicClientProvider 缓存，避免每条消息查询连接池
+	userUUID    atomic.Value // 保存用户唯一标识。
+	serverID    atomic.Value // 保存绑定的逻辑服标识。
+	isWS        atomic.Bool
+	logicClient atomic.Value // LogicClientProvider 缓存，避免每条消息查询连接池
 
 	// 连接级流控
-	msgCount        atomic.Int64 // 当前窗口消息计数
-	msgWindowStart  atomic.Int64 // 当前窗口起始时间（UnixMilli）
+	msgCount       atomic.Int64 // 当前窗口消息计数
+	msgWindowStart atomic.Int64 // 当前窗口起始时间（UnixMilli）
 }
 
 // newConnection 创建新的连接对象，初始化基本属性和状态。
@@ -147,6 +147,7 @@ func (c *Connection) ID() string { return c.id }
 
 // GetState 原子读取连接状态。
 func (c *Connection) GetState() ConnState { return ConnState(c.state.Load()) }
+
 // SetState 原子地设置连接状态，仅当当前状态等于old时才更新为new。
 func (c *Connection) SetState(old, new ConnState) bool {
 	return c.state.CompareAndSwap(int32(old), int32(new))
@@ -376,7 +377,7 @@ func (g *ConnectionGroupInfo) SnapshotUsers() []string {
 // ConnectionManager 管理所有客户端连接，包括连接的增删改查、分组管理和空闲连接检查。
 type ConnectionManager struct {
 	connections           *shardedMap[*Connection] // 分片 map，按 connectionID 索引
-	userConnections       *shardedMap[string]       // 分片 map，按 userUUID → connectionID
+	userConnections       *shardedMap[string]      // 分片 map，按 userUUID → connectionID
 	serverUserConnections sync.Map
 	serverConnections     sync.Map
 	groups                sync.Map
@@ -424,13 +425,13 @@ func generateConnectionID() string {
 // NewConnectionManager 创建新的连接管理器实例。
 func NewConnectionManager(maxConn, maxConnPerIP int) *ConnectionManager {
 	return &ConnectionManager{
-		connections:          newShardedMap[*Connection](),
-		userConnections:      newShardedMap[string](),
-		ipConnections:        make(map[string]int32),
-		maxConnections:       maxConn,
-		maxConnectionsPerIP:  maxConnPerIP,
-		stopCh:               make(chan struct{}),
-		checkDone:            make(chan struct{}),
+		connections:         newShardedMap[*Connection](),
+		userConnections:     newShardedMap[string](),
+		ipConnections:       make(map[string]int32),
+		maxConnections:      maxConn,
+		maxConnectionsPerIP: maxConnPerIP,
+		stopCh:              make(chan struct{}),
+		checkDone:           make(chan struct{}),
 	}
 }
 
