@@ -262,6 +262,7 @@ type DiscoveryConfig struct {
 	DeregisterDelay   time.Duration `yaml:"deregisterDelay"`
 	ScanInterval      time.Duration `yaml:"scanInterval"`
 	GatewayDiscovery  bool          `yaml:"gatewayDiscovery"` // 启用网关间服务发现
+	RegisterSelf      bool          `yaml:"registerSelf"`     // standalone模式下是否向etcd注册网关自身连接信息
 }
 
 // GRPCConfig gRPC 服务端配置
@@ -394,6 +395,7 @@ func loadDefaultConfig() *Config {
 		Discovery: DiscoveryConfig{
 			Enabled:           true,
 			GatewayDiscovery:  true,
+			RegisterSelf:      true,
 			ServiceName:       "logic",
 			HeartbeatInterval: 3 * time.Second,
 			HeartbeatTTL:      10 * time.Second,

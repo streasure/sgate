@@ -189,8 +189,8 @@ sgate.exe [选项]
 | `config loaded` | 配置文件加载成功 |
 | `Launching gnet with N event-loops` | gnet 事件循环启动 |
 | `gRPC 服务器已启动` | gRPC 端口就绪，可接受逻辑服连接 |
-| `etcd 逻辑服务发现已启动` | 单体模式：逻辑服发现正常 |
-| `etcd 注册成功（集群模式）` | 集群模式：网关自身已注册 |
+| `etcd 注册成功` | 网关自身已注册到 etcd（standalone/cluster 均会注册） |
+| `etcd 逻辑服务发现已启动` | 逻辑服发现正常 |
 
 ### 4.4 停止网关
 
@@ -217,12 +217,12 @@ cluster:
 ```
 
 **行为：**
-- 跳过网关自身在 etcd 的注册
+- 在 etcd 注册网关自身连接信息（`Gateway:{zone}`），供 loginserver 等服务发现
+- 保留：逻辑服发现（etcd）、负载均衡
 - 跳过网关间发现（GatewayClientPool 不创建）
 - 跳过 Leader 选举
-- 保留：逻辑服发现（etcd）、负载均衡
 
-**适用场景：** 单实例部署，不需要网关间协作。
+**适用场景：** 单实例部署，不需要网关间协作，但需要向 loginserver 暴露连接地址。
 
 ### 5.2 集群模式
 
@@ -246,7 +246,7 @@ cluster:
 | --- | --- | --- |
 | 逻辑服发现 | ✅ | ✅ |
 | 负载均衡 | ✅ | ✅ |
-| 网关自注册 | ❌ | ✅ |
+| 网关自注册 | ✅ (registerSelf) | ✅ |
 | 网关间发现 | ❌ | ✅ |
 | Leader 选举 | ❌ | ✅ |
 | GatewayClientPool | ❌ | ✅ |
@@ -302,6 +302,29 @@ transports:
 | `serviceName` | string | `logic` | 逻辑服服务名 |
 | `zone` | string | `default` | 优先选择的可用区 |
 | `gatewayDiscovery` | bool | `true` | 是否发现其他网关（集群模式下生效） |
+| `registerSelf` | bool | `true` | standalone 模式下是否向 etcd 注册网关自身连接信息（供 loginserver 发现） |
+
+### 6.4.1 etcd 注册地址格式
+
+网关注册到 etcd 的地址采用 JSON 格式，包含所有连接信息：
+
+```json
+{
+  "ip": "192.168.1.100",
+  "grpc": 50051,
+  "tcp": "192.168.1.100:48080",
+  "websocket": "192.168.1.100:48081"
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `ip` | string | 网关出口 IP |
+| `grpc` | int | gRPC 端口（逻辑服连接此端口） |
+| `tcp` | string | TCP 客户端连接地址（可选） |
+| `websocket` | string | WebSocket 客户端连接地址（可选） |
+
+loginserver 可通过 etcd watch `Gateway:{zone}` 前缀获取网关连接地址。
 
 ### 6.5 `cluster` 集群配置
 
@@ -499,14 +522,14 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 
 ## 八、性能数据
 
-测试日期：2026-09-13。条件：100 连接、64B 载荷、12 推送协程、10s、`push-interval=0`、96 流分片。
+测试日期：2026-09-13/14。条件：100 连接、64B 载荷、12 推送协程、10s、`push-interval=0`、96 流分片。
 
 ### bench1 转发
 
 | 协议 | 总转发量(10s) | 峰值速率 |
 | --- | ---: | ---: |
-| **WebSocket** | **843 万** | **840K/s** |
-| TCP | 770 万 | 767K/s |
+| **WebSocket** | **941 万** | **920K/s** |
+| TCP | 844 万 | 835K/s |
 
 ### bench2 推送
 

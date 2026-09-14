@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -44,6 +45,33 @@ func (c *ClusterComponent) Init() error {
 	return nil
 }
 
+// registerAddress 是 etcd 注册地址的 JSON 结构，包含网关所有连接地址。
+type registerAddress struct {
+	IP        string `json:"ip"`
+	GRPC      int    `json:"grpc"`
+	TCP       string `json:"tcp,omitempty"`
+	WebSocket string `json:"websocket,omitempty"`
+}
+
+// buildRegisterAddress 根据配置构建 JSON 格式的注册地址。
+func buildRegisterAddress(cfg config.Config, grpcPort int) string {
+	ip := netutil.GetOutboundIPv4()
+	addr := registerAddress{IP: ip, GRPC: grpcPort}
+	for _, t := range cfg.Transports {
+		hostPort := fmt.Sprintf("%s:%d", ip, t.Port)
+		switch t.Type {
+		case "websocket":
+			addr.WebSocket = hostPort
+		default:
+			if addr.TCP == "" {
+				addr.TCP = hostPort
+			}
+		}
+	}
+	data, _ := json.Marshal(addr)
+	return string(data)
+}
+
 func (c *ClusterComponent) Start() error {
 	clusterMode := c.cfg.Cluster.Mode
 	if clusterMode == "" {
@@ -59,9 +87,10 @@ func (c *ClusterComponent) Start() error {
 			compCfg.Discovery = etcd.DiscoveryConfig{Enabled: true, ServiceID: "Logic:" + c.cfg.Zone}
 		}
 
-		// 集群模式下注册网关自身，供其他网关发现
-		if clusterMode == "cluster" {
-			advertiseAddr := fmt.Sprintf("%s:%d", netutil.GetOutboundIPv4(), c.grpcPort)
+		// 注册网关自身，供 loginserver 等服务发现连接地址
+		// cluster 模式始终注册；standalone 模式由 RegisterSelf 控制
+		if clusterMode == "cluster" || c.cfg.Discovery.RegisterSelf {
+			advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
 			compCfg.Registration = etcd.RegistrationConfig{
 				Enabled:    true,
 				ServiceID:  c.cfg.ServerType + ":" + c.cfg.Zone,
@@ -76,14 +105,15 @@ func (c *ClusterComponent) Start() error {
 			return fmt.Errorf("start etcd: %w", err)
 		}
 
-		if clusterMode == "cluster" {
-			advertiseAddr := fmt.Sprintf("%s:%d", netutil.GetOutboundIPv4(), c.grpcPort)
-			tlog.Info("etcd 注册成功（集群模式）",
+		if compCfg.Registration.Enabled {
+			advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
+			tlog.Info("etcd 注册成功",
 				"serviceID", c.cfg.ServerType+":"+c.cfg.Zone,
 				"instanceID", c.cfg.ServerID,
-				"address", advertiseAddr)
+				"address", advertiseAddr,
+				"mode", clusterMode)
 		} else {
-			tlog.Info("etcd 逻辑服务发现已启动（单体模式，网关自身不注册）",
+			tlog.Info("etcd 逻辑服务发现已启动（网关自身不注册）",
 				"serviceID", "Logic:"+c.cfg.Zone)
 		}
 

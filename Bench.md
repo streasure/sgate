@@ -68,3 +68,17 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 | batchPush=true | 853K/s | 816K/s |
 | 提升 | 约 102% | 约 85% |
 
+### 最新验证（etcd 注册变更后）
+
+测试日期：2026-09-14。验证 standalone 模式下向 etcd 注册 JSON 格式连接信息后性能无回退。
+
+| 协议 | 总转发量(10s) | 峰值速率 |
+| --- | ---: | ---: |
+| TCP | 844 万 | 835K/s |
+| WebSocket | 941 万 | 920K/s |
+
+etcd 注册地址格式示例：
+```json
+{"ip":"10.5.20.7","grpc":50051,"tcp":"10.5.20.7:48080","websocket":"10.5.20.7:48081"}
+```
+
