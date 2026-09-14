@@ -59,8 +59,24 @@ const (
 	// protobuf 业务消息一般 < 4KB；4MB 足够大业务消息
 	DefaultMaxFrameSize = 4 * 1024 * 1024
 
+	// DefaultMaxFrameBufSize TCP 帧缓冲区上限
+	// 百万连接场景下过大导致内存爆炸，64KB 足够容纳正常帧
+	DefaultMaxFrameBufSize = 64 * 1024
+
 	// DefaultMaxWSFrameSize 单帧 payload 上限（WebSocket）
 	DefaultMaxWSFrameSize = 4 * 1024 * 1024
+
+	// DefaultMaxConnections 网关最大总连接数，0=不限制
+	// 百万在线场景建议设置为 1200000（留 20% 余量）
+	DefaultMaxConnections = 1200000
+
+	// DefaultMaxConnectionsPerIP 单 IP 最大连接数，0=不限制
+	// 防止单个客户端耗尽所有连接
+	DefaultMaxConnectionsPerIP = 0
+
+	// DefaultMaxMessagesPerConn 单连接每秒最大消息数，0=不限制
+	// 防止异常连接占满 gRPC 发送队列
+	DefaultMaxMessagesPerConn = 0
 )
 
 // --- 过载保护 ---
@@ -81,7 +97,8 @@ const (
 	DefaultConnCheckInterval = "5m"
 
 	// DefaultConnIdleTimeout 连接空闲超时（无数据则断开）
-	DefaultConnIdleTimeout = "30s"
+	// 百万连接场景适当放宽，避免频繁重连
+	DefaultConnIdleTimeout = "5m"
 )
 
 // --- 安全防护 ---

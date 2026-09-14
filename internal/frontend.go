@@ -147,6 +147,11 @@ type Gateway struct {
 	trafficMirrorDropped   atomic.Int64
 	alertSent              atomic.Int64
 	alertDropped           atomic.Int64
+
+	// 连接生命周期指标
+	connectionDurationSum   atomic.Int64 // 连接总存活时长（毫秒），用于计算平均值
+	connectionDurationCount atomic.Int64 // 已关闭连接数，用于计算平均值
+	connectionDurationTracker *obs.LatencyTracker // 连接时长分位数追踪器
 }
 
 // SetTransportType 设置监听端口对应的传输类型。
@@ -536,6 +541,10 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		g.protection = newCfg.Protection
 	}
 
+	// 动态更新连接限制参数
+	g.connectionManager.UpdateLimits(newCfg.Protection.MaxConnections, newCfg.Protection.MaxConnectionsPerIP)
+	g.protection.MaxMessagesPerConn = newCfg.Protection.MaxMessagesPerConn
+
 	// 动态更新 JWT 密钥
 	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
 		g.jwtAuth.UpdateSecret(newCfg.JWTAuth.Secret)
@@ -600,6 +609,18 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 		}
 	}()
 
+	// 连接数限制检查（P0: 防止 OOM 和连接耗尽）
+	remoteIP := getRemoteIP(c)
+	if !g.connectionManager.CanAccept(remoteIP) {
+		tlog.Warn("连接数限制，拒绝新连接",
+			"remoteIP", remoteIP,
+			"activeConnections", g.connectionManager.GetConnectionCount(),
+			"maxConnections", g.connectionManager.maxConnections,
+			"ipConnections", g.connectionManager.GetIPConnectionCount(remoteIP),
+			"maxPerIP", g.connectionManager.maxConnectionsPerIP)
+		return nil, gnet.Close
+	}
+
 	localAddr := c.LocalAddr().String()
 	isWS := false
 	g.transportType.Range(func(key, value interface{}) bool {
@@ -660,6 +681,11 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 
 	if connectionID != "" {
 		if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
+			// P1: 记录连接生命周期指标
+			duration := time.Now().UnixMilli() - conn.CreatedAt
+			g.connectionDurationSum.Add(duration)
+			g.connectionDurationCount.Add(1)
+			g.connectionDurationTracker.Record(time.Duration(duration) * time.Millisecond)
 			g.notifyLogicOffline(conn)
 		}
 		g.connectionManager.RemoveConnection(connectionID)
@@ -682,7 +708,6 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 }
 
 func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
-	wsDebug(fmt.Sprintf("handleNormalTraffic enter: fd=%d", c.Fd()))
 	defer func() {
 		if r := recover(); r != nil {
 			tlog.Error("handleNormalTraffic panic recovered", "error", cast.ToString(r))
@@ -700,7 +725,6 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 		return gnet.Close
 
 	}
-	wsDebug(fmt.Sprintf("handleNormalTraffic: connCtx type=%T dataLen=%d", connCtx, len(data)))
 	if wsConn, ok := connCtx.(*WebSocketConnection); ok {
 		return g.handleWebSocketMessage(wsConn, data)
 	}
@@ -970,8 +994,24 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	if userUUID == "" {
 		userUUID = connectionID
 	}
+	fullUUID := req.ServerId + ":" + userUUID
+
+	// P1: 主动关闭同用户的旧连接（重连场景），防止资源泄漏
+	if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
+		if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
+			tlog.Info("检测到重复登录，关闭旧连接",
+				"oldConnectionID", oldConnID,
+				"newConnectionID", connectionID,
+				"userUUID", fullUUID)
+			g.notifyLogicOffline(oldConn)
+			if oldConn.Conn != nil {
+				oldConn.Conn.Close()
+			}
+		}
+	}
+
 	// 保持选中的逻辑服在网关侧的身份标识中，以防止逻辑分片之间的会话索引冲突。
-	g.connectionManager.UpdateConnectionUserUUID(connectionID, req.ServerId+":"+userUUID)
+	g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
 	writeAck(0, "ok", req.ServerId)
 
 	// 将登录 StreamData 转发给逻辑服，以便它注册会话并处理登录特定逻辑（如加入群组、设置状态）。
@@ -1225,8 +1265,7 @@ func (g *Gateway) drainConnections(timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 
 	// 将所有 Forward 状态的连接转换为 Closed（拒绝新消息）
-	g.connectionManager.connections.Range(func(key, value interface{}) bool {
-		conn := value.(*Connection)
+	g.connectionManager.connections.Range(func(_ string, conn *Connection) bool {
 		if conn.GetState() == StateForward {
 			conn.SetState(StateForward, StateClosed)
 		}

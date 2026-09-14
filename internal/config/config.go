@@ -308,24 +308,23 @@ type StreamConfig struct {
 }
 
 type ProtectionConfig struct {
-	MaxFrameSize       int     `yaml:"maxFrameSize"`
-	MaxFrameBufSize    int     `yaml:"maxFrameBufSize"`
-	MaxWSFrameSize     int     `yaml:"maxWSFrameSize"`
-	MaxWSBufferSize    int     `yaml:"maxWSBufferSize"`
-	CPUThreshold       float64 `yaml:"cpuThreshold"`
-	DropOnOverload     bool    `yaml:"dropOnOverload"`
-	CheckIntervalMs    int     `yaml:"checkIntervalMs"`
-	WSHeartbeatTimeout int     `yaml:"wsHeartbeatTimeout"`
-	WSCheckInterval    int     `yaml:"wsCheckInterval"`
-	ConnCheckInterval  string  `yaml:"connCheckInterval"`
-	ConnIdleTimeout    string  `yaml:"connIdleTimeout"`
-	// VerifyInbound 是否对入方向消息执行完整性校验（checksum/timestamp/重放）。
-	// 默认 true：对带 checksum 的入站消息做完整校验，未携带 checksum 的消息零开销直通。
-	VerifyInbound bool `yaml:"verifyInbound"`
-	// PreAuthCommands 是逻辑层通过返回 StreamData.user_key 完成认证前，客户端唯一允许发送的命令。
-	PreAuthCommands []int32 `yaml:"preAuthCommands"`
-	// LoginAuth 配置网关校验 LoginGateReq 的方式。
-	LoginAuth LoginAuthConfig `yaml:"loginAuth"`
+	MaxFrameSize         int     `yaml:"maxFrameSize"`
+	MaxFrameBufSize      int     `yaml:"maxFrameBufSize"`
+	MaxWSFrameSize       int     `yaml:"maxWSFrameSize"`
+	MaxWSBufferSize      int     `yaml:"maxWSBufferSize"`
+	MaxConnections       int     `yaml:"maxConnections"`       // 网关最大总连接数，0=不限制
+	MaxConnectionsPerIP  int     `yaml:"maxConnectionsPerIP"`  // 单 IP 最大连接数，0=不限制
+	MaxMessagesPerConn   int     `yaml:"maxMessagesPerConn"`   // 单连接最大消息数/秒，0=不限制
+	CPUThreshold         float64 `yaml:"cpuThreshold"`
+	DropOnOverload       bool    `yaml:"dropOnOverload"`
+	CheckIntervalMs      int     `yaml:"checkIntervalMs"`
+	WSHeartbeatTimeout   int     `yaml:"wsHeartbeatTimeout"`
+	WSCheckInterval      int     `yaml:"wsCheckInterval"`
+	ConnCheckInterval    string  `yaml:"connCheckInterval"`
+	ConnIdleTimeout      string  `yaml:"connIdleTimeout"`
+	VerifyInbound        bool    `yaml:"verifyInbound"`
+	PreAuthCommands      []int32 `yaml:"preAuthCommands"`
+	LoginAuth            LoginAuthConfig `yaml:"loginAuth"`
 }
 
 // LoginAuthConfig 定义网关侧的登录认证行为。
@@ -427,19 +426,21 @@ func loadDefaultConfig() *Config {
 			},
 		},
 		Protection: ProtectionConfig{
-			MaxFrameSize:       DefaultMaxFrameSize,
-			MaxFrameBufSize:    DefaultMaxFrameSize,
-			MaxWSFrameSize:     DefaultMaxWSFrameSize,
-			MaxWSBufferSize:    DefaultMaxWSFrameSize,
-			CPUThreshold:       90.0,
-			DropOnOverload:     true,
-			CheckIntervalMs:    DefaultOverloadCheckIntervalMs,
-			WSHeartbeatTimeout: DefaultWSHeartbeatTimeoutSec,
-			WSCheckInterval:    DefaultWSCheckIntervalSec,
-			ConnCheckInterval:  DefaultConnCheckInterval,
-			ConnIdleTimeout:    DefaultConnIdleTimeout,
-			VerifyInbound:      false,
-			PreAuthCommands:    []int32{1000001},
+			MaxFrameSize:        DefaultMaxFrameSize,
+			MaxFrameBufSize:     DefaultMaxFrameBufSize,
+			MaxWSFrameSize:      DefaultMaxWSFrameSize,
+			MaxWSBufferSize:     DefaultMaxWSFrameSize,
+			MaxConnections:      DefaultMaxConnections,
+			MaxConnectionsPerIP: DefaultMaxConnectionsPerIP,
+			CPUThreshold:        90.0,
+			DropOnOverload:      true,
+			CheckIntervalMs:     DefaultOverloadCheckIntervalMs,
+			WSHeartbeatTimeout:  DefaultWSHeartbeatTimeoutSec,
+			WSCheckInterval:     DefaultWSCheckIntervalSec,
+			ConnCheckInterval:   DefaultConnCheckInterval,
+			ConnIdleTimeout:     DefaultConnIdleTimeout,
+			VerifyInbound:       false,
+			PreAuthCommands:     []int32{1000001},
 			LoginAuth: LoginAuthConfig{
 				Mode: "none",
 			},

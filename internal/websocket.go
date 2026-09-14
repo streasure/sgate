@@ -5,7 +5,6 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,20 +18,6 @@ import (
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
-
-// wsDebugLog WebSocket调试日志文件
-var wsDebugLog *os.File
-
-// wsDebug 写入WebSocket调试日志
-func wsDebug(msg string) {
-	if wsDebugLog == nil {
-		wsDebugLog, _ = os.OpenFile("E:\\sgate\\ws_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	}
-	if wsDebugLog != nil {
-		fmt.Fprintln(wsDebugLog, msg)
-		wsDebugLog.Sync()
-	}
-}
 
 // WSOpCode 表示WebSocket操作码
 type WSOpCode byte
@@ -225,14 +210,11 @@ func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payl
 		ws.Cipher(payload, mask, 0)
 	}
 
-	wsDebug(fmt.Sprintf("ws frame: opCode=%d masked=%v len=%d payloadLen=%d", opCode, masked, length, len(payload)))
-
 	return opCode, payload, frameSize + int(length), nil
 }
 
 // handleWebSocketMessage 处理接收到的WebSocket数据，将其追加到缓冲区并逐帧解析处理。
 func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byte) (action gnet.Action) {
-	wsDebug(fmt.Sprintf("handleWebSocketMessage: state=%d dataLen=%d", atomic.LoadInt32(&wsConn.State), len(data)))
 	if atomic.LoadInt32(&wsConn.State) == int32(WSStateHandshake) {
 		return g.handleWebSocketHandshake(wsConn, data)
 	}
@@ -284,8 +266,6 @@ func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOp
 // handleWebSocketDataFrame 处理WebSocket数据帧，解码消息并通过消息管道转发到逻辑层。
 func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload []byte) error {
 	g.messagesReceived.Add(1)
-
-	wsDebug(fmt.Sprintf("wsDataFrame: payloadLen=%d first8=%x", len(payload), payload[:min(len(payload), 8)]))
 
 	message, ok := decodeClientMessage(payload)
 	if !ok {

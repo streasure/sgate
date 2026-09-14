@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -308,7 +307,7 @@ func (s *StreamShard) markShardBroken() {
 func (s *StreamShard) startSendLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "startSendLoop shard %d panic recovered: %v\n", s.index, r)
+			tlog.Error("startSendLoop panic recovered", "shard", s.index, "error", fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -750,7 +749,7 @@ func (lc *LogicClient) Close() {
 func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "receiveMessages panic recovered: %v\n", r)
+			tlog.Error("receiveMessages panic recovered", "error", fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -860,8 +859,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			if batchPush {
 				flushBatch()
 			}
-			lc.gateway.GetConnectionManager().connections.Range(func(_, value any) bool {
-				conn := value.(*Connection)
+			lc.gateway.GetConnectionManager().connections.Range(func(_ string, conn *Connection) bool {
 				respData, err := marshalClientMessage(msg)
 				if err != nil {
 					return true
@@ -1466,8 +1464,7 @@ func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*p
 // BroadcastAll 向所有客户端广播消息
 func (s *GRPCServer) BroadcastAll(_ context.Context, req *protoGw.BroadcastAllReq) (*protoGw.BroadcastAllAck, error) {
 	var firstErr error
-	s.gateway.GetConnectionManager().connections.Range(func(_, value any) bool {
-		conn := value.(*Connection)
+	s.gateway.GetConnectionManager().connections.Range(func(_ string, conn *Connection) bool {
 		if err := conn.Send(encodePushMessage(req.GetCmd(), req.GetData())); err != nil && firstErr == nil {
 			firstErr = err
 		} else if err == nil {

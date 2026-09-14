@@ -1,0 +1,160 @@
+# sgate 百万连接配置
+# 适用于 1M 并发连接压测
+port: 8081
+logLevel: error    # 压测时用 error 减少日志开销
+serverId: "gateway-1m"
+serverType: "Gateway"
+zone: "default"
+
+etcd:
+  enabled: false   # 压测不需要 etcd
+
+discovery:
+  enabled: false
+
+transports:
+  - protocol: tcp
+    port: 48080
+  - protocol: tcp
+    port: 48081
+    type: websocket
+  # 多端口支持百万连接（每端口 ~6K 来自 localhost）
+  - protocol: tcp
+    port: 49000
+  - protocol: tcp
+    port: 49001
+  - protocol: tcp
+    port: 49002
+  - protocol: tcp
+    port: 49003
+  - protocol: tcp
+    port: 49004
+  - protocol: tcp
+    port: 49005
+  - protocol: tcp
+    port: 49006
+  - protocol: tcp
+    port: 49007
+  - protocol: tcp
+    port: 49008
+  - protocol: tcp
+    port: 49009
+  - protocol: tcp
+    port: 49010
+  - protocol: tcp
+    port: 49011
+  - protocol: tcp
+    port: 49012
+  - protocol: tcp
+    port: 49013
+  - protocol: tcp
+    port: 49014
+  - protocol: tcp
+    port: 49015
+  - protocol: tcp
+    port: 49016
+  - protocol: tcp
+    port: 49017
+  - protocol: tcp
+    port: 49018
+  - protocol: tcp
+    port: 49019
+  - protocol: tcp
+    port: 49020
+  - protocol: tcp
+    port: 49021
+  - protocol: tcp
+    port: 49022
+  - protocol: tcp
+    port: 49023
+  - protocol: tcp
+    port: 49024
+  - protocol: tcp
+    port: 49025
+  - protocol: tcp
+    port: 49026
+  - protocol: tcp
+    port: 49027
+  - protocol: tcp
+    port: 49028
+  - protocol: tcp
+    port: 49029
+  - protocol: tcp
+    port: 49030
+  - protocol: tcp
+    port: 49031
+  - protocol: tcp
+    port: 49032
+  - protocol: tcp
+    port: 49033
+  - protocol: tcp
+    port: 49034
+  - protocol: tcp
+    port: 49035
+  - protocol: tcp
+    port: 49036
+  - protocol: tcp
+    port: 49037
+  - protocol: tcp
+    port: 49038
+  - protocol: tcp
+    port: 49039
+  - protocol: tcp
+    port: 49040
+  - protocol: tcp
+    port: 49041
+  - protocol: tcp
+    port: 49042
+  - protocol: tcp
+    port: 49043
+  - protocol: tcp
+    port: 49044
+  - protocol: tcp
+    port: 49045
+  - protocol: tcp
+    port: 49046
+  - protocol: tcp
+    port: 49047
+  - protocol: tcp
+    port: 49048
+  - protocol: tcp
+    port: 49049
+  - protocol: tcp
+    port: 49050
+
+grpc:
+  port: 50051
+  windowSize: 67108864
+
+monitoring:
+  pprofAddr: ":6060"
+
+cluster:
+  enabled: false
+  mode: "standalone"
+
+stream:
+  shardCount: 128
+  sendChannelSize: 1048576
+
+protection:
+  maxFrameSize: 4194304
+  maxFrameBufSize: 65536        # 64KB，降低百万连接内存
+  maxWSFrameSize: 4194304
+  maxWSBufferSize: 65536
+  maxConnections: 1200000       # 百万连接 + 20% 余量
+  maxConnectionsPerIP: 0        # 压测不限单 IP
+  cpuThreshold: 95
+  dropOnOverload: true
+  checkIntervalMs: 200
+  wsHeartbeatTimeout: 120
+  wsCheckInterval: 30
+  connCheckInterval: "10m"
+  connIdleTimeout: "10m"        # 压测时放宽空闲超时
+  preAuthCommands: [1000001]
+
+security:
+  enabled: false   # 压测关闭安全组件
+
+waf:
+  enabled: false

@@ -170,6 +170,12 @@ type statsPayload struct {
 	LatencyP95Us          int64   `json:"latencyP95Us"`
 	LatencyP99Us          int64   `json:"latencyP99Us"`
 	LatencyMaxUs          int64   `json:"latencyMaxUs"`
+	// P1: 连接生命周期指标
+	AvgConnectionDurationMs float64 `json:"avgConnectionDurationMs"` // 平均连接存活时长（毫秒）
+	ConnectionDurationP50Ms  float64 `json:"connectionDurationP50Ms"`  // 连接存活时长 P50（毫秒）
+	ConnectionDurationP95Ms  float64 `json:"connectionDurationP95Ms"`  // 连接存活时长 P95（毫秒）
+	ConnectionDurationP99Ms  float64 `json:"connectionDurationP99Ms"`  // 连接存活时长 P99（毫秒）
+	IPConnectionCount        int     `json:"ipConnectionCount,omitempty"` // 当前 IP 连接数（调试用）
 }
 
 func (g *Gateway) StartStatsServer(addr string) {
@@ -226,6 +232,16 @@ func (g *Gateway) StartStatsServer(addr string) {
 			stats.LatencyP95Us = latStats.P95.Microseconds()
 			stats.LatencyP99Us = latStats.P99.Microseconds()
 			stats.LatencyMaxUs = latStats.Max.Microseconds()
+		}
+		// P1: 连接生命周期指标
+		if count := g.connectionDurationCount.Load(); count > 0 {
+			stats.AvgConnectionDurationMs = float64(g.connectionDurationSum.Load()) / float64(count)
+		}
+		if g.connectionDurationTracker != nil {
+			connDurStats := g.connectionDurationTracker.GetStats()
+			stats.ConnectionDurationP50Ms = connDurStats.P50.Seconds() * 1000
+			stats.ConnectionDurationP95Ms = connDurStats.P95.Seconds() * 1000
+			stats.ConnectionDurationP99Ms = connDurStats.P99.Seconds() * 1000
 		}
 		w.Header().Set("Content-Type", "application/json")
 		data, err := json.Marshal(stats)

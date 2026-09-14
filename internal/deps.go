@@ -91,7 +91,7 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 	}
 
 	gw := &Gateway{
-		connectionManager: NewConnectionManager(),
+		connectionManager: NewConnectionManager(protection.MaxConnections, protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
 		protection:        protection,
 		grpcCfg:           grpcCfg,
@@ -128,6 +128,7 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		clusterID:         "sgate-cluster",
 		gatewayID:         gatewayInstanceID(deps.Config),
 		isLeader:          false,
+		connectionDurationTracker: obs.NewLatencyTracker(10000),
 	}
 
 	gw.cfg.Store(&deps.Config)

@@ -66,6 +66,9 @@ func main() {
 	}
 	tlog.Info("config loaded", "port", cfg.Port)
 
+	// P0: 启动时检查文件描述符限制
+	checkFDLimit(cfg.Protection.MaxConnections)
+
 	gw := gateway.NewGateway(*confFiles)
 
 	gw.StartServices()

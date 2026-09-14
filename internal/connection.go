@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/binary"
+	"hash/fnv"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,6 +13,86 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/streasure/util/tlog"
 )
+
+// ============================================================================
+// 分片 map — 替代 sync.Map，减少锁竞争和内存开销
+// ============================================================================
+
+const shardCount = 256 // 必须是 2 的幂
+
+// shard 是分片 map 的单个分片，持有独立的读写锁。
+type shard[V any] struct {
+	mu   sync.RWMutex
+	data map[string]V
+}
+
+// shardedMap 是基于 FNV-1a 哈希的分片并发 map，适用于高读少写的场景。
+type shardedMap[V any] struct {
+	shards [shardCount]shard[V]
+}
+
+func newShardedMap[V any]() *shardedMap[V] {
+	m := &shardedMap[V]{}
+	for i := range m.shards {
+		m.shards[i].data = make(map[string]V)
+	}
+	return m
+}
+
+func (m *shardedMap[V]) getShard(key string) *shard[V] {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return &m.shards[h.Sum32()%shardCount]
+}
+
+func (m *shardedMap[V]) Load(key string) (V, bool) {
+	s := m.getShard(key)
+	s.mu.RLock()
+	v, ok := s.data[key]
+	s.mu.RUnlock()
+	return v, ok
+}
+
+func (m *shardedMap[V]) Store(key string, value V) {
+	s := m.getShard(key)
+	s.mu.Lock()
+	s.data[key] = value
+	s.mu.Unlock()
+}
+
+func (m *shardedMap[V]) Delete(key string) {
+	s := m.getShard(key)
+	s.mu.Lock()
+	delete(s.data, key)
+	s.mu.Unlock()
+}
+
+// Range 遍历所有分片中的条目。回调返回 false 时终止遍历。
+func (m *shardedMap[V]) Range(fn func(key string, value V) bool) {
+	for i := range m.shards {
+		s := &m.shards[i]
+		s.mu.RLock()
+		for k, v := range s.data {
+			if !fn(k, v) {
+				s.mu.RUnlock()
+				return
+			}
+		}
+		s.mu.RUnlock()
+	}
+}
+
+// Count 返回 map 中的总条目数（遍历所有分片，开销较大，仅用于统计）。
+func (m *shardedMap[V]) Count() int {
+	total := 0
+	for i := range m.shards {
+		s := &m.shards[i]
+		s.mu.RLock()
+		total += len(s.data)
+		s.mu.RUnlock()
+	}
+	return total
+}
 
 // ConnState 表示连接状态
 type ConnState int32
@@ -39,6 +120,10 @@ type Connection struct {
 	serverID       atomic.Value // 保存绑定的逻辑服标识。
 	isWS           atomic.Bool
 	logicClient    atomic.Value // LogicClientProvider 缓存，避免每条消息查询连接池
+
+	// 连接级流控
+	msgCount        atomic.Int64 // 当前窗口消息计数
+	msgWindowStart  atomic.Int64 // 当前窗口起始时间（UnixMilli）
 }
 
 // newConnection 创建新的连接对象，初始化基本属性和状态。
@@ -114,6 +199,30 @@ func (c *Connection) GetServerID() string {
 
 // SetWS 设置连接是否使用 WebSocket 传输。
 func (c *Connection) SetWS(v bool) { c.isWS.Store(v) }
+
+// CheckAndIncrementMsgRate 检查连接级消息速率是否超限，未超限则自增计数。
+// maxPerConn=0 表示不限制。返回 true 表示允许，false 表示超限。
+func (c *Connection) CheckAndIncrementMsgRate(maxPerConn int) bool {
+	if maxPerConn <= 0 {
+		return true
+	}
+	now := time.Now().UnixMilli()
+	windowStart := c.msgWindowStart.Load()
+	// 每秒一个窗口
+	if now-windowStart >= 1000 {
+		// 尝试重置窗口（CAS 保证只有一个 goroutine 重置）
+		if c.msgWindowStart.CompareAndSwap(windowStart, now) {
+			c.msgCount.Store(1)
+		} else {
+			// 其他 goroutine 已重置，增加计数
+			c.msgCount.Add(1)
+		}
+		return c.msgCount.Load() <= int64(maxPerConn)
+	}
+	// 窗口内，增加计数
+	c.msgCount.Add(1)
+	return c.msgCount.Load() <= int64(maxPerConn)
+}
 
 // 头部缓冲区对象池，减少内存分配
 var headerPool = sync.Pool{
@@ -266,8 +375,8 @@ func (g *ConnectionGroupInfo) SnapshotUsers() []string {
 
 // ConnectionManager 管理所有客户端连接，包括连接的增删改查、分组管理和空闲连接检查。
 type ConnectionManager struct {
-	connections           sync.Map
-	userConnections       sync.Map
+	connections           *shardedMap[*Connection] // 分片 map，按 connectionID 索引
+	userConnections       *shardedMap[string]       // 分片 map，按 userUUID → connectionID
 	serverUserConnections sync.Map
 	serverConnections     sync.Map
 	groups                sync.Map
@@ -275,6 +384,12 @@ type ConnectionManager struct {
 	count                 int32
 	stopCh                chan struct{}
 	checkDone             chan struct{}
+
+	ipConnections map[string]int32 // IP → 当前连接数
+	ipMu          sync.RWMutex
+
+	maxConnections      int // 网关最大总连接数，0=不限制
+	maxConnectionsPerIP int // 单 IP 最大连接数，0=不限制
 
 	totalConnections   atomic.Int64
 	activeConnections  atomic.Int64
@@ -307,11 +422,76 @@ func generateConnectionID() string {
 }
 
 // NewConnectionManager 创建新的连接管理器实例。
-func NewConnectionManager() *ConnectionManager {
+func NewConnectionManager(maxConn, maxConnPerIP int) *ConnectionManager {
 	return &ConnectionManager{
-		stopCh:    make(chan struct{}),
-		checkDone: make(chan struct{}),
+		connections:          newShardedMap[*Connection](),
+		userConnections:      newShardedMap[string](),
+		ipConnections:        make(map[string]int32),
+		maxConnections:       maxConn,
+		maxConnectionsPerIP:  maxConnPerIP,
+		stopCh:               make(chan struct{}),
+		checkDone:            make(chan struct{}),
 	}
+}
+
+// UpdateLimits 运行时更新连接限制参数（热配置）。
+func (cm *ConnectionManager) UpdateLimits(maxConn, maxConnPerIP int) {
+	if maxConn >= 0 {
+		cm.maxConnections = maxConn
+	}
+	if maxConnPerIP >= 0 {
+		cm.maxConnectionsPerIP = maxConnPerIP
+	}
+	tlog.Info("connection manager limits updated",
+		"maxConnections", cm.maxConnections,
+		"maxConnectionsPerIP", cm.maxConnectionsPerIP)
+}
+
+// CanAccept 检查是否允许接受新连接（总连接数 + 单 IP 连接数）。
+func (cm *ConnectionManager) CanAccept(remoteIP string) bool {
+	if cm.maxConnections > 0 && int(atomic.LoadInt32(&cm.count)) >= cm.maxConnections {
+		return false
+	}
+	if cm.maxConnectionsPerIP > 0 && remoteIP != "" {
+		cm.ipMu.RLock()
+		ipCount := cm.ipConnections[remoteIP]
+		cm.ipMu.RUnlock()
+		if ipCount >= int32(cm.maxConnectionsPerIP) {
+			return false
+		}
+	}
+	return true
+}
+
+// incrementIP 增加指定 IP 的连接计数。
+func (cm *ConnectionManager) incrementIP(remoteIP string) {
+	if remoteIP == "" {
+		return
+	}
+	cm.ipMu.Lock()
+	cm.ipConnections[remoteIP]++
+	cm.ipMu.Unlock()
+}
+
+// decrementIP 减少指定 IP 的连接计数，计数归零时删除条目。
+func (cm *ConnectionManager) decrementIP(remoteIP string) {
+	if remoteIP == "" {
+		return
+	}
+	cm.ipMu.Lock()
+	if n := cm.ipConnections[remoteIP]; n <= 1 {
+		delete(cm.ipConnections, remoteIP)
+	} else {
+		cm.ipConnections[remoteIP] = n - 1
+	}
+	cm.ipMu.Unlock()
+}
+
+// GetIPConnectionCount 获取指定 IP 的当前连接数。
+func (cm *ConnectionManager) GetIPConnectionCount(remoteIP string) int {
+	cm.ipMu.RLock()
+	defer cm.ipMu.RUnlock()
+	return int(cm.ipConnections[remoteIP])
 }
 
 // AddConnection 添加新连接，生成唯一ID并建立映射关系。
@@ -327,6 +507,9 @@ func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) stri
 	atomic.AddInt32(&cm.count, 1)
 	cm.totalConnections.Add(1)
 	cm.activeConnections.Add(1)
+	// 追踪 IP 连接数
+	remoteIP := extractIP(remoteAddr)
+	cm.incrementIP(remoteIP)
 	return connectionID
 }
 
@@ -336,16 +519,20 @@ func (cm *ConnectionManager) GetConnection(connectionID string) *Connection {
 	if !ok {
 		return nil
 	}
-	return v.(*Connection)
+	return v
+}
+
+// GetUserConnection 根据用户UUID获取关联的连接ID。
+func (cm *ConnectionManager) GetUserConnection(userUUID string) (string, bool) {
+	return cm.userConnections.Load(userUUID)
 }
 
 // RemoveConnection 移除连接并清理所有关联的映射关系。
 func (cm *ConnectionManager) RemoveConnection(connectionID string) {
-	v, ok := cm.connections.Load(connectionID)
+	conn, ok := cm.connections.Load(connectionID)
 	if !ok {
 		return
 	}
-	conn := v.(*Connection)
 	cm.connections.Delete(connectionID)
 	cm.userConnections.Delete(conn.GetUserUUID())
 	serverID := conn.GetServerID()
@@ -353,6 +540,15 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	if serverID != "" {
 		cm.serverConnections.Delete(serverID)
 	}
+	// 清理该连接所属的所有 group 成员关系
+	conn.groupsMu.RLock()
+	for groupID := range conn.Groups {
+		cm.RemoveUserFromGroup(groupID, serverID, conn.GetUserUUID())
+	}
+	conn.groupsMu.RUnlock()
+	// 追踪 IP 连接数
+	remoteIP := extractIP(conn.RemoteAddr)
+	cm.decrementIP(remoteIP)
 	atomic.AddInt32(&cm.count, -1)
 	cm.activeConnections.Add(-1)
 	cm.closedConnections.Add(1)
@@ -388,8 +584,7 @@ func (cm *ConnectionManager) GetConnectionCount() int {
 
 // BroadcastBytes 向所有处于转发状态的连接广播数据。
 func (cm *ConnectionManager) BroadcastBytes(data []byte) {
-	cm.connections.Range(func(key, value interface{}) bool {
-		conn := value.(*Connection)
+	cm.connections.Range(func(key string, conn *Connection) bool {
 		if conn.GetState() == StateForward {
 			conn.Send(data)
 		}
@@ -399,11 +594,10 @@ func (cm *ConnectionManager) BroadcastBytes(data []byte) {
 
 // SendToUser 向指定用户发送数据。
 func (cm *ConnectionManager) SendToUser(userUUID string, data []byte) {
-	v, ok := cm.userConnections.Load(userUUID)
+	connectionID, ok := cm.userConnections.Load(userUUID)
 	if !ok {
 		return
 	}
-	connectionID := v.(string)
 	if conn := cm.GetConnection(connectionID); conn != nil {
 		conn.Send(data)
 	}
@@ -560,8 +754,7 @@ func (cm *ConnectionManager) StartConnectionChecker(connIdleTimeout, connCheckIn
 // checkIdleConnections 检查并关闭超时的空闲连接。
 func (cm *ConnectionManager) checkIdleConnections(timeout time.Duration) {
 	now := time.Now().UnixMilli()
-	cm.connections.Range(func(key, value interface{}) bool {
-		conn := value.(*Connection)
+	cm.connections.Range(func(key string, conn *Connection) bool {
 		lastActive := atomic.LoadInt64(&conn.LastActive)
 		if now-lastActive > timeout.Milliseconds() {
 			tlog.Debug("closing idle connection", "connectionID", conn.ID())
@@ -587,12 +780,21 @@ func (cm *ConnectionManager) StopConnectionChecker() {
 
 // CloseAllConnections 关闭所有连接并清理资源。
 func (cm *ConnectionManager) CloseAllConnections() {
-	cm.connections.Range(func(key, value interface{}) bool {
-		conn := value.(*Connection)
+	cm.connections.Range(func(key string, conn *Connection) bool {
 		if conn.Conn != nil {
 			conn.Conn.Close()
 		}
 		cm.RemoveConnection(conn.ID())
 		return true
 	})
+}
+
+// extractIP 从地址字符串中提取 IP 部分（去掉端口）。
+func extractIP(addr string) string {
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr[:i]
+		}
+	}
+	return addr
 }

@@ -96,6 +96,15 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 	}
 
+	// 阶段2.5：连接级流控
+	if !connObj.CheckAndIncrementMsgRate(g.protection.MaxMessagesPerConn) {
+		g.messagesDroppedRateLimit.Add(1)
+		return PipelineResult{
+			Action: gnet.None,
+			Error:  fmt.Errorf("connection rate limit exceeded"),
+		}
+	}
+
 	// 优先使用缓存的LogicClient（无锁），未命中则回退到连接池查找
 	logicClient := connObj.GetCachedLogicClient()
 	if logicClient == nil || !logicClient.IsConnected() {

@@ -334,7 +334,10 @@ transports:
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `maxFrameSize` | int | `4MiB` | TCP 单帧最大载荷 |
+| `maxFrameBufSize` | int | `64KiB` | TCP 帧缓冲区上限（百万连接场景需降低） |
 | `maxWSFrameSize` | int | `4MiB` | WebSocket 单帧最大载荷 |
+| `maxConnections` | int | `0` | 网关最大总连接数，`0`=不限制。生产环境建议设置 |
+| `maxConnectionsPerIP` | int | `0` | 单 IP 最大连接数，`0`=不限制。防止单客户端耗尽连接 |
 | `cpuThreshold` | float | `90` | CPU 过载阈值（%） |
 | `dropOnOverload` | bool | `true` | 过载时丢弃新消息 |
 | `wsHeartbeatTimeout` | int | `60` | WebSocket 心跳超时（秒） |
