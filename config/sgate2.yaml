@@ -1,5 +1,6 @@
 port: 8082
 logLevel: warn
+belong: "default"
 serverId: "gateway-2"
 serverType: "Gateway"
 zone: "default"

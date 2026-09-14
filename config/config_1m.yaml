@@ -2,6 +2,7 @@
 # 适用于 1M 并发连接压测
 port: 8081
 logLevel: error    # 压测时用 error 减少日志开销
+belong: "default"
 serverId: "gateway-1m"
 serverType: "Gateway"
 zone: "default"
