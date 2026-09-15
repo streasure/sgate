@@ -34,13 +34,13 @@ func main() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
 			n := runtime.Stack(buf, false)
-			fmt.Fprintf(os.Stderr, "panic: %v\n%s\n", r, buf[:n])
+			fmt.Printf("panic: %v\n%s\n", r, buf[:n])
 		}
 	}()
 
 	logComp := tlog.NewLogComponent(*logConfig)
 	if err := logComp.Init(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
+		fmt.Printf("failed to initialize tlog: %v\n", err)
 		return
 	}
 	defer logComp.Destroy()
