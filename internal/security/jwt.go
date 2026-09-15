@@ -4,11 +4,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"time"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/types"

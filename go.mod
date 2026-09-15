@@ -3,6 +3,7 @@ module github.com/streasure/sgate
 go 1.22.5
 
 require (
+	github.com/bytedance/sonic v1.15.3
 	github.com/gobwas/ws v1.4.0
 	github.com/panjf2000/gnet/v2 v2.9.7
 	github.com/shirou/gopsutil/v3 v3.24.5
@@ -17,6 +18,9 @@ require (
 
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect
+	github.com/bytedance/gopkg v0.1.3 // indirect
+	github.com/bytedance/sonic/loader v0.5.2 // indirect
+	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/coreos/go-semver v0.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.3.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
@@ -24,13 +28,16 @@ require (
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/panjf2000/ants/v2 v2.11.3 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
-	github.com/streasure/treasure-slog v1.0.16 // indirect
+	github.com/streasure/treasure-slog v1.0.17 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
+	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.18 // indirect
@@ -38,6 +45,7 @@ require (
 	go.etcd.io/etcd/client/v3 v3.5.18 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
+	golang.org/x/arch v0.3.0 // indirect
 	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/sync v0.11.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
@@ -48,6 +56,6 @@ require (
 )
 
 replace (
-	 github.com/streasure/util => ../util
-	 github.com/streasure/protocol => ../protocol
+	github.com/streasure/protocol => ../protocol
+	github.com/streasure/util => ../util
 )

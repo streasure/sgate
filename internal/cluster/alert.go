@@ -3,12 +3,13 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/tlog"

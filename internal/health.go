@@ -1,11 +1,12 @@
 package internal
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"runtime"
 	"time"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/obs"
 )
@@ -162,5 +163,6 @@ func (g *Gateway) ServeHealthHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	_ = json.NewEncoder(w).Encode(response)
+	data, _ := json.Marshal(response)
+	w.Write(data)
 }

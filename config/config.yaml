@@ -15,8 +15,6 @@ discovery:
   enabled: true
   serviceName: "logic"
   zone: "default"
-  heartbeatInterval: 3s
-  heartbeatTTL: 10s
   registerSelf: true   # standalone模式下向etcd注册网关连接信息（供loginserver发现）
 
 # logic server type for etcd service discovery (ServiceID = logicServerType + ":" + zone)

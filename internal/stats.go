@@ -2,11 +2,12 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"runtime"
 	"sync"
 	"time"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/util/prometheus"
 	"github.com/streasure/util/tlog"

@@ -2,19 +2,16 @@ package config
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
-	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/streasure/util/config"
 )
 
 // Config 网关服务的完整配置结构体，包含所有模块配置
 type Config struct {
 	Port            int                 `yaml:"port"`
 	LogLevel        string              `yaml:"logLevel"`
-	Belong          string              `yaml:"belong"`          // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
+	Belong          string              `yaml:"belong"` // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
 	ServerID        string              `yaml:"serverId"`
 	ServerType      string              `yaml:"serverType"`
 	Zone            string              `yaml:"zone"`
@@ -77,7 +74,7 @@ func (c *Config) PortAddress() string {
 }
 
 // MonitoringConfig 监控接入配置（可插拔）
-	// 通过 enabled 开关控制是否启动 Prometheus 指标服务
+// 通过 enabled 开关控制是否启动 Prometheus 指标服务
 // 关闭时 sgate 单体也能正常运行，只是不暴露 /metrics 端点
 type MonitoringConfig struct {
 	Prometheus PrometheusConfig `yaml:"prometheus"`
@@ -255,15 +252,11 @@ type ClusterConfig struct {
 
 // DiscoveryConfig 服务发现配置
 type DiscoveryConfig struct {
-	Enabled           bool          `yaml:"enabled"`
-	ServiceName       string        `yaml:"serviceName"`
-	Zone              string        `yaml:"zone"`
-	HeartbeatInterval time.Duration `yaml:"heartbeatInterval"`
-	HeartbeatTTL      time.Duration `yaml:"heartbeatTTL"`
-	DeregisterDelay   time.Duration `yaml:"deregisterDelay"`
-	ScanInterval      time.Duration `yaml:"scanInterval"`
-	GatewayDiscovery  bool          `yaml:"gatewayDiscovery"` // 启用网关间服务发现
-	RegisterSelf      bool          `yaml:"registerSelf"`     // standalone模式下是否向etcd注册网关自身连接信息
+	Enabled          bool   `yaml:"enabled"`
+	ServiceName      string `yaml:"serviceName"`
+	Zone             string `yaml:"zone"`
+	GatewayDiscovery bool   `yaml:"gatewayDiscovery"` // 启用网关间服务发现
+	RegisterSelf     bool   `yaml:"registerSelf"`     // standalone模式下是否向etcd注册网关自身连接信息
 }
 
 // GRPCConfig gRPC 服务端配置
@@ -310,23 +303,23 @@ type StreamConfig struct {
 }
 
 type ProtectionConfig struct {
-	MaxFrameSize         int     `yaml:"maxFrameSize"`
-	MaxFrameBufSize      int     `yaml:"maxFrameBufSize"`
-	MaxWSFrameSize       int     `yaml:"maxWSFrameSize"`
-	MaxWSBufferSize      int     `yaml:"maxWSBufferSize"`
-	MaxConnections       int     `yaml:"maxConnections"`       // 网关最大总连接数，0=不限制
-	MaxConnectionsPerIP  int     `yaml:"maxConnectionsPerIP"`  // 单 IP 最大连接数，0=不限制
-	MaxMessagesPerConn   int     `yaml:"maxMessagesPerConn"`   // 单连接最大消息数/秒，0=不限制
-	CPUThreshold         float64 `yaml:"cpuThreshold"`
-	DropOnOverload       bool    `yaml:"dropOnOverload"`
-	CheckIntervalMs      int     `yaml:"checkIntervalMs"`
-	WSHeartbeatTimeout   int     `yaml:"wsHeartbeatTimeout"`
-	WSCheckInterval      int     `yaml:"wsCheckInterval"`
-	ConnCheckInterval    string  `yaml:"connCheckInterval"`
-	ConnIdleTimeout      string  `yaml:"connIdleTimeout"`
-	VerifyInbound        bool    `yaml:"verifyInbound"`
-	PreAuthCommands      []int32 `yaml:"preAuthCommands"`
-	LoginAuth            LoginAuthConfig `yaml:"loginAuth"`
+	MaxFrameSize        int             `yaml:"maxFrameSize"`
+	MaxFrameBufSize     int             `yaml:"maxFrameBufSize"`
+	MaxWSFrameSize      int             `yaml:"maxWSFrameSize"`
+	MaxWSBufferSize     int             `yaml:"maxWSBufferSize"`
+	MaxConnections      int             `yaml:"maxConnections"`      // 网关最大总连接数，0=不限制
+	MaxConnectionsPerIP int             `yaml:"maxConnectionsPerIP"` // 单 IP 最大连接数，0=不限制
+	MaxMessagesPerConn  int             `yaml:"maxMessagesPerConn"`  // 单连接最大消息数/秒，0=不限制
+	CPUThreshold        float64         `yaml:"cpuThreshold"`
+	DropOnOverload      bool            `yaml:"dropOnOverload"`
+	CheckIntervalMs     int             `yaml:"checkIntervalMs"`
+	WSHeartbeatTimeout  int             `yaml:"wsHeartbeatTimeout"`
+	WSCheckInterval     int             `yaml:"wsCheckInterval"`
+	ConnCheckInterval   string          `yaml:"connCheckInterval"`
+	ConnIdleTimeout     string          `yaml:"connIdleTimeout"`
+	VerifyInbound       bool            `yaml:"verifyInbound"`
+	PreAuthCommands     []int32         `yaml:"preAuthCommands"`
+	LoginAuth           LoginAuthConfig `yaml:"loginAuth"`
 }
 
 // LoginAuthConfig 定义网关侧的登录认证行为。
@@ -350,200 +343,10 @@ type Transport struct {
 // LoadConfig 从指定的 YAML 文件加载配置，若未找到则使用默认配置
 // 采用合并语义：默认配置 + YAML 覆盖
 func LoadConfig(configFiles ...string) (*Config, error) {
-	var file *os.File
-	candidates := configFiles
-	if len(candidates) == 0 {
-		candidates = []string{"config/config.yaml", "../config/config.yaml", "../../config/config.yaml"}
-	}
-	for _, name := range candidates {
-		candidate, err := os.Open(filepath.Clean(name))
-		if err == nil {
-			file = candidate
-			break
-		}
-	}
-	if file == nil {
-		return loadDefaultConfig(), nil
-	}
-	defer file.Close()
-
-	// 合并语义：先加载默认（含硬编码常量），再用 yaml 覆盖
-	// yaml 中未出现的字段保留默认；显式 false/0/"" 也算"出现"，会覆盖
-	cfg := loadDefaultConfig()
-	if err := yaml.NewDecoder(file).Decode(cfg); err != nil {
-		return cfg, fmt.Errorf("decode config %q: %w", file.Name(), err)
+	cfg, err := config.Load[Config](configFiles...)
+	if err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
-}
-
-// loadDefaultConfig 创建并返回包含所有默认值的配置对象
-func loadDefaultConfig() *Config {
-	port := getEnvInt("PORT", 8080)
-	logLevel := getEnvString("LOG_LEVEL", "info")
-
-	defaultTransports := []Transport{
-		{Protocol: "tcp", Port: 8080},
-		{Protocol: "tcp", Port: 8081, Type: "websocket"},
-	}
-
-	return &Config{
-		Port:       port,
-		LogLevel:   logLevel,
-		Belong:     getEnvString("GATEWAY_BELONG", "default"),
-		ServerID:   getEnvString("GATEWAY_SERVER_ID", "gateway-1"),
-		ServerType: "Gateway",
-		Zone:       "default",
-		Discovery: DiscoveryConfig{
-			Enabled:           true,
-			GatewayDiscovery:  true,
-			RegisterSelf:      true,
-			ServiceName:       "logic",
-			HeartbeatInterval: 3 * time.Second,
-			HeartbeatTTL:      10 * time.Second,
-			DeregisterDelay:   5 * time.Second,
-			ScanInterval:      10 * time.Second,
-		},
-		Transports: defaultTransports,
-		GRPC: GRPCConfig{
-			Port:           50051,
-			WindowSize:     DefaultGRPCWindowSize,
-			MaxMessageSize: DefaultGRPCMaxMessageSize,
-		},
-		LogicServerType: "Logic",
-		Etcd: EtcdConfig{
-			Enabled:       true,
-			Endpoints:     []string{"http://127.0.0.1:2379"},
-			ServicePrefix: "/services",
-			LeaseTTL:      "10s",
-		},
-		Stream: StreamConfig{
-			ShardCount:       0,
-			SendChannelSize:  DefaultStreamSendChannelSize,
-			ReceiveBatchSize: DefaultStreamReceiveBatchSize,
-			QueuePolicy: StreamQueueConfig{
-				Policy:                QueuePolicy(DefaultStreamQueuePolicy),
-				MaxSize:               DefaultStreamQueueMaxSize,
-				BlockTimeout:          DefaultStreamBlockTimeout,
-				BackpressureThreshold: DefaultBackpressureThreshold,
-				SendTimeout:           DefaultSendTimeout,
-			},
-		},
-		Protection: ProtectionConfig{
-			MaxFrameSize:        DefaultMaxFrameSize,
-			MaxFrameBufSize:     DefaultMaxFrameBufSize,
-			MaxWSFrameSize:      DefaultMaxWSFrameSize,
-			MaxWSBufferSize:     DefaultMaxWSFrameSize,
-			MaxConnections:      DefaultMaxConnections,
-			MaxConnectionsPerIP: DefaultMaxConnectionsPerIP,
-			CPUThreshold:        90.0,
-			DropOnOverload:      true,
-			CheckIntervalMs:     DefaultOverloadCheckIntervalMs,
-			WSHeartbeatTimeout:  DefaultWSHeartbeatTimeoutSec,
-			WSCheckInterval:     DefaultWSCheckIntervalSec,
-			ConnCheckInterval:   DefaultConnCheckInterval,
-			ConnIdleTimeout:     DefaultConnIdleTimeout,
-			VerifyInbound:       false,
-			PreAuthCommands:     []int32{1000001},
-			LoginAuth: LoginAuthConfig{
-				Mode: "none",
-			},
-		},
-		Security: SecurityConfig{
-			Enabled: true,
-			RateLimit: RateLimitConfig{
-				Enabled:      true,
-				MaxTokens:    DefaultRateLimitMaxTokens,
-				TokenRefresh: DefaultRateLimitTokenRefresh,
-			},
-			CircuitBreaker: CircuitBreakerConfig{
-				Enabled:          true,
-				FailureThreshold: DefaultCircuitBreakerFailureThreshold,
-				SuccessThreshold: DefaultCircuitBreakerSuccessThreshold,
-				Timeout:          DefaultCircuitBreakerTimeout,
-			},
-		},
-		WAF: WAFConfig{
-			Enabled:        true,
-			MaxPayloadSize: DefaultWAFMaxPayloadSize,
-			BlockAction:    DefaultWAFBlockAction,
-		},
-		TLS: TLSConfig{
-			Enabled:    false,
-			MinVersion: "TLS1.2",
-		},
-		Cluster: ClusterConfig{
-			Enabled:        false,
-			Mode:           "standalone",
-			NodeID:         "",
-			LeaderElection: false,
-			LockTTL:        DefaultClusterLockTTL,
-		},
-		Balancer: BalancerConfig{
-			Algorithm:        "roundRobin",
-			FailureThreshold: DefaultBalancerFailureThreshold,
-			RecoverInterval:  DefaultBalancerRecoverInterval,
-		},
-		JWTAuth: JWTAuthConfig{
-			Enabled:     false,
-			HeaderField: DefaultJWTHeaderField,
-		},
-		Canary: CanaryConfig{
-			Enabled: false,
-			Percent: DefaultCanaryPercent,
-		},
-		TrafficMirror: TrafficMirrorConfig{
-			Enabled:   false,
-			QueueSize: DefaultMirrorQueueSize,
-			Workers:   DefaultMirrorWorkers,
-		},
-		OTelTracer: OTelTracerConfig{
-			Enabled:     false,
-			ServiceName: DefaultOTelServiceName,
-			SampleRate:  DefaultOTelSampleRate,
-			QueueSize:   DefaultOTelQueueSize,
-			Workers:     DefaultOTelWorkers,
-		},
-		ConfigCenter: ConfigCenterConfig{
-			Enabled:      false,
-			PollInterval: DefaultConfigCenterPollInterval,
-		},
-		Alert: AlertWebhookConfig{
-			Enabled:   false,
-			RateLimit: DefaultAlertRateLimitPerMin,
-		},
-		Degradation: DegradationConfig{
-			Enabled: false,
-		},
-		FilterChain: FilterChainConfig{
-			Enabled: true,
-		},
-		Monitoring: MonitoringConfig{
-			PprofAddr: DefaultPprofAddr,
-			Prometheus: PrometheusConfig{
-				Enabled: false, // 默认关闭，单体运行不依赖 Prometheus
-				Addr:    DefaultPrometheusAddr,
-				Path:    DefaultPrometheusPath,
-				Prefix:  DefaultPrometheusPrefix,
-			},
-		},
-	}
-}
-
-// getEnvString 从环境变量读取字符串，不存在时返回默认值
-func getEnvString(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return defaultValue
-}
-
-// getEnvInt 从环境变量读取整数，不存在或解析失败时返回默认值
-func getEnvInt(key string, defaultValue int) int {
-	if value, exists := os.LookupEnv(key); exists {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		}
-	}
-	return defaultValue
 }

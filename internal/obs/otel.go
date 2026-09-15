@@ -3,11 +3,12 @@ package obs
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/types"

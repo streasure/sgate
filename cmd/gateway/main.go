@@ -16,7 +16,7 @@ import (
 
 var (
 	confFiles = flag.String("conf", "config/config.yaml", "config file path")
-	logConfig = flag.String("config", "config/log.yaml", "log configuration file")
+	logConfig = flag.String("logger", "config/log.yaml", "log configuration file")
 	showVer   = flag.Bool("version", false, "show version")
 )
 
@@ -38,13 +38,12 @@ func main() {
 		}
 	}()
 
-	logComp := tlog.NewLogComponent()
+	logComp := tlog.NewLogComponent(*logConfig)
 	if err := logComp.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
 		return
 	}
 	defer logComp.Destroy()
-	_ = logConfig
 
 	tlog.Info("gateway starting...",
 		"version", internal.Version,
@@ -54,12 +53,12 @@ func main() {
 
 	cfg, err := config.LoadConfig(*confFiles)
 	if err != nil {
-		tlog.Error("load config failed", "error", err)
-		os.Exit(1)
+		tlog.Error("load config failed error", err)
+		return
 	}
 	if err := cfg.Validate(); err != nil {
-		tlog.Error("invalid gateway config", "error", err)
-		os.Exit(1)
+		tlog.Error("invalid gateway config error", err)
+		return
 	}
 	tlog.Info("config loaded", "port", cfg.Port)
 

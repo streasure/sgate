@@ -15,8 +15,6 @@ discovery:
   enabled: true
   serviceName: "logic"
   zone: "default"
-  heartbeatInterval: 3s
-  heartbeatTTL: 10s
 
 logicServerType: "Logic"
 

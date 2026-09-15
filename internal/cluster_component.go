@@ -1,9 +1,10 @@
 package internal
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
+
+	json "github.com/bytedance/sonic"
 
 	clusterPkg "github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
