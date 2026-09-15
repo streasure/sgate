@@ -16,7 +16,7 @@ import (
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/gateway"
-	"github.com/streasure/util/etcd"
+	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -1635,7 +1635,7 @@ type LogicClientPool struct {
 	ordered    []string                    // 有序的服务 ID 列表，用于确定性轮询
 	mu         sync.RWMutex                // 读写锁
 	gateway    GatewayInterface            // 网关接口引用
-	discovery  *etcd.Component             // 服务发现组件
+	discovery  *uetcd.Component             // 服务发现组件
 	balancer   *cluster.Balancer           // 负载均衡器
 	stopCh     chan struct{}               // 停止信号
 	wg         sync.WaitGroup              // 等待协程退出
@@ -1700,7 +1700,7 @@ func (pool *LogicClientPool) LookupAddress(serverID string) string {
 }
 
 // SetDiscovery 设置服务发现组件并监听服务变更
-func (pool *LogicClientPool) SetDiscovery(discovery *etcd.Component) {
+func (pool *LogicClientPool) SetDiscovery(discovery *uetcd.Component) {
 	pool.discovery = discovery
 	discovery.OnServiceChange(pool.handleServiceChange)
 }
@@ -1711,17 +1711,17 @@ func (pool *LogicClientPool) SetBalancer(balancer *cluster.Balancer) {
 }
 
 // handleServiceChange 处理服务注册/注销事件
-func (pool *LogicClientPool) handleServiceChange(event etcd.ServiceEvent) {
+func (pool *LogicClientPool) handleServiceChange(event uetcd.ServiceEvent) {
 	switch event.Type {
-	case etcd.EventRegister:
+	case uetcd.EventRegister:
 		pool.handleServiceRegister(event)
-	case etcd.EventDeregister:
+	case uetcd.EventDeregister:
 		pool.handleServiceDeregister(event)
 	}
 }
 
 // handleServiceRegister 处理服务注册事件，创建新的逻辑服客户端连接
-func (pool *LogicClientPool) handleServiceRegister(event etcd.ServiceEvent) {
+func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 	pool.mu.RLock()
 	existing, exists := pool.clients[event.InstanceID]
 	pool.mu.RUnlock()
@@ -1786,7 +1786,7 @@ func (pool *LogicClientPool) handleServiceRegister(event etcd.ServiceEvent) {
 // handleServiceDeregister 处理服务注销事件
 // 注意：不立即删除和关闭连接，避免 etcd 租约过期但 gRPC 连接仍可用时的误判
 // 让健康检查器和 gRPC 流自身错误检测来处理真正的连接断开
-func (pool *LogicClientPool) handleServiceDeregister(event etcd.ServiceEvent) {
+func (pool *LogicClientPool) handleServiceDeregister(event uetcd.ServiceEvent) {
 	// 服务发现租约可能在现有 gRPC 连接仍可用时过期。
 	// 不立即从连接池删除和关闭连接，避免误判导致转发中断。
 	// 让 HealthChecker 和 gRPC 流自身错误检测来处理真正的连接断开。
@@ -2058,7 +2058,7 @@ type GatewayClientPool struct {
 	clients    map[string]*GatewayClient // 网关客户端映射
 	gens       map[string]uint64         // 每个 serverID 的注册代次，防止 deregister 误关新 client
 	mu         sync.RWMutex              // 读写锁
-	discovery  *etcd.Component           // 服务发现组件
+	discovery  *uetcd.Component           // 服务发现组件
 	addressMap map[string]string         // 地址映射（serverID → address）
 	selfID     string                    // 本实例 ID（排除自身）
 	nextGen    uint64                    // 全局递增代次计数器
@@ -2073,7 +2073,7 @@ func NewGatewayClientPool(gateway GatewayInterface) *GatewayClientPool {
 	}
 }
 
-func (pool *GatewayClientPool) LoadEvents(events []etcd.ServiceEvent) {
+func (pool *GatewayClientPool) LoadEvents(events []uetcd.ServiceEvent) {
 	for _, event := range events {
 		pool.handleServiceChange(event)
 	}
@@ -2095,25 +2095,25 @@ func (pool *GatewayClientPool) LookupAddress(serverID string) string {
 	return pool.addressMap[serverID]
 }
 
-func (pool *GatewayClientPool) SetDiscovery(discovery *etcd.Component) {
+func (pool *GatewayClientPool) SetDiscovery(discovery *uetcd.Component) {
 	pool.discovery = discovery
 	discovery.OnServiceChange(pool.handleServiceChange)
 }
 
-func (pool *GatewayClientPool) handleServiceChange(event etcd.ServiceEvent) {
+func (pool *GatewayClientPool) handleServiceChange(event uetcd.ServiceEvent) {
 	// 专用发现组件监听 Gateway:{zone}，忽略当前网关实例自身。
 	if event.InstanceID == pool.selfID {
 		return
 	}
 	switch event.Type {
-	case etcd.EventRegister:
+	case uetcd.EventRegister:
 		pool.handleRegister(event)
-	case etcd.EventDeregister:
+	case uetcd.EventDeregister:
 		pool.handleDeregister(event)
 	}
 }
 
-func (pool *GatewayClientPool) handleRegister(event etcd.ServiceEvent) {
+func (pool *GatewayClientPool) handleRegister(event uetcd.ServiceEvent) {
 	pool.mu.RLock()
 	existing, exists := pool.clients[event.InstanceID]
 	pool.mu.RUnlock()
@@ -2162,7 +2162,7 @@ func (pool *GatewayClientPool) handleRegister(event etcd.ServiceEvent) {
 		"serverID", event.InstanceID, "address", event.Address, "gen", gen, "totalClients", pool.ClientCount())
 }
 
-func (pool *GatewayClientPool) handleDeregister(event etcd.ServiceEvent) {
+func (pool *GatewayClientPool) handleDeregister(event uetcd.ServiceEvent) {
 	// 取出当前注册的 client 和代次
 	pool.mu.Lock()
 	client, exists := pool.clients[event.InstanceID]

@@ -27,7 +27,7 @@ import (
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
-	"github.com/streasure/util/etcd"
+	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/prometheus"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
@@ -83,9 +83,9 @@ type Gateway struct {
 	logicClientPool   *LogicClientPool
 	gatewayClientPool *GatewayClientPool
 	serverID          string
-	serviceDiscovery  *etcd.Component
-	gatewayDiscovery  *etcd.Component // 发现其他网关（Gateway:{zone}）
-	gatewayEvents     []etcd.ServiceEvent
+	serviceDiscovery  *uetcd.Component
+	gatewayDiscovery  *uetcd.Component // 发现其他网关（Gateway:{zone}）
+	gatewayEvents     []uetcd.ServiceEvent
 	overloadProtector *OverloadProtector
 	grpcServer        *grpc.Server
 	promExporter      *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为空）。

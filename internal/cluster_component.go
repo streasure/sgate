@@ -10,7 +10,7 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/netutil"
 	"github.com/streasure/util/component"
-	"github.com/streasure/util/etcd"
+	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/tlog"
 )
 
@@ -19,9 +19,9 @@ type ClusterComponent struct {
 	cfg              config.Config
 	grpcPort         int
 	grpcFunc         func(addr string)
-	Discovery        *etcd.Component
-	GatewayDiscovery *etcd.Component // 发现同一可用区内的其他网关。
-	gatewayEvents    []etcd.ServiceEvent
+	Discovery        *uetcd.Component
+	GatewayDiscovery *uetcd.Component // 发现同一可用区内的其他网关。
+	gatewayEvents    []uetcd.ServiceEvent
 	gatewayEventsMu  sync.RWMutex
 	Balancer         *clusterPkg.Balancer
 	ConfigCenter     clusterPkg.ConfigCenter
@@ -79,13 +79,13 @@ func (c *ClusterComponent) Start() error {
 		clusterMode = "standalone"
 	}
 
-	etcdCfg := etcd.Config{Endpoints: c.cfg.Etcd.Endpoints, Endpoint: c.cfg.Etcd.Endpoint, Username: c.cfg.Etcd.Username, Password: c.cfg.Etcd.Password, ServicePrefix: c.cfg.Etcd.ServicePrefix}
+	etcdCfg := uetcd.Config{Endpoints: c.cfg.Etcd.Endpoints, Endpoint: c.cfg.Etcd.Endpoint, Username: c.cfg.Etcd.Username, Password: c.cfg.Etcd.Password, ServicePrefix: c.cfg.Etcd.ServicePrefix}
 	if c.cfg.Etcd.Enabled {
-		compCfg := etcd.ComponentConfig{Enabled: true, Etcd: etcdCfg}
+		compCfg := uetcd.ComponentConfig{Enabled: true, Etcd: etcdCfg}
 
 		// 逻辑服务发现（单体和集群模式均需要）
 		if c.cfg.Discovery.Enabled {
-			compCfg.Discovery = etcd.DiscoveryConfig{Enabled: true, ServiceID: c.cfg.Belong + "/Logic:" + c.cfg.Zone}
+			compCfg.Discovery = uetcd.DiscoveryConfig{Enabled: true, ServiceID: c.cfg.Belong + "/Logic:" + c.cfg.Zone}
 		}
 
 		// 注册网关自身，供 loginserver 等服务发现连接地址
@@ -94,7 +94,7 @@ func (c *ClusterComponent) Start() error {
 			advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
 			// ServiceID 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
 			serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
-			compCfg.Registration = etcd.RegistrationConfig{
+			compCfg.Registration = uetcd.RegistrationConfig{
 				Enabled:    true,
 				ServiceID:  serviceID,
 				InstanceID: c.cfg.ServerID,
@@ -103,7 +103,7 @@ func (c *ClusterComponent) Start() error {
 			}
 		}
 
-		c.Discovery = etcd.New(compCfg)
+		c.Discovery = uetcd.New(compCfg)
 		if err := c.Discovery.Start(); err != nil {
 			return fmt.Errorf("start etcd: %w", err)
 		}
@@ -123,16 +123,16 @@ func (c *ClusterComponent) Start() error {
 
 		// 网关间发现仅在集群模式下启用
 		if clusterMode == "cluster" && c.cfg.Discovery.GatewayDiscovery {
-			gwCompCfg := etcd.ComponentConfig{
+			gwCompCfg := uetcd.ComponentConfig{
 				Enabled: true,
 				Etcd:    etcdCfg,
-				Discovery: etcd.DiscoveryConfig{
+				Discovery: uetcd.DiscoveryConfig{
 					Enabled:   true,
 					ServiceID: c.cfg.Belong + "/Gateway:" + c.cfg.Zone,
 				},
 			}
-			c.GatewayDiscovery = etcd.New(gwCompCfg)
-			c.GatewayDiscovery.OnServiceChange(func(event etcd.ServiceEvent) {
+			c.GatewayDiscovery = uetcd.New(gwCompCfg)
+			c.GatewayDiscovery.OnServiceChange(func(event uetcd.ServiceEvent) {
 				c.gatewayEventsMu.Lock()
 				c.gatewayEvents = append(c.gatewayEvents, event)
 				c.gatewayEventsMu.Unlock()
@@ -160,10 +160,10 @@ func (c *ClusterComponent) Start() error {
 	return nil
 }
 
-func (c *ClusterComponent) GatewayEvents() []etcd.ServiceEvent {
+func (c *ClusterComponent) GatewayEvents() []uetcd.ServiceEvent {
 	c.gatewayEventsMu.RLock()
 	defer c.gatewayEventsMu.RUnlock()
-	return append([]etcd.ServiceEvent(nil), c.gatewayEvents...)
+	return append([]uetcd.ServiceEvent(nil), c.gatewayEvents...)
 }
 
 func (c *ClusterComponent) Destroy() {

@@ -12,7 +12,7 @@ import (
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
-	"github.com/streasure/util/etcd"
+	"github.com/streasure/util/uetcd"
 )
 
 // GatewayDeps 汇总构造网关所需的外部依赖。
@@ -40,9 +40,9 @@ type GatewayDeps struct {
 	Degradation   *traffic.DegradationManager
 
 	// 集群组件。
-	Discovery        *etcd.Component
-	GatewayDiscovery *etcd.Component // 发现同一可用区内的其他网关。
-	GatewayEvents    []etcd.ServiceEvent
+	Discovery        *uetcd.Component
+	GatewayDiscovery *uetcd.Component // 发现同一可用区内的其他网关。
+	GatewayEvents    []uetcd.ServiceEvent
 	Balancer         *cluster.Balancer
 	ConfigCenter     cluster.ConfigCenter
 	ClusterNode      *cluster.Cluster
@@ -115,7 +115,7 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 		degradation:        deps.Degradation,
 		serviceDiscovery:   deps.Discovery,
 		gatewayDiscovery:   deps.GatewayDiscovery,
-		gatewayEvents:      append([]etcd.ServiceEvent(nil), deps.GatewayEvents...),
+		gatewayEvents:      append([]uetcd.ServiceEvent(nil), deps.GatewayEvents...),
 		balancer:           deps.Balancer,
 		configCenter:       deps.ConfigCenter,
 		cluster:            deps.ClusterNode,

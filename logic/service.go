@@ -11,7 +11,7 @@ import (
 
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/netutil"
-	"github.com/streasure/util/etcd"
+	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -21,7 +21,7 @@ import (
 // Service 逻辑层服务封装，管理 gRPC 服务器、etcd 注册和生命周期
 type Service struct {
 	server     *Server           // 逻辑层服务端
-	registry   *etcd.Component   // etcd 注册组件
+	registry   *uetcd.Component   // etcd 注册组件
 	listener   net.Listener      // TCP 监听器
 	grpcServer *grpc.Server      // gRPC 服务器
 	cfg        ServiceConfig     // 服务配置
@@ -108,10 +108,10 @@ func (s *Service) initRegistry() {
 	}
 	// ServiceID 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
 	serviceID := belong + "/" + s.cfg.ServerType + ":" + zone
-	s.registry = etcd.New(etcd.ComponentConfig{
+	s.registry = uetcd.New(uetcd.ComponentConfig{
 		Enabled:      true,
-		Etcd:         etcd.Config{Endpoints: endpoints, Endpoint: s.cfg.EtcdEndpoint, Username: s.cfg.EtcdUsername, Password: s.cfg.EtcdPassword, ServicePrefix: s.cfg.EtcdServicePrefix},
-		Registration: etcd.RegistrationConfig{Enabled: true, ServiceID: serviceID, InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},
+		Etcd:         uetcd.Config{Endpoints: endpoints, Endpoint: s.cfg.EtcdEndpoint, Username: s.cfg.EtcdUsername, Password: s.cfg.EtcdPassword, ServicePrefix: s.cfg.EtcdServicePrefix},
+		Registration: uetcd.RegistrationConfig{Enabled: true, ServiceID: serviceID, InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},
 	})
 	if err := s.registry.Start(); err != nil {
 		tlog.Error("service registration failed", "error", err)

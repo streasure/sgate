@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/util/etcd"
+	"github.com/streasure/util/uetcd"
 )
 
 type ConfigCenter interface {
@@ -14,7 +14,7 @@ type ConfigCenter interface {
 	Stop()
 }
 
-type etcdConfigCenter struct{ component *etcd.Component }
+type etcdConfigCenter struct{ component *uetcd.Component }
 
 func NewConfigCenter(cfg config.ConfigCenterConfig, etcdCfg config.EtcdConfig) ConfigCenter {
 	if !cfg.Enabled || !etcdCfg.Enabled {
@@ -24,10 +24,10 @@ func NewConfigCenter(cfg config.ConfigCenterConfig, etcdCfg config.EtcdConfig) C
 	if key == "" {
 		key = "sgate.yaml"
 	}
-	component := etcd.New(etcd.ComponentConfig{
+	component := uetcd.New(uetcd.ComponentConfig{
 		Enabled: true,
-		Etcd:    etcd.Config{Endpoints: etcdCfg.Endpoints, Endpoint: etcdCfg.Endpoint, Username: etcdCfg.Username, Password: etcdCfg.Password, ServicePrefix: etcdCfg.ServicePrefix, ConfigPrefix: "/config"},
-		Config:  etcd.DynamicConfig{Enabled: true, Key: key, Format: "yaml"},
+		Etcd:    uetcd.Config{Endpoints: etcdCfg.Endpoints, Endpoint: etcdCfg.Endpoint, Username: etcdCfg.Username, Password: etcdCfg.Password, ServicePrefix: etcdCfg.ServicePrefix, ConfigPrefix: "/config"},
+		Config:  uetcd.DynamicConfig{Enabled: true, Key: key, Format: "yaml"},
 	})
 	if err := component.Start(); err != nil {
 		return nil
