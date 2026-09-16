@@ -17,7 +17,7 @@ type ConfigCenter interface {
 type etcdConfigCenter struct{ component *uetcd.Component }
 
 func NewConfigCenter(cfg config.ConfigCenterConfig, etcdCfg config.EtcdConfig) ConfigCenter {
-	if !cfg.Enabled || !etcdCfg.Enabled {
+	if !cfg.Enabled {
 		return nil
 	}
 	key := cfg.DataID
@@ -25,9 +25,8 @@ func NewConfigCenter(cfg config.ConfigCenterConfig, etcdCfg config.EtcdConfig) C
 		key = "sgate.yaml"
 	}
 	component := uetcd.New(uetcd.ComponentConfig{
-		Enabled: true,
-		Etcd:    uetcd.Config{Endpoints: etcdCfg.Endpoints, Endpoint: etcdCfg.Endpoint, Username: etcdCfg.Username, Password: etcdCfg.Password, ServicePrefix: etcdCfg.ServicePrefix, ConfigPrefix: "/config"},
-		Config:  uetcd.DynamicConfig{Enabled: true, Key: key, Format: "yaml"},
+		Etcd:   uetcd.Config{Endpoints: etcdCfg.Endpoints, Endpoint: etcdCfg.Endpoint, Username: etcdCfg.Username, Password: etcdCfg.Password, ServicePrefix: etcdCfg.ServicePrefix, ConfigPrefix: "/config"},
+		Config: uetcd.DynamicConfig{Key: key, Format: "yaml"},
 	})
 	if err := component.Start(); err != nil {
 		return nil

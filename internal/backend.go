@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,8 +17,8 @@ import (
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/gateway"
-	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uetcd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -1635,7 +1636,7 @@ type LogicClientPool struct {
 	ordered    []string                    // 有序的服务 ID 列表，用于确定性轮询
 	mu         sync.RWMutex                // 读写锁
 	gateway    GatewayInterface            // 网关接口引用
-	discovery  *uetcd.Component             // 服务发现组件
+	discovery  *uetcd.Component            // 服务发现组件
 	balancer   *cluster.Balancer           // 负载均衡器
 	stopCh     chan struct{}               // 停止信号
 	wg         sync.WaitGroup              // 等待协程退出
@@ -1699,10 +1700,23 @@ func (pool *LogicClientPool) LookupAddress(serverID string) string {
 	return pool.addressMap[serverID]
 }
 
-// SetDiscovery 设置服务发现组件并监听服务变更
+// SetDiscovery 设置服务发现组件并监听服务变更。
+// 注册回调后立即重放已知服务，避免因 discovery 启动先于回调注册而丢失初始快照。
 func (pool *LogicClientPool) SetDiscovery(discovery *uetcd.Component) {
 	pool.discovery = discovery
 	discovery.OnServiceChange(pool.handleServiceChange)
+	svcs := discovery.ServiceSet()
+	tlog.Info("SetDiscovery: replaying known services", "count", len(svcs))
+	for fullKey, address := range svcs {
+		instanceID := fullKey[strings.LastIndex(fullKey, "/")+1:]
+		tlog.Info("SetDiscovery: replaying service", "instanceID", instanceID, "address", address)
+		pool.handleServiceRegister(uetcd.ServiceEvent{
+			Type:       uetcd.EventRegister,
+			ServiceID:  discovery.ServiceID(),
+			InstanceID: instanceID,
+			Address:    address,
+		})
+	}
 }
 
 // SetBalancer 设置负载均衡器
@@ -1726,18 +1740,9 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 	existing, exists := pool.clients[event.InstanceID]
 	pool.mu.RUnlock()
 
-	// 已存在且连接正常，跳过
-	if exists && existing != nil && existing.IsConnected() {
+	// 已存在的客户端已经负责连接或重连，避免初始快照和 watch 事件重复创建。
+	if exists && existing != nil {
 		return
-	}
-
-	// 已存在但连接已断开，先清理旧客户端
-	if exists && existing != nil && !existing.IsConnected() {
-		pool.mu.Lock()
-		delete(pool.clients, event.InstanceID)
-		pool.updateFastClient()
-		pool.mu.Unlock()
-		go existing.Close()
 	}
 
 	client := NewLogicClient(pool.gateway)
@@ -1749,18 +1754,31 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 			"serviceID", event.InstanceID,
 			"address", event.Address,
 		)
-		if err := client.Connect(event.Address); err != nil {
-			tlog.Error("failed to connect to discovered logic service",
-				"serviceID", event.InstanceID,
-				"address", event.Address,
-				"error", err,
-			)
-			return
+		for attempt := 1; ; attempt++ {
+			if err := client.Connect(event.Address); err == nil {
+				tlog.Info("connected to discovered logic service",
+					"serviceID", event.InstanceID,
+					"address", event.Address,
+				)
+				return
+			} else {
+				client.mu.RLock()
+				closing := client.closing
+				client.mu.RUnlock()
+				if closing {
+					return
+				}
+				if attempt == 1 || attempt%10 == 0 {
+					tlog.Warn("logic service connection failed, retrying",
+						"serviceID", event.InstanceID,
+						"address", event.Address,
+						"attempt", attempt,
+						"error", err,
+					)
+				}
+				time.Sleep(time.Second)
+			}
 		}
-		tlog.Info("connected to discovered logic service",
-			"serviceID", event.InstanceID,
-			"address", event.Address,
-		)
 	}()
 
 	pool.mu.Lock()
@@ -2058,7 +2076,7 @@ type GatewayClientPool struct {
 	clients    map[string]*GatewayClient // 网关客户端映射
 	gens       map[string]uint64         // 每个 serverID 的注册代次，防止 deregister 误关新 client
 	mu         sync.RWMutex              // 读写锁
-	discovery  *uetcd.Component           // 服务发现组件
+	discovery  *uetcd.Component          // 服务发现组件
 	addressMap map[string]string         // 地址映射（serverID → address）
 	selfID     string                    // 本实例 ID（排除自身）
 	nextGen    uint64                    // 全局递增代次计数器

@@ -10,8 +10,8 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/netutil"
 	"github.com/streasure/util/component"
-	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uetcd"
 )
 
 type ClusterComponent struct {
@@ -80,69 +80,64 @@ func (c *ClusterComponent) Start() error {
 	}
 
 	etcdCfg := uetcd.Config{Endpoints: c.cfg.Etcd.Endpoints, Endpoint: c.cfg.Etcd.Endpoint, Username: c.cfg.Etcd.Username, Password: c.cfg.Etcd.Password, ServicePrefix: c.cfg.Etcd.ServicePrefix}
-	if c.cfg.Etcd.Enabled {
-		compCfg := uetcd.ComponentConfig{Enabled: true, Etcd: etcdCfg}
+	compCfg := uetcd.ComponentConfig{Etcd: etcdCfg}
 
-		// 逻辑服务发现（单体和集群模式均需要）
-		if c.cfg.Discovery.Enabled {
-			compCfg.Discovery = uetcd.DiscoveryConfig{Enabled: true, ServiceID: c.cfg.Belong + "/Logic:" + c.cfg.Zone}
+	// 逻辑服务发现（单体和集群模式均需要）
+	if c.cfg.Discovery.Enabled {
+		compCfg.Discovery = uetcd.DiscoveryConfig{ServiceID: c.cfg.Belong + "/Logic:" + c.cfg.Zone}
+	}
+
+	// 注册网关自身，供 loginserver 等服务发现连接地址
+	// cluster 模式始终注册；standalone 模式由 RegisterSelf 控制
+	if clusterMode == "cluster" || c.cfg.Discovery.RegisterSelf {
+		advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
+		// ServiceID 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
+		serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
+		compCfg.Registration = uetcd.RegistrationConfig{
+			ServiceID:  serviceID,
+			InstanceID: c.cfg.ServerID,
+			Address:    advertiseAddr,
+			LeaseTTL:   c.cfg.Etcd.LeaseTTL,
 		}
+	}
 
-		// 注册网关自身，供 loginserver 等服务发现连接地址
-		// cluster 模式始终注册；standalone 模式由 RegisterSelf 控制
-		if clusterMode == "cluster" || c.cfg.Discovery.RegisterSelf {
-			advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
-			// ServiceID 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
-			serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
-			compCfg.Registration = uetcd.RegistrationConfig{
-				Enabled:    true,
-				ServiceID:  serviceID,
-				InstanceID: c.cfg.ServerID,
-				Address:    advertiseAddr,
-				LeaseTTL:   c.cfg.Etcd.LeaseTTL,
-			}
+	c.Discovery = uetcd.New(compCfg)
+	if err := c.Discovery.Start(); err != nil {
+		return fmt.Errorf("start etcd: %w", err)
+	}
+
+	if compCfg.Registration.ServiceID != "" {
+		advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
+		serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
+		tlog.Info("etcd 注册成功",
+			"serviceID", serviceID,
+			"instanceID", c.cfg.ServerID,
+			"address", advertiseAddr,
+			"mode", clusterMode)
+	} else {
+		tlog.Info("etcd 逻辑服务发现已启动（网关自身不注册）",
+			"serviceID", c.cfg.Belong+"/Logic:"+c.cfg.Zone)
+	}
+
+	// 网关间发现仅在集群模式下启用
+	if clusterMode == "cluster" && c.cfg.Discovery.GatewayDiscovery {
+		gwCompCfg := uetcd.ComponentConfig{
+			Etcd: etcdCfg,
+			Discovery: uetcd.DiscoveryConfig{
+				ServiceID: c.cfg.Belong + "/Gateway:" + c.cfg.Zone,
+			},
 		}
-
-		c.Discovery = uetcd.New(compCfg)
-		if err := c.Discovery.Start(); err != nil {
-			return fmt.Errorf("start etcd: %w", err)
-		}
-
-		if compCfg.Registration.Enabled {
-			advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
-			serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
-			tlog.Info("etcd 注册成功",
-				"serviceID", serviceID,
-				"instanceID", c.cfg.ServerID,
-				"address", advertiseAddr,
-				"mode", clusterMode)
+		c.GatewayDiscovery = uetcd.New(gwCompCfg)
+		c.GatewayDiscovery.OnServiceChange(func(event uetcd.ServiceEvent) {
+			c.gatewayEventsMu.Lock()
+			c.gatewayEvents = append(c.gatewayEvents, event)
+			c.gatewayEventsMu.Unlock()
+		})
+		if err := c.GatewayDiscovery.Start(); err != nil {
+			tlog.Warn("网关间发现启动失败，网关间协作已禁用", "error", err)
+			c.GatewayDiscovery = nil
 		} else {
-			tlog.Info("etcd 逻辑服务发现已启动（网关自身不注册）",
-				"serviceID", c.cfg.Belong+"/Logic:"+c.cfg.Zone)
-		}
-
-		// 网关间发现仅在集群模式下启用
-		if clusterMode == "cluster" && c.cfg.Discovery.GatewayDiscovery {
-			gwCompCfg := uetcd.ComponentConfig{
-				Enabled: true,
-				Etcd:    etcdCfg,
-				Discovery: uetcd.DiscoveryConfig{
-					Enabled:   true,
-					ServiceID: c.cfg.Belong + "/Gateway:" + c.cfg.Zone,
-				},
-			}
-			c.GatewayDiscovery = uetcd.New(gwCompCfg)
-			c.GatewayDiscovery.OnServiceChange(func(event uetcd.ServiceEvent) {
-				c.gatewayEventsMu.Lock()
-				c.gatewayEvents = append(c.gatewayEvents, event)
-				c.gatewayEventsMu.Unlock()
-			})
-			if err := c.GatewayDiscovery.Start(); err != nil {
-				tlog.Warn("网关间发现启动失败，网关间协作已禁用", "error", err)
-				c.GatewayDiscovery = nil
-			} else {
-				tlog.Info("网关间发现已启动", "serviceID", c.cfg.Belong+"/Gateway:"+c.cfg.Zone)
-			}
+			tlog.Info("网关间发现已启动", "serviceID", c.cfg.Belong+"/Gateway:"+c.cfg.Zone)
 		}
 	}
 

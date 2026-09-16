@@ -3,13 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
-	"os/signal"
 	"runtime"
-	"syscall"
 
 	"github.com/streasure/sgate/internal"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/component"
 	"github.com/streasure/util/gc"
 	"github.com/streasure/util/tlog"
 )
@@ -51,7 +49,7 @@ func main() {
 		"GOMAXPROCS", runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
 
-	cfg, err := config.LoadConfig(*confFiles)
+	cfg, err := config.Load(*confFiles)
 	if err != nil {
 		tlog.Error("load config failed error", err)
 		return
@@ -63,14 +61,7 @@ func main() {
 	tlog.Info("config loaded", "port", cfg.Port)
 
 	gw := internal.NewGateway(*confFiles)
-
-	gw.StartServices()
-
-	tlog.Info("all components started, waiting for signal...")
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	tlog.Info("gateway stopping...")
+	container := component.NewContainer()
+	container.Add(gw)
+	container.Serve()
 }

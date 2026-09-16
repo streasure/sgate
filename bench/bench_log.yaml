@@ -1,0 +1,7 @@
+log:
+  level: info
+  format: json
+  console:
+    enabled: true
+  file:
+    enabled: false

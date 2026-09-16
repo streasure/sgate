@@ -8,7 +8,7 @@ import (
 	"github.com/streasure/sgate/internal/config"
 )
 
-// Cluster 保存网关身份和本地 Leader 状态，服务注册与发现由 util/etcd 负责。
+// Cluster 保存网关身份和本地 Leader 状态，服务注册与发现由 ClusterComponent 负责。
 type Cluster struct {
 	nodeID     string
 	serverID   string

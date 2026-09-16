@@ -3,8 +3,9 @@ package config
 import (
 	"fmt"
 	"strconv"
+	"sync/atomic"
 
-	"github.com/streasure/util/config"
+	"github.com/streasure/util/uconfig"
 )
 
 // Config 网关服务的完整配置结构体，包含所有模块配置
@@ -148,7 +149,6 @@ type ConfigCenterConfig struct {
 
 // EtcdConfig etcd 服务注册与发现配置
 type EtcdConfig struct {
-	Enabled       bool     `yaml:"enabled"`
 	Endpoints     []string `yaml:"endpoints"`
 	Endpoint      string   `yaml:"endpoint"`
 	Username      string   `yaml:"username"`
@@ -343,10 +343,27 @@ type Transport struct {
 // LoadConfig 从指定的 YAML 文件加载配置，若未找到则使用默认配置
 // 采用合并语义：默认配置 + YAML 覆盖
 func LoadConfig(configFiles ...string) (*Config, error) {
-	cfg, err := config.Load[Config](configFiles...)
+	cfg, err := uconfig.Load[Config](configFiles...)
 	if err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
+}
+
+var conf atomic.Pointer[Config]
+
+// Load 从指定的 YAML 文件加载配置并存入全局变量，返回配置指针。
+func Load(configFiles ...string) (*Config, error) {
+	cfg, err := uconfig.Load[Config](configFiles...)
+	if err != nil {
+		return nil, err
+	}
+	conf.Store(cfg)
+	return cfg, nil
+}
+
+// Get 返回当前全局配置指针。必须在 Load 之后调用。
+func Get() *Config {
+	return conf.Load()
 }

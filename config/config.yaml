@@ -6,7 +6,6 @@ serverType: "Gateway"
 zone: "default"
 
 etcd:
-  enabled: true
   endpoints: ["http://127.0.0.1:2379"]
   servicePrefix: "/services"
   leaseTTL: "10s"

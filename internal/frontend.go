@@ -27,9 +27,9 @@ import (
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
-	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/prometheus"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uetcd"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -152,6 +152,9 @@ type Gateway struct {
 	connectionDurationSum     atomic.Int64        // 连接总存活时长（毫秒），用于计算平均值
 	connectionDurationCount   atomic.Int64        // 已关闭连接数，用于计算平均值
 	connectionDurationTracker *obs.LatencyTracker // 连接时长分位数追踪器
+	components                *component.Container
+	clusterComponent          *ClusterComponent
+	runtimeComponent          *GatewayRuntimeComponent
 }
 
 // SetTransportType 设置监听端口对应的传输类型。
@@ -171,9 +174,13 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 
 // NewGateway 加载配置并创建、初始化、启动网关组件。
 func NewGateway(configFiles ...string) *Gateway {
-	cfg, err := config.LoadConfig(configFiles...)
-	if err != nil {
-		tlog.Warn("load config failed, using defaults", "error", err)
+	cfg := config.Get()
+	if cfg == nil {
+		var err error
+		cfg, err = config.Load(configFiles...)
+		if err != nil {
+			tlog.Warn("load config failed, using defaults", "error", err)
+		}
 	}
 
 	switch cfg.LogLevel {
@@ -196,18 +203,12 @@ func NewGateway(configFiles ...string) *Gateway {
 	traComp := NewTrafficComponent(cfg.Canary, cfg.TrafficMirror, cfg.Degradation, fc)
 	clsComp := NewClusterComponent(*cfg, cfg.GRPC.Port, nil)
 
-	// 初始化并启动所有组件
-	for _, comp := range []component.Component{secComp, obsComp, traComp, clsComp} {
-		if err := comp.Init(); err != nil {
-			panic(fmt.Sprintf("component %s init failed: %v", comp.Name(), err))
-		}
-	}
-	for _, comp := range []component.Component{secComp, obsComp, traComp, clsComp} {
-		if err := comp.Start(); err != nil {
-			panic(fmt.Sprintf("component %s start failed: %v", comp.Name(), err))
-		}
-	}
-
+	components := component.NewContainer()
+	components.Add(secComp)
+	components.Add(obsComp)
+	components.Add(traComp)
+	components.Add(clsComp)
+	// Init 延迟到 gw 创建之后，以便添加需要 gw 引用的 runtimeComponent。
 	// 从配置加载 SPI 过滤器
 	for _, fi := range cfg.FilterChain.Filters {
 		if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
@@ -239,6 +240,16 @@ func NewGateway(configFiles ...string) *Gateway {
 		ClusterNode:        clsComp.Cluster,
 		AlertWebhook:       clsComp.AlertWebhook,
 	})
+	gw.components = components
+	gw.clusterComponent = clsComp
+
+	// 创建运行时组件并加入子容器，然后初始化所有子组件。
+	runtimeComp := NewGatewayRuntimeComponent(gw)
+	components.Add(runtimeComp)
+	gw.runtimeComponent = runtimeComp
+	if err := components.Init(); err != nil {
+		panic(err)
+	}
 
 	// TLS加密配置
 	gw.tlsConfig = &tls.Config{
@@ -273,6 +284,23 @@ func NewGateway(configFiles ...string) *Gateway {
 
 	return gw
 }
+
+func (g *Gateway) Name() string { return "gateway" }
+func (g *Gateway) Order() int   { return 1000 }
+func (g *Gateway) Init() error  { return nil }
+func (g *Gateway) Start() error {
+	// 绑定集群组件在 Init 阶段创建的资源（Discovery/Balancer 等）。
+	g.serviceDiscovery = g.clusterComponent.Discovery
+	g.gatewayDiscovery = g.clusterComponent.GatewayDiscovery
+	g.gatewayEvents = g.clusterComponent.GatewayEvents()
+	g.balancer = g.clusterComponent.Balancer
+	g.configCenter = g.clusterComponent.ConfigCenter
+	g.cluster = g.clusterComponent.Cluster
+	g.alertWebhook = g.clusterComponent.AlertWebhook
+	// 启动子容器：security → observability → traffic → cluster → gateway-runtime
+	return g.components.Start()
+}
+func (g *Gateway) Destroy() { g.Close() }
 
 // StartServices 启动网关特定服务：gRPC服务器、统计HTTP服务、
 // Prometheus监控指标、过载保护器、WebSocket心跳检测、配置文件监听
@@ -482,7 +510,7 @@ func (g *Gateway) configWatcher() {
 
 			if fileInfo.ModTime() != lastModTime {
 				lastModTime = fileInfo.ModTime()
-				newCfg, err := config.LoadConfig()
+				newCfg, err := config.Load(g.configPath)
 				if err != nil {
 					time.Sleep(5 * time.Second)
 					continue
@@ -1017,15 +1045,21 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	// 将登录 StreamData 转发给逻辑服，以便它注册会话并处理登录特定逻辑（如加入群组、设置状态）。
 	connObj := g.connectionManager.GetConnection(connectionID)
 	if connObj != nil {
-		if lc := g.GetLogicClient(req.ServerId); lc != nil {
-			forwardMsg := &protoGw.StreamData{
-				SessionId: connectionID,
-				UserKey:   connObj.GetUserUUID(),
-				Data:      append([]byte(nil), message.Data...),
-				Cmd:       message.Cmd,
-				SeqId:     message.SeqId,
+		forwardMsg := &protoGw.StreamData{
+			SessionId: connectionID,
+			UserKey:   connObj.GetUserUUID(),
+			Data:      append([]byte(nil), message.Data...),
+			Cmd:       message.Cmd,
+			SeqId:     message.SeqId,
+		}
+		// 等待 gRPC 流就绪后转发（最多 2 秒）
+		for i := 0; i < 20; i++ {
+			if lc := g.GetLogicClient(req.ServerId); lc != nil {
+				if err := lc.SendMessage(forwardMsg); err == nil {
+					break
+				}
 			}
-			_ = lc.SendMessage(forwardMsg)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 
@@ -1201,33 +1235,14 @@ func (g *Gateway) Close() {
 			tlog.Warn("connection drain timed out, forcing close")
 		}
 
-		if g.serviceDiscovery != nil {
-			g.serviceDiscovery.Destroy()
-		}
-		if g.gatewayDiscovery != nil {
-			g.gatewayDiscovery.Destroy()
-		}
-
-		if g.cluster != nil {
-			g.cluster.Stop()
-		}
-
 		if g.logicClientPool != nil {
 			g.logicClientPool.Close()
 		}
-
 		if g.gatewayClientPool != nil {
 			g.gatewayClientPool.Close()
 		}
-
 		if g.logicClient != nil {
 			g.logicClient.Close()
-		}
-		if g.messageIntegrity != nil {
-			g.messageIntegrity.Stop()
-		}
-		if g.trafficMirror != nil {
-			g.trafficMirror.Stop()
 		}
 
 		if g.grpcServer != nil {
@@ -1246,15 +1261,15 @@ func (g *Gateway) Close() {
 		g.connectionManager.StopConnectionChecker()
 		g.connectionManager.CloseAllConnections()
 
-		g.overloadProtector.Stop()
-		if g.tracer != nil {
-			g.tracer.Stop()
-		}
-
 		if g.promExporter != nil {
 			g.promExporter.Destroy()
 		}
 		g.StopStatsServer()
+
+		// 阶段3：销毁子容器（security → obs → traffic → cluster → runtime 逆序销毁）
+		if g.components != nil {
+			g.components.DestroyAll()
+		}
 
 		tlog.Info("gateway closed")
 	})

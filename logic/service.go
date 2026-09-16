@@ -11,8 +11,8 @@ import (
 
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/netutil"
-	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uetcd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/proto"
@@ -20,12 +20,12 @@ import (
 
 // Service 逻辑层服务封装，管理 gRPC 服务器、etcd 注册和生命周期
 type Service struct {
-	server     *Server           // 逻辑层服务端
-	registry   *uetcd.Component   // etcd 注册组件
-	listener   net.Listener      // TCP 监听器
-	grpcServer *grpc.Server      // gRPC 服务器
-	cfg        ServiceConfig     // 服务配置
-	stopOnce   sync.Once         // 确保只停止一次
+	server     *Server          // 逻辑层服务端
+	registry   *uetcd.Component // etcd 注册组件
+	listener   net.Listener     // TCP 监听器
+	grpcServer *grpc.Server     // gRPC 服务器
+	cfg        ServiceConfig    // 服务配置
+	stopOnce   sync.Once        // 确保只停止一次
 }
 
 // NewService 创建逻辑层服务实例，应用配置选项
@@ -53,13 +53,18 @@ func (s *Service) RegisterProto(cmd int32, reqProto proto.Message, respCmd int32
 func (s *Service) RegisterUser(userUUID, sessionID string) {
 	s.server.RegisterUser(userUUID, sessionID)
 }
+
 // UnregisterUser 注销用户与会话的映射
 func (s *Service) UnregisterUser(userUUID string) { s.server.UnregisterUser(userUUID) }
+
 // GetCommands 获取已注册的所有命令码列表
-func (s *Service) GetCommands() []int32           { return s.server.registeredCommands() }
+func (s *Service) GetCommands() []int32 { return s.server.registeredCommands() }
 
 // Start 启动 gRPC 服务器和 etcd 注册
 func (s *Service) Start() error {
+	if s.cfg.AdvertiseAddr == "" {
+		s.cfg.AdvertiseAddr = netutil.GetOutboundIPv4() + ":" + s.cfg.ListenPort
+	}
 	listener, err := net.Listen("tcp", s.cfg.ListenAddr+":"+s.cfg.ListenPort)
 	if err != nil {
 		return fmt.Errorf("listen on %s:%s: %w", s.cfg.ListenAddr, s.cfg.ListenPort, err)
@@ -84,6 +89,8 @@ func (s *Service) Start() error {
 			tlog.Error("gRPC server stopped", "error", err)
 		}
 	}()
+	// 等待 gRPC 服务就绪后再注册 etcd，避免 sgate 连接时服务端还没 accept
+	time.Sleep(200 * time.Millisecond)
 	s.initRegistry()
 	tlog.Info("logic service started", "serviceID", s.cfg.ServiceID, "address", s.cfg.AdvertiseAddr)
 	return nil
@@ -109,9 +116,8 @@ func (s *Service) initRegistry() {
 	// ServiceID 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
 	serviceID := belong + "/" + s.cfg.ServerType + ":" + zone
 	s.registry = uetcd.New(uetcd.ComponentConfig{
-		Enabled:      true,
 		Etcd:         uetcd.Config{Endpoints: endpoints, Endpoint: s.cfg.EtcdEndpoint, Username: s.cfg.EtcdUsername, Password: s.cfg.EtcdPassword, ServicePrefix: s.cfg.EtcdServicePrefix},
-		Registration: uetcd.RegistrationConfig{Enabled: true, ServiceID: serviceID, InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},
+		Registration: uetcd.RegistrationConfig{ServiceID: serviceID, InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},
 	})
 	if err := s.registry.Start(); err != nil {
 		tlog.Error("service registration failed", "error", err)
