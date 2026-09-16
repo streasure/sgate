@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
 	"runtime"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 	"github.com/streasure/sgate/internal/gateway"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
+	"github.com/streasure/util/ugrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -1594,7 +1594,7 @@ func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamD
 }
 
 // StartGRPCServer 启动 gRPC 服务器，监听指定端口
-func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSize int) (*grpc.Server, error) {
+func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSize int) (*ugrpc.Server, error) {
 	if maxMsgSize <= 0 {
 		maxMsgSize = 4 * 1024 * 1024
 	}
@@ -1602,31 +1602,23 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 		windowSize = 524288
 	}
 	tlog.Info("creating gRPC server")
-	server := grpc.NewServer(
-		grpc.MaxRecvMsgSize(maxMsgSize),
-		grpc.MaxSendMsgSize(maxMsgSize),
-		grpc.InitialWindowSize(int32(windowSize)),
-		grpc.InitialConnWindowSize(int32(windowSize)),
+	server := ugrpc.NewServer(
+		ugrpc.WithAddr(port),
+		ugrpc.WithMaxRecvMsgSize(maxMsgSize),
+		ugrpc.WithMaxSendMsgSize(maxMsgSize),
+		ugrpc.WithWindowSize(windowSize),
+		ugrpc.WithGracefulStopTimeout(5*time.Second),
 	)
 	tlog.Info("registering GatewayService")
 	grpcService := NewGRPCServer(gw)
 	protoGw.RegisterGatewayStreamServer(server, grpcService)
 	protoGw.RegisterGatewayServer(server, grpcService)
 
-	tlog.Info("listening on port", "port", port)
-	listener, err := net.Listen("tcp", port)
-	if err != nil {
-		tlog.Error("failed to listen on port", "error", err, "port", port)
+	if err := server.Start(); err != nil {
+		tlog.Error("gRPC server failed to start", "error", err, "port", port)
 		return nil, err
 	}
 
-	go func() {
-		if err := server.Serve(listener); err != nil {
-			tlog.Error("gRPC server failed", "error", err)
-		}
-	}()
-
-	tlog.Info("gRPC server started", "port", port)
 	return server, nil
 }
 

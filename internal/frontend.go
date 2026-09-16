@@ -30,7 +30,7 @@ import (
 	"github.com/streasure/util/prometheus"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
-	"google.golang.org/grpc"
+	"github.com/streasure/util/ugrpc"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -87,7 +87,7 @@ type Gateway struct {
 	gatewayDiscovery  *uetcd.Component // 发现其他网关（Gateway:{zone}）
 	gatewayEvents     []uetcd.ServiceEvent
 	overloadProtector *OverloadProtector
-	grpcServer        *grpc.Server
+	grpcServer        *ugrpc.Server
 	promExporter      *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为空）。
 	statsServer       *http.Server
 	msgRate           *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
@@ -1246,16 +1246,7 @@ func (g *Gateway) Close() {
 		}
 
 		if g.grpcServer != nil {
-			stopped := make(chan struct{})
-			go func() {
-				g.grpcServer.GracefulStop()
-				close(stopped)
-			}()
-			select {
-			case <-stopped:
-			case <-time.After(5 * time.Second):
-				g.grpcServer.Stop()
-			}
+			g.grpcServer.Stop()
 		}
 
 		g.connectionManager.StopConnectionChecker()
