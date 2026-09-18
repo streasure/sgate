@@ -3,39 +3,29 @@ log:
   format: json
   async:
     enabled: true
-    buffer_size: 5000
-    batch_size: 50
-    flush_interval: 50
-    workers: 4
+    worker_multiplier: 1
+    buffer_size: 100000
+    batch_size: 1000
+    flush_interval: 100
   console:
-    enabled: true
-    format: text
+    enabled: false
   file:
     enabled: true
-    path: ./logs/app.log
+    path: ./logs/sgate.log
     rotate:
       max_size: 100
       max_backups: 10
       max_age: 30
       compress: true
-  network:
-    enabled: false
-    type: tcp
-    address: localhost:9200
-    timeout: 5
-    retry: 3
-    tls: false
+      interval: 0
   stacktrace:
     enabled: true
     level: error
     depth: 10
   sampling:
-    enabled: false
-    initial: 1000
-    thereafter: 100
-  field_cache:
     enabled: true
-    size: 1000
+    initial: 10000
+    thereafter: 1000
   performance:
     lock_free: true
     use_pool: true

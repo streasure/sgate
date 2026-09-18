@@ -11,7 +11,7 @@ cd "$SCRIPT_DIR"
 
 # 配置路径
 CONF="config/config.yaml"
-LOG_CONF="config/log.yaml"
+LOG_CONF="config/tlog.yaml"
 
 # 编译
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译 sgate..."

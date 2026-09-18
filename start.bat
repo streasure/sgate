@@ -9,7 +9,7 @@ setlocal
 
 :: 配置路径
 set CONF=config\config.yaml
-set LOG_CONF=config\log.yaml
+set LOG_CONF=config\tlog.yaml
 
 :: 编译
 echo [%date% %time%] 编译 sgate...
