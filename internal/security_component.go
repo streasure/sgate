@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
@@ -39,7 +40,7 @@ func (c *SecurityComponent) Name() string { return "security" }
 func (c *SecurityComponent) Order() int   { return 100 }
 
 func (c *SecurityComponent) Init() error {
-	tlog.Info("security component init")
+	tlog.Info(context.Background(), "security component init")
 
 	c.WhitelistBlacklist = security.NewWhitelistBlacklist()
 	c.CircuitBreakerMgr = security.NewCircuitBreakerManager()
@@ -82,17 +83,17 @@ func (c *SecurityComponent) Init() error {
 }
 
 func (c *SecurityComponent) Start() error {
-	tlog.Info("security component started",
-		"whitelist", len(c.cfg.Whitelist),
-		"blacklist", len(c.cfg.Blacklist),
-		"rateLimit", c.cfg.RateLimit.Enabled,
-		"waf", c.waf.Enabled,
-		"jwt", c.jwt.Enabled)
+	tlog.Info(context.Background(), "security component started whitelist=%d blacklist=%d rateLimit=%v waf=%v jwt=%v",
+		len(c.cfg.Whitelist),
+		len(c.cfg.Blacklist),
+		c.cfg.RateLimit.Enabled,
+		c.waf.Enabled,
+		c.jwt.Enabled)
 	return nil
 }
 
 func (c *SecurityComponent) Destroy() {
-	tlog.Info("security component destroying")
+	tlog.Info(context.Background(), "security component destroying")
 	if c.RateLimiter != nil {
 		c.RateLimiter.Stop()
 	}

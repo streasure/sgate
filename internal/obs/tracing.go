@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -102,11 +103,11 @@ func (t *Tracer) EndSpan(span *TraceSpan) {
 	span.EndTime = time.Now()
 	span.Duration = span.EndTime.Sub(span.StartTime)
 
-	tlog.Debug("Span completed",
-		"traceID", span.TraceID,
-		"spanID", span.SpanID,
-		"name", span.Name,
-		"duration", span.Duration,
+	tlog.Debug(context.Background(), "Span completed traceID=%s spanID=%s name=%s duration=%v",
+		span.TraceID,
+		span.SpanID,
+		span.Name,
+		span.Duration,
 	)
 }
 
@@ -208,7 +209,7 @@ func (t *Tracer) cleanupExpiredTraces() {
 		}
 
 		if !allEnded && now.Sub(oldestSpan) > t.maxTraceAge {
-			tlog.Warn("force cleaning stale trace with unfinished spans", "traceID", traceID, "age", now.Sub(oldestSpan))
+			tlog.Warn(context.Background(), "force cleaning stale trace with unfinished spans traceID=%s age=%v", traceID, now.Sub(oldestSpan))
 			delete(t.traces, traceID)
 		}
 	}

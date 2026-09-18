@@ -1,6 +1,7 @@
 package traffic
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -119,10 +120,10 @@ func (m *DegradationManager) RecordResult(route string, isError bool) {
 			if r.degraded.CompareAndSwap(0, 1) {
 				r.lastDegrade.Store(time.Now().Unix())
 				m.triggeredCount.Add(1)
-				tlog.Warn("degradation triggered",
-					"route", route,
-					"errorRate", rate,
-					"threshold", r.errorThreshold)
+				tlog.Warn(context.Background(), "degradation triggered route=%s errorRate=%v threshold=%v",
+					route,
+					rate,
+					r.errorThreshold)
 			}
 		}
 	}

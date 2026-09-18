@@ -1,6 +1,7 @@
 package traffic
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 
@@ -106,10 +107,10 @@ func (tm *TrafficMirror) worker() {
 		case fc := <-tm.queue:
 			// 此处接入镜像目标（实现简化：仅日志记录）
 			// 实际生产可调用 mirror 专用 LogicClient
-			tlog.Debug("traffic mirror",
-				"route", fc.Route,
-				"conn", fc.ConnectionID,
-				"target", tm.targetAddr)
+			tlog.Debug(context.Background(), "traffic mirror route=%s conn=%s target=%s",
+				fc.Route,
+				fc.ConnectionID,
+				tm.targetAddr)
 		}
 	}
 }

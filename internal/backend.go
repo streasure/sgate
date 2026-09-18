@@ -308,7 +308,7 @@ func (s *StreamShard) markShardBroken() {
 func (s *StreamShard) startSendLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error("startSendLoop panic recovered", "shard", s.index, "error", fmt.Sprintf("%v", r))
+			tlog.Error(context.Background(), "startSendLoop panic recovered shard=%d error=%v", s.index, fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -362,7 +362,7 @@ func (s *StreamShard) startSendLoop() {
 		sendIdx := 0
 		for sendIdx < len(batch) {
 			if err := stream.Send(batch[sendIdx]); err != nil {
-				tlog.Warn("shard send error, isolating shard", "shard", s.index, "error", err)
+				tlog.Warn(context.Background(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
 				s.markShardBroken()
 				break
 			}
@@ -483,9 +483,9 @@ func (lc *LogicClient) setState(newState LogicConnectionState) {
 
 // notifyStateChange 记录连接状态变更日志
 func (lc *LogicClient) notifyStateChange(oldState, newState LogicConnectionState) {
-	tlog.Info("logic connection state changed",
-		"oldState", oldState.String(),
-		"newState", newState.String(),
+	tlog.Info(context.Background(), "logic connection state changed oldState=%s newState=%s",
+		oldState.String(),
+		newState.String(),
 	)
 }
 
@@ -519,7 +519,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	}
 
 	if lc.conn != nil {
-		tlog.Info("doConnect closing old connection (reconnect)", "isReconnect", isReconnect)
+		tlog.Info(context.Background(), "doConnect closing old connection (reconnect) isReconnect=%v", isReconnect)
 		lc.conn.Close()
 		lc.conn = nil
 		lc.client = nil
@@ -528,7 +528,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	lc.notifyStateChange(oldState, LogicConnectionState(atomic.LoadInt32(&lc.state)))
 
-	tlog.Info("connecting to logic server", "address", lc.address, "reconnect", isReconnect)
+	tlog.Info(context.Background(), "connecting to logic server address=%s reconnect=%v", lc.address, isReconnect)
 
 	windowSize := int32(524288)
 	maxMsgSize := 4 * 1024 * 1024
@@ -553,7 +553,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		}),
 	)
 	if err != nil {
-		tlog.Error("grpc.Dial failed", "error", err, "address", lc.address)
+		tlog.Error(context.Background(), "grpc.Dial failed error=%v address=%s", err, lc.address)
 		lc.setState(LogicStateDisconnected)
 		return err
 	}
@@ -633,7 +633,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			stream, err := client.OnData(ctx)
 			if err != nil {
 				errOnce.Do(func() { firstErr = err })
-				tlog.Error("failed to establish stream shard", "shard", idx, "error", err)
+				tlog.Error(context.Background(), "failed to establish stream shard shard=%d error=%v", idx, err)
 				return
 			}
 
@@ -643,14 +643,14 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			shard.ctx = ctx
 			shard.mu.Unlock()
 
-			tlog.Info("stream shard established", "shard", idx)
+			tlog.Info(context.Background(), "stream shard established shard=%d", idx)
 			// 流分片建立成功
 		}(i)
 	}
 	wg.Wait()
 
 	if firstErr != nil {
-		tlog.Error("failed to establish all stream shards", "error", firstErr)
+		tlog.Error(context.Background(), "failed to establish all stream shards error=%v", firstErr)
 		for i := 0; i < shardCount; i++ {
 			shard := lc.streamManager.shards[i]
 			shard.mu.Lock()
@@ -671,7 +671,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		return firstErr
 	}
 
-	tlog.Info("all stream shards established", "count", shardCount)
+	tlog.Info(context.Background(), "all stream shards established count=%d", shardCount)
 
 	lc.setState(LogicStateConnected)
 
@@ -696,7 +696,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	lc.startHealthChecker()
 
-	tlog.Info("successfully connected to logic server", "address", lc.address, "shards", shardCount, "isReconnect", isReconnect)
+	tlog.Info(context.Background(), "successfully connected to logic server address=%s shards=%d isReconnect=%v", lc.address, shardCount, isReconnect)
 
 	return nil
 }
@@ -743,14 +743,14 @@ func (lc *LogicClient) Close() {
 	lc.mu.Unlock()
 
 	close(lc.closed)
-	tlog.Info("closed logic server connection")
+	tlog.Info(context.Background(), "closed logic server connection")
 }
 
 // receiveMessages 从流中接收消息并推送到客户端连接
 func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error("receiveMessages panic recovered", "error", fmt.Sprintf("%v", r))
+			tlog.Error(context.Background(), "receiveMessages panic recovered error=%v", fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -822,7 +822,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				continue
 			}
 			if sendErr := cb.conn.Send(responseData); sendErr != nil {
-				tlog.Warn("batch push to client failed", "sessionID", cb.items[0].SessionId, "error", sendErr)
+				tlog.Warn(context.Background(), "batch push to client failed sessionID=%s error=%v", cb.items[0].SessionId, sendErr)
 			} else {
 				lc.gateway.AddPushedToClient(int64(len(cb.items)))
 			}
@@ -845,7 +845,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				return
 			}
 
-			tlog.Warn("shard receive error, triggering reconnect", "shard", shardIdx, "error", err)
+			tlog.Warn(context.Background(), "shard receive error, triggering reconnect shard=%d error=%v", shardIdx, err)
 			s.markShardBroken()
 			return
 		}
@@ -890,7 +890,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				responseData, err := marshalClientMessage(msg)
 				if err == nil {
 					if sendErr := conn.Send(responseData); sendErr != nil {
-						tlog.Warn("push to client failed", "sessionID", msg.SessionId, "cmd", msg.Cmd, "error", sendErr)
+						tlog.Warn(context.Background(), "push to client failed sessionID=%s cmd=%d error=%v", msg.SessionId, msg.Cmd, sendErr)
 					} else {
 						lc.gateway.AddPushedToClient(1)
 					}
@@ -922,16 +922,16 @@ func (lc *LogicClient) handleDisconnection() {
 	if lc.reconnectManager != nil {
 		lc.reconnectManager.NotifyDisconnection()
 	} else {
-		tlog.Info("logic server disconnected, attempting reconnect in 5s...")
+		tlog.Info(context.Background(), "logic server disconnected, attempting reconnect in 5s...")
 		time.Sleep(5 * time.Second)
 		if lc.closing {
 			return
 		}
 		err := lc.doConnect(true)
 		if err != nil {
-			tlog.Error("reconnect failed", "error", err)
+			tlog.Error(context.Background(), "reconnect failed error=%v", err)
 		} else {
-			tlog.Info("reconnect succeeded")
+			tlog.Info(context.Background(), "reconnect succeeded")
 		}
 	}
 }
@@ -1070,9 +1070,9 @@ func (hc *HealthChecker) doCheck() {
 	err := hc.lc.SendMessageDirect(pingMsg)
 	if err != nil {
 		hc.failCount++
-		tlog.Warn("health check failed", "failCount", hc.failCount, "maxFailures", hc.maxFailures, "error", err)
+		tlog.Warn(context.Background(), "health check failed failCount=%d maxFailures=%d error=%v", hc.failCount, hc.maxFailures, err)
 		if hc.failCount >= hc.maxFailures {
-			tlog.Error("too many health check failures, triggering reconnect", "failCount", hc.failCount)
+			tlog.Error(context.Background(), "too many health check failures, triggering reconnect failCount=%d", hc.failCount)
 			hc.lc.handleDisconnection()
 		}
 	} else {
@@ -1156,30 +1156,30 @@ func (rm *ReconnectManager) doReconnect() {
 		}
 
 		if rm.config.MaxAttempts > 0 && attempt >= rm.config.MaxAttempts {
-			tlog.Error("max reconnect attempts reached, trying etcd discovery",
-				"maxAttempts", rm.config.MaxAttempts, "serverID", rm.lc.serverID)
+			tlog.Error(context.Background(), "max reconnect attempts reached, trying etcd discovery maxAttempts=%d serverID=%s",
+				rm.config.MaxAttempts, rm.lc.serverID)
 
 			// 尝试通过 etcd 服务发现查找替代节点。
 			// 尝试通过 etcd 发现替代节点
 			if rm.lookupAddress != nil {
 				if newAddr := rm.lookupAddress(rm.lc.serverID); newAddr != "" && newAddr != originalAddress {
-					tlog.Info("discovered replacement address from etcd",
-						"serverID", rm.lc.serverID, "oldAddress", originalAddress, "newAddress", newAddr)
+					tlog.Info(context.Background(), "discovered replacement address from etcd serverID=%s oldAddress=%s newAddress=%s",
+					rm.lc.serverID, originalAddress, newAddr)
 					rm.lc.mu.Lock()
 					rm.lc.address = newAddr
 					rm.lc.mu.Unlock()
 					if err := rm.lc.doConnect(true); err == nil {
-						tlog.Info("reconnect to replacement node succeeded", "address", newAddr)
+						tlog.Info(context.Background(), "reconnect to replacement node succeeded address=%s", newAddr)
 						return
 					}
-					tlog.Warn("reconnect to replacement node failed", "address", newAddr)
+					tlog.Warn(context.Background(), "reconnect to replacement node failed address=%s", newAddr)
 				}
 			}
 			return
 		}
 
 		attempt++
-		tlog.Info("attempting reconnect", "attempt", attempt, "address", rm.lc.address)
+		tlog.Info(context.Background(), "attempting reconnect attempt=%d address=%s", attempt, rm.lc.address)
 
 		select {
 		case <-rm.stopCh:
@@ -1189,11 +1189,11 @@ func (rm *ReconnectManager) doReconnect() {
 
 		err := rm.lc.doConnect(true)
 		if err == nil {
-			tlog.Info("reconnect successful", "attempt", attempt)
+			tlog.Info(context.Background(), "reconnect successful attempt=%d", attempt)
 			return
 		}
 
-		tlog.Warn("reconnect failed", "attempt", attempt, "error", err)
+		tlog.Warn(context.Background(), "reconnect failed attempt=%d error=%v", attempt, err)
 
 		interval = time.Duration(float64(interval) * rm.config.Multiplier)
 		if interval > rm.config.MaxInterval {
@@ -1457,7 +1457,7 @@ func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*p
 		return nil, fmt.Errorf("broadcast failed: all %d sessions unreachable", totalFailed)
 	}
 	if totalFailed > 0 {
-		tlog.Warn("broadcast partial success", "sent", totalSent, "failed", totalFailed)
+		tlog.Warn(context.Background(), "broadcast partial success sent=%d failed=%d", totalSent, totalFailed)
 	}
 	return &protoGw.BroadcastAck{}, nil
 }
@@ -1532,20 +1532,20 @@ func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sen
 		conn := cm.GetConnection(sessionID)
 		if conn == nil {
 			failed++
-			tlog.Warn("group push: session disappeared", "groupID", groupID, "sessionID", sessionID)
+			tlog.Warn(context.Background(), "group push: session disappeared groupID=%s sessionID=%s", groupID, sessionID)
 			continue
 		}
 		msg := encodePushMessage(cmd, data)
 		if err := conn.Send(msg); err != nil {
 			failed++
-			tlog.Warn("group push: send failed", "groupID", groupID, "sessionID", sessionID, "error", err)
+			tlog.Warn(context.Background(), "group push: send failed groupID=%s sessionID=%s error=%v", groupID, sessionID, err)
 			continue
 		}
 		sent++
 		s.gateway.AddPushedToClient(1)
 	}
 	if failed > 0 {
-		tlog.Warn("group push completed with failures", "groupID", groupID, "total", len(sessions), "sent", sent, "failed", failed)
+		tlog.Warn(context.Background(), "group push completed with failures groupID=%s total=%d sent=%d failed=%d", groupID, len(sessions), sent, failed)
 	}
 	return sent, failed
 }
@@ -1601,7 +1601,7 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 	if windowSize <= 0 {
 		windowSize = 524288
 	}
-	tlog.Info("creating gRPC server")
+	tlog.Info(context.Background(), "creating gRPC server")
 	server := ugrpc.NewServer(
 		ugrpc.WithAddr(port),
 		ugrpc.WithMaxRecvMsgSize(maxMsgSize),
@@ -1609,13 +1609,13 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 		ugrpc.WithWindowSize(windowSize),
 		ugrpc.WithGracefulStopTimeout(5*time.Second),
 	)
-	tlog.Info("registering GatewayService")
+	tlog.Info(context.Background(), "registering GatewayService")
 	grpcService := NewGRPCServer(gw)
 	protoGw.RegisterGatewayStreamServer(server, grpcService)
 	protoGw.RegisterGatewayServer(server, grpcService)
 
 	if err := server.Start(); err != nil {
-		tlog.Error("gRPC server failed to start", "error", err, "port", port)
+		tlog.Error(context.Background(), "gRPC server failed to start error=%v port=%s", err, port)
 		return nil, err
 	}
 
@@ -1698,10 +1698,10 @@ func (pool *LogicClientPool) SetDiscovery(discovery *uetcd.Component) {
 	pool.discovery = discovery
 	discovery.OnServiceChange(pool.handleServiceChange)
 	svcs := discovery.ServiceSet()
-	tlog.Info("SetDiscovery: replaying known services", "count", len(svcs))
+	tlog.Info(context.Background(), "SetDiscovery: replaying known services count=%d", len(svcs))
 	for fullKey, address := range svcs {
 		instanceID := fullKey[strings.LastIndex(fullKey, "/")+1:]
-		tlog.Info("SetDiscovery: replaying service", "instanceID", instanceID, "address", address)
+		tlog.Info(context.Background(), "SetDiscovery: replaying service instanceID=%s address=%s", instanceID, address)
 		pool.handleServiceRegister(uetcd.ServiceEvent{
 			Type:       uetcd.EventRegister,
 			ServiceID:  discovery.ServiceID(),
@@ -1742,15 +1742,15 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 	client.shardCount = runtime.NumCPU() * 8
 
 	go func() {
-		tlog.Info("connecting to discovered logic service",
-			"serviceID", event.InstanceID,
-			"address", event.Address,
+		tlog.Info(context.Background(), "connecting to discovered logic service serviceID=%s address=%s",
+			event.InstanceID,
+			event.Address,
 		)
 		for attempt := 1; ; attempt++ {
 			if err := client.Connect(event.Address); err == nil {
-				tlog.Info("connected to discovered logic service",
-					"serviceID", event.InstanceID,
-					"address", event.Address,
+				tlog.Info(context.Background(), "connected to discovered logic service serviceID=%s address=%s",
+					event.InstanceID,
+					event.Address,
 				)
 				return
 			} else {
@@ -1761,11 +1761,11 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 					return
 				}
 				if attempt == 1 || attempt%10 == 0 {
-					tlog.Warn("logic service connection failed, retrying",
-						"serviceID", event.InstanceID,
-						"address", event.Address,
-						"attempt", attempt,
-						"error", err,
+					tlog.Warn(context.Background(), "logic service connection failed, retrying serviceID=%s address=%s attempt=%d error=%v",
+						event.InstanceID,
+						event.Address,
+						attempt,
+						err,
 					)
 				}
 				time.Sleep(time.Second)
@@ -1786,10 +1786,10 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 		pool.balancer.AddNode(event.InstanceID, event.Address, 1)
 	}
 
-	tlog.Info("logic client added to pool",
-		"serviceID", event.InstanceID,
-		"address", event.Address,
-		"totalClients", pool.ClientCount(),
+	tlog.Info(context.Background(), "logic client added to pool serviceID=%s address=%s totalClients=%d",
+		event.InstanceID,
+		event.Address,
+		pool.ClientCount(),
 	)
 }
 
@@ -1817,23 +1817,23 @@ func (pool *LogicClientPool) handleServiceDeregister(event uetcd.ServiceEvent) {
 				pool.balancer.RemoveNode(event.InstanceID)
 			}
 			go client.Close()
-			tlog.Warn("logic service offline and connection already disconnected, cleaning up",
-				"serviceID", event.InstanceID,
-				"address", event.Address,
+			tlog.Warn(context.Background(), "logic service offline and connection already disconnected, cleaning up serviceID=%s address=%s",
+				event.InstanceID,
+				event.Address,
 			)
 		} else {
 			// gRPC 连接仍存活，保留连接，等服务重新注册或 HealthChecker 检测到断开
-			tlog.Warn("logic service deregistered from etcd, keeping gRPC connection (still connected)",
-				"serviceID", event.InstanceID,
-				"address", event.Address,
+			tlog.Warn(context.Background(), "logic service deregistered from etcd, keeping gRPC connection (still connected) serviceID=%s address=%s",
+				event.InstanceID,
+				event.Address,
 			)
 		}
 	}
 
-	tlog.Warn("logic client deregister event processed",
-		"serviceID", event.InstanceID,
-		"address", event.Address,
-		"totalClients", pool.ClientCount(),
+	tlog.Warn(context.Background(), "logic client deregister event processed serviceID=%s address=%s totalClients=%d",
+		event.InstanceID,
+		event.Address,
+		pool.ClientCount(),
 	)
 }
 
@@ -2027,7 +2027,7 @@ func (gc *GatewayClient) Connect() error {
 	gc.client = protoGw.NewGatewayClient(conn)
 	gc.mu.Unlock()
 
-	tlog.Info("网关客户端已创建", "serverID", gc.serverID, "address", gc.address)
+	tlog.Info(context.Background(), "网关客户端已创建 serverID=%s address=%s", gc.serverID, gc.address)
 	return nil
 }
 
@@ -2151,13 +2151,13 @@ func (pool *GatewayClientPool) handleRegister(event uetcd.ServiceEvent) {
 
 	client := NewGatewayClient(event.InstanceID, event.Address)
 	go func() {
-		tlog.Info("正在连接已发现的网关", "serverID", event.InstanceID, "address", event.Address)
+		tlog.Info(context.Background(), "正在连接已发现的网关 serverID=%s address=%s", event.InstanceID, event.Address)
 		if err := client.Connect(); err != nil {
-			tlog.Error("连接已发现的网关失败",
+			tlog.Error(context.Background(), "连接已发现的网关失败",
 				"serverID", event.InstanceID, "address", event.Address, "error", err)
 			return
 		}
-		tlog.Info("已发现的网关连接就绪", "serverID", event.InstanceID, "address", event.Address)
+		tlog.Info(context.Background(), "已发现的网关连接就绪", "serverID", event.InstanceID, "address", event.Address)
 	}()
 
 	pool.mu.Lock()
@@ -2168,8 +2168,8 @@ func (pool *GatewayClientPool) handleRegister(event uetcd.ServiceEvent) {
 	}
 	pool.mu.Unlock()
 
-	tlog.Info("网关客户端已加入池",
-		"serverID", event.InstanceID, "address", event.Address, "gen", gen, "totalClients", pool.ClientCount())
+	tlog.Info(context.Background(), "网关客户端已加入池 serverID=%s address=%s gen=%d totalClients=%d",
+		event.InstanceID, event.Address, gen, pool.ClientCount())
 }
 
 func (pool *GatewayClientPool) handleDeregister(event uetcd.ServiceEvent) {
@@ -2189,21 +2189,21 @@ func (pool *GatewayClientPool) handleDeregister(event uetcd.ServiceEvent) {
 	if client != nil {
 		if !client.IsConnected() {
 			go client.Close()
-			tlog.Warn("网关下线且连接已断开，安全清理",
-				"serverID", event.InstanceID, "address", event.Address)
+			tlog.Warn(context.Background(), "网关下线且连接已断开，安全清理 serverID=%s address=%s",
+				event.InstanceID, event.Address)
 		} else if gen < currentGen {
 			// 此 client 对应的代次已过时（有新的 register 已到来），关闭旧 client
 			go client.Close()
-			tlog.Warn("网关代次已更新，关闭旧连接",
-				"serverID", event.InstanceID, "address", event.Address, "gen", gen, "currentGen", currentGen)
+			tlog.Warn(context.Background(), "网关代次已更新，关闭旧连接 serverID=%s address=%s gen=%d currentGen=%d",
+				event.InstanceID, event.Address, gen, currentGen)
 		} else {
-			tlog.Warn("网关已从 etcd 注销，但 gRPC 连接仍存活，保留连接",
-				"serverID", event.InstanceID, "address", event.Address)
+			tlog.Warn(context.Background(), "网关已从 etcd 注销，但 gRPC 连接仍存活，保留连接 serverID=%s address=%s",
+				event.InstanceID, event.Address)
 		}
 	}
 
-	tlog.Warn("网关注销事件处理完成",
-		"serverID", event.InstanceID, "address", event.Address, "totalClients", pool.ClientCount())
+	tlog.Warn(context.Background(), "网关注销事件处理完成 serverID=%s address=%s totalClients=%d",
+		event.InstanceID, event.Address, pool.ClientCount())
 }
 
 func (pool *GatewayClientPool) ClientCount() int {

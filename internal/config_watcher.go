@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/tlog"
 	"gopkg.in/yaml.v3"
@@ -13,7 +14,7 @@ func (g *Gateway) startConfigCenterWatcher() {
 	}
 	ch, err := g.configCenter.Watch(g.ctx)
 	if err != nil {
-		tlog.Error("config center watch failed", "error", err)
+		tlog.Error(context.Background(), "config center watch failed error=%v", err)
 		return
 	}
 	go func() {
@@ -24,7 +25,7 @@ func (g *Gateway) startConfigCenterWatcher() {
 			currentCfg := g.cfg.Load().(*config.Config)
 			newCfg := *currentCfg
 			if err := yaml.Unmarshal(yamlBytes, &newCfg); err != nil {
-				tlog.Warn("config center content parse failed", "error", err)
+				tlog.Warn(context.Background(), "config center content parse failed error=%v", err)
 				continue
 			}
 			select {
@@ -32,8 +33,8 @@ func (g *Gateway) startConfigCenterWatcher() {
 			case <-g.stopChan:
 				return
 			}
-			tlog.Info("config updated from config center",
-				"type", g.configCenter.Type())
+			tlog.Info(context.Background(), "config updated from config center type=%s",
+				g.configCenter.Type())
 		}
 	}()
 }

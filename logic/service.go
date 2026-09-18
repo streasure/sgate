@@ -1,6 +1,7 @@
 package logic
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -86,13 +87,13 @@ func (s *Service) Start() error {
 	protocol.RegisterGatewayStreamServer(s.grpcServer, s.server)
 	go func() {
 		if err := s.grpcServer.Serve(listener); err != nil {
-			tlog.Error("gRPC server stopped", "error", err)
+			tlog.Error(context.Background(), "gRPC server stopped error=%v", err)
 		}
 	}()
 	// 等待 gRPC 服务就绪后再注册 etcd，避免 sgate 连接时服务端还没 accept
 	time.Sleep(200 * time.Millisecond)
 	s.initRegistry()
-	tlog.Info("logic service started", "serviceID", s.cfg.ServiceID, "address", s.cfg.AdvertiseAddr)
+	tlog.Info(context.Background(), "logic service started serviceID=%s address=%s", s.cfg.ServiceID, s.cfg.AdvertiseAddr)
 	return nil
 }
 
@@ -120,7 +121,7 @@ func (s *Service) initRegistry() {
 		Registration: uetcd.RegistrationConfig{ServiceID: serviceID, InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},
 	})
 	if err := s.registry.Start(); err != nil {
-		tlog.Error("service registration failed", "error", err)
+		tlog.Error(context.Background(), "service registration failed error=%v", err)
 	}
 }
 

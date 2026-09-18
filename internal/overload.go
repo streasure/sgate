@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"os"
 	"runtime"
 	"strconv"
@@ -197,12 +198,12 @@ func (op *OverloadProtector) check() {
 			if p := op.memPercent.Load(); p != nil {
 				memVal = *p
 			}
-			tlog.Warn("overload detected, dropping messages",
-				"cpu", cpuVal,
-				"heapPercent", memVal,
-				"heapAllocMB", m.Alloc/1024/1024,
-				"totalDropped", op.totalDropped.Load(),
-			)
+			tlog.Warn(context.Background(), "overload detected, dropping messages cpu=%v heapPercent=%v heapAllocMB=%d totalDropped=%d",
+			cpuVal,
+			memVal,
+			m.Alloc/1024/1024,
+			op.totalDropped.Load(),
+		)
 		}
 	} else {
 		op.overloadFlag.Store(0)
@@ -233,6 +234,6 @@ func (op *OverloadProtector) Stop() {
 
 func init() {
 	if _, err := process.NewProcess(int32(os.Getpid())); err != nil {
-		tlog.Warn("gopsutil process monitor unavailable on this platform, CPU/RSS monitoring disabled", "error", err)
+		tlog.Warn(context.Background(), "gopsutil process monitor unavailable on this platform, CPU/RSS monitoring disabled error=%v", err)
 	}
 }

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"hash/fnv"
 	"math/rand"
 	"strconv"
@@ -89,7 +90,7 @@ func (b *Balancer) AddNode(id, addr string, weight int) {
 	if b.algorithm == BalancerConsistent {
 		b.rebuildRingLocked()
 	}
-	tlog.Info("balancer: node added", "id", id, "addr", addr, "weight", weight)
+	tlog.Info(context.Background(), "balancer: node added id=%s addr=%s weight=%d", id, addr, weight)
 }
 
 // RemoveNode 移除节点
@@ -102,7 +103,7 @@ func (b *Balancer) RemoveNode(id string) {
 			if b.algorithm == BalancerConsistent {
 				b.rebuildRingLocked()
 			}
-			tlog.Info("balancer: node removed", "id", id)
+			tlog.Info(context.Background(), "balancer: node removed id=%s", id)
 			return
 		}
 	}
@@ -137,7 +138,7 @@ func (b *Balancer) RecordSuccess(id string) {
 		if n.ID == id {
 			n.failures.Store(0)
 			if n.healthy.CompareAndSwap(0, 1) {
-				tlog.Info("balancer: node recovered", "id", id)
+				tlog.Info(context.Background(), "balancer: node recovered id=%s", id)
 			}
 			return
 		}
@@ -152,7 +153,7 @@ func (b *Balancer) RecordFailure(id string) {
 			cnt := n.failures.Add(1)
 			if int(cnt) >= b.failureThreshold {
 				if n.healthy.CompareAndSwap(1, 0) {
-					tlog.Warn("balancer: node marked unhealthy", "id", id, "failures", cnt)
+					tlog.Warn(context.Background(), "balancer: node marked unhealthy id=%s failures=%d", id, cnt)
 				}
 			}
 			return
@@ -294,12 +295,12 @@ func (b *Balancer) recoverLoop() {
 					if healthFn(n.ID, n.Address) {
 						n.failures.Store(0)
 						n.healthy.Store(1)
-						tlog.Info("balancer: node recovered (probe success)", "id", n.ID)
+						tlog.Info(context.Background(), "balancer: node recovered (probe success) id=%s", n.ID)
 					}
 				} else {
 					n.failures.Store(0)
 					n.healthy.Store(1)
-					tlog.Info("balancer: node set to half-open (no probe)", "id", n.ID)
+					tlog.Info(context.Background(), "balancer: node set to half-open (no probe) id=%s", n.ID)
 				}
 			}
 		}

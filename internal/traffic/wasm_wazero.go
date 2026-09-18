@@ -71,7 +71,7 @@ func (w *WazeroRuntime) LoadModule(name string, bytes []byte) error {
 		return fmt.Errorf("module %s missing 'process' export", name)
 	}
 	w.modules.Store(name, &moduleEntry{module: compiled, memory: mem, process: proc})
-	tlog.Info("wasm module loaded", "name", name, "type", "wazero")
+	tlog.Info(context.Background(), "wasm module loaded name=%s type=%s", name, "wazero")
 	return nil
 }
 

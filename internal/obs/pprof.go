@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"context"
 	"net/http"
 	"net/http/pprof"
 	"sync"
@@ -42,9 +43,9 @@ func StartPProfServer(addr string) {
 		}
 		pprofServer = &http.Server{Addr: addr, Handler: mux}
 		go func() {
-			tlog.Info("pprof server started", "addr", addr)
+			tlog.Info(context.Background(), "pprof server started addr=%s", addr)
 			if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				tlog.Warn("pprof server stopped", "error", err)
+				tlog.Warn(context.Background(), "pprof server stopped error=%v", err)
 			}
 		}()
 	})

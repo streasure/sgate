@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
@@ -443,9 +444,9 @@ func (cm *ConnectionManager) UpdateLimits(maxConn, maxConnPerIP int) {
 	if maxConnPerIP >= 0 {
 		cm.maxConnectionsPerIP = maxConnPerIP
 	}
-	tlog.Info("connection manager limits updated",
-		"maxConnections", cm.maxConnections,
-		"maxConnectionsPerIP", cm.maxConnectionsPerIP)
+	tlog.Info(context.Background(), "connection manager limits updated maxConnections=%d maxConnectionsPerIP=%d",
+		cm.maxConnections,
+		cm.maxConnectionsPerIP)
 }
 
 // CanAccept 检查是否允许接受新连接（总连接数 + 单 IP 连接数）。
@@ -758,7 +759,7 @@ func (cm *ConnectionManager) checkIdleConnections(timeout time.Duration) {
 	cm.connections.Range(func(key string, conn *Connection) bool {
 		lastActive := atomic.LoadInt64(&conn.LastActive)
 		if now-lastActive > timeout.Milliseconds() {
-			tlog.Debug("closing idle connection", "connectionID", conn.ID())
+			tlog.Debug(context.Background(), "closing idle connection", "connectionID", conn.ID())
 			if conn.Conn != nil {
 				conn.Conn.Close()
 			}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"flag"
@@ -35,7 +36,7 @@ func main() {
 	flag.Parse()
 	defer logutil.Init(*logConfig)()
 
-	tlog.Info("bench2 started", "addr", *addr, "duration", duration.String(), "parallel", *parallel, "serverID", *serverID)
+	tlog.Info(context.Background(), "bench2 started addr=%s duration=%s parallel=%d serverID=%s", *addr, duration.String(), *parallel, *serverID)
 
 	var totalRecv atomic.Int64
 	var totalAck atomic.Int64
@@ -51,7 +52,7 @@ func main() {
 		go func(idx int) {
 			defer wg.Done()
 			if err := runWSClient(addr, *duration, idx, *serverID, ready, start, abort, &measureStart, &totalRecv, &totalAck); err != nil {
-				tlog.Warn("bench2 client failed", "client", idx, "error", err)
+				tlog.Warn(context.Background(), "bench2 client failed client=%d error=%v", idx, err)
 				connectionsFailed.Add(1)
 			}
 		}(i)
@@ -75,14 +76,14 @@ func main() {
 		for range ticker.C {
 			startedAt := measureStart.Load()
 			if startedAt == 0 {
-				tlog.Info("bench2 progress", "state", "waiting for first push", "ack", totalAck.Load())
+				tlog.Info(context.Background(), "bench2 progress state=waiting ack=%d", totalAck.Load())
 				continue
 			}
 			elapsed := time.Since(time.Unix(0, startedAt)).Seconds()
 			recv := totalRecv.Load()
 			ack := totalAck.Load()
 			rate := float64(recv) / elapsed
-			tlog.Info("bench2 progress", "elapsed", elapsed, "received", recv, "ack", ack, "rate", rate)
+			tlog.Info(context.Background(), "bench2 progress elapsed=%.1f received=%d ack=%d rate=%.0f", elapsed, recv, ack, rate)
 		}
 	}()
 
@@ -95,9 +96,9 @@ func main() {
 	}
 	failed := connectionsFailed.Load()
 
-	tlog.Info("bench2 completed", "totalReceived", total, "totalAck", totalAck.Load(), "connectionsFailed", failed, "elapsed", elapsed)
+	tlog.Info(context.Background(), "bench2 completed totalReceived=%d totalAck=%d connectionsFailed=%d elapsed=%.1f", total, totalAck.Load(), failed, elapsed)
 	if elapsed > 0 {
-		tlog.Info("bench2 result", "avgReceiveRate", float64(total)/elapsed)
+		tlog.Info(context.Background(), "bench2 result avgReceiveRate=%.0f", float64(total)/elapsed)
 	}
 }
 

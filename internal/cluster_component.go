@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -109,14 +110,13 @@ func (c *ClusterComponent) Start() error {
 	if compCfg.Registration.ServiceID != "" {
 		advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
 		serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
-		tlog.Info("etcd 注册成功",
-			"serviceID", serviceID,
-			"instanceID", c.cfg.ServerID,
-			"address", advertiseAddr,
-			"mode", clusterMode)
+		tlog.Info(context.Background(), "etcd 注册成功 serviceID=%s instanceID=%s address=%s mode=%s",
+			serviceID,
+			c.cfg.ServerID,
+			advertiseAddr,
+			clusterMode)
 	} else {
-		tlog.Info("etcd 逻辑服务发现已启动（网关自身不注册）",
-			"serviceID", c.cfg.Belong+"/Logic:"+c.cfg.Zone)
+		tlog.Info(context.Background(), "etcd 逻辑服务发现已启动（网关自身不注册） serviceID=%s", c.cfg.Belong+"/Logic:"+c.cfg.Zone)
 	}
 
 	// 网关间发现仅在集群模式下启用
@@ -134,10 +134,10 @@ func (c *ClusterComponent) Start() error {
 			c.gatewayEventsMu.Unlock()
 		})
 		if err := c.GatewayDiscovery.Start(); err != nil {
-			tlog.Warn("网关间发现启动失败，网关间协作已禁用", "error", err)
+			tlog.Warn(context.Background(), "网关间发现启动失败，网关间协作已禁用 error=%v", err)
 			c.GatewayDiscovery = nil
 		} else {
-			tlog.Info("网关间发现已启动", "serviceID", c.cfg.Belong+"/Gateway:"+c.cfg.Zone)
+			tlog.Info(context.Background(), "网关间发现已启动 serviceID=%s", c.cfg.Belong+"/Gateway:"+c.cfg.Zone)
 		}
 	}
 
@@ -147,11 +147,11 @@ func (c *ClusterComponent) Start() error {
 		c.Cluster.Start()
 	}
 
-	tlog.Info("集群组件已启动",
-		"mode", clusterMode,
-		"serverType", c.cfg.ServerType,
-		"serverID", c.cfg.ServerID,
-		"zone", c.cfg.Zone)
+	tlog.Info(context.Background(), "集群组件已启动 mode=%s serverType=%s serverID=%s zone=%s",
+		clusterMode,
+		c.cfg.ServerType,
+		c.cfg.ServerID,
+		c.cfg.Zone)
 	return nil
 }
 

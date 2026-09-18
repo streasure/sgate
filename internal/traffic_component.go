@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
@@ -35,7 +36,7 @@ func (c *TrafficComponent) Name() string { return "traffic" }
 func (c *TrafficComponent) Order() int   { return 300 }
 
 func (c *TrafficComponent) Init() error {
-	tlog.Info("traffic component init")
+	tlog.Info(context.Background(), "traffic component init")
 
 	// 灰度过滤器。
 	if c.canaryCfg.Enabled {
@@ -59,15 +60,15 @@ func (c *TrafficComponent) Init() error {
 }
 
 func (c *TrafficComponent) Start() error {
-	tlog.Info("traffic component started",
-		"canary", c.canaryCfg.Enabled,
-		"mirror", c.mirrorCfg.Enabled,
-		"degradation", c.degradationCfg.Enabled)
+	tlog.Info(context.Background(), "traffic component started canary=%v mirror=%v degradation=%v",
+		c.canaryCfg.Enabled,
+		c.mirrorCfg.Enabled,
+		c.degradationCfg.Enabled)
 	return nil
 }
 
 func (c *TrafficComponent) Destroy() {
-	tlog.Info("traffic component destroying")
+	tlog.Info(context.Background(), "traffic component destroying")
 	if c.TrafficMirror != nil {
 		c.TrafficMirror.Stop()
 	}

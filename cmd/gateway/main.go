@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"runtime"
@@ -8,8 +9,8 @@ import (
 	"github.com/streasure/sgate/internal"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/component"
-	"github.com/streasure/util/gc"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uperf"
 )
 
 var (
@@ -26,8 +27,6 @@ func main() {
 		return
 	}
 
-	gc.InitGCTuning(200)
-
 	defer func() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
@@ -43,22 +42,22 @@ func main() {
 	}
 	defer logComp.Destroy()
 
-	tlog.Info("gateway starting...",
-		"version", internal.Version,
-		"cpu", runtime.NumCPU(),
-		"GOMAXPROCS", runtime.GOMAXPROCS(runtime.NumCPU()),
+	uperf.Apply(200, 80)
+
+	tlog.Info(context.Background(), "gateway starting... version=%s cpu=%d GOMAXPROCS=%d",
+		internal.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
 
 	cfg, err := config.Load(*confFiles)
 	if err != nil {
-		tlog.Error("load config failed error", err)
+		tlog.Error(context.Background(), "load config failed error=%v", err)
 		return
 	}
 	if err := cfg.Validate(); err != nil {
-		tlog.Error("invalid gateway config error", err)
+		tlog.Error(context.Background(), "invalid gateway config error=%v", err)
 		return
 	}
-	tlog.Info("config loaded", "port", cfg.Port)
+	tlog.Info(context.Background(), "config loaded port=%v", cfg.Port)
 
 	gw := internal.NewGateway(*confFiles)
 	container := component.NewContainer()

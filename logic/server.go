@@ -217,7 +217,7 @@ func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 		}
 		s.dispatchMessage(msg, func(response *protocol.StreamData) {
 			if err := conn.Send(response); err != nil {
-				tlog.Warn("failed to queue response", "cmd", response.Cmd, "sessionID", response.SessionId, "error", err)
+				tlog.Warn(context.Background(), "failed to queue response cmd=%d sessionID=%s error=%v", response.Cmd, response.SessionId, err)
 			}
 		})
 	}
