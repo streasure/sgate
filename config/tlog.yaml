@@ -16,7 +16,6 @@ log:
       max_size: 100
       max_backups: 10
       max_age: 30
-      compress: true
       interval: 0
   stacktrace:
     enabled: true
