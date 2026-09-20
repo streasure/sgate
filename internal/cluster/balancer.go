@@ -3,7 +3,7 @@ package cluster
 import (
 	"context"
 	"hash/fnv"
-	"math/rand"
+	"math/rand/v2"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -43,7 +43,7 @@ type Balancer struct {
 	ring    []uint32 // 哈希环
 	ringMap map[uint32]*BalancerNode
 	// 轮询
-	rrIndex uint64
+	rrIndex atomic.Uint64
 	// 摘除策略
 	failureThreshold int
 	recoverInterval  time.Duration
@@ -179,7 +179,7 @@ func (b *Balancer) pickRoundRobin() *BalancerNode {
 	if len(h) == 0 {
 		return nil
 	}
-	idx := atomic.AddUint64(&b.rrIndex, 1)
+	idx := b.rrIndex.Add(1)
 	return h[idx%uint64(len(h))]
 }
 
@@ -195,7 +195,7 @@ func (b *Balancer) pickWeighted() *BalancerNode {
 	if total <= 0 {
 		return h[0]
 	}
-	r := rand.Intn(total)
+	r := rand.IntN(total)
 	for _, n := range h {
 		r -= n.Weight
 		if r < 0 {
@@ -291,16 +291,13 @@ func (b *Balancer) recoverLoop() {
 			b.mu.RUnlock()
 
 			for _, n := range unhealthy {
-				if healthFn != nil {
-					if healthFn(n.ID, n.Address) {
-						n.failures.Store(0)
-						n.healthy.Store(1)
-						tlog.Info(context.Background(), "balancer: node recovered (probe success) id=%s", n.ID)
-					}
-				} else {
+				if healthFn == nil {
+					continue
+				}
+				if healthFn(n.ID, n.Address) {
 					n.failures.Store(0)
 					n.healthy.Store(1)
-					tlog.Info(context.Background(), "balancer: node set to half-open (no probe) id=%s", n.ID)
+					tlog.Info(context.Background(), "balancer: node recovered (probe success) id=%s", n.ID)
 				}
 			}
 		}

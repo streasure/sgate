@@ -14,9 +14,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// DisconnectCallback 连接断开时的回调函数类型
-type DisconnectCallback func(connectionID string)
-
 // streamConn 表示与网关的 gRPC 流连接
 type streamConn struct {
 	stream     protocol.GatewayStream_OnDataServer // gRPC 流对象
@@ -87,13 +84,6 @@ type pushGroup struct {
 	members map[string]struct{} // 组成员会话 ID 集合
 }
 
-// PushResult 记录向单个会话推送的结果
-type PushResult struct {
-	SessionID string
-	Success   bool
-	Error     error
-}
-
 // PushMetrics 推送操作统计指标，用于监控
 type PushMetrics struct {
 	TotalPushed     atomic.Int64 // 总推送成功数
@@ -135,8 +125,6 @@ type Server struct {
 	groups        map[string]*pushGroup            // 组 ID -> 推送组
 	sessionGroups map[string]map[string]struct{}   // 会话 ID -> 所属组 ID 集合
 
-	mu           sync.Mutex           // 回调列表互斥锁
-	onDisconnect []DisconnectCallback // 断连回调函数列表
 	serverID     string               // 逻辑服务端标识
 	streamSeq    atomic.Uint64        // 流连接序号生成器
 	streamChSize int                  // 流发送通道大小
@@ -149,14 +137,8 @@ type ServerOption func(*Server)
 
 // WithServerID 设置服务端 ID
 func WithServerID(serverID string) ServerOption { return func(s *Server) { s.serverID = serverID } }
-// WithDispatchWorkers 设置分发工作协程数（已废弃，保留兼容）
-func WithDispatchWorkers(int) ServerOption      { return func(*Server) {} }
-// WithDispatchChSize 设置分发通道大小（已废弃，保留兼容）
-func WithDispatchChSize(int) ServerOption       { return func(*Server) {} }
 // WithStreamChSize 设置流发送通道大小
 func WithStreamChSize(n int) ServerOption       { return func(s *Server) { s.streamChSize = n } }
-// WithServerPassthrough 设置直通模式（已废弃，保留兼容）
-func WithServerPassthrough() ServerOption       { return func(*Server) {} }
 
 // NewServer 创建逻辑层服务端实例
 func NewServer(opts ...ServerOption) *Server {
@@ -172,13 +154,6 @@ func NewServer(opts ...ServerOption) *Server {
 }
 
 func (s *Server) GetServerID() string { return s.serverID }
-
-// OnDisconnect 注册连接断开时的回调函数
-func (s *Server) OnDisconnect(cb DisconnectCallback) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onDisconnect = append(s.onDisconnect, cb)
-}
 
 // OnData 处理来自网关的流数据，按命令码分发到注册的处理器
 func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
@@ -381,20 +356,6 @@ func (s *Server) sendRawControl(cmd int32, data []byte) int {
 	return count
 }
 
-// sendToGroupLegacy 通过流发送组控制消息（旧版兼容接口）
-func (s *Server) sendToGroupLegacy(groupID string, targetCmd int32, data []byte) int {
-	controlData := mustMarshal(&protocol.StreamData{
-		Cmd:  targetCmd,
-		Data: data,
-	})
-	return s.sendRawControl(int32(targetCmd), controlData)
-}
-
-// broadcastLegacy 向所有网关广播控制消息（旧版兼容接口）
-func (s *Server) broadcastLegacy(targetCmd int32, data []byte) int {
-	return s.sendRawControl(int32(targetCmd), data)
-}
-
 // SendToUser 根据用户 UUID 查找连接并直接发送消息
 func (s *Server) SendToUser(userUUID string, targetCmd int32, data []byte) int {
 	if sessionID, ok := s.GetConnectionIDByUser(userUUID); ok {
@@ -472,11 +433,6 @@ func (s *Server) GetConnectionCount() int {
 	count := 0
 	s.sessions.Range(func(_, _ any) bool { count++; return true })
 	return count
-}
-
-// GetMetrics 获取推送监控指标快照
-func (s *Server) GetMetrics() map[string]int64 {
-	return s.metrics.GetSnapshot()
 }
 
 // SendToGroupWithRetry 向组内所有成员发送消息，失败时重试

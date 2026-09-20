@@ -1,11 +1,7 @@
 package logic
 
 import (
-	"os"
-	"path/filepath"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // ServiceConfig 逻辑层服务配置，包含身份标识、传输和 etcd 设置
@@ -34,19 +30,6 @@ type ServiceConfig struct {
 	Passthrough        bool          `yaml:"passthrough"`        // 是否直通模式
 }
 
-// LoadConfig 从 YAML 文件加载逻辑层服务配置
-func LoadConfig(name string) (ServiceConfig, error) {
-	cfg := defaultConfig()
-	data, err := os.ReadFile(filepath.Clean(name))
-	if err != nil {
-		return cfg, err
-	}
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, err
-	}
-	return cfg, nil
-}
-
 // defaultConfig 返回逻辑层服务的默认配置
 func defaultConfig() ServiceConfig {
 	return ServiceConfig{
@@ -60,18 +43,8 @@ func defaultConfig() ServiceConfig {
 // ServiceOption 服务配置选项函数
 type ServiceOption func(*ServiceConfig)
 
-// WithConfig 使用完整配置对象
-func WithConfig(cfg ServiceConfig) ServiceOption { return func(c *ServiceConfig) { *c = cfg } }
 // WithListenPort 设置监听端口
 func WithListenPort(port string) ServiceOption   { return func(c *ServiceConfig) { c.ListenPort = port } }
-// WithAdvertiseAddr 设置对外暴露地址
-func WithAdvertiseAddr(addr string) ServiceOption {
-	return func(c *ServiceConfig) { c.AdvertiseAddr = addr }
-}
-// WithBelong 设置所属应用/团队标识
-func WithBelong(belong string) ServiceOption {
-	return func(c *ServiceConfig) { c.Belong = belong }
-}
 // WithServiceID 设置服务实例 ID
 func WithServiceID(id string) ServiceOption { return func(c *ServiceConfig) { c.ServiceID = id } }
 // WithServerType 设置服务类型
@@ -91,28 +64,4 @@ func WithZone(zone string) ServiceOption {
 // WithEtcd 设置 etcd 端点
 func WithEtcd(endpoint string) ServiceOption {
 	return func(c *ServiceConfig) { c.EtcdEndpoint = endpoint }
-}
-// WithHeartbeat 设置心跳间隔和 TTL
-func WithHeartbeat(interval, ttl time.Duration) ServiceOption {
-	return func(c *ServiceConfig) { c.HeartbeatInterval, c.HeartbeatTTL = interval, ttl }
-}
-// WithGRPCWindowSize 设置 gRPC 流控窗口大小
-func WithGRPCWindowSize(size int) ServiceOption {
-	return func(c *ServiceConfig) { c.GRPCWindowSize = size }
-}
-// WithGRPCMaxMessageSize 设置 gRPC 单条消息最大长度
-func WithGRPCMaxMessageSize(size int) ServiceOption {
-	return func(c *ServiceConfig) { c.GRPCMaxMessageSize = size }
-}
-// WithStreamSendChSize 设置流发送通道大小
-func WithStreamSendChSize(n int) ServiceOption {
-	return func(c *ServiceConfig) { c.StreamSendChSize = n }
-}
-// WithPassthrough 设置直通模式开关
-func WithPassthrough(enabled bool) ServiceOption {
-	return func(c *ServiceConfig) { c.Passthrough = enabled }
-}
-// WithDispatchWorkerCount 设置分发工作协程数
-func WithDispatchWorkerCount(n int) ServiceOption {
-	return func(c *ServiceConfig) { c.DispatchWorkers = n }
 }

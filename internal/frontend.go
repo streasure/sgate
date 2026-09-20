@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -43,7 +44,6 @@ type LogicClientProvider interface {
 // GatewayClientProvider 定义网关客户端的连接状态和客户端访问能力。
 type GatewayClientProvider interface {
 	IsConnected() bool
-	Client() protoGw.GatewayClient
 }
 
 func extractRouteAndCmd(data []byte) (string, int32) {
@@ -443,15 +443,11 @@ func (g *Gateway) wsHeartbeatChecker() {
 }
 
 func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
-	var connections []*WebSocketConnection
 	g.wsConnections.Range(func(key, value interface{}) bool {
-		if conn, ok := key.(*WebSocketConnection); ok {
-			connections = append(connections, conn)
+		conn, ok := key.(*WebSocketConnection)
+		if !ok {
+			return true
 		}
-		return true
-	})
-
-	for _, conn := range connections {
 		if time.Since(conn.LastPingTime) > timeout {
 			tlog.Warn(context.Background(), "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID)
 			if conn.Conn != nil {
@@ -463,7 +459,8 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 			g.wsConnections.Delete(conn)
 			wsConnectionPool.Put(conn)
 		}
-	}
+		return true
+	})
 }
 
 func (g *Gateway) configWatcher() {
@@ -700,7 +697,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 			wsConn.Buffer = nil
 			wsConn.ConnectionID = ""
 			wsConn.Conn = nil
-			atomic.StoreInt32(&wsConn.State, int32(WSStateClosed))
+			wsConn.State.Store(int32(WSStateClosed))
 			wsConnectionPool.Put(wsConn)
 		} else if id, ok := connCtx.(string); ok {
 			connectionID = id
@@ -1126,14 +1123,11 @@ func getRemoteIP(c gnet.Conn) string {
 	if addr == nil {
 		return "unknown"
 	}
-	s := addr.String()
-	// 去掉端口部分
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == ':' {
-			return s[:i]
-		}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
 	}
-	return s
+	return host
 }
 
 // getOrCreateBreaker 获取或创建指定 route 的熔断器
@@ -1146,9 +1140,9 @@ func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 }
 
 func writeFrame(c gnet.Conn, data []byte) {
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
-	c.Writev([][]byte{header, data})
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
+	c.Writev([][]byte{header[:], data})
 }
 
 func writeMsgFrame(c gnet.Conn, msg *protoGw.StreamData) {

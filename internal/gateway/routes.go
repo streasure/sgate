@@ -165,73 +165,34 @@ func ExtractMessageFrame(data []byte) (cmd int32, seqID int64, body []byte, ok b
 
 // ExtractRouteAndCmd 从 protobuf 数据中提取路由名和命令码
 func ExtractRouteAndCmd(data []byte) (route string, cmd int32) {
-	offset := 0
-	for offset < len(data) {
-		b := data[offset]
-		if b < 0x80 {
-			offset++
-			fieldNum := int(b >> 3)
-			wireType := int(b & 0x7)
-
-			switch wireType {
-			case 0:
-				if fieldNum == 4 {
-					v, n := decodeVarintFast(data[offset:])
-					if n > 0 {
-						cmd = int32(v)
-					}
-				}
-				for offset < len(data) && data[offset] >= 0x80 {
-					offset++
-				}
-				if offset < len(data) {
-					offset++
-				}
-			case 1:
-				offset += 8
-			case 2:
-				if offset >= len(data) {
-					return
-				}
-				l := int(data[offset])
-				offset++
-				if l >= 0x80 {
-					if offset >= len(data) {
-						return
-					}
-					l2 := int(data[offset])
-					offset++
-					l = (l & 0x7F) | (l2 << 7)
-				}
-				if fieldNum == 3 {
-					if offset+l <= len(data) {
-						route = string(data[offset : offset+l])
-					}
-				}
-				offset += l
-			case 5:
-				offset += 4
-			default:
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return
+		}
+		data = data[n:]
+		switch num {
+		case 3:
+			m := protowire.ConsumeFieldValue(num, typ, data)
+			if m < 0 {
 				return
 			}
-		} else {
-			offset++
+			route = string(data[:m])
+			data = data[m:]
+		case 4:
+			v, n := protowire.ConsumeVarint(data)
+			if n < 0 {
+				return
+			}
+			cmd = int32(v)
+			data = data[n:]
+		default:
+			m := protowire.ConsumeFieldValue(num, typ, data)
+			if m < 0 {
+				return
+			}
+			data = data[m:]
 		}
 	}
 	return
-}
-
-// decodeVarintFast 快速解码 varint 编码的整数
-func decodeVarintFast(data []byte) (uint64, int) {
-	var result uint64
-	var shift uint
-	for i := 0; i < len(data) && i < 10; i++ {
-		b := data[i]
-		result |= uint64(b&0x7F) << shift
-		if b < 0x80 {
-			return result, i + 1
-		}
-		shift += 7
-	}
-	return 0, 0
 }

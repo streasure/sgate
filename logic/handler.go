@@ -2,7 +2,7 @@ package logic
 
 import (
 	"context"
-	"fmt"
+
 	"reflect"
 	"sync"
 
@@ -110,7 +110,4 @@ func (s *Server) registeredCommands() []int32 {
 	return commands
 }
 
-// invalidControlPayload 创建控制命令序列化失败的错误信息
-func invalidControlPayload(cmd int32, err error) error {
-	return fmt.Errorf("logic: marshal control command %d: %w", cmd, err)
-}
+

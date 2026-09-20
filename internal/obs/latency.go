@@ -2,7 +2,7 @@ package obs
 
 import (
 	"math"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -64,7 +64,7 @@ func (lt *LatencyTracker) GetStats() LatencyStats {
 	}
 	lt.mu.Unlock()
 
-	sort.Slice(buf, func(i, j int) bool { return buf[i] < buf[j] })
+	slices.Sort(buf)
 
 	getPct := func(p float64) time.Duration {
 		idx := int(math.Ceil(p*float64(len(buf)))) - 1

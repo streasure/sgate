@@ -1,10 +1,11 @@
 package internal
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"strconv"
 	"strings"
@@ -60,7 +61,7 @@ var wsConnectionPool = sync.Pool{
 // WebSocketConnection 表示WebSocket连接，包含缓冲区和状态信息。
 type WebSocketConnection struct {
 	Conn         gnet.Conn
-	State        int32
+	State        atomic.Int32
 	Buffer       []byte
 	ConnectionID string
 	LastPingTime time.Time
@@ -78,7 +79,7 @@ const (
 func NewWebSocketConnection(conn gnet.Conn) *WebSocketConnection {
 	wsConn := wsConnectionPool.Get().(*WebSocketConnection)
 	wsConn.Conn = conn
-	atomic.StoreInt32(&wsConn.State, int32(WSStateHandshake))
+	wsConn.State.Store(int32(WSStateHandshake))
 	wsConn.Buffer = wsConn.Buffer[:0]
 	wsConn.ConnectionID = ""
 	wsConn.LastPingTime = time.Now()
@@ -122,7 +123,9 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		return gnet.Close
 	}
 
-	accept := calculateWebSocketAccept(key)
+	combined := key + wsMagicString
+	hash := sha1.Sum([]byte(combined))
+	accept := base64.StdEncoding.EncodeToString(hash[:])
 
 	var buf bytes.Buffer
 	buf.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
@@ -136,7 +139,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		return gnet.Close
 	}
 
-	atomic.StoreInt32(&wsConn.State, int32(WSStateOpen))
+	wsConn.State.Store(int32(WSStateOpen))
 
 	if wsConn.ConnectionID == "" {
 		tempUserUUID := "temp_" + generateConnectionID()
@@ -151,13 +154,6 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	tlog.Debug(context.Background(), "WebSocket handshake success connectionID=%s", wsConn.ConnectionID)
 
 	return gnet.None
-}
-
-// calculateWebSocketAccept 根据WebSocket密钥计算Sec-WebSocket-Accept值。
-func calculateWebSocketAccept(key string) string {
-	combined := key + wsMagicString
-	hash := sha1.Sum([]byte(combined))
-	return base64.StdEncoding.EncodeToString(hash[:])
 }
 
 // parseWebSocketFrame 从缓冲区解析WebSocket帧，提取操作码和载荷数据。
@@ -216,7 +212,7 @@ func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payl
 
 // handleWebSocketMessage 处理接收到的WebSocket数据，将其追加到缓冲区并逐帧解析处理。
 func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byte) (action gnet.Action) {
-	if atomic.LoadInt32(&wsConn.State) == int32(WSStateHandshake) {
+	if wsConn.State.Load() == int32(WSStateHandshake) {
 		return g.handleWebSocketHandshake(wsConn, data)
 	}
 
@@ -354,7 +350,7 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 		return err
 	}
 
-	atomic.StoreInt32(&wsConn.State, int32(WSStateClosed))
+	wsConn.State.Store(int32(WSStateClosed))
 	if wsConn.ConnectionID != "" {
 		g.connectionManager.RemoveConnection(wsConn.ConnectionID)
 	}
@@ -365,19 +361,8 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 
 // handleWebSocketPingFrame 处理WebSocket心跳探测帧，返回心跳回复帧并更新最后活跃时间。
 func (g *Gateway) handleWebSocketPingFrame(wsConn *WebSocketConnection, payload []byte) error {
-	var pongFrame []byte
-	payloadLen := len(payload)
-	if payloadLen < 126 {
-		pongFrame = make([]byte, 0, 2+payloadLen)
-		pongFrame = append(pongFrame, 0x8A, byte(payloadLen))
-		pongFrame = append(pongFrame, payload...)
-	} else {
-		pongFrame = make([]byte, 0, 4+payloadLen)
-		pongFrame = append(pongFrame, 0x8A, 126)
-		pongFrame = append(pongFrame, byte(payloadLen>>8), byte(payloadLen))
-		pongFrame = append(pongFrame, payload...)
-	}
-	if _, err := wsConn.Conn.Write(pongFrame); err != nil {
+	frame := encodeWSFrame(0x8A, payload)
+	if _, err := wsConn.Conn.Write(frame); err != nil {
 		return err
 	}
 	wsConn.LastPingTime = time.Now()
@@ -389,35 +374,36 @@ func (g *Gateway) handleWebSocketPongFrame(wsConn *WebSocketConnection) {
 	wsConn.LastPingTime = time.Now()
 }
 
+// encodeWSFrame 构造 WebSocket 帧（服务端发送，FIN=1, 无 mask）
+func encodeWSFrame(opCode byte, payload []byte) []byte {
+	n := len(payload)
+	switch {
+	case n < 126:
+		frame := make([]byte, 0, 2+n)
+		frame = append(frame, opCode, byte(n))
+		return append(frame, payload...)
+	case n <= 65535:
+		frame := make([]byte, 0, 4+n)
+		frame = append(frame, opCode, 126, byte(n>>8), byte(n))
+		return append(frame, payload...)
+	default:
+		frame := make([]byte, 0, 10+n)
+		frame = append(frame, opCode, 127)
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], uint64(n))
+		frame = append(frame, b[:]...)
+		return append(frame, payload...)
+	}
+}
+
 // sendWebSocketMessage 向WebSocket连接发送指定操作码的消息帧，自动处理不同长度载荷的帧头编码。
 func (g *Gateway) sendWebSocketMessage(wsConn *WebSocketConnection, opCode WSOpCode, payload []byte) error {
-	if atomic.LoadInt32(&wsConn.State) != int32(WSStateOpen) {
+	if wsConn.State.Load() != int32(WSStateOpen) {
 		return fmt.Errorf("websocket connection not open")
 	}
-
-	var frame []byte
-	payloadLen := len(payload)
-
-	if payloadLen < 126 {
-		frame = make([]byte, 0, 2+payloadLen)
-		frame = append(frame, byte(opCode|0x80), byte(payloadLen))
-	} else if payloadLen <= 65535 {
-		frame = make([]byte, 0, 4+payloadLen)
-		frame = append(frame, byte(opCode|0x80), 126)
-		frame = append(frame, byte(payloadLen>>8), byte(payloadLen))
-	} else {
-		frame = make([]byte, 0, 10+payloadLen)
-		frame = append(frame, byte(opCode|0x80), 127)
-		for i := 7; i >= 0; i-- {
-			frame = append(frame, byte(uint64(payloadLen)>>(uint(i)*8)))
-		}
-	}
-	frame = append(frame, payload...)
-
-	if _, err := wsConn.Conn.Write(frame); err != nil {
-		return err
-	}
-	return nil
+	frame := encodeWSFrame(byte(opCode|0x80), payload)
+	_, err := wsConn.Conn.Write(frame)
+	return err
 }
 
 // sendHTTPResponse 发送HTTP响应，用于WebSocket握手失败时返回错误响应。

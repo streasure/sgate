@@ -58,9 +58,6 @@ func (s *Service) RegisterUser(userUUID, sessionID string) {
 // UnregisterUser 注销用户与会话的映射
 func (s *Service) UnregisterUser(userUUID string) { s.server.UnregisterUser(userUUID) }
 
-// GetCommands 获取已注册的所有命令码列表
-func (s *Service) GetCommands() []int32 { return s.server.registeredCommands() }
-
 // Start 启动 gRPC 服务器和 etcd 注册
 func (s *Service) Start() error {
 	if s.cfg.AdvertiseAddr == "" {
@@ -133,23 +130,6 @@ func (s *Service) Stop() {
 		}
 		if s.grpcServer != nil {
 			s.grpcServer.GracefulStop()
-		}
-		if s.listener != nil {
-			_ = s.listener.Close()
-		}
-		s.server.Stop()
-	})
-}
-
-// StopImmediate 立即停止 gRPC 服务器，不等待长时间流连接完成
-// 适用于基准测试驱动和强制关闭场景
-func (s *Service) StopImmediate() {
-	s.stopOnce.Do(func() {
-		if s.registry != nil {
-			s.registry.Destroy()
-		}
-		if s.grpcServer != nil {
-			s.grpcServer.Stop()
 		}
 		if s.listener != nil {
 			_ = s.listener.Close()

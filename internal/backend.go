@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -283,12 +285,9 @@ func (wc *writeCoalescer) flush() int64 {
 
 // GetShard 根据连接 ID 的哈希值获取对应的分片
 func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
-	h := uint32(2166136261)
-	for i := 0; i < len(connectionID); i++ {
-		h ^= uint32(connectionID[i])
-		h *= 16777619
-	}
-	return sm.shards[h%uint32(len(sm.shards))]
+	h := fnv.New32a()
+	h.Write([]byte(connectionID))
+	return sm.shards[h.Sum32()%uint32(len(sm.shards))]
 }
 
 // markShardBroken 分片流失效后的统一处理：触发整体重连。
@@ -424,7 +423,7 @@ type LogicClient struct {
 	client            protoGw.GatewayStreamClient // gRPC 流客户端
 	conn              *grpc.ClientConn            // gRPC 连接
 	mu                sync.RWMutex                // 保护状态和连接的读写锁
-	state             int32                       // 连接状态（原子操作）
+	state             atomic.Int32                // 连接状态（原子操作）
 	address           string                      // 逻辑服地址
 	streamManager     *StreamManager              // 流分片管理器
 	streamCtx         context.Context             // 流上下文
@@ -452,7 +451,7 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 		}
 	}
 	return &LogicClient{
-		state:             int32(LogicStateDisconnected),
+		state:             atomic.Int32{},
 		reconnectConfig:   DefaultReconnectConfig,
 		healthCheckConfig: DefaultHealthCheckConfig,
 		streamManager:     NewStreamManager(0, 0, sendTimeout),
@@ -468,16 +467,16 @@ func (lc *LogicClient) SetServerID(serverID string) { lc.serverID = serverID }
 
 // getState 原子获取连接状态
 func (lc *LogicClient) getState() LogicConnectionState {
-	return LogicConnectionState(atomic.LoadInt32(&lc.state))
+	return LogicConnectionState(lc.state.Load())
 }
 
 // setState 原子设置连接状态并通知状态变更
 func (lc *LogicClient) setState(newState LogicConnectionState) {
-	oldState := LogicConnectionState(atomic.LoadInt32(&lc.state))
+	oldState := LogicConnectionState(lc.state.Load())
 	if oldState == newState {
 		return
 	}
-	atomic.StoreInt32(&lc.state, int32(newState))
+	lc.state.Store(int32(newState))
 	lc.notifyStateChange(oldState, newState)
 }
 
@@ -511,11 +510,11 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	var oldState LogicConnectionState
 	if isReconnect {
-		oldState = LogicConnectionState(atomic.LoadInt32(&lc.state))
-		atomic.StoreInt32(&lc.state, int32(LogicStateReconnecting))
+		oldState = LogicConnectionState(lc.state.Load())
+		lc.state.Store(int32(LogicStateReconnecting))
 	} else {
-		oldState = LogicConnectionState(atomic.LoadInt32(&lc.state))
-		atomic.StoreInt32(&lc.state, int32(LogicStateConnecting))
+		oldState = LogicConnectionState(lc.state.Load())
+		lc.state.Store(int32(LogicStateConnecting))
 	}
 
 	if lc.conn != nil {
@@ -526,7 +525,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	}
 	lc.mu.Unlock()
 
-	lc.notifyStateChange(oldState, LogicConnectionState(atomic.LoadInt32(&lc.state)))
+	lc.notifyStateChange(oldState, LogicConnectionState(lc.state.Load()))
 
 	tlog.Info(context.Background(), "connecting to logic server address=%s reconnect=%v", lc.address, isReconnect)
 
@@ -1310,7 +1309,9 @@ func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 
 // Flush 冲刷队列中的消息，重连后调用以恢复转发
 func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
-	maxRetries := 100
+	const maxRetries = 100
+	const retryInterval = 100 * time.Millisecond
+
 	for i := 0; i < maxRetries; i++ {
 		msg, ok := mq.Dequeue()
 		if !ok {
@@ -1327,15 +1328,12 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 		}
 
 		if state == LogicStateConnected {
-			err := lc.SendMessageDirect(msg)
-			if err != nil {
-				_ = mq.Enqueue(msg)
-				time.Sleep(100 * time.Millisecond)
+			if err := lc.SendMessageDirect(msg); err == nil {
+				continue
 			}
-		} else {
-			_ = mq.Enqueue(msg)
-			time.Sleep(100 * time.Millisecond)
 		}
+		_ = mq.Enqueue(msg)
+		time.Sleep(retryInterval)
 	}
 }
 
@@ -1632,7 +1630,7 @@ type LogicClientPool struct {
 	balancer   *cluster.Balancer           // 负载均衡器
 	stopCh     chan struct{}               // 停止信号
 	wg         sync.WaitGroup              // 等待协程退出
-	rrIndex    uint64                      // 轮询索引（原子操作）
+	rrIndex    atomic.Uint64                // 轮询索引（原子操作）
 	fastClient atomic.Pointer[LogicClient] // 快速路径：单客户端时的原子指针
 	addressMap map[string]string           // 地址映射（serverID -> address，来自 etcd）
 }
@@ -1645,7 +1643,7 @@ func (pool *LogicClientPool) RegisterClient(serverID string, client *LogicClient
 	client.SetServerID(serverID)
 	pool.mu.Lock()
 	pool.clients[serverID] = client
-	if !containsString(pool.ordered, serverID) {
+	if !slices.Contains(pool.ordered, serverID) {
 		pool.ordered = append(pool.ordered, serverID)
 	}
 	pool.updateFastClient()
@@ -1776,7 +1774,7 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 	pool.mu.Lock()
 	pool.clients[event.InstanceID] = client
 	pool.addressMap[event.InstanceID] = event.Address
-	if !containsString(pool.ordered, event.InstanceID) {
+	if !slices.Contains(pool.ordered, event.InstanceID) {
 		pool.ordered = append(pool.ordered, event.InstanceID)
 	}
 	pool.updateFastClient()
@@ -1810,7 +1808,7 @@ func (pool *LogicClientPool) handleServiceDeregister(event uetcd.ServiceEvent) {
 			pool.mu.Lock()
 			delete(pool.clients, event.InstanceID)
 			delete(pool.addressMap, event.InstanceID)
-			pool.ordered = removeString(pool.ordered, event.InstanceID)
+			pool.ordered = slices.DeleteFunc(pool.ordered, func(v string) bool { return v == event.InstanceID })
 			pool.updateFastClient()
 			pool.mu.Unlock()
 			if pool.balancer != nil {
@@ -1871,7 +1869,7 @@ func (pool *LogicClientPool) RoundRobinSendMessage(msg *protoGw.StreamData) erro
 		return ErrNotConnected
 	}
 
-	idx := atomic.AddUint64(&pool.rrIndex, 1) % uint64(n)
+	idx := pool.rrIndex.Add(1) % uint64(n)
 	serviceID := pool.ordered[idx]
 	client := pool.clients[serviceID]
 	pool.mu.RUnlock()
@@ -1904,27 +1902,6 @@ func (pool *LogicClientPool) ClientCount() int {
 	return len(pool.clients)
 }
 
-// RemoveService 移除指定服务的客户端
-func (pool *LogicClientPool) RemoveService(serviceID string) {
-	pool.mu.Lock()
-	client, exists := pool.clients[serviceID]
-	if exists {
-		delete(pool.clients, serviceID)
-		pool.ordered = removeString(pool.ordered, serviceID)
-		pool.updateFastClient()
-	}
-	pool.mu.Unlock()
-
-	if exists {
-		if pool.balancer != nil {
-			pool.balancer.RemoveNode(serviceID)
-		}
-		if client != nil {
-			go client.Close()
-		}
-	}
-}
-
 // IsConnected 检查池中是否有已连接的客户端
 func (pool *LogicClientPool) IsConnected() bool {
 	// 快速路径：只有一个客户端，无需加锁。
@@ -1941,26 +1918,6 @@ func (pool *LogicClientPool) IsConnected() bool {
 		}
 	}
 	return false
-}
-
-// containsString 检查字符串切片是否包含指定字符串
-func containsString(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
-// removeString 从字符串切片中移除指定字符串
-func removeString(slice []string, s string) []string {
-	for i, v := range slice {
-		if v == s {
-			return append(slice[:i], slice[i+1:]...)
-		}
-	}
-	return slice
 }
 
 // ---------------------------------------------------------------------------
@@ -2038,13 +1995,6 @@ func (gc *GatewayClient) IsConnected() bool {
 	return gc.conn != nil && !gc.closing && gc.conn.GetState() != connectivity.Shutdown
 }
 
-// Client 获取底层 gRPC 客户端
-func (gc *GatewayClient) Client() protoGw.GatewayClient {
-	gc.mu.RLock()
-	defer gc.mu.RUnlock()
-	return gc.client
-}
-
 // Close 关闭网关客户端连接
 func (gc *GatewayClient) Close() {
 	gc.mu.Lock()
@@ -2097,12 +2047,6 @@ func (pool *GatewayClientPool) GetClient(serverID string) GatewayClientProvider 
 		return nil
 	}
 	return client
-}
-
-func (pool *GatewayClientPool) LookupAddress(serverID string) string {
-	pool.mu.RLock()
-	defer pool.mu.RUnlock()
-	return pool.addressMap[serverID]
 }
 
 func (pool *GatewayClientPool) SetDiscovery(discovery *uetcd.Component) {

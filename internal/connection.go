@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,7 +110,7 @@ type Connection struct {
 	Conn        gnet.Conn
 	RemoteAddr  string
 	CreatedAt   int64
-	LastActive  int64
+	LastActive  atomic.Int64
 	activitySeq atomic.Uint32
 	Status      int8
 	Groups      map[string]struct{}
@@ -131,13 +132,13 @@ type Connection struct {
 func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
 	now := time.Now().UnixMilli()
 	c := &Connection{
-		id:         id,
-		Conn:       conn,
+		id:        id,
+		Conn:      conn,
 		RemoteAddr: remoteAddr,
-		CreatedAt:  now,
-		LastActive: now,
-		Groups:     make(map[string]struct{}),
+		CreatedAt: now,
+		Groups:    make(map[string]struct{}),
 	}
+	c.LastActive.Store(now)
 	c.userUUID.Store(userUUID)
 	c.state.Store(int32(StateForward))
 	return c
@@ -226,24 +227,16 @@ func (c *Connection) CheckAndIncrementMsgRate(maxPerConn int) bool {
 	return c.msgCount.Load() <= int64(maxPerConn)
 }
 
-// 头部缓冲区对象池，减少内存分配
-var headerPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 4)
-		return &buf
-	},
-}
-
 // noopAsyncCallback 是异步写入完成时使用的空回调。
 func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
 
 // touch 更新连接的最后活跃时间，每64次调用才实际更新一次以减少原子操作开销。
 func (c *Connection) touch() {
 	seq := c.activitySeq.Add(1)
-	if seq&63 != 0 && atomic.LoadInt64(&c.LastActive) != 0 {
+	if seq&63 != 0 && c.LastActive.Load() != 0 {
 		return
 	}
-	atomic.StoreInt64(&c.LastActive, time.Now().UnixMilli())
+	c.LastActive.Store(time.Now().UnixMilli())
 }
 
 // Send 向客户端发送数据，WebSocket连接自动封装为WS帧。
@@ -255,12 +248,9 @@ func (c *Connection) Send(data []byte) error {
 	if c.IsWebSocket() {
 		return c.sendWSFrame(data)
 	}
-	headerPtr := headerPool.Get().(*[]byte)
-	header := *headerPtr
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
-	err := c.Conn.AsyncWritev([][]byte{header, data}, noopAsyncCallback)
-	// 注意：header在多次调用中复用，但AsyncWritev会拷贝数据
-	return err
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
+	return c.Conn.AsyncWritev([][]byte{header[:], data}, noopAsyncCallback)
 }
 
 // SendMulti 发送已组装好的合并数据。
@@ -291,22 +281,7 @@ func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
 
 // sendWSFrame 将数据封装为WebSocket帧并发送，支持不同长度的载荷。
 func (c *Connection) sendWSFrame(data []byte) error {
-	payloadLen := len(data)
-	var frame []byte
-	if payloadLen < 126 {
-		frame = make([]byte, 0, 2+payloadLen)
-		frame = append(frame, 0x82, byte(payloadLen))
-	} else if payloadLen <= 65535 {
-		frame = make([]byte, 0, 4+payloadLen)
-		frame = append(frame, 0x82, 126, byte(payloadLen>>8), byte(payloadLen))
-	} else {
-		frame = make([]byte, 0, 10+payloadLen)
-		frame = append(frame, 0x82, 127)
-		var b [8]byte
-		binary.BigEndian.PutUint64(b[:], uint64(payloadLen))
-		frame = append(frame, b[:]...)
-	}
-	frame = append(frame, data...)
+	frame := encodeWSFrame(0x82, data)
 	return c.Conn.AsyncWrite(frame, noopAsyncCallback)
 }
 
@@ -338,13 +313,6 @@ func (g *ConnectionGroupInfo) RemoveMember(key serverUserKey) bool {
 	defer g.mu.Unlock()
 	delete(g.Members, key)
 	return len(g.Members) == 0
-}
-
-func (g *ConnectionGroupInfo) HasMember(key serverUserKey) bool {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	_, ok := g.Members[key]
-	return ok
 }
 
 func (g *ConnectionGroupInfo) MemberCount() int {
@@ -383,7 +351,7 @@ type ConnectionManager struct {
 	serverConnections     sync.Map
 	groups                sync.Map
 	groupMutex            sync.RWMutex
-	count                 int32
+	count                 atomic.Int32
 	stopCh                chan struct{}
 	checkDone             chan struct{}
 
@@ -451,7 +419,7 @@ func (cm *ConnectionManager) UpdateLimits(maxConn, maxConnPerIP int) {
 
 // CanAccept 检查是否允许接受新连接（总连接数 + 单 IP 连接数）。
 func (cm *ConnectionManager) CanAccept(remoteIP string) bool {
-	if cm.maxConnections > 0 && int(atomic.LoadInt32(&cm.count)) >= cm.maxConnections {
+	if cm.maxConnections > 0 && int(cm.count.Load()) >= cm.maxConnections {
 		return false
 	}
 	if cm.maxConnectionsPerIP > 0 && remoteIP != "" {
@@ -506,7 +474,7 @@ func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) stri
 	c := newConnection(connectionID, conn, userUUID, remoteAddr)
 	cm.connections.Store(connectionID, c)
 	cm.userConnections.Store(userUUID, connectionID)
-	atomic.AddInt32(&cm.count, 1)
+	cm.count.Add(1)
 	cm.totalConnections.Add(1)
 	cm.activeConnections.Add(1)
 	// 追踪 IP 连接数
@@ -551,7 +519,7 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	// 追踪 IP 连接数
 	remoteIP := extractIP(conn.RemoteAddr)
 	cm.decrementIP(remoteIP)
-	atomic.AddInt32(&cm.count, -1)
+	cm.count.Add(-1)
 	cm.activeConnections.Add(-1)
 	cm.closedConnections.Add(1)
 }
@@ -581,7 +549,7 @@ func (cm *ConnectionManager) UpdateUserConnection(connectionID, oldUserUUID, new
 }
 
 func (cm *ConnectionManager) GetConnectionCount() int {
-	return int(atomic.LoadInt32(&cm.count))
+	return int(cm.count.Load())
 }
 
 // BroadcastBytes 向所有处于转发状态的连接广播数据。
@@ -757,7 +725,7 @@ func (cm *ConnectionManager) StartConnectionChecker(connIdleTimeout, connCheckIn
 func (cm *ConnectionManager) checkIdleConnections(timeout time.Duration) {
 	now := time.Now().UnixMilli()
 	cm.connections.Range(func(key string, conn *Connection) bool {
-		lastActive := atomic.LoadInt64(&conn.LastActive)
+		lastActive := conn.LastActive.Load()
 		if now-lastActive > timeout.Milliseconds() {
 			tlog.Debug(context.Background(), "closing idle connection", "connectionID", conn.ID())
 			if conn.Conn != nil {
@@ -793,10 +761,9 @@ func (cm *ConnectionManager) CloseAllConnections() {
 
 // extractIP 从地址字符串中提取 IP 部分（去掉端口）。
 func extractIP(addr string) string {
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i]
-		}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
 	}
-	return addr
+	return host
 }
