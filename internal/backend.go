@@ -558,16 +558,13 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	}
 
 	// 在阻塞的 dial 之后重新检查关闭状态，dial 期间可能已调用 Close()。
-	lc.mu.RLock()
+	lc.mu.Lock()
 	if lc.closing {
-		lc.mu.RUnlock()
+		lc.mu.Unlock()
 		conn.Close()
 		lc.setState(LogicStateDisconnected)
 		return ErrConnectionClosing
 	}
-	lc.mu.RUnlock()
-
-	lc.mu.Lock()
 	lc.conn = conn
 	lc.client = protoGw.NewGatewayStreamClient(conn)
 	lc.mu.Unlock()
@@ -830,6 +827,11 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	}
 
 	for {
+		select {
+		case <-s.stopCh:
+			return
+		default:
+		}
 		msg, err := stream.Recv()
 		if err != nil {
 			lc.mu.RLock()
@@ -1210,6 +1212,7 @@ type StreamMessageQueue struct {
 	policy                config.QueuePolicy    // 队列策略
 	blockTimeout          time.Duration         // 阻塞超时
 	backpressureThreshold float64               // 背压阈值
+	flushing              atomic.Bool           // 防止并发 Flush
 }
 
 // NewStreamMessageQueue 创建消息队列
@@ -1309,6 +1312,11 @@ func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 
 // Flush 冲刷队列中的消息，重连后调用以恢复转发
 func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
+	if !mq.flushing.CompareAndSwap(false, true) {
+		return // 已有 Flush 在运行
+	}
+	defer mq.flushing.Store(false)
+
 	const maxRetries = 100
 	const retryInterval = 100 * time.Millisecond
 
@@ -1332,7 +1340,12 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 				continue
 			}
 		}
-		_ = mq.Enqueue(msg)
+		// 重连恢复时 Block 策略会导致无限阻塞，直接丢弃
+		if mq.policy == config.QueuePolicyBlock {
+			tlog.Warn(context.Background(), "flush: dropping message due to Block policy queue full")
+		} else {
+			_ = mq.Enqueue(msg)
+		}
 		time.Sleep(retryInterval)
 	}
 }
@@ -1383,12 +1396,16 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 
 		s.handleGRPCMessage(connectionID, msg, func(response interface{}) {
 			if protoMsg, ok := response.(*protoGw.StreamData); ok {
-				stream.Send(protoMsg)
+				if err := stream.Send(protoMsg); err != nil {
+					tlog.Warn(context.Background(), "OnData: stream.Send failed error=%v", err)
+				}
 			} else if errorMsg, ok := response.(*commonstruct.ErrorResponse); ok {
 				responseMsg := &protoGw.StreamData{
 					Data: []byte(errorMsg.Error.Message),
 				}
-				stream.Send(responseMsg)
+				if err := stream.Send(responseMsg); err != nil {
+					tlog.Warn(context.Background(), "OnData: stream.Send error response failed error=%v", err)
+				}
 			}
 		}, ctx)
 	}
@@ -1436,7 +1453,11 @@ func (s *GRPCServer) SendToClient(_ context.Context, req *protoGw.SendToClientRe
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.Send(encodePushMessage(req.GetCmd(), req.GetData())); err != nil {
+	data, err := encodePushMessage(req.GetCmd(), req.GetData())
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Send(data); err != nil {
 		return nil, err
 	}
 	s.gateway.AddPushedToClient(1)
@@ -1462,9 +1483,13 @@ func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*p
 
 // BroadcastAll 向所有客户端广播消息
 func (s *GRPCServer) BroadcastAll(_ context.Context, req *protoGw.BroadcastAllReq) (*protoGw.BroadcastAllAck, error) {
+	data, err := encodePushMessage(req.GetCmd(), req.GetData())
+	if err != nil {
+		return nil, err
+	}
 	var firstErr error
 	s.gateway.GetConnectionManager().connections.Range(func(_ string, conn *Connection) bool {
-		if err := conn.Send(encodePushMessage(req.GetCmd(), req.GetData())); err != nil && firstErr == nil {
+		if err := conn.Send(data); err != nil && firstErr == nil {
 			firstErr = err
 		} else if err == nil {
 			s.gateway.AddPushedToClient(1)
@@ -1533,7 +1558,12 @@ func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sen
 			tlog.Warn(context.Background(), "group push: session disappeared groupID=%s sessionID=%s", groupID, sessionID)
 			continue
 		}
-		msg := encodePushMessage(cmd, data)
+		msg, encodeErr := encodePushMessage(cmd, data)
+		if encodeErr != nil {
+			failed++
+			tlog.Warn(context.Background(), "group push: encode failed groupID=%s error=%v", groupID, encodeErr)
+			continue
+		}
 		if err := conn.Send(msg); err != nil {
 			failed++
 			tlog.Warn(context.Background(), "group push: send failed groupID=%s sessionID=%s error=%v", groupID, sessionID, err)
@@ -1549,9 +1579,12 @@ func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sen
 }
 
 // encodePushMessage 编码推送消息为字节流
-func encodePushMessage(cmd int32, data []byte) []byte {
-	msg, _ := proto.Marshal(&protoGw.MessageFrame{Cmd: cmd, Body: data})
-	return msg
+func encodePushMessage(cmd int32, data []byte) ([]byte, error) {
+	msg, err := proto.Marshal(&protoGw.MessageFrame{Cmd: cmd, Body: data})
+	if err != nil {
+		return nil, fmt.Errorf("marshal push message: %w", err)
+	}
+	return msg, nil
 }
 
 // SendMessage 处理来自逻辑服的单条消息请求（Unary RPC）
@@ -1579,6 +1612,9 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (
 	}, grpcCtx)
 
 	wg.Wait()
+	if response == nil {
+		return nil, fmt.Errorf("no response from message handler")
+	}
 	return response, nil
 }
 
@@ -1744,7 +1780,10 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 			event.InstanceID,
 			event.Address,
 		)
-		for attempt := 1; ; attempt++ {
+		backoff := time.Second
+		const maxBackoff = 30 * time.Second
+		const maxAttempts = 60
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			if err := client.Connect(event.Address); err == nil {
 				tlog.Info(context.Background(), "connected to discovered logic service serviceID=%s address=%s",
 					event.InstanceID,
@@ -1766,9 +1805,14 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 						err,
 					)
 				}
-				time.Sleep(time.Second)
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
 			}
 		}
+		tlog.Error(context.Background(), "logic service connection gave up after %d attempts serviceID=%s address=%s", maxAttempts, event.InstanceID, event.Address)
 	}()
 
 	pool.mu.Lock()

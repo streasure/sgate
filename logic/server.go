@@ -47,20 +47,12 @@ func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gateway
 }
 
 // Send 向流连接发送消息，连接已关闭时返回错误
-func (c *streamConn) Send(msg *protocol.StreamData) (err error) {
-	if c.closed.Load() {
-		return fmt.Errorf("logic: gateway stream closed")
-	}
-	defer func() {
-		if recover() != nil {
-			err = fmt.Errorf("logic: gateway stream closed")
-		}
-	}()
+func (c *streamConn) Send(msg *protocol.StreamData) error {
 	select {
 	case c.sendCh <- msg:
 		return nil
 	case <-c.done:
-		return fmt.Errorf("logic: gateway stream ended")
+		return fmt.Errorf("logic: gateway stream closed")
 	}
 }
 
@@ -347,8 +339,9 @@ func (s *Server) sendRawControl(cmd int32, data []byte) int {
 		if _, ok := sent[conn.gatewayID]; ok {
 			return true
 		}
+		// 先记录 gatewayID 防止同一网关多流重复发送
+		sent[conn.gatewayID] = struct{}{}
 		if conn.Send(&protocol.StreamData{Cmd: cmd, Data: data}) == nil {
-			sent[conn.gatewayID] = struct{}{}
 			count++
 		}
 		return true

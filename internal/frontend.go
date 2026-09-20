@@ -694,11 +694,8 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 		} else if wsConn, ok := connCtx.(*WebSocketConnection); ok {
 			connectionID = wsConn.ConnectionID
 			g.wsConnections.Delete(wsConn)
-			wsConn.Buffer = nil
-			wsConn.ConnectionID = ""
-			wsConn.Conn = nil
 			wsConn.State.Store(int32(WSStateClosed))
-			wsConnectionPool.Put(wsConn)
+			resetWebSocketConnection(wsConn)
 		} else if id, ok := connCtx.(string); ok {
 			connectionID = id
 		}
@@ -1039,7 +1036,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
 	writeAck(0, "ok", req.ServerId)
 
-	// 将登录 StreamData 转发给逻辑服，以便它注册会话并处理登录特定逻辑（如加入群组、设置状态）。
+	// 异步转发登录 StreamData 给逻辑服（不阻塞 gnet 事件循环）。
 	connObj := g.connectionManager.GetConnection(connectionID)
 	if connObj != nil {
 		forwardMsg := &protoGw.StreamData{
@@ -1049,15 +1046,17 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 			Cmd:       message.Cmd,
 			SeqId:     message.SeqId,
 		}
-		// 等待 gRPC 流就绪后转发（最多 2 秒）
-		for i := 0; i < 20; i++ {
-			if lc := g.GetLogicClient(req.ServerId); lc != nil {
-				if err := lc.SendMessage(forwardMsg); err == nil {
-					break
+		go func() {
+			for i := 0; i < 20; i++ {
+				if lc := g.GetLogicClient(req.ServerId); lc != nil {
+					if err := lc.SendMessage(forwardMsg); err == nil {
+						return
+					}
 				}
+				time.Sleep(100 * time.Millisecond)
 			}
-			time.Sleep(100 * time.Millisecond)
-		}
+			tlog.Warn(context.Background(), "login forward to logic timed out serverID=%s", req.ServerId)
+		}()
 	}
 
 	return gnet.None

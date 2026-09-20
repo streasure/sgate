@@ -58,6 +58,17 @@ var wsConnectionPool = sync.Pool{
 	},
 }
 
+// resetWebSocketConnection 重置 WebSocket 连接并归还对象池，超大 buffer 不复用
+func resetWebSocketConnection(wsConn *WebSocketConnection) {
+	wsConn.Buffer = wsConn.Buffer[:0]
+	if cap(wsConn.Buffer) > 64*1024 {
+		wsConn.Buffer = nil
+	}
+	wsConn.ConnectionID = ""
+	wsConn.Conn = nil
+	wsConnectionPool.Put(wsConn)
+}
+
 // WebSocketConnection 表示WebSocket连接，包含缓冲区和状态信息。
 type WebSocketConnection struct {
 	Conn         gnet.Conn
@@ -233,7 +244,15 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 			return gnet.Close
 		}
 
-		wsConn.Buffer = wsConn.Buffer[frameSize:]
+		// 剩余数据较小时复制到紧凑 buffer，避免大数组长期驻留内存
+		remaining := len(wsConn.Buffer) - frameSize
+		if remaining > 0 && remaining < cap(wsConn.Buffer)/4 {
+			newBuf := make([]byte, remaining)
+			copy(newBuf, wsConn.Buffer[frameSize:])
+			wsConn.Buffer = newBuf
+		} else {
+			wsConn.Buffer = wsConn.Buffer[frameSize:]
+		}
 
 		if len(wsConn.Buffer) == 0 {
 			break
@@ -355,7 +374,6 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 		g.connectionManager.RemoveConnection(wsConn.ConnectionID)
 	}
 	g.wsConnections.Delete(wsConn)
-	wsConnectionPool.Put(wsConn)
 	return nil
 }
 

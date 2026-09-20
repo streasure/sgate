@@ -24,20 +24,11 @@ func decodeClientMessage(data []byte) (*protoGw.StreamData, bool) {
 }
 
 // marshalClientMessage 将StreamData序列化为公共MessageFrame信封格式。
-// 没有body的内部控制消息使用其序列化后的Message作为body。
 func marshalClientMessage(msg *protoGw.StreamData) ([]byte, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("nil message")
 	}
-	body := msg.Data
-	if len(body) == 0 {
-		var err error
-		body, err = proto.Marshal(msg)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return proto.Marshal(&protoGw.MessageFrame{Cmd: msg.Cmd, SeqId: msg.SeqId, Body: body})
+	return proto.Marshal(&protoGw.MessageFrame{Cmd: msg.Cmd, SeqId: msg.SeqId, Body: msg.Data})
 }
 
 // marshalClientError 将错误响应序列化为MessageFrame格式的字节数据。

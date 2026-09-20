@@ -42,6 +42,7 @@ type OverloadProtector struct {
 	// CPU 增量计算基线
 	lastCPUTime   float64 // 上次 process.Times() 的 User+System 总和（秒）
 	lastCheckTime time.Time
+	checkCount    uint64 // 检查计数，用于降低 ReadMemStats 频率
 }
 
 // parseGOMEMLIMIT 读取 GOMEMLIMIT 环境变量（如 "4GiB"/"4096MiB"/"4294967296"）。
@@ -147,10 +148,12 @@ func (op *OverloadProtector) Start() {
 func (op *OverloadProtector) check() {
 	overloaded := false
 
-	// 仅更新 memPercent 用于监控展示（heap 占 GOMEMLIMIT 百分比），不参与过载判断
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	if op.heapThreshold > 0 {
+	// 仅更新 memPercent 用于监控展示，不参与过载判断
+	// 每 5 次检查（1 秒）读取一次 MemStats，避免频繁 Stop-The-World
+	op.checkCount++
+	if op.heapThreshold > 0 && op.checkCount%5 == 0 {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
 		v := float64(m.Alloc) / float64(op.heapThreshold) * 100.0
 		op.memPercent.Store(&v)
 	}
@@ -198,10 +201,9 @@ func (op *OverloadProtector) check() {
 			if p := op.memPercent.Load(); p != nil {
 				memVal = *p
 			}
-			tlog.Warn(context.Background(), "overload detected, dropping messages cpu=%v heapPercent=%v heapAllocMB=%d totalDropped=%d",
+			tlog.Warn(context.Background(), "overload detected, dropping messages cpu=%v heapPercent=%v totalDropped=%d",
 			cpuVal,
 			memVal,
-			m.Alloc/1024/1024,
 			op.totalDropped.Load(),
 		)
 		}

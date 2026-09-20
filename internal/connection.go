@@ -210,21 +210,26 @@ func (c *Connection) CheckAndIncrementMsgRate(maxPerConn int) bool {
 		return true
 	}
 	now := time.Now().UnixMilli()
-	windowStart := c.msgWindowStart.Load()
-	// 每秒一个窗口
-	if now-windowStart >= 1000 {
-		// 尝试重置窗口（CAS 保证只有一个 goroutine 重置）
-		if c.msgWindowStart.CompareAndSwap(windowStart, now) {
-			c.msgCount.Store(1)
-		} else {
-			// 其他 goroutine 已重置，增加计数
-			c.msgCount.Add(1)
+	for {
+		ws := c.msgWindowStart.Load()
+		if now-ws >= 1000 {
+			// 窗口过期，尝试 CAS 重置窗口+计数为 1
+			if c.msgWindowStart.CompareAndSwap(ws, now) {
+				c.msgCount.Store(1)
+				return true
+			}
+			// CAS 失败，重试
+			continue
 		}
-		return c.msgCount.Load() <= int64(maxPerConn)
+		// 窗口内，CAS 自增计数
+		old := c.msgCount.Load()
+		if old >= int64(maxPerConn) {
+			return false
+		}
+		if c.msgCount.CompareAndSwap(old, old+1) {
+			return true
+		}
 	}
-	// 窗口内，增加计数
-	c.msgCount.Add(1)
-	return c.msgCount.Load() <= int64(maxPerConn)
 }
 
 // noopAsyncCallback 是异步写入完成时使用的空回调。
