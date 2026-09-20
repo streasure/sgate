@@ -457,7 +457,6 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 				g.connectionManager.RemoveConnection(conn.ConnectionID)
 			}
 			g.wsConnections.Delete(conn)
-			wsConnectionPool.Put(conn)
 		}
 		return true
 	})
@@ -695,7 +694,6 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 			connectionID = wsConn.ConnectionID
 			g.wsConnections.Delete(wsConn)
 			wsConn.State.Store(int32(WSStateClosed))
-			resetWebSocketConnection(wsConn)
 		} else if id, ok := connCtx.(string); ok {
 			connectionID = id
 		}

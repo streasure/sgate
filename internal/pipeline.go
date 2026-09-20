@@ -137,7 +137,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		protoMsg = getStreamData()
 		protoMsg.SessionId = connectionID
 		protoMsg.UserKey = connObj.GetUserUUID()
-		protoMsg.Data = message.Data
+		protoMsg.Data = append([]byte(nil), message.Data...)
 		protoMsg.SeqId = message.SeqId
 		protoMsg.Cmd = cmd
 	} else {

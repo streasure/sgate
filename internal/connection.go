@@ -124,19 +124,21 @@ type Connection struct {
 	logicClient atomic.Value // LogicClientProvider 缓存，避免每条消息查询连接池
 
 	// 连接级流控
-	msgCount       atomic.Int64 // 当前窗口消息计数
-	msgWindowStart atomic.Int64 // 当前窗口起始时间（UnixMilli）
+	msgRateMu       sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
+	msgCount        int64      // 当前窗口消息计数
+	msgWindowStart  int64      // 当前窗口起始时间（UnixMilli）
 }
 
 // newConnection 创建新的连接对象，初始化基本属性和状态。
 func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
 	now := time.Now().UnixMilli()
 	c := &Connection{
-		id:        id,
-		Conn:      conn,
-		RemoteAddr: remoteAddr,
-		CreatedAt: now,
-		Groups:    make(map[string]struct{}),
+		id:             id,
+		Conn:           conn,
+		RemoteAddr:     remoteAddr,
+		CreatedAt:      now,
+		Groups:         make(map[string]struct{}),
+		msgWindowStart: now,
 	}
 	c.LastActive.Store(now)
 	c.userUUID.Store(userUUID)
@@ -210,26 +212,20 @@ func (c *Connection) CheckAndIncrementMsgRate(maxPerConn int) bool {
 		return true
 	}
 	now := time.Now().UnixMilli()
-	for {
-		ws := c.msgWindowStart.Load()
-		if now-ws >= 1000 {
-			// 窗口过期，尝试 CAS 重置窗口+计数为 1
-			if c.msgWindowStart.CompareAndSwap(ws, now) {
-				c.msgCount.Store(1)
-				return true
-			}
-			// CAS 失败，重试
-			continue
-		}
-		// 窗口内，CAS 自增计数
-		old := c.msgCount.Load()
-		if old >= int64(maxPerConn) {
-			return false
-		}
-		if c.msgCount.CompareAndSwap(old, old+1) {
-			return true
-		}
+	c.msgRateMu.Lock()
+	if now-c.msgWindowStart >= 1000 {
+		c.msgWindowStart = now
+		c.msgCount = 1
+		c.msgRateMu.Unlock()
+		return true
 	}
+	if c.msgCount >= int64(maxPerConn) {
+		c.msgRateMu.Unlock()
+		return false
+	}
+	c.msgCount++
+	c.msgRateMu.Unlock()
+	return true
 }
 
 // noopAsyncCallback 是异步写入完成时使用的空回调。

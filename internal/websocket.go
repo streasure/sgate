@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -49,27 +48,8 @@ func (g *Gateway) getMaxWSBufferSize() int {
 	return g.protection.MaxWSBufferSize
 }
 
-// wsConnectionPool WebSocket连接对象池，减少内存分配
-var wsConnectionPool = sync.Pool{
-	New: func() interface{} {
-		return &WebSocketConnection{
-			Buffer: make([]byte, 0, 4096),
-		}
-	},
-}
-
-// resetWebSocketConnection 重置 WebSocket 连接并归还对象池，超大 buffer 不复用
-func resetWebSocketConnection(wsConn *WebSocketConnection) {
-	wsConn.Buffer = wsConn.Buffer[:0]
-	if cap(wsConn.Buffer) > 64*1024 {
-		wsConn.Buffer = nil
-	}
-	wsConn.ConnectionID = ""
-	wsConn.Conn = nil
-	wsConnectionPool.Put(wsConn)
-}
-
 // WebSocketConnection 表示WebSocket连接，包含缓冲区和状态信息。
+// 不使用 sync.Pool — 指针作为 sync.Map key 时，pool 复用会导致陈旧 entry。
 type WebSocketConnection struct {
 	Conn         gnet.Conn
 	State        atomic.Int32
@@ -86,15 +66,13 @@ const (
 	WSStateClosed           // 已关闭
 )
 
-// NewWebSocketConnection 从对象池获取WebSocket连接并初始化状态。
+// NewWebSocketConnection 创建 WebSocket 连接并初始化状态。
 func NewWebSocketConnection(conn gnet.Conn) *WebSocketConnection {
-	wsConn := wsConnectionPool.Get().(*WebSocketConnection)
-	wsConn.Conn = conn
-	wsConn.State.Store(int32(WSStateHandshake))
-	wsConn.Buffer = wsConn.Buffer[:0]
-	wsConn.ConnectionID = ""
-	wsConn.LastPingTime = time.Now()
-	return wsConn
+	return &WebSocketConnection{
+		Conn:         conn,
+		Buffer:       make([]byte, 0, 4096),
+		LastPingTime: time.Now(),
+	}
 }
 
 // handleWebSocketHandshake 处理WebSocket协议升级握手，验证请求头并返回101响应。

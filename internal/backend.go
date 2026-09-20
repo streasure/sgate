@@ -952,6 +952,7 @@ func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 			if err := lc.messageQueue.Enqueue(msg); err != nil {
 				return err
 			}
+			return nil // 消息已入队，等重连后自动发送
 		}
 		return ErrNotConnected
 	}
@@ -1262,9 +1263,10 @@ func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 				mq.mu.Unlock()
 				return ErrQueueFull
 			}
-			mq.mu.Unlock()
-			time.Sleep(time.Millisecond)
-			mq.mu.Lock()
+			// 用 timer + Broadcast 唤醒 Wait，避免 1ms busy-wait
+			timer := time.AfterFunc(remaining, func() { mq.cond.Broadcast() })
+			mq.cond.Wait()
+			timer.Stop()
 			if len(mq.queue) < mq.maxSize {
 				break
 			}
@@ -1306,6 +1308,7 @@ func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 	}
 	msg := mq.queue[0]
 	mq.queue = mq.queue[1:]
+	mq.cond.Signal() // 通知等待入队的 goroutine 有空间了
 	mq.mu.Unlock()
 	return msg, true
 }
