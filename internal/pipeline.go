@@ -65,6 +65,7 @@ func NewMessagePipeline(gw *Gateway) *MessagePipeline {
 // 失败时，Result.Error非空，调用方应使用协议特定的方法发送错误响应。
 func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.StreamData, connectionID string) PipelineResult {
 	g := p.gw
+	protection := g.getProtection()
 
 	// 阶段1：过载检查
 	if g.overloadProtector.IsOverloaded() {
@@ -98,7 +99,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	}
 
 	// 阶段2.5：连接级流控
-	if !connObj.CheckAndIncrementMsgRate(g.protection.MaxMessagesPerConn) {
+	if !connObj.CheckAndIncrementMsgRate(protection.MaxMessagesPerConn) {
 		g.messagesDroppedRateLimit.Add(1)
 		return PipelineResult{
 			Action: gnet.None,
@@ -123,7 +124,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		g.rateLimiter == nil &&
 		g.waf == nil &&
 		g.circuitBreakerMgr == nil &&
-		!g.protection.VerifyInbound
+		!protection.VerifyInbound
 
 	var remoteIP string
 	var routeKey string
@@ -182,7 +183,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 
 		// 阶段4：消息完整性检查（可选）
-		if g.protection.VerifyInbound {
+		if protection.VerifyInbound {
 			if err := g.messageIntegrity.ProcessMessage(message); err != nil {
 				return PipelineResult{
 					Action: gnet.None,

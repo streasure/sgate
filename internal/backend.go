@@ -1765,18 +1765,22 @@ func (pool *LogicClientPool) handleServiceChange(event uetcd.ServiceEvent) {
 
 // handleServiceRegister 处理服务注册事件，创建新的逻辑服客户端连接
 func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
-	pool.mu.RLock()
-	existing, exists := pool.clients[event.InstanceID]
-	pool.mu.RUnlock()
-
-	// 已存在的客户端已经负责连接或重连，避免初始快照和 watch 事件重复创建。
-	if exists && existing != nil {
+	pool.mu.Lock()
+	if existing, exists := pool.clients[event.InstanceID]; exists && existing != nil {
+		pool.mu.Unlock()
 		return
 	}
 
 	client := NewLogicClient(pool.gateway)
 	client.SetServerID(event.InstanceID)
 	client.shardCount = runtime.NumCPU() * 8
+	pool.clients[event.InstanceID] = client
+	pool.addressMap[event.InstanceID] = event.Address
+	if !slices.Contains(pool.ordered, event.InstanceID) {
+		pool.ordered = append(pool.ordered, event.InstanceID)
+	}
+	pool.updateFastClient()
+	pool.mu.Unlock()
 
 	go func() {
 		tlog.Info(context.Background(), "connecting to discovered logic service serviceID=%s address=%s",
@@ -1817,15 +1821,6 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 		}
 		tlog.Error(context.Background(), "logic service connection gave up after %d attempts serviceID=%s address=%s", maxAttempts, event.InstanceID, event.Address)
 	}()
-
-	pool.mu.Lock()
-	pool.clients[event.InstanceID] = client
-	pool.addressMap[event.InstanceID] = event.Address
-	if !slices.Contains(pool.ordered, event.InstanceID) {
-		pool.ordered = append(pool.ordered, event.InstanceID)
-	}
-	pool.updateFastClient()
-	pool.mu.Unlock()
 
 	if pool.balancer != nil {
 		pool.balancer.AddNode(event.InstanceID, event.Address, 1)

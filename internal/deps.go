@@ -93,7 +93,6 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 	gw := &Gateway{
 		connectionManager: NewConnectionManager(protection.MaxConnections, protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
-		protection:        protection,
 		grpcCfg:           grpcCfg,
 		streamCfg:         streamCfg,
 		serverID:          deps.Config.ServerID,
@@ -132,6 +131,7 @@ func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
 	}
 
 	gw.cfg.Store(&deps.Config)
+	gw.protection.Store(protection)
 	gw.ctx = context.Background()
 	gw.pipeline = NewMessagePipeline(gw)
 

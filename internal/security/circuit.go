@@ -105,14 +105,16 @@ func (cb *CircuitBreaker) RecordFailure() {
 		cb.failureCount.Add(1)
 		cb.lastFailureTime.Store(time.Now().UnixNano())
 		if cb.failureCount.Load() >= int32(cb.failureThreshold) {
-			cb.state.Store(int32(StateOpen))
-			cb.trippedCount.Add(1)
+			if cb.state.CompareAndSwap(int32(StateClosed), int32(StateOpen)) {
+				cb.trippedCount.Add(1)
+			}
 		}
 
 	case StateHalfOpen:
-		cb.state.Store(int32(StateOpen))
-		cb.lastFailureTime.Store(time.Now().UnixNano())
-		cb.trippedCount.Add(1)
+		if cb.state.CompareAndSwap(int32(StateHalfOpen), int32(StateOpen)) {
+			cb.lastFailureTime.Store(time.Now().UnixNano())
+			cb.trippedCount.Add(1)
+		}
 
 	case StateOpen:
 		cb.lastFailureTime.Store(time.Now().UnixNano())

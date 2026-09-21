@@ -159,7 +159,8 @@ func (c *Connection) SetState(old, new ConnState) bool {
 
 // IsBound 判断连接是否已绑定到服务器。
 func (c *Connection) IsBound() bool {
-	return c.serverID.Load().(string) != ""
+	v := c.serverID.Load()
+	return v != nil && v.(string) != ""
 }
 
 // IsAuthenticated 判断连接是否已完成用户认证（UUID非空且不以temp_开头）。

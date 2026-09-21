@@ -92,7 +92,7 @@ type Gateway struct {
 	statsServer       *http.Server
 	msgRate           *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
 	zone              string
-	protection        config.ProtectionConfig
+	protection        atomic.Value // stores config.ProtectionConfig — 热路径无锁读取
 	grpcCfg           config.GRPCConfig
 	streamCfg         config.StreamConfig
 	// 安全防护组件
@@ -160,6 +160,11 @@ type Gateway struct {
 // SetTransportType 设置监听端口对应的传输类型。
 func (g *Gateway) SetTransportType(port string, transportType string) {
 	g.transportType.Store(port, transportType)
+}
+
+// getProtection 无锁读取 ProtectionConfig（热路径使用）。
+func (g *Gateway) getProtection() config.ProtectionConfig {
+	return g.protection.Load().(config.ProtectionConfig)
 }
 
 // AddPushedToClient 增加已推送到客户端的消息计数（接收方向：逻辑服到网关再到客户端）。
@@ -311,11 +316,11 @@ func (g *Gateway) StartServices() {
 	go g.wsHeartbeatChecker()
 	g.messageIntegrity = NewMessageIntegrity(30000)
 
-	connCheckInterval, _ := time.ParseDuration(g.protection.ConnCheckInterval)
+	connCheckInterval, _ := time.ParseDuration(g.getProtection().ConnCheckInterval)
 	if connCheckInterval <= 0 {
 		connCheckInterval = 5 * time.Minute
 	}
-	connIdleTimeout, _ := time.ParseDuration(g.protection.ConnIdleTimeout)
+	connIdleTimeout, _ := time.ParseDuration(g.getProtection().ConnIdleTimeout)
 	if connIdleTimeout <= 0 {
 		connIdleTimeout = 30 * time.Second
 	}
@@ -427,8 +432,8 @@ func (g *Gateway) wsHeartbeatChecker() {
 			tlog.Error(context.Background(), "wsHeartbeatChecker panic recovered error=%v", r)
 		}
 	}()
-	checkInterval := time.Duration(g.protection.WSCheckInterval) * time.Second
-	heartbeatTimeout := time.Duration(g.protection.WSHeartbeatTimeout) * time.Second
+	checkInterval := time.Duration(g.getProtection().WSCheckInterval) * time.Second
+	heartbeatTimeout := time.Duration(g.getProtection().WSHeartbeatTimeout) * time.Second
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
@@ -562,12 +567,14 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 
 	// 动态更新过载保护阈值
 	if g.overloadProtector != nil {
-		g.protection = newCfg.Protection
+		g.protection.Store(newCfg.Protection)
 	}
 
 	// 动态更新连接限制参数
 	g.connectionManager.UpdateLimits(newCfg.Protection.MaxConnections, newCfg.Protection.MaxConnectionsPerIP)
-	g.protection.MaxMessagesPerConn = newCfg.Protection.MaxMessagesPerConn
+	pc := g.getProtection()
+	pc.MaxMessagesPerConn = newCfg.Protection.MaxMessagesPerConn
+	g.protection.Store(pc)
 
 	// 动态更新 JWT 密钥
 	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
@@ -760,7 +767,7 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 		return gnet.Close
 	}
 
-	maxFrameBuf := g.protection.MaxFrameBufSize
+	maxFrameBuf := g.getProtection().MaxFrameBufSize
 	if len(ctx.FrameBuf)+len(data) > maxFrameBuf {
 		ctx.FrameBuf = nil
 		return gnet.Close
@@ -769,7 +776,7 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	ctx.FrameBuf = append(ctx.FrameBuf, data...)
 
 	// 使用正常协议路径处理每个完整帧。逻辑流携带每条消息的真实客户端命令；它不定义网关私有的批处理命令。
-	maxFrame := g.protection.MaxFrameSize
+	maxFrame := g.getProtection().MaxFrameSize
 	for len(ctx.FrameBuf) >= 4 {
 		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
 		if frameLen == 0 || frameLen > uint32(maxFrame) {
@@ -815,7 +822,7 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 // 逻辑服反序列化每个负载以获取路由并分别分发。
 // 如果内部消息没有 ConnectionId，则从外部消息设置。
 func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet.Action) {
-	maxFrame := g.protection.MaxFrameSize
+	maxFrame := g.getProtection().MaxFrameSize
 
 	// 统计完整帧数并找到分割点。
 	// FrameBuf 格式：[4字节帧长度][帧数据] 重复
@@ -941,7 +948,7 @@ func (g *Gateway) isPreAuthCommand(cmd int32) bool {
 	if cmd == gateway.CmdLogicLoginReq {
 		return true
 	}
-	for _, allowed := range g.protection.PreAuthCommands {
+	for _, allowed := range g.getProtection().PreAuthCommands {
 		if cmd == allowed {
 			return true
 		}
@@ -982,10 +989,10 @@ func (g *Gateway) GetGatewayClient(serverID string) GatewayClientProvider {
 }
 
 func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
-	mode := g.protection.LoginAuth.Mode
+	mode := g.getProtection().LoginAuth.Mode
 	switch mode {
 	case "hmac":
-		return validateHMACLoginKey(userID, loginKey, g.protection.LoginAuth.Secret)
+		return validateHMACLoginKey(userID, loginKey, g.getProtection().LoginAuth.Secret)
 	case "delegate":
 		// 将验证委托给逻辑服——网关信任逻辑服的响应。如果逻辑服拒绝用户，它不会返回 UserKey。
 		return true
@@ -1130,7 +1137,7 @@ func getRemoteIP(c gnet.Conn) string {
 // getOrCreateBreaker 获取或创建指定 route 的熔断器
 func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 	timeout := 30 * time.Second
-	if d, err := time.ParseDuration(g.protection.ConnIdleTimeout); err == nil && d > 0 {
+	if d, err := time.ParseDuration(g.getProtection().ConnIdleTimeout); err == nil && d > 0 {
 		timeout = d
 	}
 	return g.circuitBreakerMgr.GetCircuitBreaker(route, 5, 3, timeout)

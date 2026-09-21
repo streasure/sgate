@@ -35,17 +35,19 @@ const (
 const wsMagicString = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 func (g *Gateway) getMaxWSFrameSize() int {
-	if g == nil || g.protection.MaxWSFrameSize <= 0 {
+	p := g.getProtection()
+	if g == nil || p.MaxWSFrameSize <= 0 {
 		return 4 * 1024 * 1024
 	}
-	return g.protection.MaxWSFrameSize
+	return p.MaxWSFrameSize
 }
 
 func (g *Gateway) getMaxWSBufferSize() int {
-	if g == nil || g.protection.MaxWSBufferSize <= 0 {
+	p := g.getProtection()
+	if g == nil || p.MaxWSBufferSize <= 0 {
 		return 4 * 1024 * 1024
 	}
-	return g.protection.MaxWSBufferSize
+	return p.MaxWSBufferSize
 }
 
 // WebSocketConnection 表示WebSocket连接，包含缓冲区和状态信息。
@@ -299,7 +301,21 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		if userUUID == "" {
 			userUUID = connectionID
 		}
-		g.connectionManager.UpdateConnectionUserUUID(connectionID, req.ServerId+":"+userUUID)
+		fullUUID := req.ServerId + ":" + userUUID
+
+		// 关闭同用户的旧连接（重连场景），防止资源泄漏
+		if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
+			if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
+				tlog.Info(context.Background(), "WS检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
+					oldConnID, connectionID, fullUUID)
+				g.notifyLogicOffline(oldConn)
+				if oldConn.Conn != nil {
+					oldConn.Conn.Close()
+				}
+			}
+		}
+
+		g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
 
 		// 转发登录请求到逻辑层，以便注册会话
 		connObj := g.connectionManager.GetConnection(connectionID)
