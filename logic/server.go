@@ -530,10 +530,17 @@ func (sp *ScheduledPush) Stop() {
 // Stop 关闭所有流连接，停止服务端
 func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
+		var wg sync.WaitGroup
 		s.streams.Range(func(_, value any) bool {
 			conn := value.(*streamConn)
-			conn.Close()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				conn.Close()
+				<-conn.done
+			}()
 			return true
 		})
+		wg.Wait()
 	})
 }

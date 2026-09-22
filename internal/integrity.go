@@ -77,9 +77,12 @@ func (mi *MessageIntegrity) MarkProcessed(msgID string) {
 
 func (mi *MessageIntegrity) ProcessMessage(msg *protoGw.StreamData) error {
 	msgID := fmt.Sprintf("%s-%s-%d-%d", msg.SessionId, msg.UserKey, msg.Cmd, msg.SeqId)
-	if mi.CheckReplay(msgID) {
+	mi.cacheMutex.Lock()
+	if _, exists := mi.replayCache[msgID]; exists {
+		mi.cacheMutex.Unlock()
 		return fmt.Errorf("replay attack detected")
 	}
-	mi.MarkProcessed(msgID)
+	mi.replayCache[msgID] = time.Now().UnixMilli()
+	mi.cacheMutex.Unlock()
 	return nil
 }

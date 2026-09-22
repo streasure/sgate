@@ -257,16 +257,12 @@ func (wc *writeCoalescer) flush() int64 {
 		entry := &wc.entries[i]
 		if len(entry.data) > 0 {
 			bufPtr := entry.bufPtr
-			err := entry.conn.SendMultiWithCallback(entry.data, func() {
+			_ = entry.conn.SendMultiWithCallback(entry.data, func() {
 				if bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
 					*bufPtr = (*bufPtr)[:0]
 					coalescerBufPool.Put(bufPtr)
 				}
 			})
-			if err != nil && bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
-				*bufPtr = (*bufPtr)[:0]
-				coalescerBufPool.Put(bufPtr)
-			}
 		}
 		entry.data = nil
 		entry.bufPtr = nil
@@ -1343,11 +1339,14 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 				continue
 			}
 		}
-		// 重连恢复时 Block 策略会导致无限阻塞，直接丢弃
+		// 发送失败，尝试重新入队
 		if mq.policy == config.QueuePolicyBlock {
-			tlog.Warn(context.Background(), "flush: dropping message due to Block policy queue full")
+			// Block 策略 Enqueue 会阻塞直到有空间，不会丢消息
+			mq.Enqueue(msg)
 		} else {
-			_ = mq.Enqueue(msg)
+			if err := mq.Enqueue(msg); err != nil {
+				tlog.Warn(context.Background(), "flush: re-enqueue failed, message dropped policy=%v error=%v", mq.policy, err)
+			}
 		}
 		time.Sleep(retryInterval)
 	}
