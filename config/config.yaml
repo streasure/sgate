@@ -48,8 +48,10 @@ cluster:
 
 stream:
   shardCount: 96
+  connGroupCount: 4          # gateway→logic 独立 TCP 连接组数（默认 4），每个组承载 shardCount/N 个 stream
   sendChannelSize: 1048576
   receiveBatchSize: 128
+  batchPush: false
 
 protection:
   maxFrameSize: 4194304
@@ -82,3 +84,12 @@ security:
 
 waf:
   enabled: false
+
+perf:
+  gcPercent: 300           # GOGC：堆增长 300% 时触发 GC（默认 100），高吞吐场景调大减少 GC 频率
+  memoryLimitPercent: 80   # 软内存上限 = 机器总内存的 80%，防止单机 OOM
+
+pipeline:
+  asyncEnabled: true       # 启用异步 pipeline（worker pool 模式）
+  workerShards: 48         # worker 分片数（默认 CPU×4=48），同一连接严格有序
+  workerQueueSize: 262144  # 总任务队列大小

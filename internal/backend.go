@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -144,28 +143,18 @@ func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Dura
 	return sm
 }
 
-// writeCoalescer 按连接合并后一次性 flush。
-// 目的：减少 gnet AsyncWrite 调用次数。每次 AsyncWrite 向 event-loop channel 发送一个 task，
-// 在 Windows 上向通道发送数据会竞争 runtime 互斥锁（runtime.lock2），94 个消息接收
-// 协程同时发送时锁竞争达到 74% CPU。通过跨批次合并，将 N 次 SendMulti
-// 降为 M 次（M 为不同连接数），减少通道发送约 10-50 倍。
+// writeCoalescer 轻量 dirty-set 跟踪器。
+// 实际的数据 buffer 下沉到 Connection 对象（per-Connection coalescing），
+// 这里只跟踪哪些连接有未 flush 的数据，避免全量遍历连接池。
 //
-// 内存优化：每个 entry 的 data buffer 从 coalescerBufPool 获取，在 AsyncWrite 完成后
-// 通过回调归还到对象池，避免每帧分配导致 GC 压力（千万级 QPS 下 GC 无法跟上分配速度）。
+// addMulti: 调 conn.AppendCoalesced（per-Connection 锁，几乎无竞争）
+//           + 将 connID 加入 dirty-set（coalescer 级锁，仅 map+slice 操作）
+// flush:    swap 出 dirty-set → 逐个调 conn.FlushCoalesced（IO 时完全无锁）
 type writeCoalescer struct {
-	entries   []coalescedEntry // 每个连接一个 entry，存储累积的帧数据
-	index     map[string]int   // connID -> entries 下标，避免重复 GetConnection
-	count     int              // 累积消息总数（用于触发 flush）
-	cm        *ConnectionManager
+	mu        sync.Mutex
+	dirty     []string              // 有未 flush 数据的连接 ID
+	dirtySet  map[string]struct{}   // 去重
 	lastFlush time.Time
-}
-
-// coalescedEntry 累积一个连接的帧数据。
-// bufPtr 持有指向池化缓冲区的指针，在刷新后通过 AsyncWrite 回调归还。
-type coalescedEntry struct {
-	conn   *Connection
-	data   []byte  // [4字节 len][payload] 重复格式，底层数组来自 coalescerBufPool
-	bufPtr *[]byte // 指向 coalescerBufPool 中获取的 buffer，用于归还
 }
 
 // coalescerBufPool 复用 coalescer 的 data buffer，避免每帧 append 分配导致 GC 风暴。
@@ -178,104 +167,58 @@ var coalescerBufPool = sync.Pool{
 }
 
 const (
-	coalesceFlushCount    = 50000                // 累积 5 万条消息后 flush，减少 event-loop 入队次数
+	coalesceFlushCount    = 50000                // 累积 5 万条消息后 flush
 	coalesceFlushInterval = 5 * time.Millisecond // 5ms 超时 flush，限制推送延迟
-	coalescerMaxBufCap    = 1 << 20              // 1MB：归还到池的 buffer 容量上限，避免持有过大 buffer
+	coalescerMaxBufCap    = 1 << 20              // 1MB：归还到池的 buffer 容量上限
 )
 
-// newWriteCoalescer 创建写合并器
-func newWriteCoalescer(cm *ConnectionManager) *writeCoalescer {
+func newWriteCoalescer() *writeCoalescer {
 	return &writeCoalescer{
-		entries:   make([]coalescedEntry, 0, 64),
-		index:     make(map[string]int, 64),
-		cm:        cm,
+		dirty:     make([]string, 0, 64),
+		dirtySet:  make(map[string]struct{}, 64),
 		lastFlush: time.Now(),
 	}
 }
 
-// getBuf 获取或复用一个 entry 的 data buffer
-func (wc *writeCoalescer) getBuf(idx int) {
-	if wc.entries[idx].bufPtr == nil {
-		bufPtr := coalescerBufPool.Get().(*[]byte)
-		wc.entries[idx].bufPtr = bufPtr
-		wc.entries[idx].data = (*bufPtr)[:0]
-	}
-}
+// addMulti 将一条消息追加到连接的 coalescing buffer，并将连接标记为 dirty。
+func (wc *writeCoalescer) addMulti(connID string, payload []byte, conn *Connection) bool {
+	conn.AppendCoalesced(payload)
 
-// addMulti 将 multi-conn 格式的一条消息加入 coalescer。
-// payload 是已序列化的单条消息字节数据。
-func (wc *writeCoalescer) addMulti(connID string, payload []byte) bool {
-	idx, ok := wc.index[connID]
-	if !ok {
-		conn := wc.cm.GetConnection(connID)
-		if conn == nil {
-			return false
-		}
-		idx = len(wc.entries)
-		wc.entries = append(wc.entries, coalescedEntry{conn: conn})
-		wc.index[connID] = idx
+	wc.mu.Lock()
+	if _, exists := wc.dirtySet[connID]; !exists {
+		wc.dirty = append(wc.dirty, connID)
+		wc.dirtySet[connID] = struct{}{}
 	}
-	wc.getBuf(idx)
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(payload)))
-	wc.entries[idx].data = append(wc.entries[idx].data, lenBuf[:]...)
-	wc.entries[idx].data = append(wc.entries[idx].data, payload...)
-	wc.count++
+	wc.mu.Unlock()
 	return true
 }
 
-// addSingle 将单连接格式的整批数据加入写合并器。
-// data 已是 [4字节 len][payload] 重复格式，直接追加。
-func (wc *writeCoalescer) addSingle(connID string, data []byte, count int) bool {
-	idx, ok := wc.index[connID]
-	if !ok {
-		conn := wc.cm.GetConnection(connID)
-		if conn == nil {
-			return false
-		}
-		idx = len(wc.entries)
-		wc.entries = append(wc.entries, coalescedEntry{conn: conn})
-		wc.index[connID] = idx
-	}
-	wc.getBuf(idx)
-	wc.entries[idx].data = append(wc.entries[idx].data, data...)
-	wc.count += count
-	return true
+func (wc *writeCoalescer) shouldFlush(totalCount int) bool {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return totalCount >= coalesceFlushCount || time.Since(wc.lastFlush) >= coalesceFlushInterval
 }
 
-// shouldFlush 判断是否应该触发刷新
-func (wc *writeCoalescer) shouldFlush() bool {
-	return wc.count >= coalesceFlushCount || time.Since(wc.lastFlush) >= coalesceFlushInterval
-}
-
-// flush 将所有连接的累积数据通过一次 SendMultiWithCallback 发送，然后重置。
-// 缓冲区在 gnet AsyncWrite 完成后通过回调归还到 coalescerBufPool。
-// 返回 pushed（成功推送的消息数）。
-func (wc *writeCoalescer) flush() int64 {
-	var pushed int64
-	for i := range wc.entries {
-		entry := &wc.entries[i]
-		if len(entry.data) > 0 {
-			bufPtr := entry.bufPtr
-			_ = entry.conn.SendMultiWithCallback(entry.data, func() {
-				if bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
-					*bufPtr = (*bufPtr)[:0]
-					coalescerBufPool.Put(bufPtr)
-				}
-			})
-		}
-		entry.data = nil
-		entry.bufPtr = nil
-		entry.conn = nil
+// flush swap 出 dirty-set，然后逐个调 conn.FlushCoalesced（IO 无锁）。
+func (wc *writeCoalescer) flush(cm *ConnectionManager) int64 {
+	wc.mu.Lock()
+	if len(wc.dirty) == 0 {
+		wc.mu.Unlock()
+		return 0
 	}
-	pushed = int64(wc.count)
-	// 重置：保留 slice/map 底层数组以复用，避免重复分配
-	wc.entries = wc.entries[:0]
-	for k := range wc.index {
-		delete(wc.index, k)
-	}
-	wc.count = 0
+	dirty := wc.dirty
+	wc.dirty = make([]string, 0, cap(dirty))
+	wc.dirtySet = make(map[string]struct{}, cap(dirty))
 	wc.lastFlush = time.Now()
+	wc.mu.Unlock()
+
+	var pushed int64
+	for _, connID := range dirty {
+		conn := cm.GetConnection(connID)
+		if conn != nil {
+			pushed += conn.FlushCoalesced()
+		}
+	}
 	return pushed
 }
 
@@ -414,10 +357,14 @@ func (s *StreamShard) stop() {
 	})
 }
 
+// connGroup 代表一条独立的 gRPC 连接及其 gRPC 客户端
+type connGroup struct {
+	conn   *grpc.ClientConn
+	client protoGw.GatewayStreamClient
+}
+
 // LogicClient 逻辑服客户端，管理与单个逻辑服实例的连接和流通信
 type LogicClient struct {
-	client            protoGw.GatewayStreamClient // gRPC 流客户端
-	conn              *grpc.ClientConn            // gRPC 连接
 	mu                sync.RWMutex                // 保护状态和连接的读写锁
 	state             atomic.Int32                // 连接状态（原子操作）
 	address           string                      // 逻辑服地址
@@ -433,6 +380,8 @@ type LogicClient struct {
 	closing           bool                        // 是否正在关闭
 	closed            chan struct{}               // 关闭完成信号
 	shardCount        int                         // 分片数量
+	connGroupCount    int                         // 独立 TCP 连接组数（默认 4）
+	connGroups        []connGroup                 // N 条独立 gRPC 连接
 	serverID          string                      // 逻辑服标识
 }
 
@@ -513,11 +462,13 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		lc.state.Store(int32(LogicStateConnecting))
 	}
 
-	if lc.conn != nil {
-		tlog.Info(context.Background(), "doConnect closing old connection (reconnect) isReconnect=%v", isReconnect)
-		lc.conn.Close()
-		lc.conn = nil
-		lc.client = nil
+	// 关闭旧的连接组
+	if len(lc.connGroups) > 0 {
+		tlog.Info(context.Background(), "doConnect closing old connGroups count=%d isReconnect=%v", len(lc.connGroups), isReconnect)
+		for _, cg := range lc.connGroups {
+			cg.conn.Close()
+		}
+		lc.connGroups = nil
 	}
 	lc.mu.Unlock()
 
@@ -527,42 +478,61 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	windowSize := int32(524288)
 	maxMsgSize := 4 * 1024 * 1024
+	connGroupCount := 4 // 默认 4 条独立 TCP 连接
 	if lc.gateway != nil {
 		grpcCfg := lc.gateway.GetGRPCConfig()
 		windowSize = int32(grpcCfg.WindowSize)
 		maxMsgSize = grpcCfg.MaxMessageSize
+		streamCfg := lc.gateway.GetStreamConfig()
+		if streamCfg.ConnGroupCount > 0 {
+			connGroupCount = streamCfg.ConnGroupCount
+		}
 	}
 
-	conn, err := grpc.Dial(lc.address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithInitialWindowSize(windowSize),
-		grpc.WithInitialConnWindowSize(windowSize),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(maxMsgSize),
-			grpc.MaxCallSendMsgSize(maxMsgSize),
-		),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second,
-			Timeout:             10 * time.Second,
-			PermitWithoutStream: true,
-		}),
-	)
-	if err != nil {
-		tlog.Error(context.Background(), "grpc.Dial failed error=%v address=%s", err, lc.address)
-		lc.setState(LogicStateDisconnected)
-		return err
+	// 创建 N 条独立 gRPC 连接
+	newGroups := make([]connGroup, connGroupCount)
+	for g := 0; g < connGroupCount; g++ {
+		conn, err := grpc.Dial(lc.address,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithInitialWindowSize(windowSize),
+			grpc.WithInitialConnWindowSize(windowSize),
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(maxMsgSize),
+				grpc.MaxCallSendMsgSize(maxMsgSize),
+			),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                30 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
+		)
+		if err != nil {
+			tlog.Error(context.Background(), "grpc.Dial failed error=%v address=%s connGroup=%d", err, lc.address, g)
+			// 关闭已创建的连接
+			for j := 0; j < g; j++ {
+				newGroups[j].conn.Close()
+			}
+			lc.setState(LogicStateDisconnected)
+			return err
+		}
+		newGroups[g] = connGroup{
+			conn:   conn,
+			client: protoGw.NewGatewayStreamClient(conn),
+		}
 	}
 
-	// 在阻塞的 dial 之后重新检查关闭状态，dial 期间可能已调用 Close()。
+	// 在阻塞的 dial 之后重新检查关闭状态
 	lc.mu.Lock()
 	if lc.closing {
 		lc.mu.Unlock()
-		conn.Close()
+		for _, cg := range newGroups {
+			cg.conn.Close()
+		}
 		lc.setState(LogicStateDisconnected)
 		return ErrConnectionClosing
 	}
-	lc.conn = conn
-	lc.client = protoGw.NewGatewayStreamClient(conn)
+	lc.connGroups = newGroups
+	lc.connGroupCount = connGroupCount
 	lc.mu.Unlock()
 
 	lc.mu.Lock()
@@ -572,7 +542,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	lc.streamCtx, lc.streamCancel = context.WithCancel(context.Background())
 	lc.mu.Unlock()
 
-	// 关闭旧的流分片：置空流引用并关闭发送通道，使 startSendLoop 协程停止使用旧的（已关闭的）流。
+	// 关闭旧的流分片
 	if lc.streamManager != nil {
 		for i := 0; i < len(lc.streamManager.shards); i++ {
 			if shard := lc.streamManager.shards[i]; shard != nil {
@@ -600,6 +570,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	}
 	lc.streamManager = NewStreamManager(shardCount, sendChannelSize, sendTimeout)
 
+	// 建立 stream：每个 shard 分配到对应的 connGroup
 	var wg sync.WaitGroup
 	var firstErr error
 	var errOnce sync.Once
@@ -609,12 +580,13 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 		go func(idx int) {
 			defer wg.Done()
 
+			groupIdx := idx % connGroupCount
 			lc.mu.RLock()
-			client := lc.client
+			cg := lc.connGroups[groupIdx]
 			ctx := lc.streamCtx
 			lc.mu.RUnlock()
 
-			if client == nil || ctx == nil {
+			if cg.client == nil || ctx == nil {
 				errOnce.Do(func() { firstErr = fmt.Errorf("client or context is nil") })
 				return
 			}
@@ -622,10 +594,10 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			if lc.gateway != nil {
 				ctx = metadata.AppendToOutgoingContext(ctx, "sgate-gateway-id", lc.gateway.GetGatewayID())
 			}
-			stream, err := client.OnData(ctx)
+			stream, err := cg.client.OnData(ctx)
 			if err != nil {
 				errOnce.Do(func() { firstErr = err })
-				tlog.Error(context.Background(), "failed to establish stream shard shard=%d error=%v", idx, err)
+				tlog.Error(context.Background(), "failed to establish stream shard shard=%d connGroup=%d error=%v", idx, groupIdx, err)
 				return
 			}
 
@@ -635,8 +607,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			shard.ctx = ctx
 			shard.mu.Unlock()
 
-			tlog.Info(context.Background(), "stream shard established shard=%d", idx)
-			// 流分片建立成功
+			tlog.Info(context.Background(), "stream shard established shard=%d connGroup=%d", idx, groupIdx)
 		}(i)
 	}
 	wg.Wait()
@@ -653,17 +624,16 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			shard.mu.Unlock()
 		}
 		lc.mu.Lock()
-		if lc.conn != nil {
-			lc.conn.Close()
-			lc.conn = nil
-			lc.client = nil
+		for _, cg := range lc.connGroups {
+			cg.conn.Close()
 		}
+		lc.connGroups = nil
 		lc.mu.Unlock()
 		lc.setState(LogicStateDisconnected)
 		return firstErr
 	}
 
-	tlog.Info(context.Background(), "all stream shards established count=%d", shardCount)
+	tlog.Info(context.Background(), "all stream shards established count=%d connGroups=%d", shardCount, connGroupCount)
 
 	lc.setState(LogicStateConnected)
 
@@ -688,7 +658,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	lc.startHealthChecker()
 
-	tlog.Info(context.Background(), "successfully connected to logic server address=%s shards=%d isReconnect=%v", lc.address, shardCount, isReconnect)
+	tlog.Info(context.Background(), "successfully connected to logic server address=%s shards=%d connGroups=%d isReconnect=%v", lc.address, shardCount, connGroupCount, isReconnect)
 
 	return nil
 }
@@ -727,11 +697,10 @@ func (lc *LogicClient) Close() {
 	}
 
 	lc.mu.Lock()
-	if lc.conn != nil {
-		lc.conn.Close()
-		lc.conn = nil
-		lc.client = nil
+	for _, cg := range lc.connGroups {
+		cg.conn.Close()
 	}
+	lc.connGroups = nil
 	lc.mu.Unlock()
 
 	close(lc.closed)
@@ -813,7 +782,10 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				lc.gateway.AddPushDroppedNoConn(int64(len(cb.items)))
 				continue
 			}
-			if sendErr := cb.conn.Send(responseData); sendErr != nil {
+			if lc.gateway.GetShardedCoalescer() != nil {
+				lc.gateway.GetShardedCoalescer().AddMulti(cb.items[0].SessionId, responseData, cb.conn)
+				lc.gateway.AddPushedToClient(int64(len(cb.items)))
+			} else if sendErr := cb.conn.Send(responseData); sendErr != nil {
 				tlog.Warn(context.Background(), "batch push to client failed sessionID=%s error=%v", cb.items[0].SessionId, sendErr)
 			} else {
 				lc.gateway.AddPushedToClient(int64(len(cb.items)))
@@ -862,7 +834,10 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				if err != nil {
 					return true
 				}
-				if sendErr := conn.Send(respData); sendErr == nil {
+				if lc.gateway.GetShardedCoalescer() != nil {
+					lc.gateway.GetShardedCoalescer().AddMulti(conn.ID(), respData, conn)
+					lc.gateway.AddPushedToClient(1)
+				} else if sendErr := conn.Send(respData); sendErr == nil {
 					lc.gateway.AddPushedToClient(1)
 				}
 				return true
@@ -886,7 +861,10 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				}
 				responseData, err := marshalClientMessage(msg)
 				if err == nil {
-					if sendErr := conn.Send(responseData); sendErr != nil {
+					if lc.gateway.GetShardedCoalescer() != nil {
+						lc.gateway.GetShardedCoalescer().AddMulti(msg.SessionId, responseData, conn)
+						lc.gateway.AddPushedToClient(1)
+					} else if sendErr := conn.Send(responseData); sendErr != nil {
 						tlog.Warn(context.Background(), "push to client failed sessionID=%s cmd=%d error=%v", msg.SessionId, msg.Cmd, sendErr)
 					} else {
 						lc.gateway.AddPushedToClient(1)
@@ -1364,6 +1342,7 @@ type GatewayInterface interface {
 	GetLogicClient(serverID string) LogicClientProvider
 	LookupLogicAddress(serverID string) string
 	GetGatewayClient(serverID string) GatewayClientProvider
+	GetShardedCoalescer() *ShardedWriteCoalescer
 }
 
 // GRPCServer gRPC 服务端，处理逻辑服的流式推送和 RPC 请求

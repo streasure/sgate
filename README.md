@@ -34,7 +34,7 @@ sgate 是一个基于 gnet v2 的高性能长连接网关。它承载 TCP 和 We
   gnet 事件循环
   消息管道与安全检查
   连接管理与会话路由
-  96 个 gRPC 流分片
+  96 个 gRPC 流分片（4 条独立 TCP 连接）
         │
         ▼
 逻辑服集群（etcd 服务发现）
@@ -348,6 +348,7 @@ loginserver 可通过 etcd watch `Gateway:{zone}` 前缀获取网关连接地址
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `shardCount` | int | 自动 | gRPC 流分片数，`0` 时按 CPU 数计算 |
+| `connGroupCount` | int | `4` | gateway→logic 独立 TCP 连接组数。每个组承载 `shardCount/N` 个 stream，各自拥有独立的 HTTP/2 写锁，实现并行写入 |
 | `sendChannelSize` | int | `131072` | 每个分片发送队列容量 |
 | `receiveBatchSize` | int | `64` | 接收处理批次大小 |
 | `batchPush` | bool | `false` | 是否将推送按连接合并为 PushBatch |

@@ -37,6 +37,21 @@ type Config struct {
 	Degradation     DegradationConfig   `yaml:"degradation"`
 	FilterChain     FilterChainConfig   `yaml:"filterChain"`
 	Monitoring      MonitoringConfig    `yaml:"monitoring"`
+	Perf            PerfConfig          `yaml:"perf"`
+	Pipeline        PipelineConfig      `yaml:"pipeline"`
+}
+
+// PipelineConfig Pipeline 异步化配置
+type PipelineConfig struct {
+	AsyncEnabled   bool `yaml:"asyncEnabled"`   // 启用异步 pipeline（worker pool 模式）
+	WorkerShards   int  `yaml:"workerShards"`   // worker 分片数（默认 CPU×4）
+	WorkerQueueSize int  `yaml:"workerQueueSize"` // 每个分片的任务队列大小
+}
+
+// PerfConfig 运行时性能调优参数（GC、内存限制），参数以机器资源百分比表示，跨机器通用。
+type PerfConfig struct {
+	GcPercent          int `yaml:"gcPercent"`          // GOGC 等价：堆增长触发 GC 的百分比（默认 100）
+	MemoryLimitPercent int `yaml:"memoryLimitPercent"` // GOMEMLIMIT 等价：软内存上限占总内存百分比（推荐 80-90）
 }
 
 // Validate 校验配置参数的合法性，返回错误信息
@@ -296,6 +311,7 @@ type StreamQueueConfig struct {
 
 type StreamConfig struct {
 	ShardCount       int               `yaml:"shardCount"`
+	ConnGroupCount   int               `yaml:"connGroupCount"`   // gateway→logic 独立 TCP 连接组数（默认 4）
 	SendChannelSize  int               `yaml:"sendChannelSize"`
 	ReceiveBatchSize int               `yaml:"receiveBatchSize"`
 	BatchPush        bool              `yaml:"batchPush"`

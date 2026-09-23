@@ -29,7 +29,7 @@ type streamConn struct {
 // newStreamConn 创建新的流连接，启动发送协程
 func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gatewayID string) *streamConn {
 	if size <= 0 {
-		size = 1024
+		size = 65536
 	}
 	c := &streamConn{
 		stream: stream, sendCh: make(chan *protocol.StreamData, size), done: make(chan struct{}),
@@ -298,8 +298,16 @@ func (s *Server) GetGroupMembers(groupID string) []string {
 	return members
 }
 
-// GetGroupCount 获取指定组的成员数量
-func (s *Server) GetGroupCount(groupID string) int { return len(s.GetGroupMembers(groupID)) }
+// GetGroupCount 获取指定组的成员数量（不分配 slice）
+func (s *Server) GetGroupCount(groupID string) int {
+	s.groupMu.RLock()
+	defer s.groupMu.RUnlock()
+	group := s.groups[groupID]
+	if group == nil {
+		return 0
+	}
+	return len(group.members)
+}
 
 // leaveAllGroups 将会话从所有组中移除
 func (s *Server) leaveAllGroups(sessionID string) {

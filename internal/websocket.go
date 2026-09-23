@@ -334,6 +334,18 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 0, "ok", req.ServerId)
 	}
 
+	// 异步路径：投递到 worker pool
+	if g.pipelineWorkerPool != nil {
+		payloadCopy := append([]byte(nil), payload...)
+		g.pipelineWorkerPool.SubmitWS(wsPipelineTaskData{
+			wsConn:       wsConn,
+			payload:      payloadCopy,
+			message:      message,
+			connectionID: connectionID,
+		})
+		return nil
+	}
+
 	result := g.pipeline.ProcessForWS(wsConn.Conn, payload, message, connectionID)
 	if result.Error != nil {
 		errorResp := newErrorResponse("error", result.Error.Error(), "", "")

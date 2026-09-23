@@ -155,6 +155,8 @@ type Gateway struct {
 	components                *component.Container
 	clusterComponent          *ClusterComponent
 	runtimeComponent          *GatewayRuntimeComponent
+	pipelineWorkerPool        *PipelineWorkerPool     // 异步 pipeline 工作池
+	shardedCoalescer          *ShardedWriteCoalescer  // 分片写合并器（推送路径）
 }
 
 // SetTransportType 设置监听端口对应的传输类型。
@@ -315,6 +317,13 @@ func (g *Gateway) StartServices() {
 	g.overloadProtector.Start()
 	go g.wsHeartbeatChecker()
 	g.messageIntegrity = NewMessageIntegrity(30000)
+
+	if cfg.Pipeline.AsyncEnabled {
+		g.pipelineWorkerPool = NewPipelineWorkerPool(g, cfg.Pipeline)
+	}
+
+	// 初始化分片写合并器（推送路径：logic → client）
+	g.shardedCoalescer = NewShardedWriteCoalescer(g.connectionManager, 16)
 
 	connCheckInterval, _ := time.ParseDuration(g.getProtection().ConnCheckInterval)
 	if connCheckInterval <= 0 {
@@ -1112,6 +1121,22 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		return g.handleLoginGate(c, connectionID, message)
 	}
 
+	// 异步路径：投递到 worker pool，event loop 立即返回
+	if g.pipelineWorkerPool != nil {
+		remoteIP := getRemoteIP(c)
+		// 深拷贝 data，因为 FrameBuf 会被 event loop 复用
+		dataCopy := append([]byte(nil), data...)
+		g.pipelineWorkerPool.Submit(pipelineTaskData{
+			conn:         c,
+			data:         dataCopy,
+			message:      message,
+			connectionID: connectionID,
+			remoteIP:     remoteIP,
+		})
+		return
+	}
+
+	// 同步路径：直接在 event loop 中处理
 	result := g.pipeline.Process(c, data, message, connectionID)
 	if result.Error != nil {
 		errorResp := newErrorResponse("error", result.Error.Error(), "", "")
@@ -1169,6 +1194,10 @@ func (g *Gateway) GetGRPCConfig() config.GRPCConfig {
 
 func (g *Gateway) GetStreamConfig() config.StreamConfig {
 	return g.streamCfg
+}
+
+func (g *Gateway) GetShardedCoalescer() *ShardedWriteCoalescer {
+	return g.shardedCoalescer
 }
 
 // GetGatewayID 返回在每个后端流中通告的稳定身份标识。
@@ -1248,6 +1277,17 @@ func (g *Gateway) Close() {
 		}
 
 		g.connectionManager.StopConnectionChecker()
+
+		// 停止 pipeline worker pool（等待所有 worker 退出）
+		if g.pipelineWorkerPool != nil {
+			g.pipelineWorkerPool.Stop()
+		}
+
+		// 停止分片写合并器（最终 flush）
+		if g.shardedCoalescer != nil {
+			g.shardedCoalescer.Stop()
+		}
+
 		g.connectionManager.CloseAllConnections()
 
 		if g.promExporter != nil {

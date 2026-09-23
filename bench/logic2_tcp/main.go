@@ -21,17 +21,16 @@ import (
 
 const cmdPush int32 = 9000001
 
-// main 启动logic2 TCP服务，注册登录处理并启动推送工作协程
 func main() {
 	port := flag.String("port", "50060", "gRPC listen port")
 	id := flag.String("id", "logic2-tcp", "service instance ID")
-	pushInterval := flag.Duration("push-interval", 1*time.Millisecond, "interval between group pushes")
+	pushWorkers := flag.Int("push-workers", 128, "parallel push workers")
 	pushSize := flag.Int("push-size", 64, "payload size in bytes")
-	pushWorkers := flag.Int("push-workers", runtime.NumCPU(), "parallel group push workers")
-	expectedMembers := flag.Int("expected-members", 0, "wait for this many logged-in group members before pushing")
-	logConfig := flag.String("config", "configs/logic2_tcp_log.yaml", "log configuration")
+	expectedMembers := flag.Int("expected-members", 0, "wait for members before pushing")
+	logConfig := flag.String("config", "configs/logic2_tcp_log.yaml", "log config")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()
+
 	svc := logic.NewService(
 		logic.WithListenPort(*port),
 		logic.WithServiceID(*id),
@@ -43,12 +42,10 @@ func main() {
 
 	var totalPushed atomic.Int64
 
-	// 注册登录请求处理函数，将用户加入测试组
 	svc.RegisterProto(1000001, &protocol.LoginGateReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
 		_ = req.(*protocol.LoginGateReq)
 		sessionID := ctx.ConnectionID
 		groupID := "bench_group"
-
 		svc.Server().JoinGroup(groupID, sessionID)
 		if ctx.UserUUID != "" {
 			svc.Server().JoinGroupForUser(ctx.UserUUID, groupID)
@@ -70,19 +67,25 @@ func main() {
 		payload[i] = byte(i % 256)
 	}
 
-	// 启动推送工作协程，向组内所有成员发送消息
+	// 预序列化 StreamData 消息体
+	streamMsg, _ := proto.Marshal(&protocol.StreamData{Cmd: cmdPush, Data: payload})
+	_ = streamMsg
+
+	// 推送协程：全力输出，无 sleep
 	go func() {
 		if *expectedMembers > 0 {
 			for svc.Server().GetGroupCount("bench_group") < *expectedMembers {
 				time.Sleep(time.Millisecond)
 			}
+			tlog.Info(context.Background(), "logic2 all members joined, waiting 10s before pushing members=%d", *expectedMembers)
+			time.Sleep(10 * time.Second)
 			tlog.Info(context.Background(), "logic2 push phase started transport=tcp members=%d", *expectedMembers)
 		}
 		workers := *pushWorkers
 		if workers < 1 {
 			workers = 1
 		}
-		jobs := make(chan string, workers*4)
+		jobs := make(chan string, workers*64)
 		var workerWG sync.WaitGroup
 		workerWG.Add(workers)
 		for i := 0; i < workers; i++ {
@@ -96,16 +99,23 @@ func main() {
 			}()
 		}
 		defer workerWG.Wait()
+
+		// 缓存成员列表，100ms 刷新一次，减少每次循环分配新 slice
+		var membersCached []string
+		var membersTS int64
 		for {
-			members := svc.Server().GetGroupMembers("bench_group")
-			if len(members) == 0 {
-				time.Sleep(*pushInterval)
+			now := time.Now().UnixNano()
+			if now-membersTS > 100*int64(time.Millisecond) || len(membersCached) == 0 {
+				membersCached = svc.Server().GetGroupMembers("bench_group")
+				membersTS = now
+			}
+			if len(membersCached) == 0 {
+				runtime.Gosched()
 				continue
 			}
-			for _, sessionID := range members {
+			for _, sessionID := range membersCached {
 				jobs <- sessionID
 			}
-			time.Sleep(*pushInterval)
 		}
 	}()
 

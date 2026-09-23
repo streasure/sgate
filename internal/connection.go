@@ -127,6 +127,12 @@ type Connection struct {
 	msgRateMu       sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
 	msgCount        int64      // 当前窗口消息计数
 	msgWindowStart  int64      // 当前窗口起始时间（UnixMilli）
+
+	// 连接级写合并：每连接独立 buffer，addMulti 只需 per-Connection 锁（几乎无竞争）
+	coalescedMu    sync.Mutex
+	coalescedData  []byte   // [4-byte len][payload] 累积格式
+	coalescedBufPtr *[]byte // 指向 coalescerBufPool 的 buffer，用于归还
+	coalescedCount int      // 累积消息数
 }
 
 // newConnection 创建新的连接对象，初始化基本属性和状态。
@@ -289,6 +295,53 @@ func (c *Connection) sendWSFrame(data []byte) error {
 
 func (c *Connection) Close() error {
 	return c.Conn.Close()
+}
+
+// ============================================================================
+// 连接级写合并（per-Connection Coalescing）
+// ============================================================================
+
+// AppendCoalesced 将一条消息追加到连接的 coalescing buffer。
+// 由 receiveMessages 单协程调用，per-Connection 锁几乎无竞争。
+func (c *Connection) AppendCoalesced(payload []byte) bool {
+	c.coalescedMu.Lock()
+	defer c.coalescedMu.Unlock()
+	if c.coalescedBufPtr == nil {
+		bufPtr := coalescerBufPool.Get().(*[]byte)
+		c.coalescedBufPtr = bufPtr
+		c.coalescedData = (*bufPtr)[:0]
+	}
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(payload)))
+	c.coalescedData = append(c.coalescedData, lenBuf[:]...)
+	c.coalescedData = append(c.coalescedData, payload...)
+	c.coalescedCount++
+	return true
+}
+
+// FlushCoalesced 将累积的数据通过 AsyncWrite 发送，然后重置 buffer。
+// 返回成功推送的消息数。IO 在锁外执行，不阻塞 AppendCoalesced。
+func (c *Connection) FlushCoalesced() int64 {
+	c.coalescedMu.Lock()
+	if c.coalescedCount == 0 {
+		c.coalescedMu.Unlock()
+		return 0
+	}
+	data := c.coalescedData
+	bufPtr := c.coalescedBufPtr
+	count := c.coalescedCount
+	c.coalescedData = nil
+	c.coalescedBufPtr = nil
+	c.coalescedCount = 0
+	c.coalescedMu.Unlock()
+
+	_ = c.SendMultiWithCallback(data, func() {
+		if bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
+			*bufPtr = (*bufPtr)[:0]
+			coalescerBufPool.Put(bufPtr)
+		}
+	})
+	return int64(count)
 }
 
 // serverUserKey 表示服务器-用户联合标识，用于关联连接和分组。
