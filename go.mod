@@ -8,8 +8,8 @@ require (
 	github.com/panjf2000/gnet/v2 v2.9.7
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cast v1.10.0
-	github.com/streasure/protocol v1.0.3
-	github.com/streasure/util v1.0.9
+	github.com/streasure/protocol v1.0.4
+	github.com/streasure/util v1.0.11
 	github.com/tetratelabs/wazero v1.8.0
 	google.golang.org/grpc v1.64.0
 	google.golang.org/protobuf v1.33.0
@@ -40,7 +40,7 @@ require (
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/prometheus/procfs v0.6.0 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
-	github.com/streasure/treasure-slog v1.0.17 // indirect
+	github.com/streasure/treasure-slog v1.0.18 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
@@ -65,10 +65,3 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	howett.net/plist v0.0.0-20181124034731-591f970eefbb // indirect
 )
-
-replace (
-	github.com/streasure/protocol => ../protocol
-	github.com/streasure/util => ../util
-)
-
-replace github.com/streasure/treasure-slog => ../treasure-slog
