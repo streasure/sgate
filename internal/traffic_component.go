@@ -36,7 +36,7 @@ func (c *TrafficComponent) Name() string { return "traffic" }
 func (c *TrafficComponent) Order() int   { return 300 }
 
 func (c *TrafficComponent) Init() error {
-	tlog.Info(context.Background(), "traffic component init")
+	tlog.Info(context.TODO(), "traffic component init")
 
 	// 灰度过滤器。
 	if c.canaryCfg.Enabled {
@@ -60,7 +60,7 @@ func (c *TrafficComponent) Init() error {
 }
 
 func (c *TrafficComponent) Start() error {
-	tlog.Info(context.Background(), "traffic component started canary=%v mirror=%v degradation=%v",
+	tlog.Info(context.TODO(), "traffic component started canary=%v mirror=%v degradation=%v",
 		c.canaryCfg.Enabled,
 		c.mirrorCfg.Enabled,
 		c.degradationCfg.Enabled)
@@ -68,7 +68,7 @@ func (c *TrafficComponent) Start() error {
 }
 
 func (c *TrafficComponent) Destroy() {
-	tlog.Info(context.Background(), "traffic component destroying")
+	tlog.Info(context.TODO(), "traffic component destroying")
 	if c.TrafficMirror != nil {
 		c.TrafficMirror.Stop()
 	}

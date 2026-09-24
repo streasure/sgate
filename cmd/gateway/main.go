@@ -44,23 +44,25 @@ func main() {
 
 	cfg, err := config.Load(*confFiles)
 	if err != nil {
-		tlog.Error(context.Background(), "load config failed error=%v", err)
+		tlog.Error(context.TODO(), "load config failed error=%v", err)
 		return
 	}
 	if err := cfg.Validate(); err != nil {
-		tlog.Error(context.Background(), "invalid gateway config error=%v", err)
+		tlog.Error(context.TODO(), "invalid gateway config error=%v", err)
 		return
 	}
 
 	uperf.Apply(cfg.Perf.GcPercent, cfg.Perf.MemoryLimitPercent)
 
-	tlog.Info(context.Background(), "gateway starting... version=%s cpu=%d GOMAXPROCS=%d",
+	tlog.Info(context.TODO(), "gateway starting... version=%s cpu=%d GOMAXPROCS=%d",
 		internal.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
-	tlog.Info(context.Background(), "config loaded port=%v", cfg.Port)
+	tlog.Info(context.TODO(), "config loaded port=%v", cfg.Port)
 
-	gw := internal.NewGateway(*confFiles)
 	container := component.NewContainer()
-	container.Add(gw)
+	gw := internal.NewGateway(*confFiles)
+	for _, comp := range gw.Components() {
+		container.Add(comp)
+	}
 	container.Serve()
 }

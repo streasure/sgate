@@ -201,11 +201,11 @@ func (op *OverloadProtector) check() {
 			if p := op.memPercent.Load(); p != nil {
 				memVal = *p
 			}
-			tlog.Warn(context.Background(), "overload detected, dropping messages cpu=%v heapPercent=%v totalDropped=%d",
-			cpuVal,
-			memVal,
-			op.totalDropped.Load(),
-		)
+			tlog.Warn(context.TODO(), "overload detected, dropping messages cpu=%v heapPercent=%v totalDropped=%d",
+				cpuVal,
+				memVal,
+				op.totalDropped.Load(),
+			)
 		}
 	} else {
 		op.overloadFlag.Store(0)
@@ -236,6 +236,6 @@ func (op *OverloadProtector) Stop() {
 
 func init() {
 	if _, err := process.NewProcess(int32(os.Getpid())); err != nil {
-		tlog.Warn(context.Background(), "gopsutil process monitor unavailable on this platform, CPU/RSS monitoring disabled error=%v", err)
+		tlog.Warn(context.TODO(), "gopsutil process monitor unavailable on this platform, CPU/RSS monitoring disabled error=%v", err)
 	}
 }

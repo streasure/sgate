@@ -72,6 +72,9 @@ protection:
   # Authentication is logic-owned. Only these command IDs are accepted until
   # logic replies with a non-empty StreamData.user_key.
   preAuthCommands: [1000001]
+  loginAuth:
+    mode: "loginserver"
+    loginServerZone: "default"
 
 security:
   enabled: true

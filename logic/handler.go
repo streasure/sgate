@@ -13,10 +13,10 @@ import (
 
 // Context 网关 StreamData 请求的业务上下文
 type Context struct {
-	ConnectionID string                    // 连接 ID（会话 ID）
-	UserUUID     string                    // 用户 UUID
-	Server       *Server                   // 逻辑层服务端引用
-	Msg          *protocol.StreamData      // 原始流数据消息
+	ConnectionID string               // 连接 ID（会话 ID）
+	UserUUID     string               // 用户 UUID
+	Server       *Server              // 逻辑层服务端引用
+	Msg          *protocol.StreamData // 原始流数据消息
 }
 
 // ProtoHandler protobuf 协议处理器函数类型
@@ -24,10 +24,10 @@ type ProtoHandler func(ctx *Context, req proto.Message) proto.Message
 
 // protoEntry 协议处理器注册项，包含请求类型、处理函数和响应命令码
 type protoEntry struct {
-	reqType reflect.Type    // 请求 protobuf 消息类型
-	handler ProtoHandler    // 处理函数
-	respCmd int32           // 响应命令码
-	reqPool sync.Pool       // 请求对象池，减少内存分配
+	reqType reflect.Type // 请求 protobuf 消息类型
+	handler ProtoHandler // 处理函数
+	respCmd int32        // 响应命令码
+	reqPool sync.Pool    // 请求对象池，减少内存分配
 }
 
 // RegisterProto 注册单个命令码的 protobuf 处理器
@@ -49,14 +49,14 @@ func (s *Server) RegisterProto(cmd int32, reqProto proto.Message, respCmd int32,
 		respCmd: respCmd,
 		reqPool: sync.Pool{New: func() any { return reflect.New(rt).Interface() }},
 	})
-	tlog.Info(context.Background(), "proto handler registered cmd=%d reqType=%s", cmd, rt.Name())
+	tlog.Info(context.TODO(), "proto handler registered cmd=%d reqType=%s", cmd, rt.Name())
 }
 
 // dispatchMessage 根据命令码分发消息到注册的处理器
 func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protocol.StreamData)) {
 	value, ok := s.handlers.Load(msg.Cmd)
 	if !ok {
-		tlog.Warn(context.Background(), "received unregistered cmd cmd=%d sessionID=%s", msg.Cmd, msg.SessionId)
+		tlog.Warn(context.TODO(), "received unregistered cmd cmd=%d sessionID=%s", msg.Cmd, msg.SessionId)
 		return
 	}
 
@@ -66,7 +66,7 @@ func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protoc
 	proto.Reset(req)
 	if len(msg.Data) > 0 {
 		if err := proto.Unmarshal(msg.Data, req); err != nil {
-			tlog.Warn(context.Background(), "failed to decode request cmd=%d sessionID=%s error=%v", msg.Cmd, msg.SessionId, err)
+			tlog.Warn(context.TODO(), "failed to decode request cmd=%d sessionID=%s error=%v", msg.Cmd, msg.SessionId, err)
 			return
 		}
 	}
@@ -82,7 +82,7 @@ func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protoc
 	}
 	data, err := proto.Marshal(resp)
 	if err != nil {
-		tlog.Error(context.Background(), "failed to encode response cmd=%d sessionID=%s error=%v", msg.Cmd, msg.SessionId, err)
+		tlog.Error(context.TODO(), "failed to encode response cmd=%d sessionID=%s error=%v", msg.Cmd, msg.SessionId, err)
 		return
 	}
 
@@ -109,5 +109,3 @@ func (s *Server) registeredCommands() []int32 {
 	})
 	return commands
 }
-
-

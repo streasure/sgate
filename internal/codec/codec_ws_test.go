@@ -27,17 +27,28 @@ type mockConn struct {
 
 func newMockConn() *mockConn { return &mockConn{} }
 
-func (m *mockConn) Read(p []byte) (int, error)                  { return 0, io.ErrNoProgress }
-func (m *mockConn) ReadFrom(r io.Reader) (int64, error)          { return 0, nil }
-func (m *mockConn) WriteTo(w io.Writer) (int64, error)           { return 0, nil }
-func (m *mockConn) Write(p []byte) (int, error)                 { m.mu.Lock(); defer m.mu.Unlock(); m.outbound = append(m.outbound, p...); return len(p), nil }
-func (m *mockConn) Close() error                                { m.closed = true; return nil }
-func (m *mockConn) LocalAddr() net.Addr                         { return &net.TCPAddr{} }
-func (m *mockConn) RemoteAddr() net.Addr                        { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345} }
-func (m *mockConn) SetDeadline(t time.Time) error               { return nil }
-func (m *mockConn) SetReadDeadline(t time.Time) error           { return nil }
-func (m *mockConn) SetWriteDeadline(t time.Time) error          { return nil }
-func (m *mockConn) InboundBuffered() int                        { m.mu.Lock(); defer m.mu.Unlock(); return len(m.inbound) - m.discarded }
+func (m *mockConn) Read(p []byte) (int, error)          { return 0, io.ErrNoProgress }
+func (m *mockConn) ReadFrom(r io.Reader) (int64, error) { return 0, nil }
+func (m *mockConn) WriteTo(w io.Writer) (int64, error)  { return 0, nil }
+func (m *mockConn) Write(p []byte) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outbound = append(m.outbound, p...)
+	return len(p), nil
+}
+func (m *mockConn) Close() error        { m.closed = true; return nil }
+func (m *mockConn) LocalAddr() net.Addr { return &net.TCPAddr{} }
+func (m *mockConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}
+}
+func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
+func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
+func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
+func (m *mockConn) InboundBuffered() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.inbound) - m.discarded
+}
 func (m *mockConn) Peek(n int) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -99,22 +110,22 @@ func (m *mockConn) Writev(bs [][]byte) (int, error) {
 	}
 	return n, nil
 }
-func (m *mockConn) Flush() error                                { return nil }
-func (m *mockConn) OutboundBuffered() int                       { return 0 }
-func (m *mockConn) SendTo(buf []byte, addr net.Addr) (int, error) { return 0, nil }
-func (m *mockConn) Context() any                                { return nil }
-func (m *mockConn) SetContext(ctx any)                          {}
-func (m *mockConn) EventLoop() gnet.EventLoop                   { return nil }
-func (m *mockConn) Wake(callback gnet.AsyncCallback) error      { return nil }
-func (m *mockConn) CloseWithCallback(cb gnet.AsyncCallback) error { return m.Close() }
-func (m *mockConn) Fd() int                                     { return 0 }
-func (m *mockConn) Dup() (int, error)                           { return 0, nil }
-func (m *mockConn) SetReadBuffer(size int) error                { return nil }
-func (m *mockConn) SetWriteBuffer(size int) error               { return nil }
-func (m *mockConn) SetLinger(secs int) error                    { return nil }
-func (m *mockConn) SetKeepAlivePeriod(d time.Duration) error    { return nil }
+func (m *mockConn) Flush() error                                                        { return nil }
+func (m *mockConn) OutboundBuffered() int                                               { return 0 }
+func (m *mockConn) SendTo(buf []byte, addr net.Addr) (int, error)                       { return 0, nil }
+func (m *mockConn) Context() any                                                        { return nil }
+func (m *mockConn) SetContext(ctx any)                                                  {}
+func (m *mockConn) EventLoop() gnet.EventLoop                                           { return nil }
+func (m *mockConn) Wake(callback gnet.AsyncCallback) error                              { return nil }
+func (m *mockConn) CloseWithCallback(cb gnet.AsyncCallback) error                       { return m.Close() }
+func (m *mockConn) Fd() int                                                             { return 0 }
+func (m *mockConn) Dup() (int, error)                                                   { return 0, nil }
+func (m *mockConn) SetReadBuffer(size int) error                                        { return nil }
+func (m *mockConn) SetWriteBuffer(size int) error                                       { return nil }
+func (m *mockConn) SetLinger(secs int) error                                            { return nil }
+func (m *mockConn) SetKeepAlivePeriod(d time.Duration) error                            { return nil }
 func (m *mockConn) SetKeepAlive(enabled bool, idle, intvl time.Duration, cnt int) error { return nil }
-func (m *mockConn) SetNoDelay(noDelay bool) error               { return nil }
+func (m *mockConn) SetNoDelay(noDelay bool) error                                       { return nil }
 
 func (m *mockConn) feed(data []byte) {
 	m.mu.Lock()

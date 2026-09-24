@@ -42,9 +42,12 @@ type Tracer struct {
 
 // NewTracer 创建追踪器
 // 参数:
-//   cleanupInterval: 清理间隔
+//
+//	cleanupInterval: 清理间隔
+//
 // 返回值:
-//   *Tracer: 追踪器实例
+//
+//	*Tracer: 追踪器实例
 func NewTracer(cleanupInterval time.Duration) *Tracer {
 	if cleanupInterval == 0 {
 		cleanupInterval = 5 * time.Minute
@@ -65,11 +68,14 @@ func NewTracer(cleanupInterval time.Duration) *Tracer {
 
 // StartSpan 开始一个 span
 // 参数:
-//   traceID: 追踪ID
-//   spanName: Span 名称
-//   parentSpanID: 父 Span ID
+//
+//	traceID: 追踪ID
+//	spanName: Span 名称
+//	parentSpanID: 父 Span ID
+//
 // 返回值:
-//   *TraceSpan: 追踪 span
+//
+//	*TraceSpan: 追踪 span
 func (t *Tracer) StartSpan(traceID, spanName, parentSpanID string) *TraceSpan {
 	span := &TraceSpan{
 		TraceID:      traceID,
@@ -98,12 +104,13 @@ func (t *Tracer) StartSpan(traceID, spanName, parentSpanID string) *TraceSpan {
 
 // EndSpan 结束一个 span
 // 参数:
-//   span: 追踪 span
+//
+//	span: 追踪 span
 func (t *Tracer) EndSpan(span *TraceSpan) {
 	span.EndTime = time.Now()
 	span.Duration = span.EndTime.Sub(span.StartTime)
 
-	tlog.Debug(context.Background(), "Span completed traceID=%s spanID=%s name=%s duration=%v",
+	tlog.Debug(context.TODO(), "Span completed traceID=%s spanID=%s name=%s duration=%v",
 		span.TraceID,
 		span.SpanID,
 		span.Name,
@@ -113,18 +120,20 @@ func (t *Tracer) EndSpan(span *TraceSpan) {
 
 // AddAttribute 添加属性到 span
 // 参数:
-//   span: 追踪 span
-//   key: 属性键
-//   value: 属性值
+//
+//	span: 追踪 span
+//	key: 属性键
+//	value: 属性值
 func (t *Tracer) AddAttribute(span *TraceSpan, key, value string) {
 	span.Attributes[key] = value
 }
 
 // AddEvent 添加事件到 span
 // 参数:
-//   span: 追踪 span
-//   eventName: 事件名称
-//   attributes: 事件属性
+//
+//	span: 追踪 span
+//	eventName: 事件名称
+//	attributes: 事件属性
 func (t *Tracer) AddEvent(span *TraceSpan, eventName string, attributes map[string]string) {
 	event := TraceEvent{
 		Timestamp:  time.Now(),
@@ -137,9 +146,12 @@ func (t *Tracer) AddEvent(span *TraceSpan, eventName string, attributes map[stri
 
 // GetTrace 获取完整追踪
 // 参数:
-//   traceID: 追踪ID
+//
+//	traceID: 追踪ID
+//
 // 返回值:
-//   []*TraceSpan: 追踪 span 列表
+//
+//	[]*TraceSpan: 追踪 span 列表
 func (t *Tracer) GetTrace(traceID string) []*TraceSpan {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
@@ -157,7 +169,8 @@ func (t *Tracer) GetTrace(traceID string) []*TraceSpan {
 
 // CleanupTrace 清理追踪
 // 参数:
-//   traceID: 追踪ID
+//
+//	traceID: 追踪ID
 func (t *Tracer) CleanupTrace(traceID string) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -209,7 +222,7 @@ func (t *Tracer) cleanupExpiredTraces() {
 		}
 
 		if !allEnded && now.Sub(oldestSpan) > t.maxTraceAge {
-			tlog.Warn(context.Background(), "force cleaning stale trace with unfinished spans traceID=%s age=%v", traceID, now.Sub(oldestSpan))
+			tlog.Warn(context.TODO(), "force cleaning stale trace with unfinished spans traceID=%s age=%v", traceID, now.Sub(oldestSpan))
 			delete(t.traces, traceID)
 		}
 	}
@@ -217,7 +230,8 @@ func (t *Tracer) cleanupExpiredTraces() {
 
 // GetStats 获取追踪统计信息
 // 返回值:
-//   map[string]int: 统计信息
+//
+//	map[string]int: 统计信息
 func (t *Tracer) GetStats() map[string]int {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
@@ -246,7 +260,8 @@ func (t *Tracer) GetStats() map[string]int {
 
 // GenerateTraceID 生成追踪ID
 // 返回值:
-//   string: 追踪ID
+//
+//	string: 追踪ID
 func GenerateTraceID() string {
 	return fmt.Sprintf("trace_%s", gatewayutil.GenerateConnectionID())
 }

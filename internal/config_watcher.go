@@ -14,7 +14,7 @@ func (g *Gateway) startConfigCenterWatcher() {
 	}
 	ch, err := g.configCenter.Watch(g.ctx)
 	if err != nil {
-		tlog.Error(context.Background(), "config center watch failed error=%v", err)
+		tlog.Error(context.TODO(), "config center watch failed error=%v", err)
 		return
 	}
 	go func() {
@@ -25,7 +25,7 @@ func (g *Gateway) startConfigCenterWatcher() {
 			currentCfg := g.cfg.Load().(*config.Config)
 			newCfg := *currentCfg
 			if err := yaml.Unmarshal(yamlBytes, &newCfg); err != nil {
-				tlog.Warn(context.Background(), "config center content parse failed error=%v", err)
+				tlog.Warn(context.TODO(), "config center content parse failed error=%v", err)
 				continue
 			}
 			select {
@@ -33,7 +33,7 @@ func (g *Gateway) startConfigCenterWatcher() {
 			case <-g.stopChan:
 				return
 			}
-			tlog.Info(context.Background(), "config updated from config center type=%s",
+			tlog.Info(context.TODO(), "config updated from config center type=%s",
 				g.configCenter.Type())
 		}
 	}()

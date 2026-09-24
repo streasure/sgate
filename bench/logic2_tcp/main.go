@@ -51,7 +51,7 @@ func main() {
 			svc.Server().JoinGroupForUser(ctx.UserUUID, groupID)
 		}
 		memberCount := svc.Server().GetGroupCount(groupID)
-		tlog.Info(context.Background(), "user joined sessionID=%s user=%s group=%s members=%d", sessionID, ctx.UserUUID, groupID, memberCount)
+		tlog.Info(context.TODO(), "user joined sessionID=%s user=%s group=%s members=%d", sessionID, ctx.UserUUID, groupID, memberCount)
 		return nil
 	})
 
@@ -60,7 +60,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	tlog.Info(context.Background(), "logic2 started transport=tcp grpcPort=%s id=%s pushWorkers=%d", *port, *id, *pushWorkers)
+	tlog.Info(context.TODO(), "logic2 started transport=tcp grpcPort=%s id=%s pushWorkers=%d", *port, *id, *pushWorkers)
 
 	payload := make([]byte, *pushSize)
 	for i := range payload {
@@ -77,9 +77,9 @@ func main() {
 			for svc.Server().GetGroupCount("bench_group") < *expectedMembers {
 				time.Sleep(time.Millisecond)
 			}
-			tlog.Info(context.Background(), "logic2 all members joined, waiting 10s before pushing members=%d", *expectedMembers)
+			tlog.Info(context.TODO(), "logic2 all members joined, waiting 10s before pushing members=%d", *expectedMembers)
 			time.Sleep(10 * time.Second)
-			tlog.Info(context.Background(), "logic2 push phase started transport=tcp members=%d", *expectedMembers)
+			tlog.Info(context.TODO(), "logic2 push phase started transport=tcp members=%d", *expectedMembers)
 		}
 		workers := *pushWorkers
 		if workers < 1 {
@@ -128,7 +128,7 @@ func main() {
 			pushed := totalPushed.Load()
 			members := svc.Server().GetGroupCount("bench_group")
 			rate := float64(pushed) / elapsed
-			tlog.Info(context.Background(), "logic2 progress transport=tcp members=%d pushed=%d rate=%.0f", members, pushed, rate)
+			tlog.Info(context.TODO(), "logic2 progress transport=tcp members=%d pushed=%d rate=%.0f", members, pushed, rate)
 		}
 	}()
 
@@ -137,5 +137,5 @@ func main() {
 	<-sigCh
 
 	svc.Stop()
-	tlog.Info(context.Background(), "logic2 stopped transport=tcp totalPushed=%d", totalPushed.Load())
+	tlog.Info(context.TODO(), "logic2 stopped transport=tcp totalPushed=%d", totalPushed.Load())
 }

@@ -10,41 +10,41 @@ import (
 
 // Config 网关服务的完整配置结构体，包含所有模块配置
 type Config struct {
-	Port            int                 `yaml:"port"`
-	LogLevel        string              `yaml:"logLevel"`
-	Belong          string              `yaml:"belong"` // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
-	ServerID        string              `yaml:"serverId"`
-	ServerType      string              `yaml:"serverType"`
-	Zone            string              `yaml:"zone"`
-	Discovery       DiscoveryConfig     `yaml:"discovery"`
-	Transports      []Transport         `yaml:"transports"`
-	GRPC            GRPCConfig          `yaml:"grpc"`
-	LogicServerType string              `yaml:"logicServerType"`
-	Etcd            EtcdConfig          `yaml:"etcd"`
-	Stream          StreamConfig        `yaml:"stream"`
-	Protection      ProtectionConfig    `yaml:"protection"`
-	Security        SecurityConfig      `yaml:"security"`
-	WAF             WAFConfig           `yaml:"waf"`
-	TLS             TLSConfig           `yaml:"tls"`
-	Cluster         ClusterConfig       `yaml:"cluster"`
-	Balancer        BalancerConfig      `yaml:"balancer"`
-	JWTAuth         JWTAuthConfig       `yaml:"jwtAuth"`
-	Canary          CanaryConfig        `yaml:"canary"`
-	TrafficMirror   TrafficMirrorConfig `yaml:"trafficMirror"`
-	OTelTracer      OTelTracerConfig    `yaml:"otelTracer"`
-	ConfigCenter    ConfigCenterConfig  `yaml:"configCenter"`
-	Alert           AlertWebhookConfig  `yaml:"alert"`
-	Degradation     DegradationConfig   `yaml:"degradation"`
-	FilterChain     FilterChainConfig   `yaml:"filterChain"`
-	Monitoring      MonitoringConfig    `yaml:"monitoring"`
-	Perf            PerfConfig          `yaml:"perf"`
-	Pipeline        PipelineConfig      `yaml:"pipeline"`
+	Port            int                 `validate:"required"`
+	LogLevel        string              `default:"info"`
+	Belong          string              `validate:"required"` // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
+	ServerID        string              `validate:"required"`
+	ServerType      string              `validate:"required"`
+	Zone            string              `validate:"required"`
+	Discovery       DiscoveryConfig     `validate:"required"`
+	Transports      []Transport         `validate:"required"`
+	GRPC            GRPCConfig          `validate:"required"`
+	LogicServerType string              `default:"Logic"`
+	Etcd            EtcdConfig          `validate:"required"`
+	Stream          StreamConfig        `default:""`
+	Protection      ProtectionConfig    `default:""`
+	Security        SecurityConfig      `default:""`
+	WAF             WAFConfig           `default:""`
+	TLS             TLSConfig           `default:""`
+	Cluster         ClusterConfig       `default:""`
+	Balancer        BalancerConfig      `default:""`
+	JWTAuth         JWTAuthConfig       `default:""`
+	Canary          CanaryConfig        `default:""`
+	TrafficMirror   TrafficMirrorConfig `default:""`
+	OTelTracer      OTelTracerConfig    `default:""`
+	ConfigCenter    ConfigCenterConfig  `default:""`
+	Alert           AlertWebhookConfig  `default:""`
+	Degradation     DegradationConfig   `default:""`
+	FilterChain     FilterChainConfig   `default:""`
+	Monitoring      MonitoringConfig    `default:""`
+	Perf            PerfConfig          `default:""`
+	Pipeline        PipelineConfig      `default:""`
 }
 
 // PipelineConfig Pipeline 异步化配置
 type PipelineConfig struct {
-	AsyncEnabled   bool `yaml:"asyncEnabled"`   // 启用异步 pipeline（worker pool 模式）
-	WorkerShards   int  `yaml:"workerShards"`   // worker 分片数（默认 CPU×4）
+	AsyncEnabled    bool `yaml:"asyncEnabled"`    // 启用异步 pipeline（worker pool 模式）
+	WorkerShards    int  `yaml:"workerShards"`    // worker 分片数（默认 CPU×4）
 	WorkerQueueSize int  `yaml:"workerQueueSize"` // 每个分片的任务队列大小
 }
 
@@ -311,7 +311,7 @@ type StreamQueueConfig struct {
 
 type StreamConfig struct {
 	ShardCount       int               `yaml:"shardCount"`
-	ConnGroupCount   int               `yaml:"connGroupCount"`   // gateway→logic 独立 TCP 连接组数（默认 4）
+	ConnGroupCount   int               `yaml:"connGroupCount"` // gateway→logic 独立 TCP 连接组数（默认 4）
 	SendChannelSize  int               `yaml:"sendChannelSize"`
 	ReceiveBatchSize int               `yaml:"receiveBatchSize"`
 	BatchPush        bool              `yaml:"batchPush"`
@@ -344,9 +344,12 @@ type LoginAuthConfig struct {
 	//   "none"：跳过校验，始终接受（默认，用于测试）
 	//   "hmac"：按 HMAC-SHA256(userId, secret) 校验 login_key
 	//   "delegate"：转发到逻辑服校验（会增加延迟）
+	//   "loginserver"：通过 loginserver gRPC 校验 accountId 和 loginToken
 	Mode string `yaml:"mode"`
 	// Secret 是 HMAC 共享密钥（Mode 为 "hmac" 时必填）。
 	Secret string `yaml:"secret"`
+	// LoginServerZone 是 loginserver 在 etcd 中注册的 zone（Mode 为 "loginserver" 时必填）。
+	LoginServerZone string `yaml:"loginServerZone"`
 }
 
 // Transport 网络传输配置

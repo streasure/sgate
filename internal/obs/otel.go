@@ -161,7 +161,7 @@ func (t *OTelTracer) flush(spans []*OTelSpan) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
-		tlog.Debug(context.Background(), "otel trace export failed error=%v", err)
+		tlog.Debug(context.TODO(), "otel trace export failed error=%v", err)
 		return
 	}
 	resp.Body.Close()

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/spf13/cast"
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
+	protoLogin "github.com/streasure/protocol/loginserver"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/gateway"
@@ -32,6 +34,9 @@ import (
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/ugrpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -152,11 +157,16 @@ type Gateway struct {
 	connectionDurationSum     atomic.Int64        // 连接总存活时长（毫秒），用于计算平均值
 	connectionDurationCount   atomic.Int64        // 已关闭连接数，用于计算平均值
 	connectionDurationTracker *obs.LatencyTracker // 连接时长分位数追踪器
-	components                *component.Container
 	clusterComponent          *ClusterComponent
-	runtimeComponent          *GatewayRuntimeComponent
-	pipelineWorkerPool        *PipelineWorkerPool     // 异步 pipeline 工作池
-	shardedCoalescer          *ShardedWriteCoalescer  // 分片写合并器（推送路径）
+	securityComponent         *SecurityComponent
+	observabilityComponent    *ObservabilityComponent
+	trafficComponent          *TrafficComponent
+	loginServerMu             sync.RWMutex
+	loginServerClient         protoLogin.LoginServiceClient
+	loginServerConn           *grpc.ClientConn
+	loginServerAddr           string
+	pipelineWorkerPool        *PipelineWorkerPool    // 异步 pipeline 工作池
+	shardedCoalescer          *ShardedWriteCoalescer // 分片写合并器（推送路径）
 }
 
 // SetTransportType 设置监听端口对应的传输类型。
@@ -179,14 +189,14 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
 }
 
-// NewGateway 加载配置并创建、初始化、启动网关组件。
+// NewGateway 加载配置并创建网关及其关联的平铺生命周期组件。
 func NewGateway(configFiles ...string) *Gateway {
 	cfg := config.Get()
 	if cfg == nil {
 		var err error
 		cfg, err = config.Load(configFiles...)
 		if err != nil {
-			tlog.Warn(context.Background(), "load config failed, using defaults error=%v", err)
+			tlog.Warn(context.TODO(), "load config failed, using defaults error=%v", err)
 		}
 	}
 
@@ -204,59 +214,28 @@ func NewGateway(configFiles ...string) *Gateway {
 	// 创建共享过滤器链
 	fc := types.NewFilterChain()
 
-	// 创建所有生命周期组件
+	// 创建所有生命周期组件。Container 由 cmd/gateway/main.go 统一创建和组装。
 	secComp := NewSecurityComponent(cfg.Security, cfg.WAF, cfg.JWTAuth, fc)
 	obsComp := NewObservabilityComponent(cfg.OTelTracer, cfg.Monitoring.PprofAddr, fc)
 	traComp := NewTrafficComponent(cfg.Canary, cfg.TrafficMirror, cfg.Degradation, fc)
 	clsComp := NewClusterComponent(*cfg, cfg.GRPC.Port, nil)
 
-	components := component.NewContainer()
-	components.Add(secComp)
-	components.Add(obsComp)
-	components.Add(traComp)
-	components.Add(clsComp)
-	// Init 延迟到 gw 创建之后，以便添加需要 gw 引用的 runtimeComponent。
 	// 从配置加载 SPI 过滤器
 	for _, fi := range cfg.FilterChain.Filters {
 		if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
-			tlog.Warn(context.Background(), "failed to load filter from config name=%s error=%v", fi.Name, err)
+			tlog.Warn(context.TODO(), "failed to load filter from config name=%s error=%v", fi.Name, err)
 		}
 	}
 
-	// 通过依赖注入构建网关
+	// 通过依赖注入构建网关。各组件的运行时资源在 Gateway.Init 中绑定。
 	gw := NewGatewayWithDeps(GatewayDeps{
-		Config:             *cfg,
-		FilterChain:        fc,
-		LogSanitizer:       obsComp.LogSanitizer,
-		WhitelistBlacklist: secComp.WhitelistBlacklist,
-		WAF:                secComp.WAF,
-		RateLimiter:        secComp.RateLimiter,
-		JWTAuth:            secComp.JWTAuth,
-		CircuitBreakerMgr:  secComp.CircuitBreakerMgr,
-		Tracer:             obsComp.Tracer,
-		OTelTracer:         obsComp.OTelTracer,
-		LatencyTracker:     obsComp.LatencyTracker,
-		CanaryFilter:       traComp.CanaryFilter,
-		TrafficMirror:      traComp.TrafficMirror,
-		Degradation:        traComp.Degradation,
-		Discovery:          clsComp.Discovery,
-		GatewayDiscovery:   clsComp.GatewayDiscovery,
-		GatewayEvents:      clsComp.GatewayEvents(),
-		Balancer:           clsComp.Balancer,
-		ConfigCenter:       clsComp.ConfigCenter,
-		ClusterNode:        clsComp.Cluster,
-		AlertWebhook:       clsComp.AlertWebhook,
+		Config:      *cfg,
+		FilterChain: fc,
 	})
-	gw.components = components
+	gw.securityComponent = secComp
+	gw.observabilityComponent = obsComp
+	gw.trafficComponent = traComp
 	gw.clusterComponent = clsComp
-
-	// 创建运行时组件并加入子容器，然后初始化所有子组件。
-	runtimeComp := NewGatewayRuntimeComponent(gw)
-	components.Add(runtimeComp)
-	gw.runtimeComponent = runtimeComp
-	if err := components.Init(); err != nil {
-		panic(err)
-	}
 
 	// TLS加密配置
 	gw.tlsConfig = &tls.Config{
@@ -277,7 +256,7 @@ func NewGateway(configFiles ...string) *Gateway {
 	if cfg.TLS.Enabled && cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 		if err != nil {
-			tlog.Error(context.Background(), "failed to load TLS certificate error=%v", err)
+			tlog.Error(context.TODO(), "failed to load TLS certificate error=%v", err)
 		} else {
 			gw.tlsConfig.Certificates = []tls.Certificate{cert}
 			if strings.EqualFold(cfg.TLS.MinVersion, "TLS1.3") {
@@ -294,9 +273,46 @@ func NewGateway(configFiles ...string) *Gateway {
 
 func (g *Gateway) Name() string { return "gateway" }
 func (g *Gateway) Order() int   { return 1000 }
-func (g *Gateway) Init() error  { return nil }
+func (g *Gateway) Components() []component.Component {
+	return []component.Component{
+		g.securityComponent,
+		g.observabilityComponent,
+		g.trafficComponent,
+		g.clusterComponent,
+		g,
+	}
+}
+
+func (g *Gateway) Init() error {
+	// 前置组件已完成 Init，此处统一绑定其创建的资源。
+	sec := g.securityComponent
+	obsComp := g.observabilityComponent
+	traffic := g.trafficComponent
+	clusterComp := g.clusterComponent
+	g.filterChain = sec.FilterChain
+	g.logSanitizer = obsComp.LogSanitizer
+	g.whitelistBlacklist = sec.WhitelistBlacklist
+	g.waf = sec.WAF
+	g.rateLimiter = sec.RateLimiter
+	g.jwtAuth = sec.JWTAuth
+	g.circuitBreakerMgr = sec.CircuitBreakerMgr
+	g.tracer = obsComp.Tracer
+	g.otelTracer = obsComp.OTelTracer
+	g.latencyTracker = obsComp.LatencyTracker
+	g.canaryFilter = traffic.CanaryFilter
+	g.trafficMirror = traffic.TrafficMirror
+	g.degradation = traffic.Degradation
+	g.serviceDiscovery = clusterComp.Discovery
+	g.gatewayDiscovery = clusterComp.GatewayDiscovery
+	g.gatewayEvents = clusterComp.GatewayEvents()
+	g.balancer = clusterComp.Balancer
+	g.configCenter = clusterComp.ConfigCenter
+	g.cluster = clusterComp.Cluster
+	g.alertWebhook = clusterComp.AlertWebhook
+	return nil
+}
 func (g *Gateway) Start() error {
-	// 绑定集群组件在 Init 阶段创建的资源（Discovery/Balancer 等）。
+	// ClusterComponent 在 Start 中创建 discovery，需在其后重新绑定。
 	g.serviceDiscovery = g.clusterComponent.Discovery
 	g.gatewayDiscovery = g.clusterComponent.GatewayDiscovery
 	g.gatewayEvents = g.clusterComponent.GatewayEvents()
@@ -304,8 +320,56 @@ func (g *Gateway) Start() error {
 	g.configCenter = g.clusterComponent.ConfigCenter
 	g.cluster = g.clusterComponent.Cluster
 	g.alertWebhook = g.clusterComponent.AlertWebhook
-	// 启动子容器：security → observability → traffic → cluster → gateway-runtime
-	return g.components.Start()
+	g.setLoginServerDiscovery(g.clusterComponent.LoginDiscovery)
+	g.StartServices()
+	return nil
+}
+
+func (g *Gateway) setLoginServerDiscovery(discovery *uetcd.Component) {
+	if discovery == nil {
+		return
+	}
+	discovery.OnServiceChange(g.handleLoginServerChange)
+	for fullKey, address := range discovery.ServiceSet() {
+		instanceID := fullKey[strings.LastIndex(fullKey, "/")+1:]
+		g.handleLoginServerChange(uetcd.ServiceEvent{
+			Type:       uetcd.EventRegister,
+			ServiceID:  discovery.ServiceID(),
+			InstanceID: instanceID,
+			Address:    address,
+		})
+	}
+}
+
+func (g *Gateway) handleLoginServerChange(event uetcd.ServiceEvent) {
+	if event.Type == uetcd.EventDeregister {
+		return
+	}
+	if _, err := netip.ParseAddrPort(event.Address); err != nil {
+		tlog.Warn(context.TODO(), "invalid loginserver address instanceID=%s address=%s error=%v", event.InstanceID, event.Address, err)
+		return
+	}
+	g.loginServerMu.Lock()
+	defer g.loginServerMu.Unlock()
+	if g.loginServerAddr == event.Address {
+		return
+	}
+	conn, err := grpc.Dial(event.Address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 30 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true}),
+	)
+	if err != nil {
+		tlog.Error(context.TODO(), "connect loginserver failed address=%s error=%v", event.Address, err)
+		return
+	}
+	oldConn := g.loginServerConn
+	g.loginServerConn = conn
+	g.loginServerClient = protoLogin.NewLoginServiceClient(conn)
+	g.loginServerAddr = event.Address
+	if oldConn != nil {
+		_ = oldConn.Close()
+	}
+	tlog.Info(context.TODO(), "loginserver connected instanceID=%s address=%s", event.InstanceID, event.Address)
 }
 func (g *Gateway) Destroy() { g.Close() }
 
@@ -379,13 +443,13 @@ func (g *Gateway) StartServices() {
 
 	// gRPC服务器
 	grpcPort := fmt.Sprintf(":%d", g.grpcCfg.Port)
-	tlog.Info(context.Background(), "starting gRPC server port=%s", grpcPort)
+	tlog.Info(context.TODO(), "starting gRPC server port=%s", grpcPort)
 	go func() {
 		if server, err := StartGRPCServer(g, grpcPort, g.grpcCfg.MaxMessageSize, g.grpcCfg.WindowSize); err != nil {
-			tlog.Error(context.Background(), "failed to start gRPC server error=%v", err)
+			tlog.Error(context.TODO(), "failed to start gRPC server error=%v", err)
 		} else {
 			g.grpcServer = server
-			tlog.Info(context.Background(), "gRPC server started port=%s", grpcPort)
+			tlog.Info(context.TODO(), "gRPC server started port=%s", grpcPort)
 		}
 	}()
 
@@ -426,10 +490,10 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 		if transportType == "" || transportType == "websocket" {
 			options = append(options, gnet.WithTCPNoDelay(gnet.TCPNoDelay))
 		}
-		tlog.Info(context.Background(), "starting gateway transport addr=%s type=%s", addr, transportType)
+		tlog.Info(context.TODO(), "starting gateway transport addr=%s type=%s", addr, transportType)
 		go func(addr, transportType string) {
 			if err := gnet.Run(g, addr, options...); err != nil {
-				tlog.Error(context.Background(), "gateway transport stopped addr=%s error=%v", addr, err)
+				tlog.Error(context.TODO(), "gateway transport stopped addr=%s error=%v", addr, err)
 			}
 		}(addr, transportType)
 	}
@@ -438,7 +502,7 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 func (g *Gateway) wsHeartbeatChecker() {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "wsHeartbeatChecker panic recovered error=%v", r)
+			tlog.Error(context.TODO(), "wsHeartbeatChecker panic recovered error=%v", r)
 		}
 	}()
 	checkInterval := time.Duration(g.getProtection().WSCheckInterval) * time.Second
@@ -463,7 +527,7 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 			return true
 		}
 		if time.Since(conn.LastPingTime) > timeout {
-			tlog.Warn(context.Background(), "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID)
+			tlog.Warn(context.TODO(), "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID)
 			if conn.Conn != nil {
 				conn.Conn.Close()
 			}
@@ -479,7 +543,7 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 func (g *Gateway) configWatcher() {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "configWatcher panic recovered error=%v", r)
+			tlog.Error(context.TODO(), "configWatcher panic recovered error=%v", r)
 		}
 	}()
 	if g.configPath == "" {
@@ -550,7 +614,7 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 			tokens = 10000
 		}
 		g.rateLimiter.UpdateRate(tokens, refresh)
-		tlog.Info(context.Background(), "rate limiter updated maxTokens=%d refresh=%v", tokens, refresh)
+		tlog.Info(context.TODO(), "rate limiter updated maxTokens=%d refresh=%v", tokens, refresh)
 	}
 
 	// 动态更新白名单/黑名单
@@ -569,7 +633,7 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		for _, ip := range newCfg.Security.Blacklist {
 			g.whitelistBlacklist.AddToBlacklist(ip)
 		}
-		tlog.Info(context.Background(), "whitelist/blacklist updated whitelist=%d blacklist=%d",
+		tlog.Info(context.TODO(), "whitelist/blacklist updated whitelist=%d blacklist=%d",
 			len(newCfg.Security.Whitelist),
 			len(newCfg.Security.Blacklist))
 	}
@@ -588,19 +652,19 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 动态更新 JWT 密钥
 	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
 		g.jwtAuth.UpdateSecret(newCfg.JWTAuth.Secret)
-		tlog.Info(context.Background(), "jwt secret updated")
+		tlog.Info(context.TODO(), "jwt secret updated")
 	}
 
 	// 动态更新灰度规则
 	if g.canaryFilter != nil && newCfg.Canary.Enabled {
 		g.canaryFilter.UpdateConfig(newCfg.Canary)
-		tlog.Info(context.Background(), "canary config updated percent=%d", newCfg.Canary.Percent)
+		tlog.Info(context.TODO(), "canary config updated percent=%d", newCfg.Canary.Percent)
 	}
 
 	// 动态更新流量镜像比例
 	if g.trafficMirror != nil && newCfg.TrafficMirror.Enabled {
 		g.trafficMirror.UpdatePercent(newCfg.TrafficMirror.Percent)
-		tlog.Info(context.Background(), "traffic mirror updated percent=%d", newCfg.TrafficMirror.Percent)
+		tlog.Info(context.TODO(), "traffic mirror updated percent=%d", newCfg.TrafficMirror.Percent)
 	}
 
 	// 动态更新降级规则
@@ -608,10 +672,10 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		for _, rc := range newCfg.Degradation.Rules {
 			g.degradation.AddRule(rc)
 		}
-		tlog.Info(context.Background(), "degradation rules updated count=%d", len(newCfg.Degradation.Rules))
+		tlog.Info(context.TODO(), "degradation rules updated count=%d", len(newCfg.Degradation.Rules))
 	}
 
-	tlog.Info(context.Background(), "config updated dynamically")
+	tlog.Info(context.TODO(), "config updated dynamically")
 }
 
 var connContextPool = sync.Pool{
@@ -644,7 +708,7 @@ type ConnContext struct {
 func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "OnOpen panic recovered error=%v", r)
+			tlog.Error(context.TODO(), "OnOpen panic recovered error=%v", r)
 			action = gnet.Close
 		}
 	}()
@@ -652,7 +716,7 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	// 连接数限制检查（P0: 防止 OOM 和连接耗尽）
 	remoteIP := getRemoteIP(c)
 	if !g.connectionManager.CanAccept(remoteIP) {
-		tlog.Warn(context.Background(), "连接数限制，拒绝新连接 remoteIP=%s activeConnections=%d maxConnections=%d ipConnections=%d maxPerIP=%d",
+		tlog.Warn(context.TODO(), "连接数限制，拒绝新连接 remoteIP=%s activeConnections=%d maxConnections=%d ipConnections=%d maxPerIP=%d",
 			remoteIP,
 			g.connectionManager.GetConnectionCount(),
 			g.connectionManager.maxConnections,
@@ -688,14 +752,14 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	g.connectionsTotal.Add(1)
 	g.connectionsActive.Add(1)
 
-	tlog.Debug(context.Background(), "new connection localAddr=%s isWS=%v", localAddr, isWS)
+	tlog.Debug(context.TODO(), "new connection localAddr=%s isWS=%v", localAddr, isWS)
 	return
 }
 
 func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "OnClose panic recovered error=%v", r)
+			tlog.Error(context.TODO(), "OnClose panic recovered error=%v", r)
 		}
 	}()
 
@@ -726,7 +790,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 		}
 		g.connectionManager.RemoveConnection(connectionID)
 		g.connectionsActive.Add(-1)
-		tlog.Debug(context.Background(), "connection closed connectionID=%s error=%v", connectionID, err)
+		tlog.Debug(context.TODO(), "connection closed connectionID=%s error=%v", connectionID, err)
 	}
 
 	return
@@ -735,7 +799,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "OnTraffic panic recovered error=%v", fmt.Sprintf("%v", r))
+			tlog.Error(context.TODO(), "OnTraffic panic recovered error=%v", fmt.Sprintf("%v", r))
 			action = gnet.Close
 		}
 	}()
@@ -746,7 +810,7 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "handleNormalTraffic panic recovered error=%s", cast.ToString(r))
+			tlog.Error(context.TODO(), "handleNormalTraffic panic recovered error=%s", cast.ToString(r))
 			action = gnet.Close
 		}
 	}()
@@ -1005,6 +1069,25 @@ func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
 	case "delegate":
 		// 将验证委托给逻辑服——网关信任逻辑服的响应。如果逻辑服拒绝用户，它不会返回 UserKey。
 		return true
+	case "loginserver":
+		if userID == "" || loginKey == "" {
+			return false
+		}
+		g.loginServerMu.RLock()
+		client := g.loginServerClient
+		g.loginServerMu.RUnlock()
+		if client == nil {
+			tlog.Warn(context.TODO(), "loginserver validation unavailable accountId=%s", userID)
+			return false
+		}
+		ctx, cancel := context.WithTimeout(context.TODO(), 3*time.Second)
+		defer cancel()
+		ack, err := client.ValidateLoginToken(ctx, &protoLogin.ValidateLoginTokenReq{AccountId: userID, LoginToken: loginKey})
+		if err != nil {
+			tlog.Warn(context.TODO(), "validate login token failed accountId=%s error=%v", userID, err)
+			return false
+		}
+		return ack.Valid
 	default: // "none" 或空值
 		return true
 	}
@@ -1035,7 +1118,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	// P1: 主动关闭同用户的旧连接（重连场景），防止资源泄漏
 	if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
 		if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
-			tlog.Info(context.Background(), "检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
+			tlog.Info(context.TODO(), "检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
 				oldConnID,
 				connectionID,
 				fullUUID)
@@ -1069,7 +1152,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
-			tlog.Warn(context.Background(), "login forward to logic timed out serverID=%s", req.ServerId)
+			tlog.Warn(context.TODO(), "login forward to logic timed out serverID=%s", req.ServerId)
 		}()
 	}
 
@@ -1211,7 +1294,7 @@ func (g *Gateway) GetServerID() string {
 }
 
 func (g *Gateway) logMetrics() {
-	tlog.Info(context.Background(), "gateway metrics connectionsActive=%d connectionsTotal=%d messagesReceived=%d messagesForwarded=%d messagesPushed=%d messagesProcessed=%d messagesFailed=%d",
+	tlog.Info(context.TODO(), "gateway metrics connectionsActive=%d connectionsTotal=%d messagesReceived=%d messagesForwarded=%d messagesPushed=%d messagesProcessed=%d messagesFailed=%d",
 		g.connectionsActive.Load(),
 		g.connectionsTotal.Load(),
 		g.messagesReceived.Load(),
@@ -1257,9 +1340,9 @@ func (g *Gateway) Close() {
 				default:
 				}
 			}
-			tlog.Info(context.Background(), "connection drain completed")
+			tlog.Info(context.TODO(), "connection drain completed")
 		case <-drainTimer.C:
-			tlog.Warn(context.Background(), "connection drain timed out, forcing close")
+			tlog.Warn(context.TODO(), "connection drain timed out, forcing close")
 		}
 
 		if g.logicClientPool != nil {
@@ -1270,6 +1353,12 @@ func (g *Gateway) Close() {
 		}
 		if g.logicClient != nil {
 			g.logicClient.Close()
+		}
+		if g.overloadProtector != nil {
+			g.overloadProtector.Stop()
+		}
+		if g.messageIntegrity != nil {
+			g.messageIntegrity.Stop()
 		}
 
 		if g.grpcServer != nil {
@@ -1295,12 +1384,7 @@ func (g *Gateway) Close() {
 		}
 		g.StopStatsServer()
 
-		// 阶段3：销毁子容器（security → obs → traffic → cluster → runtime 逆序销毁）
-		if g.components != nil {
-			g.components.DestroyAll()
-		}
-
-		tlog.Info(context.Background(), "gateway closed")
+		tlog.Info(context.TODO(), "gateway closed")
 	})
 }
 

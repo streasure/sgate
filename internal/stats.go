@@ -258,9 +258,9 @@ func (g *Gateway) StartStatsServer(addr string) {
 	srv := &http.Server{Addr: addr, Handler: mux}
 	g.statsServer = srv
 	go func() {
-		tlog.Info(context.Background(), "starting stats server addr=%s", addr)
+		tlog.Info(context.TODO(), "starting stats server addr=%s", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			tlog.Error(context.Background(), "stats server failed error=%v", err)
+			tlog.Error(context.TODO(), "stats server failed error=%v", err)
 		}
 	}()
 }

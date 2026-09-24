@@ -44,15 +44,19 @@ func defaultConfig() ServiceConfig {
 type ServiceOption func(*ServiceConfig)
 
 // WithListenPort 设置监听端口
-func WithListenPort(port string) ServiceOption   { return func(c *ServiceConfig) { c.ListenPort = port } }
+func WithListenPort(port string) ServiceOption { return func(c *ServiceConfig) { c.ListenPort = port } }
+
 // WithServiceID 设置服务实例 ID
 func WithServiceID(id string) ServiceOption { return func(c *ServiceConfig) { c.ServiceID = id } }
+
 // WithServerType 设置服务类型
 func WithServerType(t string) ServiceOption { return func(c *ServiceConfig) { c.ServerType = t } }
+
 // WithServiceName 设置服务名称
 func WithServiceName(name string) ServiceOption {
 	return func(c *ServiceConfig) { c.ServiceName = name }
 }
+
 // WithZone 设置可用区（空值不生效）
 func WithZone(zone string) ServiceOption {
 	return func(c *ServiceConfig) {
@@ -61,6 +65,7 @@ func WithZone(zone string) ServiceOption {
 		}
 	}
 }
+
 // WithEtcd 设置 etcd 端点
 func WithEtcd(endpoint string) ServiceOption {
 	return func(c *ServiceConfig) { c.EtcdEndpoint = endpoint }

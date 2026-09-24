@@ -124,15 +124,15 @@ type Connection struct {
 	logicClient atomic.Value // LogicClientProvider 缓存，避免每条消息查询连接池
 
 	// 连接级流控
-	msgRateMu       sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
-	msgCount        int64      // 当前窗口消息计数
-	msgWindowStart  int64      // 当前窗口起始时间（UnixMilli）
+	msgRateMu      sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
+	msgCount       int64      // 当前窗口消息计数
+	msgWindowStart int64      // 当前窗口起始时间（UnixMilli）
 
 	// 连接级写合并：每连接独立 buffer，addMulti 只需 per-Connection 锁（几乎无竞争）
-	coalescedMu    sync.Mutex
-	coalescedData  []byte   // [4-byte len][payload] 累积格式
+	coalescedMu     sync.Mutex
+	coalescedData   []byte  // [4-byte len][payload] 累积格式
 	coalescedBufPtr *[]byte // 指向 coalescerBufPool 的 buffer，用于归还
-	coalescedCount int      // 累积消息数
+	coalescedCount  int     // 累积消息数
 }
 
 // newConnection 创建新的连接对象，初始化基本属性和状态。
@@ -467,7 +467,7 @@ func (cm *ConnectionManager) UpdateLimits(maxConn, maxConnPerIP int) {
 	if maxConnPerIP >= 0 {
 		cm.maxConnectionsPerIP = maxConnPerIP
 	}
-	tlog.Info(context.Background(), "connection manager limits updated maxConnections=%d maxConnectionsPerIP=%d",
+	tlog.Info(context.TODO(), "connection manager limits updated maxConnections=%d maxConnectionsPerIP=%d",
 		cm.maxConnections,
 		cm.maxConnectionsPerIP)
 }
@@ -782,7 +782,7 @@ func (cm *ConnectionManager) checkIdleConnections(timeout time.Duration) {
 	cm.connections.Range(func(key string, conn *Connection) bool {
 		lastActive := conn.LastActive.Load()
 		if now-lastActive > timeout.Milliseconds() {
-			tlog.Debug(context.Background(), "closing idle connection", "connectionID", conn.ID())
+			tlog.Debug(context.TODO(), "closing idle connection connectionID=%s", conn.ID())
 			if conn.Conn != nil {
 				conn.Conn.Close()
 			}

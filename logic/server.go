@@ -17,8 +17,8 @@ import (
 // streamConn 表示与网关的 gRPC 流连接
 type streamConn struct {
 	stream     protocol.GatewayStream_OnDataServer // gRPC 流对象
-	sendCh     chan *protocol.StreamData            // 发送通道
-	done       chan struct{}                        // 流结束信号
+	sendCh     chan *protocol.StreamData           // 发送通道
+	done       chan struct{}                       // 流结束信号
 	closed     atomic.Bool                         // 连接是否已关闭
 	closeOnce  sync.Once                           // 确保只关闭一次
 	gatewayID  string                              // 网关标识
@@ -113,15 +113,15 @@ type Server struct {
 	userSessions sync.Map // 用户 UUID -> 会话 ID，用户到会话的映射
 	sessionUsers sync.Map // 会话 ID -> 用户 UUID，会话到用户的映射
 
-	groupMu       sync.RWMutex                     // 分组操作互斥锁
-	groups        map[string]*pushGroup            // 组 ID -> 推送组
-	sessionGroups map[string]map[string]struct{}   // 会话 ID -> 所属组 ID 集合
+	groupMu       sync.RWMutex                   // 分组操作互斥锁
+	groups        map[string]*pushGroup          // 组 ID -> 推送组
+	sessionGroups map[string]map[string]struct{} // 会话 ID -> 所属组 ID 集合
 
-	serverID     string               // 逻辑服务端标识
-	streamSeq    atomic.Uint64        // 流连接序号生成器
-	streamChSize int                  // 流发送通道大小
-	stopOnce     sync.Once            // 确保只停止一次
-	metrics      PushMetrics          // 推送监控指标
+	serverID     string        // 逻辑服务端标识
+	streamSeq    atomic.Uint64 // 流连接序号生成器
+	streamChSize int           // 流发送通道大小
+	stopOnce     sync.Once     // 确保只停止一次
+	metrics      PushMetrics   // 推送监控指标
 }
 
 // ServerOption 服务端配置选项函数
@@ -129,8 +129,9 @@ type ServerOption func(*Server)
 
 // WithServerID 设置服务端 ID
 func WithServerID(serverID string) ServerOption { return func(s *Server) { s.serverID = serverID } }
+
 // WithStreamChSize 设置流发送通道大小
-func WithStreamChSize(n int) ServerOption       { return func(s *Server) { s.streamChSize = n } }
+func WithStreamChSize(n int) ServerOption { return func(s *Server) { s.streamChSize = n } }
 
 // NewServer 创建逻辑层服务端实例
 func NewServer(opts ...ServerOption) *Server {
@@ -184,7 +185,7 @@ func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 		}
 		s.dispatchMessage(msg, func(response *protocol.StreamData) {
 			if err := conn.Send(response); err != nil {
-				tlog.Warn(context.Background(), "failed to queue response cmd=%d sessionID=%s error=%v", response.Cmd, response.SessionId, err)
+				tlog.Warn(context.TODO(), "failed to queue response cmd=%d sessionID=%s error=%v", response.Cmd, response.SessionId, err)
 			}
 		})
 	}
@@ -488,7 +489,7 @@ type ScheduledPush struct {
 	Interval time.Duration // 推送间隔
 	MaxCount int           // 最大推送次数（0 = 无限）
 	stopCh   chan struct{} // 停止信号
-	server   *Server      // 服务端引用
+	server   *Server       // 服务端引用
 	done     chan struct{} // 任务结束信号
 }
 

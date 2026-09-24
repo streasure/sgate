@@ -125,14 +125,14 @@ func (a *AlertWebhook) sendOne(h webhookConfig, payload []byte) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		tlog.Warn(context.Background(), "alert webhook send failed webhook=%s error=%v",
+		tlog.Warn(context.TODO(), "alert webhook send failed webhook=%s error=%v",
 			h.name,
 			err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		tlog.Warn(context.Background(), "alert webhook non-2xx webhook=%s status=%d",
+		tlog.Warn(context.TODO(), "alert webhook non-2xx webhook=%s status=%d",
 			h.name,
 			resp.StatusCode)
 	}

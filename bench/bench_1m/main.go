@@ -2,8 +2,9 @@
 // 测试 sgate 网关在大量并发 TCP 连接下的承载能力。
 // 多端口分发：本地每端口最多 ~6K 连接（Windows 临时端口限制）。
 // 用法：
-//   go run .\bench\bench_1m -addr 127.0.0.1:48080 -connections 1000000
-//   go run .\bench\bench_1m -addr 127.0.0.1 -ports 48080-49050 -connections 1000000
+//
+//	go run .\bench\bench_1m -addr 127.0.0.1:48080 -connections 1000000
+//	go run .\bench\bench_1m -addr 127.0.0.1 -ports 48080-49050 -connections 1000000
 package main
 
 import (

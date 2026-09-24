@@ -70,13 +70,13 @@ func NewWAF(cfg config.WAFConfig) *WAF {
 	for _, p := range patterns {
 		re, err := regexp.Compile(p)
 		if err != nil {
-			tlog.Warn(context.Background(), "WAF: invalid SQL pattern, skipping pattern=%s error=%v", p, err)
+			tlog.Warn(context.TODO(), "WAF: invalid SQL pattern, skipping pattern=%s error=%v", p, err)
 			continue
 		}
 		waf.sqlPatterns = append(waf.sqlPatterns, re)
 	}
 	if userSQLConfigured && len(waf.sqlPatterns) == 0 {
-		tlog.Warn(context.Background(), "WAF: all user SQL patterns invalid, falling back to defaults")
+		tlog.Warn(context.TODO(), "WAF: all user SQL patterns invalid, falling back to defaults")
 		for _, p := range defaultSQLPatterns {
 			if re, err := regexp.Compile(p); err == nil {
 				waf.sqlPatterns = append(waf.sqlPatterns, re)
@@ -93,13 +93,13 @@ func NewWAF(cfg config.WAFConfig) *WAF {
 	for _, p := range xssPatterns {
 		re, err := regexp.Compile(p)
 		if err != nil {
-			tlog.Warn(context.Background(), "WAF: invalid XSS pattern, skipping pattern=%s error=%v", p, err)
+			tlog.Warn(context.TODO(), "WAF: invalid XSS pattern, skipping pattern=%s error=%v", p, err)
 			continue
 		}
 		waf.xssPatterns = append(waf.xssPatterns, re)
 	}
 	if userXSSConfigured && len(waf.xssPatterns) == 0 {
-		tlog.Warn(context.Background(), "WAF: all user XSS patterns invalid, falling back to defaults")
+		tlog.Warn(context.TODO(), "WAF: all user XSS patterns invalid, falling back to defaults")
 		for _, p := range defaultXSSPatterns {
 			if re, err := regexp.Compile(p); err == nil {
 				waf.xssPatterns = append(waf.xssPatterns, re)
@@ -107,7 +107,7 @@ func NewWAF(cfg config.WAFConfig) *WAF {
 		}
 	}
 
-	tlog.Info(context.Background(), "WAF initialized sqlPatterns=%d xssPatterns=%d maxPayloadSize=%d",
+	tlog.Info(context.TODO(), "WAF initialized sqlPatterns=%d xssPatterns=%d maxPayloadSize=%d",
 		len(waf.sqlPatterns),
 		len(waf.xssPatterns),
 		waf.maxPayloadSize)
@@ -125,7 +125,7 @@ func (w *WAF) Inspect(data []byte) bool {
 	// 大 payload 拦截
 	if w.maxPayloadSize > 0 && len(data) > w.maxPayloadSize {
 		w.blockedCount.Add(1)
-		tlog.Warn(context.Background(), "WAF: payload exceeds size limit", "size", len(data), "limit", w.maxPayloadSize)
+		tlog.Warn(context.TODO(), "WAF: payload exceeds size limit size=%d limit=%d", len(data), w.maxPayloadSize)
 		return false
 	}
 
@@ -141,7 +141,7 @@ func (w *WAF) Inspect(data []byte) bool {
 	for _, re := range w.sqlPatterns {
 		if re.MatchString(str) {
 			w.blockedCount.Add(1)
-			tlog.Warn(context.Background(), "WAF: SQL injection detected pattern=%s", re.String())
+			tlog.Warn(context.TODO(), "WAF: SQL injection detected pattern=%s", re.String())
 			return false
 		}
 	}
@@ -150,7 +150,7 @@ func (w *WAF) Inspect(data []byte) bool {
 	for _, re := range w.xssPatterns {
 		if re.MatchString(str) {
 			w.blockedCount.Add(1)
-			tlog.Warn(context.Background(), "WAF: XSS attack detected pattern=%s", re.String())
+			tlog.Warn(context.TODO(), "WAF: XSS attack detected pattern=%s", re.String())
 			return false
 		}
 	}

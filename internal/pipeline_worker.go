@@ -46,9 +46,9 @@ type pipelineWorker struct {
 // PipelineWorkerPool 是分片的异步 pipeline 工作池。
 // 按 connectionID 哈希分片，保证同一连接的消息严格有序。
 type PipelineWorkerPool struct {
-	workers  []pipelineWorker
-	shards   int
-	gw       *Gateway
+	workers   []pipelineWorker
+	shards    int
+	gw        *Gateway
 	submitted atomic.Int64
 	dropped   atomic.Int64
 	wg        sync.WaitGroup
@@ -78,7 +78,7 @@ func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWork
 		go p.runWorker(i)
 	}
 
-	tlog.Info(context.Background(), "pipeline worker pool started shards=%d queueSize=%d", shards, queueSize)
+	tlog.Info(context.TODO(), "pipeline worker pool started shards=%d queueSize=%d", shards, queueSize)
 	return p
 }
 
@@ -123,7 +123,7 @@ func (p *PipelineWorkerPool) Submit(task pipelineTaskData) bool {
 		return true
 	default:
 		p.dropped.Add(1)
-		tlog.Warn(context.Background(), "pipeline worker queue full, task dropped shard=%d connectionID=%s", shard, task.connectionID)
+		tlog.Warn(context.TODO(), "pipeline worker queue full, task dropped shard=%d connectionID=%s", shard, task.connectionID)
 		return false
 	}
 }
@@ -137,7 +137,7 @@ func (p *PipelineWorkerPool) SubmitWS(task wsPipelineTaskData) bool {
 		return true
 	default:
 		p.dropped.Add(1)
-		tlog.Warn(context.Background(), "pipeline worker queue full, WS task dropped shard=%d connectionID=%s", shard, task.connectionID)
+		tlog.Warn(context.TODO(), "pipeline worker queue full, WS task dropped shard=%d connectionID=%s", shard, task.connectionID)
 		return false
 	}
 }

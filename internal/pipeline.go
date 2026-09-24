@@ -242,7 +242,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 
 	// 阶段7：指标记录
 	if sendErr != nil {
-		tlog.Warn(context.Background(), "client message forward failed sessionID=%s serverID=%s cmd=%d error=%v", connectionID, connObj.GetServerID(), cmd, sendErr)
+		tlog.Warn(context.TODO(), "client message forward failed sessionID=%s serverID=%s cmd=%d error=%v", connectionID, connObj.GetServerID(), cmd, sendErr)
 		g.messagesDroppedFull.Add(1)
 		if g.circuitBreakerMgr != nil {
 			g.getOrCreateBreaker(routeKey).RecordFailure()
@@ -293,7 +293,7 @@ func (p *MessagePipeline) ProcessForWS(conn gnet.Conn, data []byte, message *pro
 	if message.UserKey != "" {
 		oldUserUUID := "temp_" + connectionID
 		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserKey)
-		tlog.Debug(context.Background(), "received user UUID connectionID=%s userUUID=%s", connectionID, message.UserKey)
+		tlog.Debug(context.TODO(), "received user UUID connectionID=%s userUUID=%s", connectionID, message.UserKey)
 	}
 
 	result := p.Process(conn, data, message, connectionID)

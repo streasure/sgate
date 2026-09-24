@@ -43,9 +43,9 @@ func StartPProfServer(addr string) {
 		}
 		pprofServer = &http.Server{Addr: addr, Handler: mux}
 		go func() {
-			tlog.Info(context.Background(), "pprof server started addr=%s", addr)
+			tlog.Info(context.TODO(), "pprof server started addr=%s", addr)
 			if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				tlog.Warn(context.Background(), "pprof server stopped error=%v", err)
+				tlog.Warn(context.TODO(), "pprof server stopped error=%v", err)
 			}
 		}()
 	})

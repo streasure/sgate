@@ -12,20 +12,28 @@ import (
 
 // MessageFrame 是公共消息帧协议类型别名。
 type MessageFrame = protocol.MessageFrame
+
 // LoginGateReq 是网关登录请求协议类型别名。
 type LoginGateReq = protocol.LoginGateReq
+
 // LoginGateAck 是网关登录响应协议类型别名。
 type LoginGateAck = protocol.LoginGateAck
+
 // ProtocolStreamData 是逻辑流数据协议类型别名。
 type ProtocolStreamData = protocol.StreamData
+
 // GatewayStreamClient 是网关流客户端接口别名。
 type GatewayStreamClient = protocol.GatewayStreamClient
+
 // GatewayStream_OnDataClient 是网关流客户端数据接口别名。
 type GatewayStream_OnDataClient = protocol.GatewayStream_OnDataClient
+
 // GatewayStreamServer 是网关流服务端接口别名。
 type GatewayStreamServer = protocol.GatewayStreamServer
+
 // GatewayStream_OnDataServer 是网关流服务端数据接口别名。
 type GatewayStream_OnDataServer = protocol.GatewayStream_OnDataServer
+
 // UnimplementedGatewayStreamServer 是未实现网关流服务端的嵌入式实现。
 type UnimplementedGatewayStreamServer = protocol.UnimplementedGatewayStreamServer
 
@@ -53,31 +61,31 @@ const (
 
 // 路由常量定义
 const (
-	RouteLogin       = "login"          // 登录路由
-	RouteLoginGate   = "login_gate"     // 网关登录路由
-	RouteUserOffline = "user_offline"   // 用户下线路由
-	RouteHeartbeat   = "heartbeat"      // 心跳路由
-	RouteError       = "error"          // 错误路由
+	RouteLogin       = "login"        // 登录路由
+	RouteLoginGate   = "login_gate"   // 网关登录路由
+	RouteUserOffline = "user_offline" // 用户下线路由
+	RouteHeartbeat   = "heartbeat"    // 心跳路由
+	RouteError       = "error"        // 错误路由
 
-	RouteServerKick             = "server.kick"              // 踢下线命令
-	RouteServerJoinGroup        = "server.join_group"         // 加入组
-	RouteServerLeaveGroup       = "server.leave_group"        // 离开组
-	RouteServerJoinGroupByUser  = "server.join_group_by_user" // 按用户加入组
-	RouteServerLeaveGroupByUser = "server.leave_group_by_user"// 按用户离开组
-	RouteServerCreateGroup      = "server.create_group"       // 创建组
-	RouteServerDeleteGroup      = "server.delete_group"       // 删除组
-	RouteServerSendToGroup      = "server.send_to_group"      // 向组发送消息
-	RouteServerGetGroupInfo     = "server.get_group_info"     // 获取组信息
-	RouteServerBroadcast        = "server.broadcast"          // 广播消息
-	RouteServerSendToUser       = "server.send_to_user"       // 向用户发送消息
+	RouteServerKick             = "server.kick"                // 踢下线命令
+	RouteServerJoinGroup        = "server.join_group"          // 加入组
+	RouteServerLeaveGroup       = "server.leave_group"         // 离开组
+	RouteServerJoinGroupByUser  = "server.join_group_by_user"  // 按用户加入组
+	RouteServerLeaveGroupByUser = "server.leave_group_by_user" // 按用户离开组
+	RouteServerCreateGroup      = "server.create_group"        // 创建组
+	RouteServerDeleteGroup      = "server.delete_group"        // 删除组
+	RouteServerSendToGroup      = "server.send_to_group"       // 向组发送消息
+	RouteServerGetGroupInfo     = "server.get_group_info"      // 获取组信息
+	RouteServerBroadcast        = "server.broadcast"           // 广播消息
+	RouteServerSendToUser       = "server.send_to_user"        // 向用户发送消息
 
-	RoutePing       = "ping"        // 心跳探测
-	RoutePong       = "pong"        // 心跳响应
-	RouteTest       = "test"        // 测试路由
-	RouteTestResult = "testResult"  // 测试结果
-	RouteEcho       = "echo"        // 回显路由
+	RoutePing       = "ping"       // 心跳探测
+	RoutePong       = "pong"       // 心跳响应
+	RouteTest       = "test"       // 测试路由
+	RouteTestResult = "testResult" // 测试结果
+	RouteEcho       = "echo"       // 回显路由
 
-	RouteBatch = "_batch"           // 批量路由后缀
+	RouteBatch = "_batch" // 批量路由后缀
 )
 
 // CmdForMessage 根据路由和消息名生成命令码（FNV32a 哈希取正值）

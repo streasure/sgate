@@ -1,0 +1,17 @@
+log:
+  level: info
+  format: json
+  console:
+    enabled: false
+  file:
+    enabled: true
+    path: logs/logincheck.log
+    rotate:
+      max_size: 10
+      max_backups: 1
+      max_age: 1
+  async:
+    enabled: true
+    buffer_size: 1000
+    batch_size: 1
+    flush_interval: 1

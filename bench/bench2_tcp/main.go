@@ -32,7 +32,7 @@ func main() {
 	flag.Parse()
 	defer logutil.Init(*logConfig)()
 
-	tlog.Info(context.Background(), "bench2 started addr=%s duration=%s parallel=%d serverID=%s loginBatch=%d", *addr, duration.String(), *parallel, *serverID, *loginBatch)
+	tlog.Info(context.TODO(), "bench2 started addr=%s duration=%s parallel=%d serverID=%s loginBatch=%d", *addr, duration.String(), *parallel, *serverID, *loginBatch)
 
 	var totalRecv atomic.Int64
 	var totalAck atomic.Int64
@@ -47,13 +47,13 @@ func main() {
 
 	// 存活连接：登录成功后存入，start 信号后开始接收
 	type connEntry struct {
-		conn   net.Conn
-		idx    int
+		conn net.Conn
+		idx  int
 	}
 	var conns []*connEntry
 	var connMu sync.Mutex
 
-	tlog.Info(context.Background(), "bench2 login phase started parallel=%d batchSize=%d", *parallel, batchSize)
+	tlog.Info(context.TODO(), "bench2 login phase started parallel=%d batchSize=%d", *parallel, batchSize)
 
 	for batch := 0; batch < *parallel; batch += batchSize {
 		end := batch + batchSize
@@ -72,7 +72,7 @@ func main() {
 				defer batchWG.Done()
 				c, err := net.DialTimeout("tcp", *addr, 5*time.Second)
 				if err != nil {
-					tlog.Warn(context.Background(), "bench2 dial failed client=%d error=%v", idx, err)
+					tlog.Warn(context.TODO(), "bench2 dial failed client=%d error=%v", idx, err)
 					connectionsFailed.Add(1)
 					batchReady.Done()
 					return
@@ -82,7 +82,7 @@ func main() {
 				loginReq := &protocol.LoginGateReq{ServerId: *serverID, UserId: userID}
 				loginBody, _ := proto.Marshal(loginReq)
 				if err := sendTCPFrame(c, &protocol.MessageFrame{Cmd: cmdLoginGate, SeqId: 1, Body: loginBody}); err != nil {
-					tlog.Warn(context.Background(), "bench2 send login failed client=%d error=%v", idx, err)
+					tlog.Warn(context.TODO(), "bench2 send login failed client=%d error=%v", idx, err)
 					c.Close()
 					connectionsFailed.Add(1)
 					batchReady.Done()
@@ -91,7 +91,7 @@ func main() {
 
 				resp, err := readTCPFrame(c)
 				if err != nil || resp.Cmd != cmdLoginGateAck {
-					tlog.Warn(context.Background(), "bench2 login ack failed client=%d error=%v", idx, err)
+					tlog.Warn(context.TODO(), "bench2 login ack failed client=%d error=%v", idx, err)
 					c.Close()
 					connectionsFailed.Add(1)
 					batchReady.Done()
@@ -107,13 +107,13 @@ func main() {
 		}
 		batchReady.Wait()
 		// 本批完成，继续下一批
-		tlog.Info(context.Background(), "bench2 login batch done batch=%d~%d ack=%d failed=%d totalConns=%d", batch, end-1, totalAck.Load(), connectionsFailed.Load(), len(conns))
+		tlog.Info(context.TODO(), "bench2 login batch done batch=%d~%d ack=%d failed=%d totalConns=%d", batch, end-1, totalAck.Load(), connectionsFailed.Load(), len(conns))
 	}
 
 	connected := len(conns)
-	tlog.Info(context.Background(), "bench2 all logins done connected=%d failed=%d", connected, connectionsFailed.Load())
+	tlog.Info(context.TODO(), "bench2 all logins done connected=%d failed=%d", connected, connectionsFailed.Load())
 	if connected == 0 {
-		tlog.Info(context.Background(), "bench2 completed totalReceived=0 totalAck=%d connectionsFailed=%d elapsed=0.0", totalAck.Load(), connectionsFailed.Load())
+		tlog.Info(context.TODO(), "bench2 completed totalReceived=0 totalAck=%d connectionsFailed=%d elapsed=0.0", totalAck.Load(), connectionsFailed.Load())
 		return
 	}
 
@@ -124,7 +124,7 @@ func main() {
 	}
 
 	// 阶段2：开始接收推送
-	tlog.Info(context.Background(), "bench2 receive phase started connections=%d duration=%s", connected, duration.String())
+	tlog.Info(context.TODO(), "bench2 receive phase started connections=%d duration=%s", connected, duration.String())
 	measureStart.Store(time.Now().UnixNano())
 
 	var recvWG sync.WaitGroup
@@ -170,7 +170,7 @@ func main() {
 				elapsed := time.Since(time.Unix(0, startedAt)).Seconds()
 				recv := totalRecv.Load()
 				rate := float64(recv) / elapsed
-				tlog.Info(context.Background(), "bench2 progress elapsed=%.1f received=%d ack=%d rate=%.0f", elapsed, recv, totalAck.Load(), rate)
+				tlog.Info(context.TODO(), "bench2 progress elapsed=%.1f received=%d ack=%d rate=%.0f", elapsed, recv, totalAck.Load(), rate)
 			case <-done:
 				return
 			}
@@ -194,9 +194,9 @@ func main() {
 		elapsed = time.Since(time.Unix(0, startedAt)).Seconds()
 	}
 
-	tlog.Info(context.Background(), "bench2 completed totalReceived=%d totalAck=%d connectionsFailed=%d elapsed=%.1f", total, totalAck.Load(), connectionsFailed.Load(), elapsed)
+	tlog.Info(context.TODO(), "bench2 completed totalReceived=%d totalAck=%d connectionsFailed=%d elapsed=%.1f", total, totalAck.Load(), connectionsFailed.Load(), elapsed)
 	if elapsed > 0 {
-		tlog.Info(context.Background(), "bench2 result avgReceiveRate=%.0f", float64(total)/elapsed)
+		tlog.Info(context.TODO(), "bench2 result avgReceiveRate=%.0f", float64(total)/elapsed)
 	}
 }
 

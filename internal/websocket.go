@@ -126,7 +126,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	buf.WriteString("\r\n")
 
 	if _, err := wsConn.Conn.Write(buf.Bytes()); err != nil {
-		tlog.Error(context.Background(), "WebSocket handshake write failed error=%v", err)
+		tlog.Error(context.TODO(), "WebSocket handshake write failed error=%v", err)
 		return gnet.Close
 	}
 
@@ -142,7 +142,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		conn.SetWS(true)
 	}
 
-	tlog.Debug(context.Background(), "WebSocket handshake success connectionID=%s", wsConn.ConnectionID)
+	tlog.Debug(context.TODO(), "WebSocket handshake success connectionID=%s", wsConn.ConnectionID)
 
 	return gnet.None
 }
@@ -220,7 +220,7 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 		}
 
 		if err := g.processWebSocketFrame(wsConn, opCode, payload); err != nil {
-			tlog.Error(context.Background(), "WebSocket frame process failed error=%v", err)
+			tlog.Error(context.TODO(), "WebSocket frame process failed error=%v", err)
 			return gnet.Close
 		}
 
@@ -254,7 +254,7 @@ func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOp
 	case WSOpText, WSOpBinary:
 		return g.handleWebSocketDataFrame(wsConn, payload)
 	default:
-		tlog.Warn(context.Background(), "unknown WebSocket opcode opCode=%d", opCode)
+		tlog.Warn(context.TODO(), "unknown WebSocket opcode opCode=%d", opCode)
 	}
 	return nil
 }
@@ -265,7 +265,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 
 	message, ok := decodeClientMessage(payload)
 	if !ok {
-		tlog.Error(context.Background(), "WebSocket message unmarshal failed")
+		tlog.Error(context.TODO(), "WebSocket message unmarshal failed")
 		errorMsg := newErrorResponse("error", "Invalid message format", "invalid message frame", string(payload))
 		responseData := marshalClientError(errorMsg)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
@@ -306,7 +306,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		// 关闭同用户的旧连接（重连场景），防止资源泄漏
 		if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
 			if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
-				tlog.Info(context.Background(), "WS检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
+				tlog.Info(context.TODO(), "WS检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
 					oldConnID, connectionID, fullUUID)
 				g.notifyLogicOffline(oldConn)
 				if oldConn.Conn != nil {
@@ -461,6 +461,6 @@ func (g *Gateway) sendHTTPResponse(conn gnet.Conn, statusCode int, statusText st
 	buf.WriteString("\r\n")
 
 	if _, err := conn.Write(buf.Bytes()); err != nil {
-		tlog.Debug(context.Background(), "write HTTP response failed error=%v", err)
+		tlog.Debug(context.TODO(), "write HTTP response failed error=%v", err)
 	}
 }

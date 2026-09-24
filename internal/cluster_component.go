@@ -22,6 +22,7 @@ type ClusterComponent struct {
 	grpcFunc         func(addr string)
 	Discovery        *uetcd.Component
 	GatewayDiscovery *uetcd.Component // 发现同一可用区内的其他网关。
+	LoginDiscovery   *uetcd.Component // 发现指定 zone 的 loginserver。
 	gatewayEvents    []uetcd.ServiceEvent
 	gatewayEventsMu  sync.RWMutex
 	Balancer         *clusterPkg.Balancer
@@ -110,13 +111,13 @@ func (c *ClusterComponent) Start() error {
 	if compCfg.Registration.ServiceID != "" {
 		advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
 		serviceID := c.cfg.Belong + "/" + c.cfg.ServerType + ":" + c.cfg.Zone
-		tlog.Info(context.Background(), "etcd 注册成功 serviceID=%s instanceID=%s address=%s mode=%s",
+		tlog.Info(context.TODO(), "etcd 注册成功 serviceID=%s instanceID=%s address=%s mode=%s",
 			serviceID,
 			c.cfg.ServerID,
 			advertiseAddr,
 			clusterMode)
 	} else {
-		tlog.Info(context.Background(), "etcd 逻辑服务发现已启动（网关自身不注册） serviceID=%s", c.cfg.Belong+"/Logic:"+c.cfg.Zone)
+		tlog.Info(context.TODO(), "etcd 逻辑服务发现已启动（网关自身不注册） serviceID=%s", c.cfg.Belong+"/Logic:"+c.cfg.Zone)
 	}
 
 	// 网关间发现仅在集群模式下启用
@@ -134,11 +135,29 @@ func (c *ClusterComponent) Start() error {
 			c.gatewayEventsMu.Unlock()
 		})
 		if err := c.GatewayDiscovery.Start(); err != nil {
-			tlog.Warn(context.Background(), "网关间发现启动失败，网关间协作已禁用 error=%v", err)
+			tlog.Warn(context.TODO(), "网关间发现启动失败，网关间协作已禁用 error=%v", err)
 			c.GatewayDiscovery = nil
 		} else {
-			tlog.Info(context.Background(), "网关间发现已启动 serviceID=%s", c.cfg.Belong+"/Gateway:"+c.cfg.Zone)
+			tlog.Info(context.TODO(), "网关间发现已启动 serviceID=%s", c.cfg.Belong+"/Gateway:"+c.cfg.Zone)
 		}
+	}
+
+	if c.cfg.Protection.LoginAuth.Mode == "loginserver" {
+		zone := c.cfg.Protection.LoginAuth.LoginServerZone
+		if zone == "" {
+			return fmt.Errorf("loginServerZone is required when loginAuth.mode is loginserver")
+		}
+		loginCompCfg := uetcd.ComponentConfig{
+			Etcd: etcdCfg,
+			Discovery: uetcd.DiscoveryConfig{
+				ServiceID: c.cfg.Belong + "/LoginServer:" + zone,
+			},
+		}
+		c.LoginDiscovery = uetcd.New(loginCompCfg)
+		if err := c.LoginDiscovery.Start(); err != nil {
+			return fmt.Errorf("start loginserver discovery: %w", err)
+		}
+		tlog.Info(context.TODO(), "loginserver discovery started serviceID=%s", c.cfg.Belong+"/LoginServer:"+zone)
 	}
 
 	// Leader 选举仅在集群模式下启用
@@ -147,7 +166,7 @@ func (c *ClusterComponent) Start() error {
 		c.Cluster.Start()
 	}
 
-	tlog.Info(context.Background(), "集群组件已启动 mode=%s serverType=%s serverID=%s zone=%s",
+	tlog.Info(context.TODO(), "集群组件已启动 mode=%s serverType=%s serverID=%s zone=%s",
 		clusterMode,
 		c.cfg.ServerType,
 		c.cfg.ServerID,
@@ -167,6 +186,9 @@ func (c *ClusterComponent) Destroy() {
 	}
 	if c.GatewayDiscovery != nil {
 		c.GatewayDiscovery.Destroy()
+	}
+	if c.LoginDiscovery != nil {
+		c.LoginDiscovery.Destroy()
 	}
 	if c.Cluster != nil {
 		c.Cluster.Stop()

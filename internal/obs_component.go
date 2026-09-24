@@ -38,7 +38,7 @@ func (c *ObservabilityComponent) Name() string { return "observability" }
 func (c *ObservabilityComponent) Order() int   { return 200 }
 
 func (c *ObservabilityComponent) Init() error {
-	tlog.Info(context.Background(), "observability component init")
+	tlog.Info(context.TODO(), "observability component init")
 
 	c.Tracer = obs.NewTracer(5 * time.Minute)
 	c.LatencyTracker = obs.NewLatencyTracker(10000)
@@ -59,14 +59,14 @@ func (c *ObservabilityComponent) Start() error {
 		obs.StartPProfServer(c.pprofAddr)
 	}
 
-	tlog.Info(context.Background(), "observability component started otel=%v pprof=%s",
+	tlog.Info(context.TODO(), "observability component started otel=%v pprof=%s",
 		c.otelCfg.Enabled,
 		c.pprofAddr)
 	return nil
 }
 
 func (c *ObservabilityComponent) Destroy() {
-	tlog.Info(context.Background(), "observability component destroying")
+	tlog.Info(context.TODO(), "observability component destroying")
 	if c.Tracer != nil {
 		c.Tracer.Stop()
 	}
