@@ -26,13 +26,15 @@ var (
 func main() {
 	flag.Parse()
 	if *showVer {
-		fmt.Printf("sgate gateway version: %s\n", gateway.Version)
+		// CLI 版本输出：tlog 尚未初始化，属非日志输出（AGENTS 允许 fmt）
+		fmt.Fprintf(os.Stdout, "sgate gateway version: %s\n", gateway.Version)
 		return
 	}
 
 	logComp := tlog.NewLogComponent(*logConfig)
 	if err := logComp.Init(); err != nil {
-		fmt.Printf("failed to initialize tlog: %v\n", err)
+		// tlog 初始化失败时 tlog 不可用，只能走 stderr
+		fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
 		return
 	}
 	defer logComp.Destroy()

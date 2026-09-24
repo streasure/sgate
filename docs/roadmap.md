@@ -69,6 +69,28 @@
 
 ---
 
+## 已实现（本迭代）
+
+| 项 | 状态 |
+| --- | --- |
+| LogoutGate 协议（`1000003/1000004`，断连无推送 + JWT Revoke） | ✅ |
+| Admin 封禁 HTTP（`/admin/ban|unban|bans`，先推 `CmdBanNtf` 再断，Bearer `admin.token`） | ✅ |
+| 进程内 `BanStore` | ✅（**TODO: 迁 MySQL**，多网关共享） |
+| LoginGate 封禁拦截（403） | ✅ |
+| JWT jti 持久化到 Connection + Revoke 接入 logout/ban | ✅ |
+| WS 关键修复：close 关 TCP、握手半包累积、分片重组、强制客户端 mask | ✅ |
+| `OnTick` 每秒采样 `msgRate`（修 Health 速率失真） | ✅ |
+| `config_1m.yaml` 补 `prometheus` 段 | ✅ |
+| `architecture.md` 去掉不存在的 `config.Set` | ✅ |
+
+### 封禁状态迁移 MySQL（TODO）
+
+- **问题：** `BanStore` 仅进程内存，重启丢失、多网关不共享
+- **方案：** MySQL 表 `user_bans(user_uuid PK, reason, jti, banned_at, expires_at)`；启动加载未过期记录；`/admin/ban` 双写内存+DB；定时清理过期行
+- **优先级：** P2
+
+---
+
 ## 已修复（P0 + P1 + P2 + P3）
 
 以下问题已在当前版本修复：

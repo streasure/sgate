@@ -51,6 +51,9 @@ const (
 	CmdError         int32 = 3       // 错误命令
 	CmdLoginGate     int32 = 1000001 // 网关登录请求
 	CmdLoginGateAck  int32 = 1000002 // 网关登录响应
+	CmdLogoutGate    int32 = 1000003 // 网关登出请求（断开当前连接，无业务推送）
+	CmdLogoutGateAck int32 = 1000004 // 网关登出响应
+	CmdBanNtf        int32 = 1000005 // 封禁通知推送（先推后断）
 	CmdLogicLoginReq int32 = 1100001 // 逻辑层登录请求
 	CmdLogicLoginAck int32 = 1100002 // 逻辑层登录响应
 	CmdHeartbeatReq  int32 = 1100010 // 心跳请求

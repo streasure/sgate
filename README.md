@@ -379,6 +379,22 @@ loginserver 可通过 etcd watch `{belong}/SGATE:{zone}` 前缀获取网关连�
 | `connIdleTimeout` | string | `30s` | 连接空闲超时 |
 | `preAuthCommands` | []int | `[1000001]` | 认证前允许的命令 |
 
+### 6.8.1 `admin` 管理端接口（stats server）
+
+挂载在 `httpPort` 的 HTTP 上，需 `Authorization: Bearer <token>`。**token 为空 = 接口关闭（fail-closed）**。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `admin.token` | string | `""` | 管理接口 Bearer token |
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/admin/ban` | 封禁：`{"userUuid","reason","jti?","ttlSeconds?"}`；先推 `CmdBanNtf(1000005)` 再断连，并撤销 JWT |
+| POST | `/admin/unban` | 解封：`{"userUuid"}` |
+| GET | `/admin/bans` | 当前有效封禁列表（内存，TODO→MySQL） |
+
+客户端登出：`CmdLogoutGate(1000003)` → 撤销 JWT → 通知逻辑服 → 断连（无业务推送）；ack 为 `CmdLogoutGateAck(1000004)`。
+
 ### 6.9 `security` 安全组件
 
 | 字段 | 类型 | 默认值 | 说明 |

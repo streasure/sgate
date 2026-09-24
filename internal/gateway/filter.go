@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"strconv"
+
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/types"
@@ -37,6 +39,17 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID str
 	// 镜像副作用标记
 	if fcx.Mirrored && g.trafficMirror != nil {
 		g.trafficMirror.Mirror(fcx)
+	}
+	// 持久化 JWT jti/exp 到连接，供 logout/封禁撤销
+	if jti := fcx.Metadata["jwt.jti"]; jti != "" {
+		if connObj := g.connectionManager.GetConnection(connectionID); connObj != nil {
+			connObj.SetJWTJti(jti)
+			if expStr := fcx.Metadata["jwt.exp"]; expStr != "" {
+				if exp, err := strconv.ParseInt(expStr, 10, 64); err == nil {
+					connObj.SetJWTExp(exp)
+				}
+			}
+		}
 	}
 	// 过滤器可能改写 Data（如降级兜底），优先使用过滤后的数据
 	payload := fcx.Data

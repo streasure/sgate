@@ -59,7 +59,15 @@ type WebSocketConnection struct {
 	Buffer       []byte
 	ConnectionID string
 	lastPingUnix atomic.Int64 // 纳秒时间戳，避免 time.Time 字段跨协程读写竞态
+
+	// 分片帧重组（FIN=0 的 continuation）
+	fragOp   WSOpCode
+	fragBuf  []byte
+	fragging bool
 }
+
+// maxWSHandshakeSize WebSocket 握手请求最大字节数（防半包无限缓冲）。
+const maxWSHandshakeSize = 16 * 1024
 
 // WebSocket连接状态常量
 const (
@@ -159,28 +167,29 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	return gnet.None
 }
 
-// parseWebSocketFrame 从缓冲区解析WebSocket帧，提取操作码和载荷数据。
+// parseWebSocketFrame 从缓冲区解析WebSocket帧，提取操作码、载荷、FIN 与 mask 位。
 // 支持不同长度的载荷（7位、16位、64位长度编码）和掩码解码。
-func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payload []byte, frameSize int, err error) {
+func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payload []byte, frameSize int, fin bool, masked bool, err error) {
 	if len(buffer) < 2 {
-		return 0, nil, 0, nil
+		return 0, nil, 0, false, false, nil
 	}
 
+	fin = (buffer[0] & 0x80) != 0
 	opCode = WSOpCode(buffer[0] & 0x0F)
-	masked := (buffer[1] & 0x80) != 0
+	masked = (buffer[1] & 0x80) != 0
 	length := uint64(buffer[1] & 0x7F)
 
 	frameSize = 2
 
 	if length == 126 {
 		if len(buffer) < 4 {
-			return 0, nil, 0, nil
+			return 0, nil, 0, false, false, nil
 		}
 		length = uint64(buffer[2])<<8 | uint64(buffer[3])
 		frameSize += 2
 	} else if length == 127 {
 		if len(buffer) < 10 {
-			return 0, nil, 0, nil
+			return 0, nil, 0, false, false, nil
 		}
 		length = uint64(buffer[2])<<56 | uint64(buffer[3])<<48 | uint64(buffer[4])<<40 | uint64(buffer[5])<<32 |
 			uint64(buffer[6])<<24 | uint64(buffer[7])<<16 | uint64(buffer[8])<<8 | uint64(buffer[9])
@@ -188,20 +197,20 @@ func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payl
 	}
 
 	if length > uint64(maxFrameSize) {
-		return 0, nil, 0, fmt.Errorf("frame too large: %d bytes", length)
+		return 0, nil, 0, false, false, fmt.Errorf("frame too large: %d bytes", length)
 	}
 
 	var mask [4]byte
 	if masked {
 		if len(buffer) < frameSize+4 {
-			return 0, nil, 0, nil
+			return 0, nil, 0, false, false, nil
 		}
 		copy(mask[:], buffer[frameSize:frameSize+4])
 		frameSize += 4
 	}
 
 	if len(buffer) < frameSize+int(length) {
-		return 0, nil, 0, nil
+		return 0, nil, 0, false, false, nil
 	}
 
 	payload = buffer[frameSize : frameSize+int(length)]
@@ -210,33 +219,88 @@ func parseWebSocketFrame(buffer []byte, maxFrameSize int) (opCode WSOpCode, payl
 		ws.Cipher(payload, mask, 0)
 	}
 
-	return opCode, payload, frameSize + int(length), nil
+	return opCode, payload, frameSize + int(length), fin, masked, nil
 }
 
 // handleWebSocketMessage 处理接收到的WebSocket数据，将其追加到缓冲区并逐帧解析处理。
 func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byte) (action gnet.Action) {
 	if wsConn.State.Load() == int32(WSStateHandshake) {
-		return g.handleWebSocketHandshake(wsConn, data)
-	}
-
-	if len(wsConn.Buffer)+len(data) > g.getMaxWSBufferSize() {
-		wsConn.Buffer = nil
-		return gnet.Close
-	}
-	wsConn.Buffer = append(wsConn.Buffer, data...)
-
-	for {
-		opCode, payload, frameSize, err := parseWebSocketFrame(wsConn.Buffer, g.getMaxWSFrameSize())
-		if err != nil || frameSize == 0 {
+		// 半包累积：跨 packet 等待完整 \r\n\r\n 再握手
+		if len(wsConn.Buffer)+len(data) > maxWSHandshakeSize {
+			g.sendHTTPResponse(wsConn.Conn, 400, "Bad Request", nil)
+			return gnet.Close
+		}
+		wsConn.Buffer = append(wsConn.Buffer, data...)
+		idx := bytes.Index(wsConn.Buffer, []byte("\r\n\r\n"))
+		if idx < 0 {
+			return gnet.None // 等待更多数据
+		}
+		handshake := wsConn.Buffer[:idx+4]
+		rest := wsConn.Buffer[idx+4:]
+		action = g.handleWebSocketHandshake(wsConn, handshake)
+		if action == gnet.Close {
+			return action
+		}
+		// 握手成功后残留数据按帧继续处理
+		wsConn.Buffer = append([]byte(nil), rest...)
+		if len(wsConn.Buffer) == 0 {
+			wsConn.Buffer = nil
 			return gnet.None
 		}
+		// fall through 到帧解析
+	} else if len(wsConn.Buffer)+len(data) > g.getMaxWSBufferSize() {
+		wsConn.Buffer = nil
+		return gnet.Close
+	} else {
+		wsConn.Buffer = append(wsConn.Buffer, data...)
+	}
 
-		if err := g.processWebSocketFrame(wsConn, opCode, payload); err != nil {
-			tlog.Error(context.TODO(), "WebSocket frame process failed error=%v", err)
+	for {
+		opCode, payload, frameSize, fin, masked, err := parseWebSocketFrame(wsConn.Buffer, g.getMaxWSFrameSize())
+		if err != nil {
+			return gnet.Close
+		}
+		if frameSize == 0 {
+			return gnet.None
+		}
+		// RFC6455：客户端帧必须 mask
+		if !masked {
+			tlog.Warn(context.TODO(), "unmasked client frame rejected connectionID=%s", wsConn.ConnectionID)
 			return gnet.Close
 		}
 
-		// 剩余数据较小时复制到紧凑 buffer，避免大数组长期驻留内存
+		// 分片重组
+		if opCode == 0x0 { // continuation
+			if !wsConn.fragging {
+				tlog.Warn(context.TODO(), "unexpected continuation frame connectionID=%s", wsConn.ConnectionID)
+				return gnet.Close
+			}
+			if len(wsConn.fragBuf)+len(payload) > g.getMaxWSFrameSize() {
+				return gnet.Close
+			}
+			wsConn.fragBuf = append(wsConn.fragBuf, payload...)
+			if fin {
+				msg := wsConn.fragBuf
+				op := wsConn.fragOp
+				wsConn.fragBuf = nil
+				wsConn.fragging = false
+				if err := g.processWebSocketFrame(wsConn, op, msg); err != nil {
+					tlog.Error(context.TODO(), "WebSocket frame process failed error=%v", err)
+					return gnet.Close
+				}
+			}
+		} else if !fin {
+			// 首片分帧
+			wsConn.fragging = true
+			wsConn.fragOp = opCode
+			wsConn.fragBuf = append([]byte(nil), payload...)
+		} else {
+			if err := g.processWebSocketFrame(wsConn, opCode, payload); err != nil {
+				tlog.Error(context.TODO(), "WebSocket frame process failed error=%v", err)
+				return gnet.Close
+			}
+		}
+
 		remaining := len(wsConn.Buffer) - frameSize
 		if remaining > 0 && remaining < cap(wsConn.Buffer)/4 {
 			newBuf := make([]byte, remaining)
@@ -247,6 +311,7 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 		}
 
 		if len(wsConn.Buffer) == 0 {
+			wsConn.Buffer = nil
 			break
 		}
 	}
@@ -318,6 +383,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return nil
 	}
 
+	if message.Cmd == routes.CmdLogoutGate {
+		return g.handleWSLogoutGate(wsConn, connectionID, message)
+	}
+
 	// 异步路径：投递到 worker pool
 	if g.pipelineWorkerPool != nil {
 		payloadCopy := append([]byte(nil), payload...)
@@ -335,6 +404,24 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
 		responseData := routes.MarshalClientError(errorResp)
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
+	}
+	return nil
+}
+
+// handleWSLogoutGate 处理 WS 登出：撤销 JWT → 通知逻辑服 → 断开（尽力回写 ack 后关连接）。
+func (g *Gateway) handleWSLogoutGate(wsConn *WebSocketConnection, connectionID string, message *protoGw.StreamData) error {
+	connObj := g.connectionManager.GetConnection(connectionID)
+	if connObj != nil {
+		g.revokeConnJWT(connObj)
+		g.notifyLogicOffline(connObj)
+	}
+	ackBody, _ := proto.Marshal(&protoGw.LoginGateAck{Code: 0, Message: "ok", SessionId: connectionID})
+	if data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil {
+		_ = g.sendWebSocketMessageAsync(wsConn, WSOpBinary, data)
+	}
+	wsConn.State.Store(int32(WSStateClosing))
+	if wsConn.Conn != nil {
+		_ = wsConn.Conn.Close()
 	}
 	return nil
 }
@@ -361,6 +448,11 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 	}
 	if !g.validateLoginKey(req.UserId, req.LoginKey) {
 		ack(401, "invalid login key")
+		return
+	}
+	if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
+		ack(code, text)
+	}) {
 		return
 	}
 	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
@@ -411,11 +503,12 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 	}
 }
 
-// handleWebSocketCloseFrame 处理WebSocket关闭帧，发送关闭响应并清理连接资源。
+// handleWebSocketCloseFrame 处理WebSocket关闭帧：回写 close 帧并关闭底层 TCP，
+// 确保连接从 manager/wsConnections 清理（OnClose 亦会兜底），避免僵尸 FD。
 func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 	closeFrame := []byte{0x88, 0x02, 0x03, 0xE8}
 	if _, err := wsConn.Conn.Write(closeFrame); err != nil {
-		return err
+		tlog.Debug(context.TODO(), "ws close frame write failed error=%v", err)
 	}
 
 	wsConn.State.Store(int32(WSStateClosed))
@@ -423,6 +516,10 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 		g.connectionManager.RemoveConnection(wsConn.ConnectionID)
 	}
 	g.wsConnections.Delete(wsConn)
+	// 关闭底层 TCP，触发 OnClose 清理（H1：原先仅清 map 不关 socket → FD 泄漏）
+	if wsConn.Conn != nil {
+		_ = wsConn.Conn.Close()
+	}
 	return nil
 }
 

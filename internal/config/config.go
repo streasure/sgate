@@ -38,6 +38,13 @@ type Config struct {
 	Monitoring      MonitoringConfig      `default:""`
 	Perf            PerfConfig            `default:""`
 	Pipeline        PipelineConfig        `default:""`
+	Admin           AdminConfig           `default:""`
+}
+
+// AdminConfig 管理端 HTTP 接口鉴权（stats server 上的 /admin/*）。
+// token 为空 = 管理接口关闭（fail-closed）。
+type AdminConfig struct {
+	Token string `yaml:"token"`
 }
 
 // PipelineConfig Pipeline 异步化配置

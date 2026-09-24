@@ -96,8 +96,9 @@ func (g *Gateway) Stats() prometheus.Stats {
 	s.MessagesFailed = g.messagesFailed.Load()
 
 	now := time.Now()
+	_ = now
 	if g.msgRate != nil {
-		g.msgRate.record(now, s.MessagesReceived)
+		// 采样由 OnTick 每秒执行；此处只读取速率，避免与 OnTick 双写导致失真
 		s.MessagesPerSecond = g.msgRate.rate()
 	}
 
@@ -260,6 +261,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 	mux.HandleFunc("/health", g.ServeHealthHTTP)
 	mux.HandleFunc("/ready", g.ServeHealthHTTP)
 	mux.HandleFunc("/live", g.ServeHealthHTTP)
+	g.registerAdminRoutes(mux)
 	srv := &http.Server{Addr: addr, Handler: mux}
 	g.statsServer = srv
 	go func() {

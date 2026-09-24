@@ -92,3 +92,7 @@ pipeline:
   asyncEnabled: true       # 启用异步 pipeline（worker pool 模式）
   workerShards: 48         # worker 分片数（默认 CPU×4=48），同一连接严格有序
   workerQueueSize: 262144  # 总任务队列大小
+
+# 管理端 /admin/* Bearer token；空 = 关闭（fail-closed）
+admin:
+  token: ""

@@ -308,6 +308,9 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	if cmd == routes.CmdLoginGate {
 		return g.handleLoginGate(c, connectionID, message)
 	}
+	if cmd == routes.CmdLogoutGate {
+		return g.handleLogoutGate(c, connectionID, message)
+	}
 
 	// 异步路径：投递到 worker pool，event loop 立即返回
 	if g.pipelineWorkerPool != nil {

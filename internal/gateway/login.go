@@ -116,6 +116,15 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		return gnet.None
 	}
 
+	// 登录前封禁检查（内存 BanStore；TODO 迁 MySQL）
+	if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
+		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: req.ServerId}
+		body, _ := proto.Marshal(ack)
+		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+	}) {
+		return gnet.Close
+	}
+
 	// 校验与绑定在 worker 中执行，避免同步 gRPC 阻塞 event loop。
 	// 成功后在 worker 中回写 LoginGateAck（writeFrame 在 worker 中改用 AsyncWrite）。
 	go g.finishLoginGate(c, connectionID, message, req)
@@ -132,6 +141,12 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 	}
 	if !g.validateLoginKey(req.UserId, req.LoginKey) {
 		writeAck(401, "invalid login key", req.ServerId)
+		return
+	}
+	// 二次封禁检查（worker 路径，防竞态补写）
+	if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
+		writeAck(code, text, req.ServerId)
+	}) {
 		return
 	}
 	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)

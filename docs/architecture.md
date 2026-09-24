@@ -55,6 +55,7 @@ Gateway 结构体承载全部接入侧状态：
 | 生命周期 | gateway.go | `NewGateway()`, `Init/Start/Destroy`, `StartServices` |
 | gnet 事件 | handlers.go | `OnOpen/OnTraffic/OnClose`（原 conn.go） |
 | 登录 | login.go | `handleLoginGate`, session 绑定 |
+| 登出/封禁 | admin_ban.go | `handleLogoutGate`（断连无推送）、`/admin/ban`（先推 `CmdBanNtf` 再断）、内存 `BanStore`（TODO→MySQL） |
 | WebSocket | websocket.go | 握手升级、帧编解码 |
 | 消息管道 | pipeline.go | 认证→安全→过滤→转发 |
 | 过滤器 | filter.go | SPI 加载、`types.GetFilterChain()` |
@@ -266,8 +267,8 @@ var _ backend.GatewayInterface = (*Gateway)(nil)
 
 ## 7. 配置与热更新
 
-- **冷启动**：`config.Load()` → `config.Set()` → 组件通过 `config.Get()` 读取
-- **热更新**：`configWatcher` 监听文件 → `handleConfigUpdate` 应用差异
+- **冷启动**：`config.Load()` → 全局 `conf` 指针 → 组件通过 `config.Get()` 读取（无 `config.Set`）
+- **热更新**：`configWatcher` 监听 `config.Path()` 指定文件 → `handleConfigUpdate` 应用差异
 - **支持热更的参数**：限流阈值、黑名单、过载保护、JWT、灰度、镜像、降级、连接限制、连接级流控
 
 ---

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -88,6 +89,7 @@ func (f *JWTAuthFilter) Process(fc *types.FilterContext) (bool, error) {
 	}
 	fc.UserUUID = claims.Sub
 	fc.Metadata["jwt.jti"] = claims.Jti
+	fc.Metadata["jwt.exp"] = strconv.FormatInt(claims.Exp, 10)
 	return true, nil
 }
 

@@ -605,6 +605,10 @@ func (g *Gateway) metricsLogEnabled() bool {
 }
 
 func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
+	// 每秒滚动采样消息速率（Stats/Health 依赖；原先仅在 Stats 调用时采样，单独查 /health 会失真）
+	if g.msgRate != nil {
+		g.msgRate.record(time.Now(), g.messagesReceived.Load())
+	}
 	if g.metricsLogEnabled() {
 		g.logMetrics()
 	}

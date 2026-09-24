@@ -34,6 +34,8 @@ type Connection struct {
 	serverID    atomic.Value // 保存绑定的逻辑服标识。
 	isWS        atomic.Bool
 	logicClient atomic.Value // LogicClientProvider 缓存，避免每条消息查询连接池
+	jwtJti      atomic.Value // string：JWT jti（logout/封禁时撤销）
+	jwtExp      atomic.Int64 // JWT exp（Unix 秒；0=未知）
 
 	// 连接级流控
 	msgRateMu      sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
@@ -122,6 +124,25 @@ func (c *Connection) GetServerID() string {
 
 // SetWS 设置连接是否使用 WebSocket 传输。
 func (c *Connection) SetWS(v bool) { c.isWS.Store(v) }
+
+// SetJWTJti 持久化当前会话 JWT jti（供 logout/封禁撤销）。
+func (c *Connection) SetJWTJti(jti string) { c.jwtJti.Store(jti) }
+
+// GetJWTJti 返回连接上缓存的 JWT jti，无则空串。
+func (c *Connection) GetJWTJti() string {
+	if v := c.jwtJti.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// SetJWTExp 持久化 JWT 过期时间（Unix 秒）。
+func (c *Connection) SetJWTExp(exp int64) { c.jwtExp.Store(exp) }
+
+// GetJWTExp 返回连接上缓存的 JWT exp。
+func (c *Connection) GetJWTExp() int64 { return c.jwtExp.Load() }
 
 // CheckAndIncrementMsgRate 检查连接级消息速率是否超限，未超限则自增计数。
 // maxPerConn=0 表示不限制。返回 true 表示允许，false 表示超限。
