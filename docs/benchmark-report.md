@@ -232,6 +232,6 @@ standalone 和 cluster 模式均向 etcd 注册网关连接信息，格式为 JS
 }
 ```
 
-- etcd key: `/services/Gateway:{zone}/{serverID}`
+- etcd key: `/services/{belong}/{SERVER_TYPE_SGATE}:{zone}/{instanceId}`（2026-09-24 起使用 protocol 枚举）
 - lease: 自动续期，TTL 默认 10s
-- loginserver 通过 etcd watch 前缀 `/services/Gateway:` 获取网关连接地址
+- loginserver 通过 etcd watch 前缀 `/services/{belong}/SGATE:` 获取网关连接地址

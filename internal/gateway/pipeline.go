@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"runtime"
 	"strconv"
 	"sync"
@@ -80,6 +79,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	// 阶段2：连接/认证状态检查
 	connObj := g.connectionManager.GetConnection(connectionID)
 	if connObj == nil || connObj.GetServerID() == "" {
+		g.messagesDroppedAuth.Add(1)
 		return PipelineResult{Action: gnet.Close}
 	}
 	if !connObj.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
@@ -144,8 +144,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 				g.messagesDroppedBlacklist.Add(1)
 				return PipelineResult{Action: gnet.None}
 			}
-			whitelist := g.whitelistBlacklist.GetWhitelist()
-			if len(whitelist) > 0 && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
+			if !g.whitelistBlacklist.WhitelistEmpty() && !g.whitelistBlacklist.IsInWhitelist(remoteIP) {
 				g.messagesDroppedBlacklist.Add(1)
 				return PipelineResult{Action: gnet.None}
 			}
@@ -167,8 +166,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			}
 		}
 		if g.circuitBreakerMgr != nil {
-			breaker := g.getOrCreateBreaker(routeKey)
-			if !breaker.Allow() {
+			if breaker := g.getOrCreateBreaker(routeKey); breaker != nil && !breaker.Allow() {
 				g.messagesDroppedCircuit.Add(1)
 				return PipelineResult{Action: gnet.None}
 			}
@@ -177,6 +175,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		// 阶段4：消息完整性检查（可选）
 		if protection.VerifyInbound {
 			if err := g.messageIntegrity.ProcessMessage(message); err != nil {
+				g.messagesDroppedIntegrity.Add(1)
 				return PipelineResult{
 					Action: gnet.None,
 					Error:  fmt.Errorf("message integrity check failed: %w", err),
@@ -193,7 +192,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 
 		// 阶段5：过滤器链（JWT、金丝雀、镜像、OpenTelemetry、降级）
-		protoMsg, filterOK = g.applyForwardFilters(conn, message.Data, connectionID, cmd)
+		protoMsg, filterOK = g.applyForwardFilters(conn, message.Data, connectionID, cmd, message.SeqId)
 		if !filterOK {
 			if span != nil && g.tracer != nil {
 				g.tracer.EndSpan(span)
@@ -221,6 +220,9 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			if cmd > 0 && protoMsg.Cmd == 0 {
 				protoMsg.Cmd = cmd
 			}
+			if protoMsg.SeqId == 0 && message.SeqId != 0 {
+				protoMsg.SeqId = message.SeqId
+			}
 		}
 	}
 
@@ -237,7 +239,9 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		tlog.Warn(context.TODO(), "client message forward failed sessionID=%s serverID=%s cmd=%d error=%v", connectionID, connObj.GetServerID(), cmd, sendErr)
 		g.messagesDroppedFull.Add(1)
 		if g.circuitBreakerMgr != nil {
-			g.getOrCreateBreaker(routeKey).RecordFailure()
+			if breaker := g.getOrCreateBreaker(routeKey); breaker != nil {
+				breaker.RecordFailure()
+			}
 		}
 		if g.balancer != nil {
 			g.balancer.RecordFailure(routeKey)
@@ -248,7 +252,9 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	} else {
 		g.messagesForwarded.Add(1)
 		if g.circuitBreakerMgr != nil {
-			g.getOrCreateBreaker(routeKey).RecordSuccess()
+			if breaker := g.getOrCreateBreaker(routeKey); breaker != nil {
+				breaker.RecordSuccess()
+			}
 		}
 		if g.balancer != nil {
 			g.balancer.RecordSuccess(routeKey)
@@ -390,8 +396,9 @@ func (p *PipelineWorkerPool) processTask(task *pipelineTaskData) {
 	if result.Error != nil {
 		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
 		respData, _ := proto.Marshal(errorResp)
-		writeFrame(task.conn, respData)
+		writeFrameAsync(task.conn, respData)
 	}
+	applyAsyncResult(task.conn, nil, result)
 }
 
 // processWSTask 在 worker goroutine 中执行 WebSocket pipeline 处理。
@@ -400,9 +407,33 @@ func (p *PipelineWorkerPool) processWSTask(task *wsPipelineTaskData) {
 	if result.Error != nil {
 		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
 		responseData := routes.MarshalClientError(errorResp)
-		p.gw.sendWebSocketMessage(task.wsConn, WSOpBinary, responseData)
+		p.gw.sendWebSocketMessageAsync(task.wsConn, WSOpBinary, responseData)
 	}
+	applyAsyncResult(task.wsConn.Conn, task.wsConn, result)
 }
+
+// applyAsyncResult 在 worker 中执行 pipeline 返回的 Action（如 Close）。
+// gnet.Conn.Close 是并发安全的；不得在 worker 中使用非 Async 的 Write。
+func applyAsyncResult(conn gnet.Conn, wsConn *WebSocketConnection, result PipelineResult) {
+	if result.Action != gnet.Close {
+		return
+	}
+	if wsConn != nil {
+		wsConn.State.Store(int32(WSStateClosing))
+	}
+	_ = conn.Close()
+}
+
+// writeFrameAsync 从 worker goroutine 安全写 TCP 帧（gnet 要求跨协程用 AsyncWrite）。
+func writeFrameAsync(conn gnet.Conn, data []byte) {
+	if conn == nil {
+		return
+	}
+	_ = conn.AsyncWrite(data, noopAsyncCallback)
+}
+
+// noopAsyncCallback AsyncWrite 完成回调，忽略错误。
+func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
 
 // Submit 将 TCP pipeline 任务提交到对应分片的 worker。
 func (p *PipelineWorkerPool) Submit(task pipelineTaskData) bool {
@@ -434,9 +465,21 @@ func (p *PipelineWorkerPool) SubmitWS(task wsPipelineTaskData) bool {
 
 // getShard 根据 connectionID 计算分片索引。
 func (p *PipelineWorkerPool) getShard(connectionID string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(connectionID))
-	return h.Sum32() % uint32(p.shards)
+	return fnvHashString(connectionID) % uint32(p.shards)
+}
+
+// fnvHashString 内联 FNV-1a，避免热路径每次分配 hash.Hash32 接口。
+func fnvHashString(s string) uint32 {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return h
 }
 
 // Stats 返回工作池统计信息。

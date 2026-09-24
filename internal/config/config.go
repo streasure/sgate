@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strconv"
 	"sync/atomic"
 
@@ -66,6 +67,9 @@ func (c *Config) PortAddress() string {
 type MonitoringConfig struct {
 	Prometheus PrometheusConfig `yaml:"prometheus"`
 	PprofAddr  string           `yaml:"pprofAddr"`
+	// DisableMetricsLog 关闭每秒打印 gateway metrics 日志（OnTick）。
+	// 线上建议 true，避免日志洪水；压测/排障可 false 打开。默认 false=保持每秒打。
+	DisableMetricsLog bool `yaml:"disableMetricsLog"`
 }
 
 // PrometheusConfig Prometheus 指标暴露配置
@@ -322,6 +326,170 @@ type Transport struct {
 	Type     string `yaml:"type"`
 }
 
+var conf atomic.Pointer[Config]
+var confPath atomic.Value // string：最近一次 Load 的配置文件路径
+
+// Validate 校验必填配置项。Load/LoadConfig 解析成功后调用。
+func (c *Config) Validate() error {
+	if c.HttpPort <= 0 {
+		return fmt.Errorf("httpPort is required and must be > 0")
+	}
+	if c.Belong == "" {
+		return fmt.Errorf("belong is required")
+	}
+	if c.ServerID == "" {
+		return fmt.Errorf("serverId is required")
+	}
+	if c.ServerType == "" {
+		return fmt.Errorf("serverType is required")
+	}
+	if c.Zone == "" {
+		return fmt.Errorf("zone is required")
+	}
+	if len(c.Transports) == 0 {
+		return fmt.Errorf("transports is required")
+	}
+	return nil
+}
+
+// ApplyRuntimeDefaults 为运行时零值字段补齐安全默认值。
+// Load/LoadConfig 与配置热更新必须在 Store 前调用；幂等，可重复调用。
+// 默认值与压测/生产网关当前行为保持一致（勿随意改数值，避免吞吐/内存回归）。
+func (c *Config) ApplyRuntimeDefaults() {
+	p := &c.Protection
+	if p.MaxFrameSize <= 0 {
+		p.MaxFrameSize = DefaultMaxFrameSize
+	}
+	if p.MaxFrameBufSize <= 0 {
+		// 与历史网关运行时默认一致（4MB）；百万连接场景请在 yaml 显式设 64KB
+		p.MaxFrameBufSize = DefaultMaxFrameSize
+	}
+	if p.MaxWSFrameSize <= 0 {
+		p.MaxWSFrameSize = DefaultMaxWSFrameSize
+	}
+	if p.MaxWSBufferSize <= 0 {
+		p.MaxWSBufferSize = DefaultMaxWSFrameSize
+	}
+	if p.WSHeartbeatTimeout <= 0 {
+		p.WSHeartbeatTimeout = DefaultWSHeartbeatTimeoutSec
+	}
+	if p.WSCheckInterval <= 0 {
+		p.WSCheckInterval = DefaultWSCheckIntervalSec
+	}
+	if p.ConnCheckInterval == "" {
+		p.ConnCheckInterval = DefaultConnCheckInterval
+	}
+	if p.ConnIdleTimeout == "" {
+		p.ConnIdleTimeout = DefaultConnIdleTimeout
+	}
+
+	g := &c.GRPC
+	if g.Port <= 0 {
+		g.Port = DefaultGRPCPort
+	}
+	// WindowSize/MaxMessageSize 与历史网关零值默认保持一致（勿改成 defaults.go 的 16MB/8MB，避免压测回归）
+	if g.WindowSize <= 0 {
+		g.WindowSize = DefaultGatewayGRPCWindowSize
+	}
+	if g.MaxMessageSize <= 0 {
+		g.MaxMessageSize = DefaultGatewayGRPCMaxMessageSize
+	}
+
+	s := &c.Stream
+	// 与历史网关零值默认一致
+	if s.SendChannelSize <= 0 {
+		s.SendChannelSize = DefaultGatewayStreamSendChannelSize
+	}
+	if s.ReceiveBatchSize <= 0 {
+		s.ReceiveBatchSize = DefaultStreamReceiveBatchSize
+	}
+	if s.QueuePolicy.Policy == "" {
+		s.QueuePolicy.Policy = DefaultStreamQueuePolicy
+	}
+	if s.QueuePolicy.MaxSize <= 0 {
+		s.QueuePolicy.MaxSize = DefaultStreamQueueMaxSize
+	}
+	if s.QueuePolicy.BlockTimeout == "" {
+		s.QueuePolicy.BlockTimeout = DefaultStreamBlockTimeout
+	}
+	if s.QueuePolicy.BackpressureThreshold <= 0 {
+		s.QueuePolicy.BackpressureThreshold = DefaultBackpressureThreshold
+	}
+	if s.QueuePolicy.SendTimeout == "" {
+		s.QueuePolicy.SendTimeout = DefaultSendTimeout
+	}
+
+	if c.Security.RateLimit.MaxTokens <= 0 {
+		c.Security.RateLimit.MaxTokens = DefaultRateLimitMaxTokens
+	}
+	if c.Security.RateLimit.TokenRefresh == "" {
+		c.Security.RateLimit.TokenRefresh = DefaultRateLimitTokenRefresh
+	}
+	if c.Security.CircuitBreaker.FailureThreshold <= 0 {
+		c.Security.CircuitBreaker.FailureThreshold = DefaultCircuitBreakerFailureThreshold
+	}
+	if c.Security.CircuitBreaker.SuccessThreshold <= 0 {
+		c.Security.CircuitBreaker.SuccessThreshold = DefaultCircuitBreakerSuccessThreshold
+	}
+	if c.Security.CircuitBreaker.Timeout == "" {
+		c.Security.CircuitBreaker.Timeout = DefaultCircuitBreakerTimeout
+	}
+	if c.JWTAuth.HeaderField == "" {
+		c.JWTAuth.HeaderField = DefaultJWTHeaderField
+	}
+	if c.WAF.MaxPayloadSize <= 0 {
+		c.WAF.MaxPayloadSize = DefaultWAFMaxPayloadSize
+	}
+	if c.WAF.BlockAction == "" {
+		c.WAF.BlockAction = DefaultWAFBlockAction
+	}
+	if c.Pipeline.WorkerShards <= 0 {
+		c.Pipeline.WorkerShards = 0 // 0 = runtime.NumCPU()*4，由 pool 计算
+	}
+	if c.Pipeline.WorkerQueueSize <= 0 {
+		c.Pipeline.WorkerQueueSize = 4096
+	}
+	if c.Protection.CheckIntervalMs <= 0 {
+		c.Protection.CheckIntervalMs = DefaultOverloadCheckIntervalMs
+	}
+	if c.Protection.CPUThreshold <= 0 {
+		c.Protection.CPUThreshold = DefaultOverloadCPUThreshold
+	}
+	// Monitoring.PprofAddr 空串 = 关闭 pprof，不填默认值
+	if c.Monitoring.Prometheus.Enabled {
+		if c.Monitoring.Prometheus.Addr == "" {
+			c.Monitoring.Prometheus.Addr = DefaultPrometheusAddr
+		}
+		if c.Monitoring.Prometheus.Path == "" {
+			c.Monitoring.Prometheus.Path = DefaultPrometheusPath
+		}
+		if c.Monitoring.Prometheus.Prefix == "" {
+			c.Monitoring.Prometheus.Prefix = DefaultPrometheusPrefix
+		}
+	}
+	if c.OTelTracer.ServiceName == "" {
+		c.OTelTracer.ServiceName = DefaultOTelServiceName
+	}
+	if c.OTelTracer.SampleRate <= 0 {
+		c.OTelTracer.SampleRate = DefaultOTelSampleRate
+	}
+	if c.OTelTracer.QueueSize <= 0 {
+		c.OTelTracer.QueueSize = DefaultOTelQueueSize
+	}
+	if c.OTelTracer.Workers <= 0 {
+		c.OTelTracer.Workers = DefaultOTelWorkers
+	}
+	if c.Alert.RateLimit <= 0 {
+		c.Alert.RateLimit = DefaultAlertRateLimitPerMin
+	}
+	if c.TrafficMirror.QueueSize <= 0 {
+		c.TrafficMirror.QueueSize = DefaultMirrorQueueSize
+	}
+	if c.TrafficMirror.Workers <= 0 {
+		c.TrafficMirror.Workers = DefaultMirrorWorkers
+	}
+}
+
 // LoadConfig 从指定的 YAML 文件加载配置，若未找到则使用默认配置
 // 采用合并语义：默认配置 + YAML 覆盖
 func LoadConfig(configFiles ...string) (*Config, error) {
@@ -329,11 +497,12 @@ func LoadConfig(configFiles ...string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	cfg.ApplyRuntimeDefaults()
 	return cfg, nil
 }
-
-var conf atomic.Pointer[Config]
 
 // Load 从指定的 YAML 文件加载配置并存入全局变量，返回配置指针。
 func Load(configFiles ...string) (*Config, error) {
@@ -341,11 +510,26 @@ func Load(configFiles ...string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	cfg.ApplyRuntimeDefaults()
 	conf.Store(cfg)
+	if len(configFiles) > 0 && configFiles[0] != "" {
+		confPath.Store(configFiles[0])
+	}
 	return cfg, nil
 }
 
 // Get 返回当前全局配置指针。必须在 Load 之后调用。
 func Get() *Config {
 	return conf.Load()
+}
+
+// Path 返回最近一次 Load 使用的配置文件路径（未 Load 时返回空串）。
+func Path() string {
+	if v, ok := confPath.Load().(string); ok {
+		return v
+	}
+	return ""
 }

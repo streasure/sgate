@@ -58,7 +58,7 @@ type WebSocketConnection struct {
 	State        atomic.Int32
 	Buffer       []byte
 	ConnectionID string
-	LastPingTime time.Time
+	lastPingUnix atomic.Int64 // 纳秒时间戳，避免 time.Time 字段跨协程读写竞态
 }
 
 // WebSocket连接状态常量
@@ -71,11 +71,22 @@ const (
 
 // NewWebSocketConnection 创建 WebSocket 连接并初始化状态。
 func NewWebSocketConnection(conn gnet.Conn) *WebSocketConnection {
-	return &WebSocketConnection{
-		Conn:         conn,
-		Buffer:       make([]byte, 0, 4096),
-		LastPingTime: time.Now(),
+	ws := &WebSocketConnection{
+		Conn:   conn,
+		Buffer: make([]byte, 0, 4096),
 	}
+	ws.lastPingUnix.Store(time.Now().UnixNano())
+	return ws
+}
+
+// setLastPingTime 更新最后心跳时间（并发安全）。
+func (c *WebSocketConnection) setLastPingTime(t time.Time) {
+	c.lastPingUnix.Store(t.UnixNano())
+}
+
+// getLastPingTime 获取最后心跳时间（并发安全）。
+func (c *WebSocketConnection) getLastPingTime() time.Time {
+	return time.Unix(0, c.lastPingUnix.Load())
 }
 
 // handleWebSocketHandshake 处理WebSocket协议升级握手，验证请求头并返回101响应。
@@ -294,45 +305,17 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
 			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 400, "invalid login gate request", req.ServerId)
 		}
-		if !g.validateLoginKey(req.UserId, req.LoginKey) {
-			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 401, "invalid login key", req.ServerId)
+		// 校验与绑定在后台协程执行，避免同步 gRPC 阻塞 event loop；完成后异步回写 ack。
+		msgCopy := &protoGw.StreamData{
+			Cmd:     message.Cmd,
+			SeqId:   message.SeqId,
+			Data:    append([]byte(nil), message.Data...),
+			UserKey: message.UserKey,
 		}
-		g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
-		userUUID := req.UserId
-		if userUUID == "" {
-			userUUID = connectionID
-		}
-		fullUUID := req.ServerId + ":" + userUUID
-
-		// 关闭同用户的旧连接（重连场景），防止资源泄漏
-		if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
-			if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
-				tlog.Info(context.TODO(), "WS检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
-					oldConnID, connectionID, fullUUID)
-				g.notifyLogicOffline(oldConn)
-				if oldConn.Conn != nil {
-					oldConn.Conn.Close()
-				}
-			}
-		}
-
-		g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
-
-		// 转发登录请求到逻辑层，以便注册会话
-		connObj := g.connectionManager.GetConnection(connectionID)
-		if connObj != nil {
-			if lc := g.GetLogicClient(req.ServerId); lc != nil {
-				_ = lc.SendMessage(&protoGw.StreamData{
-					SessionId: connectionID,
-					UserKey:   connObj.GetUserUUID(),
-					Data:      append([]byte(nil), message.Data...),
-					Cmd:       message.Cmd,
-					SeqId:     message.SeqId,
-				})
-			}
-		}
-
-		return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 0, "ok", req.ServerId)
+		go func() {
+			g.finishWSLoginGate(wsConn, connectionID, msgCopy, req)
+		}()
+		return nil
 	}
 
 	// 异步路径：投递到 worker pool
@@ -369,6 +352,65 @@ func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionI
 	return g.sendWebSocketMessage(wsConn, WSOpBinary, data)
 }
 
+// finishWSLoginGate 在后台协程完成 WS 登录：loginKey 校验、绑定、ack 异步回写与逻辑转发。
+func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID string, message *protoGw.StreamData, req *protoGw.LoginGateReq) {
+	ack := func(code int32, text string) {
+		body, _ := proto.Marshal(&protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: req.ServerId})
+		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		_ = g.sendWebSocketMessageAsync(wsConn, WSOpBinary, data)
+	}
+	if !g.validateLoginKey(req.UserId, req.LoginKey) {
+		ack(401, "invalid login key")
+		return
+	}
+	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
+	userUUID := req.UserId
+	if userUUID == "" {
+		userUUID = connectionID
+	}
+	fullUUID := req.ServerId + ":" + userUUID
+
+	// 关闭同用户的旧连接（重连场景），防止资源泄漏
+	if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
+		if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
+			tlog.Info(context.TODO(), "WS检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
+				oldConnID, connectionID, fullUUID)
+			g.notifyLogicOffline(oldConn)
+			if oldConn.Conn != nil {
+				oldConn.Conn.Close()
+			}
+		}
+	}
+
+	g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
+
+	// 先回 ack（与 TCP 路径一致），再异步转发登录给逻辑层，避免逻辑服慢导致 ack 延迟。
+	ack(0, "ok")
+
+	// 转发登录请求到逻辑层，以便注册会话
+	connObj := g.connectionManager.GetConnection(connectionID)
+	if connObj != nil {
+		forwardMsg := &protoGw.StreamData{
+			SessionId: connectionID,
+			UserKey:   connObj.GetUserUUID(),
+			Data:      append([]byte(nil), message.Data...),
+			Cmd:       message.Cmd,
+			SeqId:     message.SeqId,
+		}
+		go func() {
+			for i := 0; i < 20; i++ {
+				if lc := g.GetLogicClient(req.ServerId); lc != nil {
+					if err := lc.SendMessage(forwardMsg); err == nil {
+						return
+					}
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			tlog.Warn(context.TODO(), "WS login forward to logic timed out serverID=%s", req.ServerId)
+		}()
+	}
+}
+
 // handleWebSocketCloseFrame 处理WebSocket关闭帧，发送关闭响应并清理连接资源。
 func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 	closeFrame := []byte{0x88, 0x02, 0x03, 0xE8}
@@ -390,13 +432,13 @@ func (g *Gateway) handleWebSocketPingFrame(wsConn *WebSocketConnection, payload 
 	if _, err := wsConn.Conn.Write(frame); err != nil {
 		return err
 	}
-	wsConn.LastPingTime = time.Now()
+	wsConn.setLastPingTime(time.Now())
 	return nil
 }
 
 // handleWebSocketPongFrame 处理WebSocket心跳回复帧，更新最后活跃时间。
 func (g *Gateway) handleWebSocketPongFrame(wsConn *WebSocketConnection) {
-	wsConn.LastPingTime = time.Now()
+	wsConn.setLastPingTime(time.Now())
 }
 
 // sendWebSocketMessage 向WebSocket连接发送指定操作码的消息帧，自动处理不同长度载荷的帧头编码。
@@ -407,6 +449,18 @@ func (g *Gateway) sendWebSocketMessage(wsConn *WebSocketConnection, opCode WSOpC
 	frame := connection.EncodeWSFrame(byte(opCode|0x80), payload)
 	_, err := wsConn.Conn.Write(frame)
 	return err
+}
+
+// sendWebSocketMessageAsync 从非 event loop 协程安全发送 WS 帧（gnet 要求跨协程用 AsyncWrite）。
+func (g *Gateway) sendWebSocketMessageAsync(wsConn *WebSocketConnection, opCode WSOpCode, payload []byte) error {
+	if wsConn == nil || wsConn.Conn == nil {
+		return fmt.Errorf("websocket connection is nil")
+	}
+	if wsConn.State.Load() != int32(WSStateOpen) {
+		return fmt.Errorf("websocket connection not open")
+	}
+	frame := connection.EncodeWSFrame(byte(opCode|0x80), payload)
+	return wsConn.Conn.AsyncWrite(frame, noopAsyncCallback)
 }
 
 // sendHTTPResponse 发送HTTP响应，用于WebSocket握手失败时返回错误响应。

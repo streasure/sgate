@@ -120,7 +120,7 @@ go build -o bench\bench1_tcp\bench1_tcp.exe .\bench\bench1_tcp
 ### 步骤 3：启动网关
 
 ```powershell
-.\sgate.exe -conf config\config.yaml -config config\log.yaml
+.\sgate.exe -conf config\config.yaml -logger config\log.yaml
 ```
 
 看到以下日志表示启动成功：
@@ -154,7 +154,7 @@ sgate.exe [选项]
 
 选项：
   -conf string     网关配置文件路径（默认 "config/config.yaml"）
-  -config string   日志配置文件路径（默认 "config/log.yaml"）
+  -logger string  日志配置文件路径（默认 "config/log.yaml"）
   -version         显示版本号
 ```
 
@@ -165,7 +165,7 @@ sgate.exe [选项]
 .\sgate.exe
 
 # 指定配置文件
-.\sgate.exe -conf config\config_batch_on.yaml -config config\log.yaml
+.\sgate.exe -conf config\config_batch_on.yaml -logger config\log.yaml
 
 # 查看版本
 .\sgate.exe -version
@@ -230,7 +230,7 @@ cluster:
 ```
 
 **行为：**
-- 在 etcd 注册网关自身连接信息（`Gateway:{zone}`），供 loginserver 等服务发现
+- 在 etcd 注册网关自身连接信息（`{belong}/SGATE:{zone}`），供 loginserver 等服务发现
 - 保留：逻辑服发现（etcd）、负载均衡
 - 跳过网关间发现（GatewayClientPool 不创建）
 - 跳过 Leader 选举
@@ -246,7 +246,7 @@ cluster:
 ```
 
 **行为：**
-- 在 etcd 注册网关自身（`Gateway:{zone}`）
+- 在 etcd 注册网关自身（`{belong}/SGATE:{zone}`）
 - 发现同一 zone 的其他网关实例
 - 启用 Leader 选举
 - 创建网关间 gRPC 客户端池
@@ -335,7 +335,7 @@ transports:
 | `tcp` | string | TCP 客户端连接地址（可选） |
 | `websocket` | string | WebSocket 客户端连接地址（可选） |
 
-loginserver 可通过 etcd watch `Gateway:{zone}` 前缀获取网关连接地址。
+loginserver 可通过 etcd watch `{belong}/SGATE:{zone}` 前缀获取网关连接地址。
 
 ### 6.5 `cluster` 集群配置
 
@@ -416,7 +416,7 @@ loginValidation:
 | `configCenter` | `enabled` | 配置中心 |
 | `alert` | `enabled`, `webhooks` | 告警 Webhook |
 | `degradation` | `enabled`, `rules` | 业务降级 |
-| `monitoring` | `pprofAddr` | pprof 地址（如 `:6060`） |
+| `monitoring` | `pprofAddr`, `disableMetricsLog`, `prometheus` | pprof 地址；`disableMetricsLog=true` 关闭每秒 metrics 日志 |
 
 ---
 
@@ -456,7 +456,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 **终端 1 — 网关：**
 
 ```powershell
-.\sgate.exe -conf config\config.yaml -config config\log.yaml
+.\sgate.exe -conf config\config.yaml -logger config\log.yaml
 ```
 
 **终端 2 — 逻辑服（只接收，不处理）：**
@@ -475,7 +475,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 
 ```powershell
 # 终端 1
-.\sgate.exe -conf config\config.yaml -config config\log.yaml
+.\sgate.exe -conf config\config.yaml -logger config\log.yaml
 
 # 终端 2
 .\bench\logic1_tcp\logic1_tcp.exe -port 50050 -id logic1-tcp
@@ -492,7 +492,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 
 ```powershell
 # 终端 1：网关
-.\sgate.exe -conf config\config_batch_off.yaml -config config\log.yaml
+.\sgate.exe -conf config\config_batch_off.yaml -logger config\log.yaml
 
 # 终端 2：逻辑服（push-interval=0 不人为限速）
 .\bench\logic2_ws\logic2_ws.exe -port 50061 -id logic2-ws -push-interval 0 -push-size 64 -expected-members 100 -push-workers 12 -config bench\logic2_ws\configs\logic2_ws_log.yaml
@@ -504,19 +504,19 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 **batchPush 开启：** 只需替换网关配置：
 
 ```powershell
-.\sgate.exe -conf config\config_batch_on.yaml -config config\log.yaml
+.\sgate.exe -conf config\config_batch_on.yaml -logger config\log.yaml
 ```
 
 ### 7.6 bench2 TCP 压测
 
 ```powershell
 # batchPush 关闭
-.\sgate.exe -conf config\config_batch_off.yaml -config config\log.yaml
+.\sgate.exe -conf config\config_batch_off.yaml -logger config\log.yaml
 .\bench\logic2_tcp\logic2_tcp.exe -port 50060 -id logic2-tcp -push-interval 0 -push-size 64 -expected-members 100 -push-workers 12 -config bench\logic2_tcp\configs\logic2_tcp_log.yaml
 .\bench\bench2_tcp\bench2_tcp.exe -addr 127.0.0.1:48080 -duration 10s -parallel 100 -server-id logic2-tcp -config bench\bench2_tcp\configs\log.yaml
 
 # batchPush 开启：替换网关配置
-.\sgate.exe -conf config\config_batch_on.yaml -config config\log.yaml
+.\sgate.exe -conf config\config_batch_on.yaml -logger config\log.yaml
 ```
 
 ### 7.7 压测参数说明

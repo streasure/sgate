@@ -58,6 +58,23 @@ func (m *shardedMap[V]) Delete(key string) {
 	s.mu.Unlock()
 }
 
+// DeleteIf 当 value 匹配时才删除（compare-and-delete），避免旧连接删除新连接的映射。
+func (m *shardedMap[V]) DeleteIf(key string, value V) bool {
+	s := m.getShard(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.data[key]
+	if !ok {
+		return false
+	}
+	// comparable 类型用 ==；string 等 V 均可比较
+	if any(cur) != any(value) {
+		return false
+	}
+	delete(s.data, key)
+	return true
+}
+
 // Range 遍历所有分片中的条目。回调返回 false 时终止遍历。
 func (m *shardedMap[V]) Range(fn func(key string, value V) bool) {
 	for i := range m.shards {

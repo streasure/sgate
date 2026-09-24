@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"runtime"
 
 	comp "github.com/streasure/sgate/internal/component"
@@ -39,7 +40,9 @@ func main() {
 	cfg, err := config.Load(*confFiles)
 	if err != nil {
 		tlog.Error(context.TODO(), "load config failed error=%v", err)
-		return
+		// 配置加载失败必须非零退出，避免进程管理器误判为正常退出
+		logComp.Destroy()
+		os.Exit(1)
 	}
 
 	uperf.Apply(cfg.Perf.GcPercent, cfg.Perf.MemoryLimitPercent)

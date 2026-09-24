@@ -16,15 +16,12 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cast"
 	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/config"
 	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
-
-func extractRouteAndCmd(data []byte) (string, int32) {
-	return routes.ExtractRouteAndCmd(data)
-}
 
 var connContextPool = sync.Pool{
 	New: func() interface{} {
@@ -225,134 +222,6 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	return
 }
 
-// handleBatchTraffic 将 FrameBuf 中的所有完整帧收集到单个 RouteBatch 消息中，
-// 并通过一次 SendMessage 调用转发。这将每帧开销（proto解析、深拷贝、分配、通道发送）
-// 降低到每批次。
-//
-// 零拷贝优化：FrameBuf 已包含 [4字节帧长度][帧数据] 的重复结构，
-// 这恰好是 RouteBatch 数据格式。我们不需要将帧复制到单独的批处理缓冲区中，
-// 而是将 FrameBuf 切片的所有权转移给批处理消息，让下一次 OnTraffic 调用分配
-// 新缓冲区。这消除了在2000万QPS时导致GC压力的每批256KB分配和拷贝。
-//
-// 批处理格式（单连接）：RouteBatch 消息包含：
-//
-//	ConnectionId = ctx.ConnectionID（此连接的所有帧共享）
-//	Data = FrameBuf[:offset]（转移所有权，零拷贝）
-//	Cmd = 帧数量
-//
-// 逻辑服反序列化每个负载以获取路由并分别分发。
-// 如果内部消息没有 ConnectionId，则从外部消息设置。
-func (g *Gateway) handleBatchTraffic(c gnet.Conn, ctx *ConnContext) (action gnet.Action) {
-	maxFrame := g.getProtection().MaxFrameSize
-
-	// 统计完整帧数并找到分割点。
-	// FrameBuf 格式：[4字节帧长度][帧数据] 重复
-	// = 逻辑服所需的批处理格式。
-	offset := 0
-	batchCount := 0
-	for offset+4 <= len(ctx.FrameBuf) {
-		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[offset : offset+4])
-		if frameLen == 0 || frameLen > uint32(maxFrame) {
-			ctx.FrameBuf = nil
-			return gnet.Close
-		}
-		totalLen := 4 + int(frameLen)
-		if offset+totalLen > len(ctx.FrameBuf) {
-			break // 不完整帧，等待更多数据
-		}
-		if batchCount == 0 {
-			cmd, _, _, ok := routes.ExtractMessageFrame(ctx.FrameBuf[offset+4 : offset+totalLen])
-			if !ok {
-				ctx.FrameBuf = nil
-				return gnet.Close
-			}
-			if cmd == routes.CmdLoginGate {
-				// 登录命令不能被批处理，需要立即处理
-				frameData := append([]byte(nil), ctx.FrameBuf[offset+4:offset+totalLen]...)
-				ctx.FrameBuf = append(ctx.FrameBuf[:0], ctx.FrameBuf[offset+totalLen:]...)
-				return g.handleTCPRequest(c, frameData)
-			}
-		}
-
-		offset += totalLen
-		batchCount++
-	}
-
-	if batchCount == 0 {
-		return
-	}
-
-	conn := g.connectionManager.GetConnection(ctx.ConnectionID)
-	if conn != nil && !conn.IsAuthenticated() {
-		// 检查每帧的命令——未认证连接的批处理中，如果首帧是预认证命令，不允许混入非预认证命令。
-		off := 0
-		for off+4 <= len(ctx.FrameBuf) {
-			frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[off : off+4])
-			totalLen := 4 + int(frameLen)
-			if off+totalLen > len(ctx.FrameBuf) {
-				break
-			}
-			cmd, _, _, ok := routes.ExtractMessageFrame(ctx.FrameBuf[off+4 : off+totalLen])
-			if !ok || !g.isPreAuthCommand(cmd) {
-				errorResp := routes.NewErrorResponse("error", "unauthorized", "connection not authenticated", "")
-				respData, _ := proto.Marshal(errorResp)
-				writeFrame(c, respData)
-				g.messagesDroppedAuth.Add(int64(batchCount))
-				return gnet.Close
-			}
-			off += totalLen
-		}
-	}
-
-	g.messagesReceived.Add(int64(batchCount))
-
-	// 首先分割 FrameBuf：将完整帧转移到 batchData，不完整尾部保留在 FrameBuf 中。
-	// 这必须在任何提前返回（过载、无逻辑服）之前发生，以防止帧在下次 OnTraffic 调用时被重复计数。
-	var batchData []byte
-	if offset == len(ctx.FrameBuf) {
-		batchData = ctx.FrameBuf
-		ctx.FrameBuf = nil
-	} else {
-		batchData = ctx.FrameBuf[:offset]
-		tail := make([]byte, len(ctx.FrameBuf)-offset)
-		copy(tail, ctx.FrameBuf[offset:])
-		ctx.FrameBuf = tail
-	}
-
-	if g.overloadProtector.IsOverloaded() {
-		g.overloadProtector.RecordDrop(int64(batchCount))
-		g.messagesDroppedOverload.Add(int64(batchCount))
-		errorResp := routes.NewErrorResponse("error", "server overload", "cpu threshold exceeded", "")
-		respData, _ := proto.Marshal(errorResp)
-		writeFrame(c, respData)
-		return
-	}
-
-	conn = g.connectionManager.GetConnection(ctx.ConnectionID)
-	if conn == nil || !conn.IsBound() {
-		return gnet.Close
-	}
-	logicClient := g.GetLogicClient(conn.GetServerID())
-	if logicClient == nil {
-		g.messagesDroppedNoLogicNotConnected.Add(int64(batchCount))
-		return
-	}
-
-	batchMsg := &protoGw.StreamData{
-		SessionId: ctx.ConnectionID,
-		Data:      batchData,
-		Cmd:       int32(batchCount),
-	}
-
-	if err := logicClient.SendMessage(batchMsg); err != nil {
-		g.messagesDroppedFull.Add(int64(batchCount))
-	} else {
-		g.messagesForwarded.Add(int64(batchCount))
-	}
-
-	return
-}
-
 func (g *Gateway) isLogicConnected() bool {
 	if g.logicClientPool != nil && g.logicClientPool.IsConnected() {
 		return true
@@ -478,13 +347,35 @@ func getRemoteIP(c gnet.Conn) string {
 	return host
 }
 
-// getOrCreateBreaker 获取或创建指定 route 的熔断器
+// getOrCreateBreaker 获取或创建指定 route 的熔断器。
+// security.circuitBreaker.enabled=false 时返回 nil（调用方需判空）。
 func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
-	timeout := 30 * time.Second
-	if d, err := time.ParseDuration(g.getProtection().ConnIdleTimeout); err == nil && d > 0 {
-		timeout = d
+	if g.circuitBreakerMgr == nil {
+		return nil
 	}
-	return g.circuitBreakerMgr.GetCircuitBreaker(route, 5, 3, timeout)
+	failureThreshold := 5
+	successThreshold := 3
+	timeout := 30 * time.Second
+	enabled := true
+	if cfg, ok := g.cfg.Load().(*config.Config); ok && cfg != nil {
+		cb := cfg.Security.CircuitBreaker
+		enabled = cb.Enabled
+		if cb.FailureThreshold > 0 {
+			failureThreshold = cb.FailureThreshold
+		}
+		if cb.SuccessThreshold > 0 {
+			successThreshold = cb.SuccessThreshold
+		}
+		if cb.Timeout != "" {
+			if d, err := time.ParseDuration(cb.Timeout); err == nil && d > 0 {
+				timeout = d
+			}
+		}
+	}
+	if !enabled {
+		return nil
+	}
+	return g.circuitBreakerMgr.GetCircuitBreaker(route, failureThreshold, successThreshold, timeout)
 }
 
 func writeFrame(c gnet.Conn, data []byte) {

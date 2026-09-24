@@ -3,15 +3,13 @@ package config
 // ============================================================================
 // sgate 默认常量
 // ----------------------------------------------------------------------------
-// 用途：把"不常用/设置一次基本不改"的参数集中到代码常量，从 yaml 中移除
+// 用途：把"不常用/设置一次基本不改"的参数集中到代码常量，作为 yaml 缺省值的参考。
 //
 // 使用方法：
-//   1) 这些常量由 loadDefaultConfig() 注入默认配置
-//   2) LoadConfig() 解析 yaml 时采用"合并"语义：
-//      - yaml 中显式出现的字段，覆盖默认值
-//      - yaml 中未出现的字段，保留这里的默认值
-//      因此 yaml 文件可以非常精简，只保留环境相关 + 运营策略字段
-//   3) 如需调整某个"不常用"参数（如 gRPC 窗口大小、限流阈值），直接改本文件常量
+//   1) 这些常量是文档化的默认值参考；Load/LoadConfig 使用 uconfig 合并语义，
+//      yaml 中显式出现的字段覆盖默认，未出现的字段保持 uconfig 解析零值。
+//      Validate 通过后调用 ApplyRuntimeDefaults 对零值字段统一补齐默认。
+//   2) 如需调整某个"不常用"参数（如 gRPC 窗口大小、限流阈值），直接改本文件常量
 //      或在 yaml 中显式覆盖（推荐后者，便于环境差异化）
 //
 // 分类：
@@ -25,6 +23,9 @@ package config
 // --- 网络与协议 ---
 
 const (
+	// DefaultGRPCPort gRPC 服务默认监听端口
+	DefaultGRPCPort = 50051
+
 	// DefaultGRPCWindowSize gRPC 流量控制窗口大小（字节）
 	// 调大可提升吞吐，但占用内存更多。一般 16MB 足够千万 QPS
 	DefaultGRPCWindowSize = 16 * 1024 * 1024
@@ -32,6 +33,15 @@ const (
 	// DefaultGRPCMaxMessageSize 单条 gRPC 消息上限（字节）
 	// 批量转发场景按 batchSize × frameSize 估算，留 2x 余量
 	DefaultGRPCMaxMessageSize = 8 * 1024 * 1024
+
+	// DefaultGatewayGRPCWindowSize 网关零值回退：历史运行时默认（压测口径，勿改）
+	DefaultGatewayGRPCWindowSize = 524288
+
+	// DefaultGatewayGRPCMaxMessageSize 网关零值回退：历史运行时默认（压测口径，勿改）
+	DefaultGatewayGRPCMaxMessageSize = 4 * 1024 * 1024
+
+	// DefaultGatewayStreamSendChannelSize 网关零值回退：历史运行时默认（压测口径，勿改）
+	DefaultGatewayStreamSendChannelSize = 65536
 
 	// DefaultStreamSendChannelSize 正向 shard 发送队列容量
 	// 队列满则触发 ErrNotConnected 快速失败，防止背压堆积
@@ -85,6 +95,9 @@ const (
 	// DefaultOverloadCheckIntervalMs 过载检查间隔（毫秒）
 	// 200ms 检查一次 CPU/内存水位，平衡灵敏度与开销
 	DefaultOverloadCheckIntervalMs = 200
+
+	// DefaultOverloadCPUThreshold 过载 CPU 阈值（百分比）
+	DefaultOverloadCPUThreshold = 90.0
 
 	// DefaultWSHeartbeatTimeoutSec WebSocket 心跳超时（秒）
 	DefaultWSHeartbeatTimeoutSec = 60

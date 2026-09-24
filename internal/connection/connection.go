@@ -27,9 +27,7 @@ type Connection struct {
 	LastActive  atomic.Int64
 	activitySeq atomic.Uint32
 	Status      int8
-	Groups      map[string]struct{}
 	state       atomic.Int32
-	groupsMu    sync.RWMutex
 
 	// 原子字段，用于无锁并发访问
 	userUUID    atomic.Value // 保存用户唯一标识。
@@ -57,7 +55,6 @@ func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Conn
 		Conn:           conn,
 		RemoteAddr:     remoteAddr,
 		CreatedAt:      now,
-		Groups:         make(map[string]struct{}),
 		msgWindowStart: now,
 	}
 	c.LastActive.Store(now)
@@ -235,6 +232,7 @@ func (c *Connection) AppendCoalesced(payload []byte) bool {
 
 // FlushCoalesced 将累积的数据通过 AsyncWrite 发送，然后重置 buffer。
 // 返回成功推送的消息数。IO 在锁外执行，不阻塞 AppendCoalesced。
+// WebSocket 连接将 [len][payload] 单元序列重新包装为 WS binary 帧，避免客户端解析到裸 TCP 长度前缀。
 func (c *Connection) FlushCoalesced() int64 {
 	c.coalescedMu.Lock()
 	if c.coalescedCount == 0 {
@@ -249,11 +247,64 @@ func (c *Connection) FlushCoalesced() int64 {
 	c.coalescedCount = 0
 	c.coalescedMu.Unlock()
 
+	if c.IsWebSocket() {
+		reframed := reframeCoalescedAsWSFrames(data)
+		if reframed != nil {
+			data = reframed
+		}
+	}
+
 	_ = c.SendMultiWithCallback(data, func() {
 		if bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
 			*bufPtr = (*bufPtr)[:0]
 			coalescerBufPool.Put(bufPtr)
 		}
+		if reframedNeedsFree(data) {
+			// reframed 分配自 append，无需归还对象池
+		}
 	})
 	return int64(count)
+}
+
+// reframedNeedsFree 占位：reframe 结果使用普通分配，回调无需额外处理。
+func reframedNeedsFree(_ []byte) bool { return false }
+
+// reframeCoalescedAsWSFrames 将 coalescer 缓冲中的 [len][payload]* 序列转换为
+// 等价的 WS binary 帧序列（每个 payload 一个 FIN 帧）。解析失败返回 nil。
+func reframeCoalescedAsWSFrames(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	out := make([]byte, 0, len(data)+len(data)/8+16)
+	off := 0
+	for off+4 <= len(data) {
+		n := int(binary.BigEndian.Uint32(data[off : off+4]))
+		off += 4
+		if n < 0 || off+n > len(data) {
+			return nil
+		}
+		out = EncodeWSFrame(0x82, data[off:off+n])
+		// EncodeWSFrame 返回独立 buffer，连续多帧需拼接
+		// 为避免二次分配，改为手动拼接：
+		// —— 实现见下方循环重写。
+		_ = out
+		off += n
+	}
+	// 正确路径：一次遍历拼接所有帧
+	out = out[:0]
+	off = 0
+	for off+4 <= len(data) {
+		n := int(binary.BigEndian.Uint32(data[off : off+4]))
+		off += 4
+		if n < 0 || off+n > len(data) {
+			return nil
+		}
+		frame := EncodeWSFrame(0x82, data[off:off+n])
+		out = append(out, frame...)
+		off += n
+	}
+	if off != len(data) {
+		return nil
+	}
+	return out
 }

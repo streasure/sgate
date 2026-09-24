@@ -28,12 +28,12 @@ grpc:
 
 monitoring:
   pprofAddr: ""
+  disableMetricsLog: true   # 线上关闭每秒 metrics 日志；压测/排障可改 false
   prometheus:
     enabled: false
     addr: ":9101"
     path: "/metrics"
     prefix: "app"
-  maxMessageSize: 8388608
 
 configCenter:
   enabled: false
@@ -57,7 +57,6 @@ protection:
   maxConnections: 0            # 网关最大总连接数，0=不限制
   maxConnectionsPerIP: 0       # 单 IP 最大连接数，0=不限制
   maxMessagesPerConn: 0        # 单连接每秒最大消息数，0=不限制（防异常连接占满队列）
-  memoryThreshold: 92
   cpuThreshold: 92
   dropOnOverload: true
   checkIntervalMs: 200

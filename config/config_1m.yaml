@@ -128,6 +128,7 @@ grpc:
 
 monitoring:
   pprofAddr: ":6060"
+  disableMetricsLog: true   # 百万连接压测关闭每秒 metrics 日志
 
 cluster:
   enabled: false

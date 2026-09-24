@@ -71,7 +71,9 @@ type Gateway struct {
 	waf                *security.WAF
 	cluster            *cluster.Cluster
 	latencyTracker     *obs.LatencyTracker
-	engine             *gnet.Engine // 启动时保存，用于优雅关闭
+	engines            []gnet.Engine // 所有 transport engine，关闭时逐个 Stop
+	enginesMu          sync.Mutex
+	grpcServerMu       sync.Mutex // 保护 grpcServer 赋值/读取（启动协程与 Close 竞态）
 
 	// 企业级扩展组件
 	filterChain   *types.FilterChain          // SPI 过滤器链
@@ -149,21 +151,19 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
 }
 
-// NewGateway 创建网关实例。配置从 config.Get() 读取，
+// NewGateway 创建网关实例。配置从 config.Get() 读取（main 必须先 config.Load），
 // 运行时资源由各组件在 Init/Start 中写入 package 级全局变量后读取。
 func NewGateway() *Gateway {
 	cfg := config.Get()
 	if cfg == nil {
-		tlog.Error(context.TODO(), "config not loaded, call config.Load first")
-		return &Gateway{
-			stopChan:          make(chan struct{}),
-			configUpdateChan:  make(chan *config.Config),
-			ctx:               context.Background(),
-			overloadProtector: NewOverloadProtector(config.ProtectionConfig{}),
-		}
+		// fail-fast：main 已保证 Load 成功；半初始化 Gateway 会在 Start 阶段 panic，更难排查
+		panic("gateway: config not loaded, call config.Load first")
 	}
+	return newGateway(cfg)
+}
 
-	// TLS加密配置
+// buildTLSConfig 根据配置构建 TLS 配置；证书加载失败时保持无证书（仅记录错误）。
+func buildTLSConfig(cfg *config.Config) *tls.Config {
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		MaxVersion: tls.VersionTLS13,
@@ -179,24 +179,19 @@ func NewGateway() *Gateway {
 		PreferServerCipherSuites: true,
 		CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
 	}
-	if cfg.TLS.Enabled && cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-		if err != nil {
-			tlog.Error(context.TODO(), "failed to load TLS certificate error=%v", err)
-		} else {
-			tlsConfig.Certificates = []tls.Certificate{cert}
-			if strings.EqualFold(cfg.TLS.MinVersion, "TLS1.3") {
-				tlsConfig.MinVersion = tls.VersionTLS13
-			}
-		}
+	if !cfg.TLS.Enabled || cfg.TLS.CertFile == "" || cfg.TLS.KeyFile == "" {
+		return tlsConfig
 	}
-
-	gw := NewGatewayWithDeps(GatewayDeps{
-		Config: *cfg,
-	})
-	gw.tlsConfig = tlsConfig
-
-	return gw
+	cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	if err != nil {
+		tlog.Error(context.TODO(), "failed to load TLS certificate error=%v", err)
+		return tlsConfig
+	}
+	tlsConfig.Certificates = []tls.Certificate{cert}
+	if strings.EqualFold(cfg.TLS.MinVersion, "TLS1.3") {
+		tlsConfig.MinVersion = tls.VersionTLS13
+	}
+	return tlsConfig
 }
 
 func (g *Gateway) Name() string { return "gateway" }
@@ -310,7 +305,9 @@ func (g *Gateway) StartServices() {
 		if server, err := backend.StartGRPCServer(g, grpcPort, g.grpcCfg.MaxMessageSize, g.grpcCfg.WindowSize); err != nil {
 			tlog.Error(context.TODO(), "failed to start gRPC server error=%v", err)
 		} else {
+			g.grpcServerMu.Lock()
 			g.grpcServer = server
+			g.grpcServerMu.Unlock()
 			tlog.Info(context.TODO(), "gRPC server started port=%s", grpcPort)
 		}
 	}()
@@ -388,7 +385,7 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 		if !ok {
 			return true
 		}
-		if time.Since(conn.LastPingTime) > timeout {
+		if time.Since(conn.getLastPingTime()) > timeout {
 			tlog.Warn(context.TODO(), "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID)
 			if conn.Conn != nil {
 				conn.Conn.Close()
@@ -402,12 +399,32 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 	})
 }
 
+// tryEnqueueConfig 非阻塞投递配置更新：通道满时丢弃最旧一项，保证始终保留最新配置。
+func (g *Gateway) tryEnqueueConfig(newCfg *config.Config) {
+	select {
+	case g.configUpdateChan <- newCfg:
+	default:
+		select {
+		case <-g.configUpdateChan: // drop oldest pending
+		default:
+		}
+		select {
+		case g.configUpdateChan <- newCfg:
+		default:
+		}
+	}
+}
+
 func (g *Gateway) configWatcher() {
 	defer func() {
 		if r := recover(); r != nil {
 			tlog.Error(context.TODO(), "configWatcher panic recovered error=%v", r)
 		}
 	}()
+	// 优先使用 config.Load 记录的真实路径，避免 -conf 与默认路径不一致导致热更新失效
+	if p := config.Path(); p != "" {
+		g.configPath = p
+	}
 	if g.configPath == "" {
 		g.configPath = "config/config.yaml"
 	}
@@ -448,13 +465,11 @@ func (g *Gateway) configWatcher() {
 				lastModTime = fileInfo.ModTime()
 				newCfg, err := config.Load(g.configPath)
 				if err != nil {
+					tlog.Error(context.TODO(), "config reload failed path=%s error=%v", g.configPath, err)
 					time.Sleep(5 * time.Second)
 					continue
 				}
-				select {
-				case g.configUpdateChan <- newCfg:
-				default:
-				}
+				g.tryEnqueueConfig(newCfg)
 			}
 
 			time.Sleep(5 * time.Second)
@@ -463,6 +478,8 @@ func (g *Gateway) configWatcher() {
 }
 
 func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
+	// 先补齐运行时默认值，再原子替换（防止零值热更把连接踢飞）
+	newCfg.ApplyRuntimeDefaults()
 	g.cfg.Store(newCfg)
 
 	// 动态更新限流阈值（无需重启）
@@ -479,22 +496,10 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		tlog.Info(context.TODO(), "rate limiter updated maxTokens=%d refresh=%v", tokens, refresh)
 	}
 
-	// 动态更新白名单/黑名单
+	// 动态更新白名单/黑名单（原子替换，避免清空-重填中间态）
 	if g.whitelistBlacklist != nil && newCfg.Security.Enabled {
-		// 清空旧名单
-		for _, ip := range g.whitelistBlacklist.GetWhitelist() {
-			g.whitelistBlacklist.RemoveFromWhitelist(ip)
-		}
-		for _, ip := range g.whitelistBlacklist.GetBlacklist() {
-			g.whitelistBlacklist.RemoveFromBlacklist(ip)
-		}
-		// 加载新名单
-		for _, ip := range newCfg.Security.Whitelist {
-			g.whitelistBlacklist.AddToWhitelist(ip)
-		}
-		for _, ip := range newCfg.Security.Blacklist {
-			g.whitelistBlacklist.AddToBlacklist(ip)
-		}
+		g.whitelistBlacklist.ReplaceWhitelist(newCfg.Security.Whitelist)
+		g.whitelistBlacklist.ReplaceBlacklist(newCfg.Security.Blacklist)
 		tlog.Info(context.TODO(), "whitelist/blacklist updated whitelist=%d blacklist=%d",
 			len(newCfg.Security.Whitelist),
 			len(newCfg.Security.Blacklist))
@@ -507,9 +512,10 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 
 	// 动态更新连接限制参数
 	g.connectionManager.UpdateLimits(newCfg.Protection.MaxConnections, newCfg.Protection.MaxConnectionsPerIP)
-	pc := g.getProtection()
-	pc.MaxMessagesPerConn = newCfg.Protection.MaxMessagesPerConn
-	g.protection.Store(pc)
+
+	// gRPC/stream 运行时快照随配置更新（GetGRPCConfig/GetStreamConfig 消费）
+	g.grpcCfg = newCfg.GRPC
+	g.streamCfg = newCfg.Stream
 
 	// 动态更新 JWT 密钥
 	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
@@ -544,7 +550,9 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 }
 
 func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
-	g.engine = &engine
+	g.enginesMu.Lock()
+	g.engines = append(g.engines, engine)
+	g.enginesMu.Unlock()
 	return
 }
 
@@ -586,8 +594,20 @@ func (g *Gateway) logMetrics() {
 	)
 }
 
+// metricsLogEnabled 返回是否允许每秒打印 metrics 日志（热更新生效）。
+// monitoring.disableMetricsLog=true 时关闭（线上默认建议打开该关闭项）。
+func (g *Gateway) metricsLogEnabled() bool {
+	cfg, ok := g.cfg.Load().(*config.Config)
+	if !ok || cfg == nil {
+		return true
+	}
+	return !cfg.Monitoring.DisableMetricsLog
+}
+
 func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
-	g.logMetrics()
+	if g.metricsLogEnabled() {
+		g.logMetrics()
+	}
 	return 1 * time.Second, gnet.None
 }
 
@@ -599,9 +619,12 @@ func (g *Gateway) Close() {
 	g.closeOnce.Do(func() {
 		close(g.stopChan)
 
-		// 阶段1：停止接受新连接（engine.Stop）
-		if g.engine != nil {
-			g.engine.Stop(context.Background())
+		// 阶段1：停止接受新连接（所有 transport engine）
+		g.enginesMu.Lock()
+		engines := append([]gnet.Engine(nil), g.engines...)
+		g.enginesMu.Unlock()
+		for i := range engines {
+			_ = engines[i].Stop(context.Background())
 		}
 
 		// 阶段2：排空进行中的消息（最多2分钟）
@@ -642,8 +665,11 @@ func (g *Gateway) Close() {
 			g.messageIntegrity.Stop()
 		}
 
-		if g.grpcServer != nil {
-			g.grpcServer.Stop()
+		g.grpcServerMu.Lock()
+		grpcSrv := g.grpcServer
+		g.grpcServerMu.Unlock()
+		if grpcSrv != nil {
+			grpcSrv.Stop()
 		}
 
 		g.connectionManager.StopConnectionChecker()
@@ -690,75 +716,37 @@ func (g *Gateway) drainConnections(timeout time.Duration) {
 	}
 }
 
-// ===== defaults / construction (merged from deps.go) =====
+// ===== construction =====
 
-// GatewayDeps 汇总构造网关所需的配置依赖。
-// 运行时资源由各组件在 Init/Start 中写入 component 包级全局变量，Gateway 再读取。
-type GatewayDeps struct {
-	Config config.Config
-}
-
-// NewGatewayWithDeps 使用外部配置构造网关，是采用组件生命周期时推荐的构造方法。
-func NewGatewayWithDeps(deps GatewayDeps) *Gateway {
-	protection := deps.Config.Protection
-	if protection.MaxFrameSize <= 0 {
-		protection.MaxFrameSize = 4 * 1024 * 1024
-	}
-	if protection.MaxFrameBufSize <= 0 {
-		protection.MaxFrameBufSize = 4 * 1024 * 1024
-	}
-	if protection.MaxWSFrameSize <= 0 {
-		protection.MaxWSFrameSize = 4 * 1024 * 1024
-	}
-	if protection.MaxWSBufferSize <= 0 {
-		protection.MaxWSBufferSize = 4 * 1024 * 1024
-	}
-	if protection.WSHeartbeatTimeout <= 0 {
-		protection.WSHeartbeatTimeout = 60
-	}
-	if protection.WSCheckInterval <= 0 {
-		protection.WSCheckInterval = 30
-	}
-
-	grpcCfg := deps.Config.GRPC
-	if grpcCfg.Port <= 0 {
-		grpcCfg.Port = 50051
-	}
-	if grpcCfg.WindowSize <= 0 {
-		grpcCfg.WindowSize = 524288
-	}
-	if grpcCfg.MaxMessageSize <= 0 {
-		grpcCfg.MaxMessageSize = 4 * 1024 * 1024
-	}
-
-	streamCfg := deps.Config.Stream
-	if streamCfg.SendChannelSize <= 0 {
-		streamCfg.SendChannelSize = 65536
-	}
-	if streamCfg.ReceiveBatchSize <= 0 {
-		streamCfg.ReceiveBatchSize = 64
-	}
+// newGateway 用已加载并补齐默认值的配置构造网关。
+// 参数仅为 *config.Config，避免 GatewayDeps 单字段间接层。
+func newGateway(cfg *config.Config) *Gateway {
+	// 防御：外部传入的 cfg 可能未走 Load（测试/热更新拷贝）
+	cfg.ApplyRuntimeDefaults()
 
 	gw := &Gateway{
-		connectionManager: connection.NewConnectionManager(protection.MaxConnections, protection.MaxConnectionsPerIP),
+		connectionManager: connection.NewConnectionManager(cfg.Protection.MaxConnections, cfg.Protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
-		grpcCfg:           grpcCfg,
-		streamCfg:         streamCfg,
-		serverID:          deps.Config.ServerID,
-		zone:              deps.Config.Zone,
+		grpcCfg:           cfg.GRPC,
+		streamCfg:         cfg.Stream,
+		serverID:          cfg.ServerID,
+		zone:              cfg.Zone,
 
-		configUpdateChan:          make(chan *config.Config),
-		overloadProtector:         NewOverloadProtector(protection),
+		configUpdateChan:          make(chan *config.Config, 1),
+		overloadProtector:         NewOverloadProtector(cfg.Protection),
 		logicClient:               backend.NewLogicClient(nil),
 		msgRate:                   newMessageRateTracker(60 * time.Second),
 		clusterID:                 "sgate-cluster",
-		gatewayID:                 gatewayInstanceID(deps.Config),
+		gatewayID:                 gatewayInstanceID(*cfg),
 		isLeader:                  false,
 		connectionDurationTracker: obs.NewLatencyTracker(10000),
+		tlsConfig:                 buildTLSConfig(cfg),
 	}
 
-	gw.cfg.Store(&deps.Config)
-	gw.protection.Store(protection)
+	// 存指针副本，避免调用方后续原地改写共享配置
+	stored := *cfg
+	gw.cfg.Store(&stored)
+	gw.protection.Store(stored.Protection)
 	gw.ctx = context.Background()
 	gw.pipeline = NewMessagePipeline(gw)
 

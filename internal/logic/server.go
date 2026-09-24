@@ -37,17 +37,31 @@ func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gateway
 	}
 	go func() {
 		defer close(c.done)
-		for msg := range c.sendCh {
-			if err := c.stream.Send(msg); err != nil {
+		for {
+			select {
+			case <-c.done:
 				return
+			case msg := <-c.sendCh:
+				if c.closed.Load() {
+					return
+				}
+				if err := c.stream.Send(msg); err != nil {
+					c.closed.Store(true)
+					return
+				}
 			}
 		}
 	}()
 	return c
 }
 
-// Send 向流连接发送消息，连接已关闭时返回错误
+// Send 向流连接发送消息，连接已关闭时返回错误。
+// 关闭协议：先置 closed 标志，再 close(done) 通知发送方；sendCh 不在 Close 中关闭，
+// 避免与仍有 send 在途的 goroutine 竞态触发 send-on-closed-channel。
 func (c *streamConn) Send(msg *protocol.StreamData) error {
+	if c.closed.Load() {
+		return fmt.Errorf("logic: gateway stream closed")
+	}
 	select {
 	case c.sendCh <- msg:
 		return nil
@@ -63,11 +77,12 @@ func (c *streamConn) bindSession(sessionID string) {
 	c.sessionMu.Unlock()
 }
 
-// Close 关闭流连接，确保只执行一次
+// Close 关闭流连接，确保只执行一次。
+// 置 closed → close(done) 通知 Send 失败；不关闭 sendCh（避免 send-on-closed-channel）。
 func (c *streamConn) Close() {
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
-		close(c.sendCh)
+		close(c.done)
 	})
 }
 

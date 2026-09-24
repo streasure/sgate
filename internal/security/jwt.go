@@ -68,9 +68,15 @@ func (f *JWTAuthFilter) Process(fc *types.FilterContext) (bool, error) {
 	}
 	token := fc.Metadata[f.headerName]
 	if token == "" {
-		// 允许握手阶段无 token（连接未建立）
+		// 握手/未绑定会话阶段可无 token；已绑定则必须带 token，空 UserUUID 不放行
 		if fc.ConnectionID == "" || fc.UserUUID == "" {
-			return true, nil
+			if fc.ConnectionID != "" && fc.UserUUID == "" {
+				// 连接已建立但尚未绑定用户（未登录帧），允许通过认证阶段
+				return true, nil
+			}
+			if fc.ConnectionID == "" {
+				return true, nil
+			}
 		}
 		fc.DropReason = "missing jwt token"
 		return false, nil
@@ -142,10 +148,18 @@ func (f *JWTAuthFilter) Validate(token string) (*JWTClaims, error) {
 	return &claims, nil
 }
 
-// Revoke 撤销 token（按 jti）
+// Revoke 撤销 token（按 jti）。写入时顺带清理已过期的撤销记录，防止 map 无限增长。
 func (f *JWTAuthFilter) Revoke(jti string, exp int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now().Unix()
+	if len(f.revoked) > 1024 {
+		for k, e := range f.revoked {
+			if e <= now {
+				delete(f.revoked, k)
+			}
+		}
+	}
 	f.revoked[jti] = exp
 }
 

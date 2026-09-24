@@ -168,7 +168,8 @@ func ExtractMessageFrame(data []byte) (cmd int32, seqID int64, body []byte, ok b
 			data = data[m:]
 		}
 	}
-	return cmd, seqID, body, cmd != 0 && len(body) > 0
+	// body 允许为空（仅 cmd+seq 的控制消息）；必须有 cmd 才是合法消息帧
+	return cmd, seqID, body, cmd != 0
 }
 
 // ExtractRouteAndCmd 从 protobuf 数据中提取路由名和命令码

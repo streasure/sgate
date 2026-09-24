@@ -25,24 +25,25 @@ type connGroup struct {
 
 // LogicClient 逻辑服客户端，管理与单个逻辑服实例的连接和流通信
 type LogicClient struct {
-	mu                sync.RWMutex        // 保护状态和连接的读写锁
-	state             atomic.Int32        // 连接状态（原子操作）
-	address           string              // 逻辑服地址
-	streamManager     *StreamManager      // 流分片管理器
-	streamCtx         context.Context     // 流上下文
-	streamCancel      context.CancelFunc  // 取消流上下文
-	reconnectConfig   ReconnectConfig     // 重连配置
-	healthCheckConfig HealthCheckConfig   // 健康检查配置
-	healthChecker     *HealthChecker      // 健康检查器
-	reconnectManager  *ReconnectManager   // 重连管理器
-	messageQueue      *StreamMessageQueue // 断线期间的消息缓存队列
-	gateway           GatewayInterface    // 网关接口引用
-	closing           bool                // 是否正在关闭
-	closed            chan struct{}       // 关闭完成信号
-	shardCount        int                 // 分片数量
-	connGroupCount    int                 // 独立 TCP 连接组数（默认 4）
-	connGroups        []connGroup         // N 条独立 gRPC 连接
-	serverID          string              // 逻辑服标识
+	mu                sync.RWMutex                  // 保护状态和连接的读写锁
+	connectMu         sync.Mutex                    // 串行化 doConnect，防止并发重连创建多套流
+	state             atomic.Int32                  // 连接状态（原子操作）
+	address           string                        // 逻辑服地址
+	streamManager     atomic.Pointer[StreamManager] // 流分片管理器（原子替换，热路径无锁读取）
+	streamCtx         context.Context               // 流上下文
+	streamCancel      context.CancelFunc            // 取消流上下文
+	reconnectConfig   ReconnectConfig               // 重连配置
+	healthCheckConfig HealthCheckConfig             // 健康检查配置
+	healthChecker     *HealthChecker                // 健康检查器
+	reconnectManager  *ReconnectManager             // 重连管理器
+	messageQueue      *StreamMessageQueue           // 断线期间的消息缓存队列
+	gateway           GatewayInterface              // 网关接口引用
+	closing           bool                          // 是否正在关闭
+	closed            chan struct{}                 // 关闭完成信号
+	shardCount        int                           // 分片数量
+	connGroupCount    int                           // 独立 TCP 连接组数（默认 4）
+	connGroups        []connGroup                   // N 条独立 gRPC 连接
+	serverID          string                        // 逻辑服标识
 }
 
 // NewLogicClient 创建逻辑服客户端实例
@@ -55,17 +56,18 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 			sendTimeout = d
 		}
 	}
-	return &LogicClient{
+	lc := &LogicClient{
 		state:             atomic.Int32{},
 		reconnectConfig:   DefaultReconnectConfig,
 		healthCheckConfig: DefaultHealthCheckConfig,
-		streamManager:     NewStreamManager(0, 0, sendTimeout),
 		gateway:           gateway,
 		closing:           false,
 		closed:            make(chan struct{}),
 		shardCount:        runtime.NumCPU() * 8,
 		messageQueue:      NewStreamMessageQueue(queuePolicy),
 	}
+	lc.streamManager.Store(NewStreamManager(0, 0, sendTimeout))
+	return lc
 }
 
 func (lc *LogicClient) SetServerID(serverID string) { lc.serverID = serverID }
@@ -112,8 +114,12 @@ func (lc *LogicClient) Connect(address string) error {
 	return lc.doConnect(false)
 }
 
-// doConnect 执行实际的连接/重连操作
+// doConnect 执行实际的连接/重连操作。
+// connectMu 串行化重连，防止并发 doConnect 创建多套 connGroup/stream。
 func (lc *LogicClient) doConnect(isReconnect bool) error {
+	lc.connectMu.Lock()
+	defer lc.connectMu.Unlock()
+
 	lc.mu.Lock()
 	if lc.closing {
 		lc.mu.Unlock()
@@ -210,9 +216,9 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	lc.mu.Unlock()
 
 	// 关闭旧的流分片
-	if lc.streamManager != nil {
-		for i := 0; i < len(lc.streamManager.shards); i++ {
-			if shard := lc.streamManager.shards[i]; shard != nil {
+	if oldSM := lc.streamManager.Load(); oldSM != nil {
+		for i := 0; i < len(oldSM.shards); i++ {
+			if shard := oldSM.shards[i]; shard != nil {
 				shard.closed.Store(true)
 				shard.mu.Lock()
 				shard.stream = nil
@@ -235,7 +241,8 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			sendTimeout = d
 		}
 	}
-	lc.streamManager = NewStreamManager(shardCount, sendChannelSize, sendTimeout)
+	newSM := NewStreamManager(shardCount, sendChannelSize, sendTimeout)
+	lc.streamManager.Store(newSM)
 
 	// 建立 stream：每个 shard 分配到对应的 connGroup
 	var wg sync.WaitGroup
@@ -268,7 +275,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 				return
 			}
 
-			shard := lc.streamManager.shards[idx]
+			shard := newSM.shards[idx]
 			shard.mu.Lock()
 			shard.stream = stream
 			shard.ctx = ctx
@@ -282,7 +289,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	if firstErr != nil {
 		tlog.Error(context.TODO(), "failed to establish all stream shards error=%v", firstErr)
 		for i := 0; i < shardCount; i++ {
-			shard := lc.streamManager.shards[i]
+			shard := newSM.shards[i]
 			shard.mu.Lock()
 			if shard.stream != nil {
 				shard.stream.CloseSend()
@@ -305,9 +312,9 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	lc.setState(LogicStateConnected)
 
 	for i := 0; i < shardCount; i++ {
-		lc.streamManager.shards[i].lc = lc
-		go lc.streamManager.shards[i].startSendLoop()
-		go lc.streamManager.shards[i].receiveMessages(lc, i)
+		newSM.shards[i].lc = lc
+		go newSM.shards[i].startSendLoop()
+		go newSM.shards[i].receiveMessages(lc, i)
 	}
 
 	// 冲刷断线期间缓存的消息。
@@ -344,9 +351,9 @@ func (lc *LogicClient) Close() {
 		lc.streamCancel = nil
 	}
 
-	if lc.streamManager != nil {
-		for i := 0; i < len(lc.streamManager.shards); i++ {
-			if shard := lc.streamManager.shards[i]; shard != nil {
+	if oldSM := lc.streamManager.Load(); oldSM != nil {
+		for i := 0; i < len(oldSM.shards); i++ {
+			if shard := oldSM.shards[i]; shard != nil {
 				shard.closed.Store(true)
 				shard.stop()
 			}
@@ -428,7 +435,11 @@ func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 		return ErrNotConnected
 	}
 
-	shard := lc.streamManager.GetShard(msg.SessionId)
+	sm := lc.streamManager.Load()
+	if sm == nil {
+		return ErrNotConnected
+	}
+	shard := sm.GetShard(msg.SessionId)
 	err := shard.SendMessage(msg)
 	if err != nil {
 		if lc.messageQueue != nil {
@@ -457,8 +468,11 @@ func (lc *LogicClient) SendMessageDirect(msg *protoGw.StreamData) error {
 		return ErrNotConnected
 	}
 
-	shard := lc.streamManager.GetShard(msg.SessionId)
-	return shard.SendMessage(msg)
+	sm := lc.streamManager.Load()
+	if sm == nil {
+		return ErrNotConnected
+	}
+	return sm.GetShard(msg.SessionId).SendMessage(msg)
 }
 
 func (lc *LogicClient) IsConnected() bool {
@@ -784,17 +798,19 @@ func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 	return msg, true
 }
 
-// Flush 冲刷队列中的消息，重连后调用以恢复转发
+// Flush 冲刷队列中的消息，重连后调用以恢复转发。
+// maxRetries 统计连续失败次数而非成功消息数，避免长队列在 100 条后停止冲刷。
 func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 	if !mq.flushing.CompareAndSwap(false, true) {
 		return // 已有 Flush 在运行
 	}
 	defer mq.flushing.Store(false)
 
-	const maxRetries = 100
+	const maxFailures = 100
 	const retryInterval = 100 * time.Millisecond
+	failures := 0
 
-	for i := 0; i < maxRetries; i++ {
+	for failures < maxFailures {
 		msg, ok := mq.Dequeue()
 		if !ok {
 			return
@@ -811,6 +827,7 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 
 		if state == LogicStateConnected {
 			if err := lc.SendMessageDirect(msg); err == nil {
+				failures = 0
 				continue
 			}
 		}
@@ -823,6 +840,8 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 				tlog.Warn(context.TODO(), "flush: re-enqueue failed, message dropped policy=%v error=%v", mq.policy, err)
 			}
 		}
+		failures++
 		time.Sleep(retryInterval)
 	}
+	tlog.Warn(context.TODO(), "flush: aborted after consecutive failures policy=%v", mq.policy)
 }

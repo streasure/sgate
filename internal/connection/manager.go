@@ -22,6 +22,7 @@ type ConnectionManager struct {
 	count                 atomic.Int32
 	stopCh                chan struct{}
 	checkDone             chan struct{}
+	checkStarted          atomic.Bool // StartConnectionChecker 是否已启动
 
 	ipConnections map[string]int32 // IP → 当前连接数
 	ipMu          sync.RWMutex
@@ -172,24 +173,22 @@ func (cm *ConnectionManager) GetUserConnection(userUUID string) (string, bool) {
 }
 
 // RemoveConnection 移除连接并清理所有关联的映射关系。
+// userConnections 使用 compare-and-delete：仅当映射仍指向本连接时才删除，避免误删新登录的映射。
 func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	conn, ok := cm.connections.Load(connectionID)
 	if !ok {
 		return
 	}
 	cm.connections.Delete(connectionID)
-	cm.userConnections.Delete(conn.GetUserUUID())
+	cm.userConnections.DeleteIf(conn.GetUserUUID(), connectionID)
 	serverID := conn.GetServerID()
-	cm.serverUserConnections.Delete(serverUserKey{serverID: serverID, userUUID: conn.GetUserUUID()})
+	userUUID := conn.GetUserUUID()
+	cm.serverUserConnections.Delete(serverUserKey{serverID: serverID, userUUID: userUUID})
 	if serverID != "" {
 		cm.serverConnections.Delete(serverID)
 	}
-	// 清理该连接所属的所有 group 成员关系
-	conn.groupsMu.RLock()
-	for groupID := range conn.Groups {
-		cm.RemoveUserFromGroup(groupID, serverID, conn.GetUserUUID())
-	}
-	conn.groupsMu.RUnlock()
+	// 扫描所有 group，移除该 serverUser 成员
+	cm.removeMemberFromAllGroups(serverID, userUUID)
 	// 追踪 IP 连接数
 	remoteIP := extractIP(conn.RemoteAddr)
 	cm.decrementIP(remoteIP)
@@ -207,11 +206,12 @@ func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string
 }
 
 // UpdateConnectionUserUUID 更新连接关联的用户UUID，同步更新所有映射。
+// 旧映射使用 compare-and-delete：仅当仍指向本连接时才删除。
 func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID, userUUID string) {
 	if conn := cm.GetConnection(connectionID); conn != nil {
 		oldUUID := conn.GetUserUUID()
 		conn.SetUserUUID(userUUID)
-		cm.userConnections.Delete(oldUUID)
+		cm.userConnections.DeleteIf(oldUUID, connectionID)
 		cm.userConnections.Store(userUUID, connectionID)
 		cm.serverUserConnections.Store(serverUserKey{serverID: conn.GetServerID(), userUUID: userUUID}, connectionID)
 	}
@@ -306,6 +306,32 @@ func (cm *ConnectionManager) RemoveUserFromGroup(groupID, serverID, userUUID str
 	}
 }
 
+// removeMemberFromAllGroups 扫描所有分组并移除指定 serverUser 成员，分组为空时删除。
+// 持有写锁时调用（由 RemoveConnection 路径使用）。
+func (cm *ConnectionManager) removeMemberFromAllGroups(serverID, userUUID string) {
+	cm.groupMutex.Lock()
+	defer cm.groupMutex.Unlock()
+	key := serverUserKey{serverID: serverID, userUUID: userUUID}
+	var emptyGroups []string
+	cm.groups.Range(func(k, v any) bool {
+		groupID, ok := k.(string)
+		if !ok {
+			return true
+		}
+		group, ok := v.(*ConnectionGroupInfo)
+		if !ok {
+			return true
+		}
+		if group.RemoveMember(key) {
+			emptyGroups = append(emptyGroups, groupID)
+		}
+		return true
+	})
+	for _, k := range emptyGroups {
+		cm.groups.Delete(k)
+	}
+}
+
 // CreateGroup 创建新的连接分组。
 func (cm *ConnectionManager) CreateGroup(groupID, groupName string) {
 	cm.groupMutex.Lock()
@@ -358,6 +384,9 @@ func (cm *ConnectionManager) GetGroupSessions(groupID string) []string {
 
 // StartConnectionChecker 启动空闲连接检查器，定期关闭超时的空闲连接。
 func (cm *ConnectionManager) StartConnectionChecker(connIdleTimeout, connCheckInterval time.Duration) {
+	if !cm.checkStarted.CompareAndSwap(false, true) {
+		return // 已启动
+	}
 	go func() {
 		defer close(cm.checkDone)
 		ticker := time.NewTicker(connCheckInterval)
@@ -391,7 +420,11 @@ func (cm *ConnectionManager) checkIdleConnections(timeout time.Duration) {
 }
 
 // StopConnectionChecker 停止空闲连接检查器。
+// 未调用 StartConnectionChecker 时不会阻塞（checkDone 未关闭）。
 func (cm *ConnectionManager) StopConnectionChecker() {
+	if !cm.checkStarted.Load() {
+		return
+	}
 	select {
 	case <-cm.stopCh:
 	default:

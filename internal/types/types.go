@@ -129,7 +129,8 @@ func (fc *FilterChain) AddFilter(f Filter) {
 	fc.sortFiltersLocked()
 }
 
-// RunByPhase 执行指定阶段的过滤器，返回 false 表示链被中止
+// RunByPhase 执行指定阶段的过滤器，返回 false 表示链被中止。
+// 过滤器返回 error 时 fail-closed：中止链，不再放行。
 func (fc *FilterChain) RunByPhase(phase FilterPhase, fcx *FilterContext) bool {
 	if fc.enabled.Load() == 0 {
 		return true
@@ -142,7 +143,11 @@ func (fc *FilterChain) RunByPhase(phase FilterPhase, fcx *FilterContext) bool {
 		}
 		ok, err := f.Process(fcx)
 		if err != nil {
-			continue
+			if fcx.DropReason == "" {
+				fcx.DropReason = f.Name() + ": " + err.Error()
+			}
+			fcx.Abort = true
+			return false
 		}
 		if !ok {
 			fcx.Abort = true

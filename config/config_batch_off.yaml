@@ -28,12 +28,12 @@ grpc:
 
 monitoring:
   pprofAddr: ""
+  disableMetricsLog: true   # 压测关闭每秒 metrics 日志
   prometheus:
     enabled: false
     addr: ":9101"
     path: "/metrics"
     prefix: "app"
-  maxMessageSize: 8388608
 
 configCenter:
   enabled: false
@@ -53,7 +53,6 @@ protection:
   maxFrameBufSize: 4194304
   maxWSFrameSize: 4194304
   maxWSBufferSize: 4194304
-  memoryThreshold: 92
   cpuThreshold: 92
   dropOnOverload: true
   checkIntervalMs: 200

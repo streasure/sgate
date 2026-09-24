@@ -19,7 +19,7 @@ func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID stri
 	return fc
 }
 
-func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID string, cmd int32) (*protoGw.StreamData, bool) {
+func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID string, cmd int32, seqID int64) (*protoGw.StreamData, bool) {
 	if g.filterChain == nil {
 		return nil, true
 	}
@@ -30,6 +30,7 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID str
 			return nil, false
 		}
 		if fcx.Abort {
+			g.messagesDroppedFilterChain.Add(1)
 			return nil, false
 		}
 	}
@@ -37,10 +38,17 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID str
 	if fcx.Mirrored && g.trafficMirror != nil {
 		g.trafficMirror.Mirror(fcx)
 	}
+	// 过滤器可能改写 Data（如降级兜底），优先使用过滤后的数据
+	payload := fcx.Data
+	if len(payload) == 0 {
+		payload = data
+	}
 	// 构造转发消息（允许过滤器修改 metadata）
 	msg := &protoGw.StreamData{
 		SessionId: connectionID,
-		Data:      data,
+		Data:      payload,
+		Cmd:       cmd,
+		SeqId:     seqID,
 	}
 	if fcx.UserUUID != "" {
 		msg.UserKey = fcx.UserUUID

@@ -106,18 +106,33 @@ func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
 
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
 	req := new(protoGw.LoginGateReq)
-	writeAck := func(code int32, text, serverID string) {
-		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
-		body, _ := proto.Marshal(ack)
-		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
-	}
 	if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
+		writeAck := func(code int32, text, serverID string) {
+			ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
+			body, _ := proto.Marshal(ack)
+			writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		}
 		writeAck(400, "invalid login gate request", req.ServerId)
 		return gnet.None
 	}
+
+	// 校验与绑定在 worker 中执行，避免同步 gRPC 阻塞 event loop。
+	// 成功后在 worker 中回写 LoginGateAck（writeFrame 在 worker 中改用 AsyncWrite）。
+	go g.finishLoginGate(c, connectionID, message, req)
+	return gnet.None
+}
+
+// finishLoginGate 在后台协程完成 loginKey 校验、连接绑定与 ack 回写。
+func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData, req *protoGw.LoginGateReq) {
+	writeAck := func(code int32, text, serverID string) {
+		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
+		body, _ := proto.Marshal(ack)
+		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		writeFrameAsync(c, data)
+	}
 	if !g.validateLoginKey(req.UserId, req.LoginKey) {
 		writeAck(401, "invalid login key", req.ServerId)
-		return gnet.None
+		return
 	}
 	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
 	userUUID := req.UserId
@@ -144,7 +159,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
 	writeAck(0, "ok", req.ServerId)
 
-	// 异步转发登录 StreamData 给逻辑服（不阻塞 gnet 事件循环）。
+	// 异步转发登录 StreamData 给逻辑服。
 	connObj := g.connectionManager.GetConnection(connectionID)
 	if connObj != nil {
 		forwardMsg := &protoGw.StreamData{
@@ -166,8 +181,6 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 			tlog.Warn(context.TODO(), "login forward to logic timed out serverID=%s", req.ServerId)
 		}()
 	}
-
-	return gnet.None
 }
 
 func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {

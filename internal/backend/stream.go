@@ -130,7 +130,10 @@ func (s *StreamShard) startSendLoop() {
 		s.mu.Unlock()
 
 		if stream == nil {
-			// 流不可用时，将所有消息归还到对象池。
+			// 流不可用时归还对象池，并统计推送丢弃
+			if s.lc != nil && s.lc.gateway != nil {
+				s.lc.gateway.AddPushDroppedNoConn(int64(len(batch)))
+			}
 			for _, m := range batch {
 				PutStreamData(m)
 			}
@@ -148,7 +151,10 @@ func (s *StreamShard) startSendLoop() {
 			PutStreamData(batch[sendIdx])
 			sendIdx++
 		}
-		// 将未发送的消息归还到对象池。
+		// 将未发送的消息归还到对象池并计数。
+		if sendIdx < len(batch) && s.lc != nil && s.lc.gateway != nil {
+			s.lc.gateway.AddPushDroppedNoConn(int64(len(batch) - sendIdx))
+		}
 		for i := sendIdx; i < len(batch); i++ {
 			PutStreamData(batch[i])
 		}

@@ -125,6 +125,35 @@ func (wbl *WhitelistBlacklist) RemoveFromBlacklist(key string) error {
 	return nil
 }
 
+// ReplaceWhitelist 原子替换白名单，热更新时先构建新 map 再一次性 swap，避免中间态读到半空列表。
+func (wbl *WhitelistBlacklist) ReplaceWhitelist(keys []string) {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		m[k] = true
+	}
+	wbl.mu.Lock()
+	wbl.whitelist = m
+	wbl.mu.Unlock()
+}
+
+// ReplaceBlacklist 原子替换黑名单。
+func (wbl *WhitelistBlacklist) ReplaceBlacklist(keys []string) {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		m[k] = true
+	}
+	wbl.mu.Lock()
+	wbl.blacklist = m
+	wbl.mu.Unlock()
+}
+
+// WhitelistEmpty 返回白名单是否为空（无锁拷贝检查，避免热路径每次 GetWhitelist 分配切片）。
+func (wbl *WhitelistBlacklist) WhitelistEmpty() bool {
+	wbl.mu.RLock()
+	defer wbl.mu.RUnlock()
+	return len(wbl.whitelist) == 0
+}
+
 // GetWhitelist 获取白名单
 // 返回值:
 //
