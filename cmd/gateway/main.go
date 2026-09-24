@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/streasure/sgate/internal"
+	comp "github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/gateway"
+	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uperf"
@@ -23,17 +25,9 @@ var (
 func main() {
 	flag.Parse()
 	if *showVer {
-		fmt.Printf("sgate gateway version: %s\n", internal.Version)
+		fmt.Printf("sgate gateway version: %s\n", gateway.Version)
 		return
 	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			buf := make([]byte, 4096)
-			n := runtime.Stack(buf, false)
-			fmt.Printf("panic: %v\n%s\n", r, buf[:n])
-		}
-	}()
 
 	logComp := tlog.NewLogComponent(*logConfig)
 	if err := logComp.Init(); err != nil {
@@ -47,22 +41,27 @@ func main() {
 		tlog.Error(context.TODO(), "load config failed error=%v", err)
 		return
 	}
-	if err := cfg.Validate(); err != nil {
-		tlog.Error(context.TODO(), "invalid gateway config error=%v", err)
-		return
-	}
 
 	uperf.Apply(cfg.Perf.GcPercent, cfg.Perf.MemoryLimitPercent)
 
-	tlog.Info(context.TODO(), "gateway starting... version=%s cpu=%d GOMAXPROCS=%d",
-		internal.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
+	tlog.Info(context.TODO(), "gateway starting http port:%d version=%s cpu=%d GOMAXPROCS=%d",
+		cfg.HttpPort, gateway.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
-	tlog.Info(context.TODO(), "config loaded port=%v", cfg.Port)
 
-	container := component.NewContainer()
-	gw := internal.NewGateway(*confFiles)
-	for _, comp := range gw.Components() {
-		container.Add(comp)
+	// 创建全局过滤器链并加载 SPI 过滤器
+	fc := types.InitFilterChain()
+	for _, fi := range cfg.FilterChain.Filters {
+		if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
+			tlog.Warn(context.TODO(), "failed to load filter from config name=%s error=%v", fi.Name, err)
+		}
 	}
+
+	// 平铺创建所有生命周期组件，Container 由 main 统一创建和组装
+	container := component.NewContainer()
+	container.Add(comp.NewSecurityComponent())
+	container.Add(comp.NewObservabilityComponent())
+	container.Add(comp.NewTrafficComponent())
+	container.Add(comp.NewClusterComponent())
+	container.Add(gateway.NewGateway())
 	container.Serve()
 }

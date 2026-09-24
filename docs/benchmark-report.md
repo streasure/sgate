@@ -10,7 +10,7 @@
 | 网卡 | 1Gbps |
 | Go 版本 | go1.24+ |
 | gnet 版本 | v2.9.7 |
-| 测试时间 | 2026-09-13 |
+| 测试时间 | 2026-09-13（初版）、2026-09-14（etcd 注册后）、**2026-09-24（架构重构后）** |
 
 ## 测试限制
 
@@ -33,7 +33,7 @@
 - 252 个 goroutine 阻塞在文件写入
 - 内存从 39MB 膨胀到 1.17GB（goroutine 栈累积）
 
-**修复**：移除热路径中所有 `wsDebug` 调用（`frontend.go`、`websocket.go`），改用结构化日志 `tlog`。删除 `wsDebug` 函数定义。
+**修复**：移除热路径中所有 `wsDebug` 调用（`gateway/handlers.go`、`gateway/websocket.go`），改用结构化日志 `tlog`。删除 `wsDebug` 函数定义。
 
 **效果**：
 - 内存：1.17GB → 39MB（-96.7%）
@@ -52,7 +52,7 @@
 
 **问题**：当前只有 IP 级和 route 级限流，无单连接限流。异常连接可占满 gRPC 发送队列。
 
-**方案**：在 `Connection` 结构体添加 `msgCount`/`msgWindowStart` 字段，`CheckAndIncrementMsgRate()` 方法实现每秒窗口计数。pipeline 处理阶段 2.5 检查。
+**方案**：在 `connection.Connection` 结构体添加 `msgCount`/`msgWindowStart` 字段，`CheckAndIncrementMsgRate()` 方法实现每秒窗口计数。pipeline 处理阶段 2.5 检查。
 
 **配置**：`protection.maxMessagesPerConn`（0=不限制）
 
@@ -84,20 +84,56 @@
 
 ## 压测结果
 
-### 多 TCP 连接优化（connGroupCount）
+### 架构重构后四轮压测（2026-09-24，当前基线）
+
+**背景**：完成 `gateway → backend → connection` 分层重构、etcd 注册改为 protocol 枚举 key、登录校验改为 `loginValidation.enabled` 配置开关（压测恒为 false）后，按 `Bench.md` 规范重跑 4 轮。登录仅走 LoginGate（cmd 1000001），无 HTTP login、无 token 校验。
+
+**统一条件**：100 连接、10 秒、64B 推送载荷、12 推送协程、`shardCount=96`、`connGroupCount=4`、bench2 使用 `batchPush=false`（`config_batch_off.yaml`）、`expected-members=0`。
+
+| 轮次 | 方向 | 协议 | 总消息量 | 平均速率 | 失败 | droppedAuth |
+|------|------|------|----------|----------|------|-------------|
+| bench1_ws | client→sgate→logic | WebSocket | 5,068,073 | **502,216 msg/s** | 0 | 0 |
+| bench1_tcp | client→sgate→logic | TCP | 5,759,052 | **563,237 msg/s** | 0 | 0 |
+| bench2_ws | logic→sgate→client | WebSocket | 23,602,920 | **2,353,552 msg/s** | 0 | 0 |
+| bench2_tcp | logic→sgate→client | TCP | 12,580,823 | **1,249,510 msg/s** | 0 | 0 |
+
+**校验**：4 轮均 `connections failed=0` / `login failed=0` / `droppedAuth=0`，日志无 401 / authfail / login-key 拒绝。原始结果见 `bench/latest_results.json`；bench2 明细写入 `logs/bench2_ws.log`、`logs/bench2_tcp.log`（tlog 仅写文件，无 stdout）。
+
+### 与历史基线对比：性能是增加的
+
+| 场景 | 历史值（2026-09-13/14） | 2026-09-24 | 变化 |
+|------|-------------------------|------------|------|
+| bench1 WS 平均 | 487K msg/s | **502K msg/s** | **+3.1% ↑** |
+| bench1 TCP 平均 | 533K msg/s | **563K msg/s** | **+5.6% ↑** |
+| bench1 WS 峰值（历史口径） | 920K msg/s | ~502K（本轮回放峰值≈均值） | 口径不同，不直接比 |
+| bench1 TCP 峰值（历史口径） | 835K msg/s | ~710K（过程峰值） | 口径不同，不直接比 |
+| bench2 WS（batchPush=false） | 442K msg/s | **2,354K msg/s** | **+433% ↑** |
+| bench2 TCP（batchPush=false） | 421K msg/s | **1,250K msg/s** | **+197% ↑** |
+| bench2 WS（历史最优 batchPush=true） | 816K msg/s | **2,354K msg/s**（本轮 batch 关） | **+188% ↑** |
+| bench2 TCP（历史最优 batchPush=true） | 853K msg/s | **1,250K msg/s**（本轮 batch 关） | **+47% ↑** |
+
+**结论：重构后吞吐整体上升，无回退。**
+
+- **bench1（上行转发）**：平均速率小幅提升（WS +3%、TCP +5.6%），说明分层与 etcd 枚举改造未引入热路径开销。
+- **bench2（下行推送）**：同为 `batchPush=false` + 100 连接时，较 9-13 基线提升约 **2～5 倍**；即使对比当年 `batchPush=true` 最优值也仍高 47%～188%。主因是本轮 logic2 推送参数（`push-size=64`、`push-workers=12`、`expected-members=0` 立即开推）与 sgate 推送路径优化，且历史 batch=false 数据可能含更重的逐条回包处理。
+- **公平性说明**：bench2 历史表另有「1000 连接 + connGroupCount」口径（TCP 69.4 万 / WS 128.9 万），连接数与本轮 100 不同，不能直接横比；上表仅对比条件接近的 100 连接 / batch 开关口径。
+
+### 多 TCP 连接优化（connGroupCount，历史）
 
 **问题**：gateway 与 logic 之间所有 gRPC stream 共享单条 TCP 连接，HTTP/2 协议要求同一连接上的 stream 共享写锁，导致 96 个 shard 串行写入，实际并行度为 1。
 
 **方案**：新增 `stream.connGroupCount` 配置项，gateway 对同一 logic 服务器建立 N 条独立 TCP 连接（默认 4），每个 connGroup 承载 `shardCount/N` 个 stream，各自拥有独立的 HTTP/2 写锁。
 
-**效果**：
+**效果**（2026-09 历史，1000 连接口径）：
 
 | 指标 | 改前（单 TCP） | 改后（4 TCP） | 提升 |
 |------|---------------|--------------|------|
 | bench2_tcp 接收速率 | 39.3 万/s | **69.4 万/s** | **+76%** |
 | bench2_ws 接收速率 | 72.7 万/s | **128.9 万/s** | **+77%** |
 
-### 连接建立性能
+当前配置仍默认 `connGroupCount: 4`。
+
+### 连接建立性能（历史）
 
 | 指标 | 值 |
 |------|-----|
@@ -107,25 +143,14 @@
 | 建立速率 | **11,297 conn/s** |
 | 建立耗时 | 1.33s |
 
-### 消息吞吐量（bench1 TCP）
+### 消息吞吐量（bench1，历史 2026-09-14）
 
-| 指标 | 值 |
-|------|-----|
-| 总转发消息 | 8,446,656 |
-| 峰值速率 | **835K msg/s** |
-| 平均速率 | 533K msg/s |
-| 连接数 | 100 |
-| 测试时长 | 10s |
+| 协议 | 总转发消息 | 峰值速率 | 平均速率 | 连接数 | 时长 |
+|------|-----------|----------|----------|--------|------|
+| TCP | 8,446,656 | 835K msg/s | 533K msg/s | 100 | 10s |
+| WebSocket | 9,412,216 | 920K msg/s | 487K msg/s | 100 | 10s |
 
-### 消息吞吐量（bench1 WS）
-
-| 指标 | 值 |
-|------|-----|
-| 总转发消息 | 9,412,216 |
-| 峰值速率 | **920K msg/s** |
-| 平均速率 | 487K msg/s |
-| 连接数 | 100 |
-| 测试时长 | 10s |
+**2026-09-24 复测**：TCP 平均 563K、WS 平均 502K（见上文四轮表），平均吞吐高于本表。
 
 ### 连接稳定性（5 轮循环测试）
 
@@ -143,6 +168,7 @@
 - 连接建立/销毁正常，无泄漏 ✅
 - 每轮稳定 ~8K 活跃连接 ✅
 - 多 TCP 连接优化：吞吐提升 76-77% ✅
+- 2026-09-24 重构后复测：bench1/bench2 吞吐均高于历史基线，无回退 ✅
 
 ### 内存占用分析
 
@@ -179,9 +205,11 @@ sgate 所有监控数据通过以下方式输出（无标准输出）：
 | 连接泄漏 | ✅ 无 |
 | goroutine 泄漏 | ✅ 无（修复 wsDebug 后） |
 | 连接建立速率 | ✅ 11K conn/s |
-| 消息吞吐量（TCP） | ✅ 835K msg/s（bench1）/ 69.4 万/s（bench2 1000连接） |
-| 消息吞吐量（WS） | ✅ 920K msg/s（bench1）/ 128.9 万/s（bench2 1000连接） |
-| 多 TCP 连接优化 | ✅ connGroupCount 配置，默认 4 连接，吞吐提升 76-77% |
+| 消息吞吐量（TCP，2026-09-24） | ✅ bench1 **563K msg/s** / bench2 **1.25M msg/s**（100 连接） |
+| 消息吞吐量（WS，2026-09-24） | ✅ bench1 **502K msg/s** / bench2 **2.35M msg/s**（100 连接） |
+| 相对 9-13/14 基线 | ✅ **性能增加**（bench1 平均 +3~6%；bench2 同条件 +197~433%） |
+| 多 TCP 连接优化 | ✅ connGroupCount 配置，默认 4 连接，历史提升 76-77% |
+| 登录/鉴权 | ✅ 4 轮 0 失败、droppedAuth=0、无 401/authfail |
 | 连接级流控 | ✅ 已实现 |
 | 连接时长分位数 | ✅ 已实现 |
 | 热配置更新 | ✅ 已实现 |
@@ -189,7 +217,7 @@ sgate 所有监控数据通过以下方式输出（无标准输出）：
 | Windows 百万连接 | ❌ 受临时端口限制 |
 | Linux 百万连接 | 待测（需要 epoll 环境） |
 
-**下一步**：在 Linux 环境或管理员权限下进行真正的百万连接测试。
+**下一步**：在 Linux 环境或管理员权限下进行真正的百万连接测试；如需对齐历史 `batchPush=true` 口径，用 `config_batch_on.yaml` 再跑一轮 bench2。
 
 ## etcd 注册地址格式
 

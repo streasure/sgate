@@ -84,6 +84,18 @@ func main() {
 			results[i] = connResult{nil, fmt.Errorf("unexpected cmd")}
 			continue
 		}
+		ack := new(protocol.LoginGateAck)
+		if err := proto.Unmarshal(resp.Body, ack); err != nil || ack.Code != 0 {
+			code := int32(-1)
+			if ack != nil {
+				code = ack.Code
+			}
+			fmt.Fprintf(os.Stderr, "client %d login rejected code=%d message=%s\n", i, code, ack.GetMessage())
+			conn.Close()
+			connectionsFailed.Add(1)
+			results[i] = connResult{nil, fmt.Errorf("login rejected code=%d", code)}
+			continue
+		}
 		totalAck.Add(1)
 		results[i] = connResult{conn, nil}
 	}

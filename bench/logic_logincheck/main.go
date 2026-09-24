@@ -10,7 +10,7 @@ import (
 	protocol "github.com/streasure/protocol/gateway"
 	logicproto "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/bench/logutil"
-	"github.com/streasure/sgate/logic"
+	logic "github.com/streasure/sgate/internal/logic"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )

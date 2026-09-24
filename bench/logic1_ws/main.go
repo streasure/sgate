@@ -8,7 +8,7 @@ import (
 	"syscall"
 
 	"github.com/streasure/sgate/bench/logutil"
-	"github.com/streasure/sgate/logic"
+	logic "github.com/streasure/sgate/internal/logic"
 )
 
 // main 启动logic1 WebSocket服务，注册gRPC服务并等待信号退出

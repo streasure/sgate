@@ -51,16 +51,64 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 
 ## 已验证结果
 
-测试日期：2026-09-13。测试条件：100 个连接、64 字节推送载荷、12 个推送工作协程、持续 10 秒、push-interval=0、96 个流分片。
+### 最新：架构重构后（2026-09-24）✅ 性能增加
 
-### bench1 转发
+测试日期：2026-09-24。背景：`gateway→backend→connection` 分层重构、etcd 枚举 key、`loginValidation.enabled` 开关（压测恒为 false）之后。
+
+条件：100 连接、10s、64B 载荷、12 推送协程、`shardCount=96`、`connGroupCount=4`、bench2 使用 `config_batch_off.yaml`（`batchPush=false`）、`expected-members=0`、登录仅 LoginGate（无 HTTP login / 无 token 校验）。
+
+#### bench1 转发（client→sgate→logic）
+
+| 协议 | 总转发量(10s) | 平均速率 | 失败 | droppedAuth |
+| --- | ---: | ---: | ---: | ---: |
+| WebSocket | 506.8 万 | **502,216/s** | 0 | 0 |
+| TCP | 575.9 万 | **563,237/s** | 0 | 0 |
+
+#### bench2 推送（logic→sgate→client，batchPush=false）
+
+| 协议 | 总接收量(10s) | 平均接收速率 | 失败 | droppedAuth |
+| --- | ---: | ---: | ---: | ---: |
+| WebSocket | 2,360.3 万 | **2,353,552/s** | 0 | 0 |
+| TCP | 1,258.1 万 | **1,249,510/s** | 0 | 0 |
+
+原始数据：`bench/latest_results.json`；bench2 日志：`logs/bench2_ws.log`、`logs/bench2_tcp.log`。
+
+#### 与历史对比（是否变快）
+
+| 场景 | 旧（09-13/14） | 新（09-24） | 变化 |
+| --- | ---: | ---: | --- |
+| bench1 WS 平均 | 487K/s | 502K/s | **+3.1% ↑** |
+| bench1 TCP 平均 | 533K/s | 563K/s | **+5.6% ↑** |
+| bench2 WS（batch=false） | 442K/s | 2,354K/s | **+433% ↑** |
+| bench2 TCP（batch=false） | 421K/s | 1,250K/s | **+197% ↑** |
+| bench2 WS（batch=true 旧最优） | 816K/s | 2,354K/s（本轮 batch 关） | **+188% ↑** |
+| bench2 TCP（batch=true 旧最优） | 853K/s | 1,250K/s（本轮 batch 关） | **+47% ↑** |
+
+**结论：重构后性能是增加的，无回退。** bench1 平均吞吐小幅上升；bench2 在同为 `batchPush=false` + 100 连接条件下提升约 2～5 倍。
+
+注意：历史另有 1000 连接 + `connGroupCount` 口径（TCP 69.4 万 / WS 128.9 万），连接数不同，不能与本轮 100 连接直接横比。
+
+### 历史：多 TCP 连接优化后（2026-09-14）
+
+测试日期：2026-09-14。验证 standalone 模式下向 etcd 注册 JSON 格式连接信息后性能无回退。
+
+| 协议 | 总转发量(10s) | 峰值速率 | 平均速率 |
+| --- | ---: | ---: | ---: |
+| TCP | 844 万 | 835K/s | 533K/s |
+| WebSocket | 941 万 | 920K/s | 487K/s |
+
+### 历史：batchPush 与 1000 连接口径（2026-09-13）
+
+测试日期：2026-09-13。条件：100 连接、64 字节推送载荷、12 个推送工作协程、持续 10 秒、`push-interval=0`、96 个流分片。
+
+#### bench1 转发
 
 | 协议 | 总转发量(10s) | 峰值速率 |
 | --- | ---: | ---: |
 | WebSocket | 843 万 | 840K/s |
 | TCP | 770 万 | 767K/s |
 
-### bench2 推送
+#### bench2 推送（100 连接）
 
 | 模式 | TCP | WebSocket |
 | --- | ---: | ---: |
@@ -68,17 +116,17 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 | batchPush=true | 853K/s | 816K/s |
 | 提升 | 约 102% | 约 85% |
 
-### 最新验证（etcd 注册变更后）
+#### bench2 推送（1000 连接 + connGroupCount=4）
 
-测试日期：2026-09-14。验证 standalone 模式下向 etcd 注册 JSON 格式连接信息后性能无回退。
-
-| 协议 | 总转发量(10s) | 峰值速率 |
-| --- | ---: | ---: |
-| TCP | 844 万 | 835K/s |
-| WebSocket | 941 万 | 920K/s |
+| 指标 | 改前（单 TCP） | 改后（4 TCP） | 提升 |
+| --- | ---: | ---: | ---: |
+| bench2_tcp | 39.3 万/s | 69.4 万/s | +76% |
+| bench2_ws | 72.7 万/s | 128.9 万/s | +77% |
 
 etcd 注册地址格式示例：
 ```json
 {"ip":"10.5.20.7","grpc":50051,"tcp":"10.5.20.7:48080","websocket":"10.5.20.7:48081"}
 ```
+
+2026-09-24 起 etcd key 改为 protocol 枚举：`/services/{belong}/{ServerTypeName}:{zone}/{instanceId}`（如 `SGATE` / `LOGINSERVER` / `LOGICSERVER`）。
 

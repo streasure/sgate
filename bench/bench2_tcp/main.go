@@ -61,15 +61,12 @@ func main() {
 			end = *parallel
 		}
 
-		var batchWG sync.WaitGroup
 		var batchReady sync.WaitGroup
 		batchReady.Add(end - batch)
 
 		for i := batch; i < end; i++ {
 			idx := i
-			batchWG.Add(1)
 			go func() {
-				defer batchWG.Done()
 				c, err := net.DialTimeout("tcp", *addr, 5*time.Second)
 				if err != nil {
 					tlog.Warn(context.TODO(), "bench2 dial failed client=%d error=%v", idx, err)
@@ -92,6 +89,18 @@ func main() {
 				resp, err := readTCPFrame(c)
 				if err != nil || resp.Cmd != cmdLoginGateAck {
 					tlog.Warn(context.TODO(), "bench2 login ack failed client=%d error=%v", idx, err)
+					c.Close()
+					connectionsFailed.Add(1)
+					batchReady.Done()
+					return
+				}
+				ack := new(protocol.LoginGateAck)
+				if err := proto.Unmarshal(resp.Body, ack); err != nil || ack.Code != 0 {
+					code := int32(-1)
+					if ack != nil {
+						code = ack.Code
+					}
+					tlog.Warn(context.TODO(), "bench2 login rejected client=%d code=%d message=%s", idx, code, ack.GetMessage())
 					c.Close()
 					connectionsFailed.Add(1)
 					batchReady.Done()

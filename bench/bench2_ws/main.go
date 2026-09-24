@@ -101,6 +101,17 @@ func main() {
 					connectionsFailed.Add(1)
 					return
 				}
+				ack := new(protocol.LoginGateAck)
+				if err := proto.Unmarshal(resp.Body, ack); err != nil || ack.Code != 0 {
+					code := int32(-1)
+					if ack != nil {
+						code = ack.Code
+					}
+					tlog.Warn(context.TODO(), "bench2 login rejected client=%d code=%d message=%s", idx, code, ack.GetMessage())
+					c.Close()
+					connectionsFailed.Add(1)
+					return
+				}
 
 				totalAck.Add(1)
 				connMu.Lock()

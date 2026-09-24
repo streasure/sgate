@@ -8,7 +8,7 @@
 
 ### 1. 广播性能优化
 - **问题：** `BroadcastAll` 同步遍历所有连接，百万连接时广播一次可能导致秒级延迟
-- **文件：** `internal/backend.go:1469`、`internal/connection.go:544`
+- **文件：** `internal/backend/grpc_server.go`、`internal/connection/manager.go`
 - **方案：** 广播改为异步分批投递，或按 zone 分片广播
 - **优先级：** P2
 
@@ -19,14 +19,14 @@
 
 ### 3. 连接级流控
 - **问题：** 当前只有 IP 级和 route 级限流，无单连接限流。异常连接可占满 gRPC 发送队列
-- **文件：** `internal/security/ratelimit.go`、`internal/connection.go`、`internal/pipeline.go`
+- **文件：** `internal/security/ratelimit.go`、`internal/connection/connection.go`、`internal/gateway/pipeline.go`
 - **方案：** 添加 `maxMessagesPerConn` 配置，每连接每秒消息计数超限则丢弃
 - **优先级：** P2
 - **状态：** ✅ 已修复
 
 ### 4. 连接生命周期指标完善
 - **问题：** 当前只有平均连接时长，缺少连接时长分布直方图
-- **文件：** `internal/stats.go`、`internal/frontend.go`、`internal/obs/latency.go`
+- **文件：** `internal/gateway/monitor.go`、`internal/gateway/handlers.go`、`internal/obs/latency.go`
 - **方案：** 添加 P50/P95/P99 连接时长指标（基于滑动窗口 LatencyTracker）
 - **优先级：** P2
 - **状态：** ✅ 已修复
@@ -86,3 +86,18 @@
 | P2-3 | 连接级流控 (`maxMessagesPerConn`) | ✅ 已修复 |
 | P2-4 | 连接生命周期指标（P50/P95/P99） | ✅ 已修复 |
 | P3-8 | 热配置更新（运行时参数热更新） | ✅ 已修复 |
+
+---
+
+## 架构重构（已完成）
+
+2026-09 完成四阶段包结构重构，详见 [`architecture.md`](architecture.md)：
+
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| A | 死代码清理（GroupManager、MessageIntegrity 冗余方法、空目录） | ✅ |
+| B | 抽出 `internal/connection`（Connection/Manager/Group/Coalescer） | ✅ |
+| C | 抽出 `internal/backend`（LogicClient/Pool/Stream/GRPCServer） | ✅ |
+| D | 迁入 `internal/gateway`（Gateway/handlers/pipeline 等），删除根包 | ✅ |
+
+**依赖方向：** `gateway → backend → connection`（单向无环）；共享帧工具位于 `routes`。

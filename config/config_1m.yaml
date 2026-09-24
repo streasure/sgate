@@ -1,7 +1,6 @@
 # sgate 百万连接配置
 # 适用于 1M 并发连接压测
-port: 8081
-logLevel: error    # 压测时用 error 减少日志开销
+httpPort: 8081
 belong: "default"
 serverId: "gateway-1m"
 serverType: "Gateway"
@@ -156,6 +155,10 @@ protection:
 
 security:
   enabled: false   # 压测关闭安全组件
+
+# 压测：必须关闭登录校验
+loginValidation:
+  enabled: false
 
 waf:
   enabled: false

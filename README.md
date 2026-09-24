@@ -31,14 +31,25 @@ sgate 是一个基于 gnet v2 的高性能长连接网关。它承载 TCP 和 We
         │
         ▼
       sgate
-  gnet 事件循环
-  消息管道与安全检查
-  连接管理与会话路由
-  96 个 gRPC 流分片（4 条独立 TCP 连接）
-        │
+  ┌─────────────────────────────────────┐
+  │ internal/gateway   接入层            │
+  │   gnet 事件循环、消息管道、登录       │
+  │   过滤器、监控、过载保护              │
+  ├─────────────────────────────────────┤
+  │ internal/backend    后端层            │
+  │   LogicClient、流分片、重连           │
+  │   gRPC Server、连接池                │
+  ├─────────────────────────────────────┤
+  │ internal/connection 连接层            │
+  │   Connection、Manager、分组           │
+  │   分片 Map、写合并器                  │
+  └─────────────────────────────────────┘
+        │  96 个 gRPC 流分片（4 条独立 TCP 连接）
         ▼
 逻辑服集群（etcd 服务发现）
 ```
+
+包依赖方向（单向无环）：`gateway → backend → connection`
 
 **客户端 → 逻辑服**
 
@@ -60,6 +71,8 @@ sgate 是一个基于 gnet v2 的高性能长连接网关。它承载 TCP 和 We
   → TCP/WebSocket 编码
   → 客户端接收 MessageFrame
 ```
+
+详细设计见 [`docs/architecture.md`](docs/architecture.md)。
 
 ---
 
@@ -262,11 +275,9 @@ cluster:
 | 字段 | 类型 | 默认值 | 作用 |
 | --- | --- | --- | --- |
 | `port` | int | `8080` | 网关基础端口。实际客户端端口由 `transports` 指定 |
-| `logLevel` | string | `info` | 日志等级：`debug`、`info`、`warn`、`error` |
 | `serverId` | string | `gateway-1` | 实例 ID，集群中必须唯一。也可由 `GATEWAY_SERVER_ID` 环境变量覆盖 |
 | `serverType` | string | `Gateway` | 服务类型 |
 | `zone` | string | `default` | 可用区名称 |
-| `logicServerType` | string | `Logic` | 逻辑服在 etcd 中的服务类型 |
 
 ### 6.2 `transports` 客户端监听
 
@@ -376,6 +387,20 @@ loginserver 可通过 etcd watch `Gateway:{zone}` 前缀获取网关连接地址
 | `rateLimit.enabled` | bool | `true` | 令牌桶限流 |
 | `rateLimit.maxTokens` | int | `1000000` | 最大令牌数 |
 | `circuitBreaker.enabled` | bool | `false` | 熔断器 |
+
+### 6.9.1 `loginValidation` 登录校验开关
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | `true`：LoginGate 必须经 loginserver `ValidateLoginToken`（**空 `loginKey` 也不能绕过**；未连上 loginserver 或 gRPC 失败 → 401）。`false`：永远放行（压测/本地免登） |
+
+```yaml
+loginValidation:
+  enabled: true   # 生产开启
+# 压测配置必须为 false（见 AGENTS.md Benchmarks）
+```
+
+不以「是否传了 `loginKey`」决定是否校验——否则不传 key 即可绕过。是否校验只看本开关。
 
 ### 6.10 其他可选组件
 
@@ -523,21 +548,52 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 
 ## 八、性能数据
 
-测试日期：2026-09-13/14。条件：100 连接、64B 载荷、12 推送协程、10s、`push-interval=0`、96 流分片。
+### 8.1 当前基线（2026-09-24，架构重构后）✅ 性能增加
 
-### bench1 转发
+条件：100 连接、10s、64B 载荷、12 推送协程、`shardCount=96`、`connGroupCount=4`、bench2 使用 `config_batch_off.yaml`（`batchPush=false`）、登录仅 LoginGate（无 HTTP login）。原始结果：`bench/latest_results.json`。
 
-| 协议 | 总转发量(10s) | 峰值速率 |
-| --- | ---: | ---: |
-| **WebSocket** | **941 万** | **920K/s** |
-| TCP | 844 万 | 835K/s |
+#### bench1 转发
 
-### bench2 推送
+| 协议 | 总转发量(10s) | 平均速率 | 失败 | droppedAuth |
+| --- | ---: | ---: | ---: | ---: |
+| **WebSocket** | **506.8 万** | **502,216/s** | 0 | 0 |
+| **TCP** | **575.9 万** | **563,237/s** | 0 | 0 |
+
+#### bench2 推送（batchPush=false）
+
+| 协议 | 总接收量(10s) | 平均接收速率 | 失败 | droppedAuth |
+| --- | ---: | ---: | ---: | ---: |
+| **WebSocket** | **2,360.3 万** | **2,353,552/s** | 0 | 0 |
+| **TCP** | **1,258.1 万** | **1,249,510/s** | 0 | 0 |
+
+#### 相对 2026-09-13/14 基线
+
+| 场景 | 旧 | 新 | 变化 |
+| --- | ---: | ---: | --- |
+| bench1 WS 平均 | 487K/s | 502K/s | **+3.1% ↑** |
+| bench1 TCP 平均 | 533K/s | 563K/s | **+5.6% ↑** |
+| bench2 WS（batch=false） | 442K/s | 2,354K/s | **+433% ↑** |
+| bench2 TCP（batch=false） | 421K/s | 1,250K/s | **+197% ↑** |
+
+**结论：重构后性能是增加的**（bench1 平均 +3~6%；bench2 同条件约 2～5 倍）。历史 1000 连接口径（TCP 69.4 万 / WS 128.9 万）连接数不同，不可直接横比。
+
+### 8.2 历史数据（2026-09-13/14）
+
+条件：100 连接、64B 载荷、12 推送协程、10s、`push-interval=0`、96 流分片。
+
+#### bench1 转发
+
+| 协议 | 总转发量(10s) | 峰值速率 | 平均速率 |
+| --- | ---: | ---: | ---: |
+| WebSocket | 941 万 | 920K/s | 487K/s |
+| TCP | 844 万 | 835K/s | 533K/s |
+
+#### bench2 推送（100 连接）
 
 | 模式 | TCP | WebSocket |
 | --- | ---: | ---: |
 | `batchPush=false` | 421K/s | 442K/s |
-| `batchPush=true` | **853K/s** | **816K/s** |
+| `batchPush=true` | 853K/s | 816K/s |
 | 提升 | +102% | +85% |
 
 详细报告见 [`docs/benchmark-report.md`](docs/benchmark-report.md)。
@@ -583,24 +639,66 @@ Broadcast(command, data)                    // 向所有网关广播
 ## 十一、目录结构
 
 ```text
-cmd/gateway/              网关程序入口
-internal/frontend.go      TCP 接入、登录和客户端消息处理
-internal/websocket.go     WebSocket 握手、帧解析
-internal/backend.go       gRPC 逻辑服连接、流分片、重连、反向推送
-internal/pipeline.go      认证、安全、过滤和转发管道
-internal/connection.go    客户端连接对象与连接管理器
-internal/frame.go         MessageFrame 编解码
+cmd/gateway/              网关程序入口（唯一组装点）
+
+internal/gateway/         接入层（package gateway）
+  gateway.go                Gateway 结构体、生命周期、组件编排
+  handlers.go               gnet 事件回调（TCP/WS 读写、关闭）
+  login.go                  登录流程（LoginGateReq/Ack）
+  websocket.go              WebSocket 握手、帧解析
+  pipeline.go               认证、安全、过滤、转发管道
+  filter.go                 过滤器链 SPI
+  monitor.go                /stats、Prometheus、配置热更新
+  overload.go               过载保护
+  integrity.go              消息完整性（时间戳/去重）
+  version.go                版本信息
+
+internal/backend/         后端层（package backend）
+  client.go                 LogicClient、HealthChecker、ReconnectManager
+  pool.go                   LogicClientPool（etcd 发现、负载均衡）
+  stream.go                 StreamManager、StreamShard（gRPC 流分片）
+  state.go                  连接状态、错误定义、重连/健康检查配置
+  grpc_server.go            GRPCServer（逻辑服推送、RPC 接口）
+  gateway_client.go         GatewayClientPool（网关间通信）
+  iface.go                  GatewayInterface、GatewayClientProvider
+
+internal/connection/      连接层（package connection）
+  connection.go             客户端连接对象
+  manager.go                ConnectionManager（分片存储、空闲检查）
+  group.go                  连接分组（广播/组播）
+  sharded_map.go            分片并发 Map
+  coalescer.go              分片写合并器（批量推送优化）
+  ws_frame.go               WebSocket 帧编码
+  iface.go                  LogicClientProvider 接口
+
+internal/routes/          路由与协议帧
+  routes.go                 路由常量、命令码、帧解析
+  frame.go                  MessageFrame 编解码、错误响应构造
+
+internal/component/       组件容器（Security/Obs/Traffic/Cluster）
 internal/config/          配置结构、默认值、校验
-internal/security/        白名单、黑名单、限流、熔断、WAF
+internal/security/        白名单、限流、熔断、WAF、JWT
 internal/traffic/         灰度、镜像、降级
 internal/cluster/         集群、负载均衡、Leader 选举
 internal/obs/             监控、追踪、pprof
 internal/codec/           TCP/WebSocket 编解码器
-logic/                    逻辑服 SDK
+internal/types/           过滤器链、公共类型
+internal/logic/           逻辑服 SDK（bench 用）
+internal/netutil/         网络工具
+
 bench/                    bench1、bench2 压测程序
 config/                   配置文件
 docs/                     设计文档和压测报告
 ```
+
+**设计原则：**
+
+1. **分层单向依赖**：`gateway → backend → connection`，禁止反向引用
+2. **组件扁平生命周期**：`NewContainer()` 仅在 `main.go` 创建；组件 Init/Start/Destroy 按 Order 排序
+3. **构造函数零参数**：所有组件构造函数无参数，内部读取 `config.Get()`
+4. **全局资源模式**：组件写入 `component/resources.go` 全局变量，Gateway 通过导出 getter 读取
+5. **过滤器链全局**：`types.InitFilterChain()` 在 main 初始化，组件通过 `types.GetFilterChain().AddFilter()` 注册
+6. **日志规范**：统一 `tlog`，禁止 `fmt.Print*/log.*`（见 AGENTS.md）
 
 ---
 

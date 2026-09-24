@@ -1,5 +1,4 @@
-port: 8081
-logLevel: warn
+httpPort: 8081
 belong: "default"       # 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
 serverId: "gateway-1"
 serverType: "Gateway"
@@ -15,9 +14,6 @@ discovery:
   serviceName: "logic"
   zone: "default"
   registerSelf: true   # standalone模式下向etcd注册网关连接信息（供loginserver发现）
-
-# logic server type for etcd service discovery (ServiceID = logicServerType + ":" + zone)
-logicServerType: "Logic"
 
 transports:
   - protocol: tcp
@@ -72,9 +68,6 @@ protection:
   # Authentication is logic-owned. Only these command IDs are accepted until
   # logic replies with a non-empty StreamData.user_key.
   preAuthCommands: [1000001]
-  loginAuth:
-    mode: "loginserver"
-    loginServerZone: "default"
 
 security:
   enabled: true
@@ -84,6 +77,10 @@ security:
     tokenRefresh: "1s"
   circuitBreaker:
     enabled: false
+
+# LoginGate loginKey 校验：true=必须过 loginserver（空 key 也不能绕过）；false=永远放行（压测）
+loginValidation:
+  enabled: false
 
 waf:
   enabled: false

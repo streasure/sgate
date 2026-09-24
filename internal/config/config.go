@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"strconv"
 	"sync/atomic"
 
@@ -10,35 +9,34 @@ import (
 
 // Config 网关服务的完整配置结构体，包含所有模块配置
 type Config struct {
-	Port            int                 `validate:"required"`
-	LogLevel        string              `default:"info"`
-	Belong          string              `validate:"required"` // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
-	ServerID        string              `validate:"required"`
-	ServerType      string              `validate:"required"`
-	Zone            string              `validate:"required"`
-	Discovery       DiscoveryConfig     `validate:"required"`
-	Transports      []Transport         `validate:"required"`
-	GRPC            GRPCConfig          `validate:"required"`
-	LogicServerType string              `default:"Logic"`
-	Etcd            EtcdConfig          `validate:"required"`
-	Stream          StreamConfig        `default:""`
-	Protection      ProtectionConfig    `default:""`
-	Security        SecurityConfig      `default:""`
-	WAF             WAFConfig           `default:""`
-	TLS             TLSConfig           `default:""`
-	Cluster         ClusterConfig       `default:""`
-	Balancer        BalancerConfig      `default:""`
-	JWTAuth         JWTAuthConfig       `default:""`
-	Canary          CanaryConfig        `default:""`
-	TrafficMirror   TrafficMirrorConfig `default:""`
-	OTelTracer      OTelTracerConfig    `default:""`
-	ConfigCenter    ConfigCenterConfig  `default:""`
-	Alert           AlertWebhookConfig  `default:""`
-	Degradation     DegradationConfig   `default:""`
-	FilterChain     FilterChainConfig   `default:""`
-	Monitoring      MonitoringConfig    `default:""`
-	Perf            PerfConfig          `default:""`
-	Pipeline        PipelineConfig      `default:""`
+	HttpPort        int                   `validate:"required"`
+	Belong          string                `validate:"required"` // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
+	ServerID        string                `validate:"required"`
+	ServerType      string                `validate:"required"`
+	Zone            string                `validate:"required"`
+	Discovery       DiscoveryConfig       `validate:"required"`
+	Transports      []Transport           `validate:"required"`
+	GRPC            GRPCConfig            `validate:"required"`
+	Etcd            EtcdConfig            `validate:"required"`
+	Stream          StreamConfig          `default:""`
+	Protection      ProtectionConfig      `default:""`
+	Security        SecurityConfig        `default:""`
+	LoginValidation LoginValidationConfig `default:""`
+	WAF             WAFConfig             `default:""`
+	TLS             TLSConfig             `default:""`
+	Cluster         ClusterConfig         `default:""`
+	Balancer        BalancerConfig        `default:""`
+	JWTAuth         JWTAuthConfig         `default:""`
+	Canary          CanaryConfig          `default:""`
+	TrafficMirror   TrafficMirrorConfig   `default:""`
+	OTelTracer      OTelTracerConfig      `default:""`
+	ConfigCenter    ConfigCenterConfig    `default:""`
+	Alert           AlertWebhookConfig    `default:""`
+	Degradation     DegradationConfig     `default:""`
+	FilterChain     FilterChainConfig     `default:""`
+	Monitoring      MonitoringConfig      `default:""`
+	Perf            PerfConfig            `default:""`
+	Pipeline        PipelineConfig        `default:""`
 }
 
 // PipelineConfig Pipeline 异步化配置
@@ -54,39 +52,12 @@ type PerfConfig struct {
 	MemoryLimitPercent int `yaml:"memoryLimitPercent"` // GOMEMLIMIT 等价：软内存上限占总内存百分比（推荐 80-90）
 }
 
-// Validate 校验配置参数的合法性，返回错误信息
-func (c *Config) Validate() error {
-	if c.GRPC.Port <= 0 || c.GRPC.Port > 65535 {
-		return fmt.Errorf("grpc.port must be between 1 and 65535")
-	}
-	seen := make(map[int]bool, len(c.Transports))
-	for _, transport := range c.Transports {
-		if transport.Protocol != "tcp" {
-			return fmt.Errorf("transport %d must use protocol tcp; UDP and other protocols are unsupported", transport.Port)
-		}
-		if transport.Port <= 0 || transport.Port > 65535 {
-			return fmt.Errorf("transport port must be between 1 and 65535")
-		}
-		if seen[transport.Port] {
-			return fmt.Errorf("duplicate transport port: %d", transport.Port)
-		}
-		seen[transport.Port] = true
-		if transport.Type != "" && transport.Type != "websocket" {
-			return fmt.Errorf("unsupported transport type %q", transport.Type)
-		}
-	}
-	if c.TLS.Enabled {
-		return fmt.Errorf("TLS/WSS is not supported by gnet v2 transport; disable tls.enabled")
-	}
-	return nil
-}
-
 // PortAddress 返回格式化的监听地址（如 ":8080"），端口无效时返回空字符串
 func (c *Config) PortAddress() string {
-	if c.Port <= 0 {
+	if c.HttpPort <= 0 {
 		return ""
 	}
-	return ":" + strconv.Itoa(c.Port)
+	return ":" + strconv.Itoa(c.HttpPort)
 }
 
 // MonitoringConfig 监控接入配置（可插拔）
@@ -224,6 +195,13 @@ type SecurityConfig struct {
 	CircuitBreaker CircuitBreakerConfig `yaml:"circuitBreaker"`
 }
 
+// LoginValidationConfig LoginGate loginKey 校验开关。
+// enabled=false：永远放行（压测/本地免登）。
+// enabled=true：必须经 loginserver ValidateLoginToken；空 loginKey 也不能绕过。
+type LoginValidationConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // RateLimitConfig 限流配置
 type RateLimitConfig struct {
 	Enabled      bool   `yaml:"enabled"`
@@ -319,37 +297,22 @@ type StreamConfig struct {
 }
 
 type ProtectionConfig struct {
-	MaxFrameSize        int             `yaml:"maxFrameSize"`
-	MaxFrameBufSize     int             `yaml:"maxFrameBufSize"`
-	MaxWSFrameSize      int             `yaml:"maxWSFrameSize"`
-	MaxWSBufferSize     int             `yaml:"maxWSBufferSize"`
-	MaxConnections      int             `yaml:"maxConnections"`      // 网关最大总连接数，0=不限制
-	MaxConnectionsPerIP int             `yaml:"maxConnectionsPerIP"` // 单 IP 最大连接数，0=不限制
-	MaxMessagesPerConn  int             `yaml:"maxMessagesPerConn"`  // 单连接最大消息数/秒，0=不限制
-	CPUThreshold        float64         `yaml:"cpuThreshold"`
-	DropOnOverload      bool            `yaml:"dropOnOverload"`
-	CheckIntervalMs     int             `yaml:"checkIntervalMs"`
-	WSHeartbeatTimeout  int             `yaml:"wsHeartbeatTimeout"`
-	WSCheckInterval     int             `yaml:"wsCheckInterval"`
-	ConnCheckInterval   string          `yaml:"connCheckInterval"`
-	ConnIdleTimeout     string          `yaml:"connIdleTimeout"`
-	VerifyInbound       bool            `yaml:"verifyInbound"`
-	PreAuthCommands     []int32         `yaml:"preAuthCommands"`
-	LoginAuth           LoginAuthConfig `yaml:"loginAuth"`
-}
-
-// LoginAuthConfig 定义网关侧的登录认证行为。
-type LoginAuthConfig struct {
-	// Mode 控制登录密钥校验方式：
-	//   "none"：跳过校验，始终接受（默认，用于测试）
-	//   "hmac"：按 HMAC-SHA256(userId, secret) 校验 login_key
-	//   "delegate"：转发到逻辑服校验（会增加延迟）
-	//   "loginserver"：通过 loginserver gRPC 校验 accountId 和 loginToken
-	Mode string `yaml:"mode"`
-	// Secret 是 HMAC 共享密钥（Mode 为 "hmac" 时必填）。
-	Secret string `yaml:"secret"`
-	// LoginServerZone 是 loginserver 在 etcd 中注册的 zone（Mode 为 "loginserver" 时必填）。
-	LoginServerZone string `yaml:"loginServerZone"`
+	MaxFrameSize        int     `yaml:"maxFrameSize"`
+	MaxFrameBufSize     int     `yaml:"maxFrameBufSize"`
+	MaxWSFrameSize      int     `yaml:"maxWSFrameSize"`
+	MaxWSBufferSize     int     `yaml:"maxWSBufferSize"`
+	MaxConnections      int     `yaml:"maxConnections"`      // 网关最大总连接数，0=不限制
+	MaxConnectionsPerIP int     `yaml:"maxConnectionsPerIP"` // 单 IP 最大连接数，0=不限制
+	MaxMessagesPerConn  int     `yaml:"maxMessagesPerConn"`  // 单连接最大消息数/秒，0=不限制
+	CPUThreshold        float64 `yaml:"cpuThreshold"`
+	DropOnOverload      bool    `yaml:"dropOnOverload"`
+	CheckIntervalMs     int     `yaml:"checkIntervalMs"`
+	WSHeartbeatTimeout  int     `yaml:"wsHeartbeatTimeout"`
+	WSCheckInterval     int     `yaml:"wsCheckInterval"`
+	ConnCheckInterval   string  `yaml:"connCheckInterval"`
+	ConnIdleTimeout     string  `yaml:"connIdleTimeout"`
+	VerifyInbound       bool    `yaml:"verifyInbound"`
+	PreAuthCommands     []int32 `yaml:"preAuthCommands"`
 }
 
 // Transport 网络传输配置

@@ -1,5 +1,4 @@
-port: 8081
-logLevel: warn
+httpPort: 8081
 belong: "default"
 serverId: "gateway-1"
 serverType: "Gateway"
@@ -15,8 +14,6 @@ discovery:
   serviceName: "logic"
   zone: "default"
   registerSelf: true
-
-logicServerType: "Logic"
 
 transports:
   - protocol: tcp
@@ -73,6 +70,10 @@ security:
     tokenRefresh: "1s"
   circuitBreaker:
     enabled: false
+
+# 集群联调默认关闭登录校验；生产应设 true
+loginValidation:
+  enabled: false
 
 waf:
   enabled: false
