@@ -99,7 +99,7 @@
 | --- | --- | --- |
 | P0-1 | 最大连接数限制 (`maxConnections`) | ✅ 已修复 |
 | P0-2 | 单 IP 连接数限制 (`maxConnectionsPerIP`) | ✅ 已修复 |
-| P0-3 | FrameBuf 默认值降低至 64KB | ✅ 已修复 |
+| P0-3 | FrameBuf 默认值（零值回退 `4MiB`，百万连接建议显式 `64KiB`，见 `config_defaults_test`） | ✅ 已修复 |
 | P0-4 | 启动时检查 FD 限制 | ✅ 已修复 |
 | P1-1 | ConnectionManager sync.Map → 分片 map | ✅ 已修复 |
 | P1-2 | Group 成员泄漏修复 | ✅ 已修复 |

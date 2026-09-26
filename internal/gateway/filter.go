@@ -8,7 +8,8 @@ import (
 	"github.com/streasure/sgate/internal/types"
 )
 
-// buildFilterContext 从原始请求构造过滤器上下文
+// buildFilterContext 从原始请求构造过滤器上下文。
+// 填充连接已绑定的 UserUUID，使 Auth 阶段能区分「已登录帧」与「未登录帧」。
 func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID string, cmd int32) *types.FilterContext {
 	fc := &types.FilterContext{
 		Ctx:          g.ctx,
@@ -18,6 +19,11 @@ func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID stri
 		Data:         data,
 		Metadata:     make(map[string]string),
 	}
+	if conn := g.connectionManager.GetConnection(connectionID); conn != nil && conn.IsAuthenticated() {
+		fc.UserUUID = conn.GetUserUUID()
+	}
+	// Route 供 skipRoutes 匹配；协议帧无路由名，用 cmd 十进制串（与 skipRoutes 配置一致）
+	fc.Route = strconv.Itoa(int(cmd))
 	return fc
 }
 

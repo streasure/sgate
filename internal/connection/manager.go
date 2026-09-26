@@ -27,8 +27,8 @@ type ConnectionManager struct {
 	ipConnections map[string]int32 // IP → 当前连接数
 	ipMu          sync.RWMutex
 
-	maxConnections      int // 网关最大总连接数，0=不限制
-	maxConnectionsPerIP int // 单 IP 最大连接数，0=不限制
+	maxConnections      atomic.Int32 // 网关最大总连接数，0=不限制
+	maxConnectionsPerIP atomic.Int32 // 单 IP 最大连接数，0=不限制
 
 	totalConnections   atomic.Int64
 	activeConnections  atomic.Int64
@@ -62,40 +62,41 @@ func GenerateConnectionID() string {
 
 // NewConnectionManager 创建新的连接管理器实例。
 func NewConnectionManager(maxConn, maxConnPerIP int) *ConnectionManager {
-	return &ConnectionManager{
-		connections:         newShardedMap[*Connection](),
-		userConnections:     newShardedMap[string](),
-		ipConnections:       make(map[string]int32),
-		maxConnections:      maxConn,
-		maxConnectionsPerIP: maxConnPerIP,
-		stopCh:              make(chan struct{}),
-		checkDone:           make(chan struct{}),
+	cm := &ConnectionManager{
+		connections:     newShardedMap[*Connection](),
+		userConnections: newShardedMap[string](),
+		ipConnections:   make(map[string]int32),
+		stopCh:          make(chan struct{}),
+		checkDone:       make(chan struct{}),
 	}
+	cm.maxConnections.Store(int32(maxConn))
+	cm.maxConnectionsPerIP.Store(int32(maxConnPerIP))
+	return cm
 }
 
 // UpdateLimits 运行时更新连接限制参数（热配置）。
 func (cm *ConnectionManager) UpdateLimits(maxConn, maxConnPerIP int) {
 	if maxConn >= 0 {
-		cm.maxConnections = maxConn
+		cm.maxConnections.Store(int32(maxConn))
 	}
 	if maxConnPerIP >= 0 {
-		cm.maxConnectionsPerIP = maxConnPerIP
+		cm.maxConnectionsPerIP.Store(int32(maxConnPerIP))
 	}
 	tlog.Info(context.TODO(), "connection manager limits updated maxConnections=%d maxConnectionsPerIP=%d",
-		cm.maxConnections,
-		cm.maxConnectionsPerIP)
+		cm.maxConnections.Load(),
+		cm.maxConnectionsPerIP.Load())
 }
 
 // CanAccept 检查是否允许接受新连接（总连接数 + 单 IP 连接数）。
 func (cm *ConnectionManager) CanAccept(remoteIP string) bool {
-	if cm.maxConnections > 0 && int(cm.count.Load()) >= cm.maxConnections {
+	if max := int(cm.maxConnections.Load()); max > 0 && int(cm.count.Load()) >= max {
 		return false
 	}
-	if cm.maxConnectionsPerIP > 0 && remoteIP != "" {
+	if maxPerIP := int(cm.maxConnectionsPerIP.Load()); maxPerIP > 0 && remoteIP != "" {
 		cm.ipMu.RLock()
 		ipCount := cm.ipConnections[remoteIP]
 		cm.ipMu.RUnlock()
-		if ipCount >= int32(cm.maxConnectionsPerIP) {
+		if ipCount >= int32(maxPerIP) {
 			return false
 		}
 	}
@@ -103,10 +104,10 @@ func (cm *ConnectionManager) CanAccept(remoteIP string) bool {
 }
 
 // MaxConnections 返回网关最大总连接数（0=不限制）。
-func (cm *ConnectionManager) MaxConnections() int { return cm.maxConnections }
+func (cm *ConnectionManager) MaxConnections() int { return int(cm.maxConnections.Load()) }
 
 // MaxConnectionsPerIP 返回单 IP 最大连接数（0=不限制）。
-func (cm *ConnectionManager) MaxConnectionsPerIP() int { return cm.maxConnectionsPerIP }
+func (cm *ConnectionManager) MaxConnectionsPerIP() int { return int(cm.maxConnectionsPerIP.Load()) }
 
 // incrementIP 增加指定 IP 的连接计数。
 func (cm *ConnectionManager) incrementIP(remoteIP string) {
@@ -173,13 +174,15 @@ func (cm *ConnectionManager) GetUserConnection(userUUID string) (string, bool) {
 }
 
 // RemoveConnection 移除连接并清理所有关联的映射关系。
-// userConnections 使用 compare-and-delete：仅当映射仍指向本连接时才删除，避免误删新登录的映射。
+// 幂等：connections 用 compare-and-delete，仅首个调用者执行计数/映射清理，避免并发双减。
 func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	conn, ok := cm.connections.Load(connectionID)
 	if !ok {
 		return
 	}
-	cm.connections.Delete(connectionID)
+	if !cm.connections.DeleteIf(connectionID, conn) {
+		return // 已被并发调用移除
+	}
 	cm.userConnections.DeleteIf(conn.GetUserUUID(), connectionID)
 	serverID := conn.GetServerID()
 	userUUID := conn.GetUserUUID()
@@ -213,6 +216,13 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID, userUUID str
 		conn.SetUserUUID(userUUID)
 		cm.userConnections.DeleteIf(oldUUID, connectionID)
 		cm.userConnections.Store(userUUID, connectionID)
+		// 清理旧 serverUser 键（否则 serverUserConnections 残留孤儿条目）
+		if oldUUID != "" && oldUUID != userUUID {
+			key := serverUserKey{serverID: conn.GetServerID(), userUUID: oldUUID}
+			if cur, ok := cm.serverUserConnections.Load(key); ok && cur == connectionID {
+				cm.serverUserConnections.Delete(key)
+			}
+		}
 		cm.serverUserConnections.Store(serverUserKey{serverID: conn.GetServerID(), userUUID: userUUID}, connectionID)
 	}
 }

@@ -116,7 +116,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 			connectionID = ctx.ConnectionID
 			PutConnContext(ctx)
 		} else if wsConn, ok := connCtx.(*WebSocketConnection); ok {
-			connectionID = wsConn.ConnectionID
+			connectionID = wsConn.ConnectionID()
 			g.wsConnections.Delete(wsConn)
 			wsConn.State.Store(int32(WSStateClosed))
 		} else if id, ok := connCtx.(string); ok {
@@ -303,6 +303,10 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	message, ok := routes.DecodeClientMessage(data)
 	if !ok {
 		return gnet.Close
+	}
+	// 入站流量刷新活跃时间（否则仅靠 Send 采样会被 connIdleTimeout 误杀）
+	if connObj := g.connectionManager.GetConnection(connectionID); connObj != nil {
+		connObj.TouchActive()
 	}
 	cmd := message.Cmd
 	if cmd == routes.CmdLoginGate {

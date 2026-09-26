@@ -107,7 +107,6 @@ routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免�
 | `traffic` | 灰度、镜像、降级、eBPF/WASM |
 | `cluster` | 集群模式、负载均衡、Leader 选举 |
 | `obs` | 追踪、pprof、健康检查、延迟分位数 |
-| `codec` | TCP/WS 编解码器（含池化） |
 | `types` | 过滤器链、公共类型定义 |
 
 ---
@@ -179,7 +178,7 @@ types.GetFilterChain().AddFilter(myFilter)
 
 ```text
 1. gnet OnTraffic (handlers.go)
-2. TCP: 长度前缀解码 / WS: 帧解码 (codec)
+2. TCP: 长度前缀切帧 / WS: 帧解析 (handlers.go / websocket.go)
 3. decode MessageFrame (routes.ExtractMessageFrame)
 4. MessagePipeline (pipeline.go)
    ├─ 过载检查 (overload)
@@ -205,13 +204,15 @@ types.GetFilterChain().AddFilter(myFilter)
 ### 4.3 登录流程
 
 ```text
-Client → CmdLoginGate(1000001) LoginGateReq
-  → pipeline 认证前命令白名单 (preAuthCommands)
-  → login.handleLoginGate
-  → 分配 sessionID、绑定 Connection
-  → 可选转发 logic: CmdLogicLoginReq(1100001)
-Logic → CmdLogicLoginAck(1100002)
-  → Client ← CmdLoginGateAck(1000002)
+Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pipeline）
+  → 过载检查 → IP 限流 → 请求解析 → 封禁检查 (rejectIfBanned)
+  → 并发登录槽 (loginSlots，满则 429)
+  → worker 协程 finishLoginGate（避免阻塞 event loop）
+      ├─ loginValidation.enabled=true 时经 loginserver ValidateLoginToken（失败 401，fail-closed）
+      ├─ 二次封禁检查、绑定 userUUID = {serverId}:{userId}、踢旧连接
+      ├─ Client ← CmdLoginGateAck(1000002)（code=0 成功）
+      └─ 原始 LoginGate StreamData 带 SessionId/UserKey 异步转发 logic
+         （logic 直接读取原始 LoginGateReq，无 CmdLogicLoginReq/Ack 转换）
 ```
 
 ---

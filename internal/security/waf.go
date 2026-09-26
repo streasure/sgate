@@ -158,6 +158,9 @@ func (w *WAF) Inspect(data []byte) bool {
 	return true
 }
 
+// ShouldBlock 返回命中时是否断连（blockAction=drop）；log 模式仅记录放行。
+func (w *WAF) ShouldBlock() bool { return w.blockAction == "drop" }
+
 // isLikelyText 判断数据是否为文本（非二进制 protobuf）
 // protobuf 帧以 field tag 开头，文本则以可打印 ASCII/UTF-8 开头
 func isLikelyText(data []byte) bool {

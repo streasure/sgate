@@ -3,8 +3,6 @@ package routes
 // 本文件定义网关路由常量、命令码及消息帧解析函数
 
 import (
-	"hash/fnv"
-
 	protocol "github.com/streasure/protocol/gateway"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -91,39 +89,6 @@ const (
 	RouteBatch = "_batch" // 批量路由后缀
 )
 
-// CmdForMessage 根据路由和消息名生成命令码（FNV32a 哈希取正值）
-func CmdForMessage(route, msgName string) int32 {
-	h := fnv.New32a()
-	h.Write([]byte(route))
-	h.Write([]byte("."))
-	h.Write([]byte(msgName))
-	return int32(h.Sum32() & 0x7FFFFFFF)
-}
-
-// CmdForRoute 根据路由名获取对应的命令码
-func CmdForRoute(route string) int32 {
-	switch route {
-	case RouteLogin:
-		return CmdLogin
-	case RouteError:
-		return CmdError
-	default:
-		return CmdForMessage(route, "Message")
-	}
-}
-
-// RouteForCmd 根据命令码反查路由名
-func RouteForCmd(cmd int32) string {
-	switch cmd {
-	case CmdLogin:
-		return RouteLogin
-	case CmdError:
-		return RouteError
-	default:
-		return ""
-	}
-}
-
 // ExtractMessageFrame 从 protobuf 编码的数据中提取消息帧（命令码、序列号、消息体）
 func ExtractMessageFrame(data []byte) (cmd int32, seqID int64, body []byte, ok bool) {
 	for len(data) > 0 {
@@ -173,38 +138,4 @@ func ExtractMessageFrame(data []byte) (cmd int32, seqID int64, body []byte, ok b
 	}
 	// body 允许为空（仅 cmd+seq 的控制消息）；必须有 cmd 才是合法消息帧
 	return cmd, seqID, body, cmd != 0
-}
-
-// ExtractRouteAndCmd 从 protobuf 数据中提取路由名和命令码
-func ExtractRouteAndCmd(data []byte) (route string, cmd int32) {
-	for len(data) > 0 {
-		num, typ, n := protowire.ConsumeTag(data)
-		if n < 0 {
-			return
-		}
-		data = data[n:]
-		switch num {
-		case 3:
-			m := protowire.ConsumeFieldValue(num, typ, data)
-			if m < 0 {
-				return
-			}
-			route = string(data[:m])
-			data = data[m:]
-		case 4:
-			v, n := protowire.ConsumeVarint(data)
-			if n < 0 {
-				return
-			}
-			cmd = int32(v)
-			data = data[n:]
-		default:
-			m := protowire.ConsumeFieldValue(num, typ, data)
-			if m < 0 {
-				return
-			}
-			data = data[m:]
-		}
-	}
-	return
 }

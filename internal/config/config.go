@@ -146,6 +146,9 @@ type ConfigCenterConfig struct {
 
 // EtcdConfig etcd 服务注册与发现配置
 type EtcdConfig struct {
+	// Enabled 是否启用 etcd（nil=true；yaml `etcd.enabled`）。
+	// 关闭时跳过 etcd 启动（无逻辑服务发现/网关注册，standalone 纯静态地址模式）。
+	Enabled       *bool    `yaml:"enabled"`
 	Endpoints     []string `yaml:"endpoints"`
 	Endpoint      string   `yaml:"endpoint"`
 	Username      string   `yaml:"username"`
@@ -154,6 +157,9 @@ type EtcdConfig struct {
 	ServicePrefix string   `yaml:"servicePrefix"`
 	LeaseTTL      string   `yaml:"leaseTTL"`
 }
+
+// IsEnabled 返回 etcd 是否启用（缺省 true）。
+func (e EtcdConfig) IsEnabled() bool { return e.Enabled == nil || *e.Enabled }
 
 // AlertWebhookConfig 告警 webhook 配置
 type AlertWebhookConfig struct {

@@ -60,7 +60,10 @@ func (f *JWTAuthFilter) Name() string             { return "jwt-auth" }
 func (f *JWTAuthFilter) Phase() types.FilterPhase { return types.PhaseAuth }
 func (f *JWTAuthFilter) Priority() int            { return 100 }
 
-// Process 鉴权处理：从元数据取 token，校验签名+过期+撤销
+// Process 鉴权处理：从元数据取 token，校验签名+过期+撤销。
+// fail-closed：连接已绑定用户（UserUUID 非空）且无 token → 拒绝；
+// 未绑定（LoginGate 前/未登录帧）→ 放行，由 loginKey/流水线兜底。
+// skipRoutes 支持路由名与 cmd 十进制串两种键。
 func (f *JWTAuthFilter) Process(fc *types.FilterContext) (bool, error) {
 	if len(f.skipRoutes) > 0 {
 		if _, ok := f.skipRoutes[fc.Route]; ok {
@@ -69,15 +72,9 @@ func (f *JWTAuthFilter) Process(fc *types.FilterContext) (bool, error) {
 	}
 	token := fc.Metadata[f.headerName]
 	if token == "" {
-		// 握手/未绑定会话阶段可无 token；已绑定则必须带 token，空 UserUUID 不放行
-		if fc.ConnectionID == "" || fc.UserUUID == "" {
-			if fc.ConnectionID != "" && fc.UserUUID == "" {
-				// 连接已建立但尚未绑定用户（未登录帧），允许通过认证阶段
-				return true, nil
-			}
-			if fc.ConnectionID == "" {
-				return true, nil
-			}
+		if fc.UserUUID == "" {
+			// 未绑定用户：不在此处强制 JWT（LoginGate/preAuth 负责建立会话）
+			return true, nil
 		}
 		fc.DropReason = "missing jwt token"
 		return false, nil

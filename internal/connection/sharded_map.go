@@ -76,17 +76,23 @@ func (m *shardedMap[V]) DeleteIf(key string, value V) bool {
 }
 
 // Range 遍历所有分片中的条目。回调返回 false 时终止遍历。
+// 先在读锁内快照再回调，允许回调中执行 Delete/Store（否则同分片 Lock 会与 RLock 自死锁）。
 func (m *shardedMap[V]) Range(fn func(key string, value V) bool) {
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.RLock()
+		keys := make([]string, 0, len(s.data))
+		vals := make([]V, 0, len(s.data))
 		for k, v := range s.data {
-			if !fn(k, v) {
-				s.mu.RUnlock()
+			keys = append(keys, k)
+			vals = append(vals, v)
+		}
+		s.mu.RUnlock()
+		for j := range keys {
+			if !fn(keys[j], vals[j]) {
 				return
 			}
 		}
-		s.mu.RUnlock()
 	}
 }
 

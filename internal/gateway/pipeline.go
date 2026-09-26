@@ -12,6 +12,7 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/backend"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
@@ -78,11 +79,21 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 
 	// 阶段2：连接/认证状态检查
 	connObj := g.connectionManager.GetConnection(connectionID)
-	if connObj == nil || connObj.GetServerID() == "" {
+	if connObj == nil {
 		g.messagesDroppedAuth.Add(1)
-		return PipelineResult{Action: gnet.Close}
+		return PipelineResult{Action: gnet.Close, Error: fmt.Errorf("unknown connection")}
 	}
-	if !connObj.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
+	// preAuth 命令（如 LoginGate）在 serverID 绑定完成前也放行，否则 preAuthCommands 配置永远无效。
+	// 未绑定时 connObj 仍可用于 rate 控制与转发（LoginGate 处理器内部完成绑定）。
+	unbound := connObj.GetServerID() == ""
+	if unbound && !g.isPreAuthCommand(cmd) {
+		g.messagesDroppedAuth.Add(1)
+		return PipelineResult{
+			Action: gnet.Close,
+			Error:  fmt.Errorf("connection not bound (login pending)"),
+		}
+	}
+	if !unbound && !connObj.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
 		g.messagesDroppedAuth.Add(1)
 		return PipelineResult{
 			Action: gnet.Close,
@@ -99,15 +110,22 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 	}
 
-	// 优先使用缓存的LogicClient（无锁），未命中则回退到连接池查找
-	logicClient := connObj.GetCachedLogicClient()
-	if logicClient == nil || !logicClient.IsConnected() {
-		logicClient = g.GetLogicClient(connObj.GetServerID())
-		if logicClient == nil {
-			g.messagesDroppedNoLogicNotConnected.Add(1)
-			return PipelineResult{Action: gnet.None}
+	// 优先使用缓存的LogicClient（无锁），未命中则回退到连接池查找。
+	// 未绑定（preAuth 阶段，如 LoginGate）时 logicClient 为 nil，
+	// 由阶段6返回 ErrNotConnected 前需允许处理器本地处理——
+	// 实际上 LoginGate 由 handler 直接处理、不进入转发，此分支仅对绑定后消息生效。
+	var logicClient connection.LogicClientProvider
+	boundServerID := connObj.GetServerID()
+	if boundServerID != "" {
+		logicClient = connObj.GetCachedLogicClient()
+		if logicClient == nil || !logicClient.IsConnected() {
+			logicClient = g.GetLogicClient(boundServerID)
+			if logicClient == nil {
+				g.messagesDroppedNoLogicNotConnected.Add(1)
+				return PipelineResult{Action: gnet.None}
+			}
+			connObj.SetCachedLogicClient(logicClient)
 		}
-		connObj.SetCachedLogicClient(logicClient)
 	}
 
 	// 快速路径：当没有启用安全组件或全部为nil时，
@@ -162,6 +180,10 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		if g.waf != nil {
 			if !g.waf.Inspect(data) {
 				g.messagesDroppedWAF.Add(1)
+				// blockAction=log 仅记录（已由 WAF 内部告警）并放行；drop 才断连
+				if g.waf.ShouldBlock() {
+					return PipelineResult{Action: gnet.Close}
+				}
 				return PipelineResult{Action: gnet.None}
 			}
 		}
@@ -174,7 +196,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 
 		// 阶段4：消息完整性检查（可选）
 		if protection.VerifyInbound {
-			if err := g.messageIntegrity.ProcessMessage(message); err != nil {
+			if err := g.messageIntegrity.ProcessMessage(connectionID, message); err != nil {
 				g.messagesDroppedIntegrity.Add(1)
 				return PipelineResult{
 					Action: gnet.None,
@@ -236,6 +258,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 
 	// 阶段7：指标记录
 	if sendErr != nil {
+		g.messagesFailed.Add(1)
 		tlog.Warn(context.TODO(), "client message forward failed sessionID=%s serverID=%s cmd=%d error=%v", connectionID, connObj.GetServerID(), cmd, sendErr)
 		g.messagesDroppedFull.Add(1)
 		if g.circuitBreakerMgr != nil {
@@ -251,6 +274,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 	} else {
 		g.messagesForwarded.Add(1)
+		g.messagesProcessed.Add(1)
 		if g.circuitBreakerMgr != nil {
 			if breaker := g.getOrCreateBreaker(routeKey); breaker != nil {
 				breaker.RecordSuccess()
@@ -444,6 +468,9 @@ func (p *PipelineWorkerPool) Submit(task pipelineTaskData) bool {
 		return true
 	default:
 		p.dropped.Add(1)
+		if p.gw != nil {
+			p.gw.messagesDroppedFull.Add(1)
+		}
 		tlog.Warn(context.TODO(), "pipeline worker queue full, task dropped shard=%d connectionID=%s", shard, task.connectionID)
 		return false
 	}
@@ -458,6 +485,9 @@ func (p *PipelineWorkerPool) SubmitWS(task wsPipelineTaskData) bool {
 		return true
 	default:
 		p.dropped.Add(1)
+		if p.gw != nil {
+			p.gw.messagesDroppedFull.Add(1)
+		}
 		tlog.Warn(context.TODO(), "pipeline worker queue full, WS task dropped shard=%d connectionID=%s", shard, task.connectionID)
 		return false
 	}

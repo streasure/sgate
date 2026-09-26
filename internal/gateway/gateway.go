@@ -62,8 +62,8 @@ type Gateway struct {
 	msgRate           *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
 	zone              string
 	protection        atomic.Value // stores config.ProtectionConfig — 热路径无锁读取
-	grpcCfg           config.GRPCConfig
-	streamCfg         config.StreamConfig
+	grpcCfg           atomic.Value // stores config.GRPCConfig（热更新原子替换）
+	streamCfg         atomic.Value // stores config.StreamConfig（热更新原子替换）
 	// 安全防护组件
 	whitelistBlacklist *security.WhitelistBlacklist
 	circuitBreakerMgr  *security.CircuitBreakerManager
@@ -89,6 +89,7 @@ type Gateway struct {
 
 	// 转发统计计数器（用于极限压测时观测 sgate 转发能力）
 	pipeline                           *MessagePipeline
+	loginSlots                         chan struct{} // 并发登录协程上限（finishLoginGate）
 	connectionsTotal                   atomic.Int64
 	connectionsActive                  atomic.Int64
 	messagesForwarded                  atomic.Int64
@@ -299,10 +300,11 @@ func (g *Gateway) StartServices() {
 	}
 
 	// gRPC服务器
-	grpcPort := fmt.Sprintf(":%d", g.grpcCfg.Port)
+	grpcCfg := g.GetGRPCConfig()
+	grpcPort := fmt.Sprintf(":%d", grpcCfg.Port)
 	tlog.Info(context.TODO(), "starting gRPC server port=%s", grpcPort)
 	go func() {
-		if server, err := backend.StartGRPCServer(g, grpcPort, g.grpcCfg.MaxMessageSize, g.grpcCfg.WindowSize); err != nil {
+		if server, err := backend.StartGRPCServer(g, grpcPort, grpcCfg.MaxMessageSize, grpcCfg.WindowSize); err != nil {
 			tlog.Error(context.TODO(), "failed to start gRPC server error=%v", err)
 		} else {
 			g.grpcServerMu.Lock()
@@ -386,12 +388,12 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 			return true
 		}
 		if time.Since(conn.getLastPingTime()) > timeout {
-			tlog.Warn(context.TODO(), "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID)
+			tlog.Warn(context.TODO(), "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID())
 			if conn.Conn != nil {
 				conn.Conn.Close()
 			}
-			if conn.ConnectionID != "" {
-				g.connectionManager.RemoveConnection(conn.ConnectionID)
+			if conn.ConnectionID() != "" {
+				g.connectionManager.RemoveConnection(conn.ConnectionID())
 			}
 			g.wsConnections.Delete(conn)
 		}
@@ -485,7 +487,7 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 动态更新限流阈值（无需重启）
 	if g.rateLimiter != nil && newCfg.Security.RateLimit.Enabled {
 		refresh := time.Second
-		if d, err := time.ParseDuration(newCfg.Security.RateLimit.TokenRefresh); err == nil {
+		if d, err := time.ParseDuration(newCfg.Security.RateLimit.TokenRefresh); err == nil && d > 0 {
 			refresh = d
 		}
 		tokens := newCfg.Security.RateLimit.MaxTokens
@@ -497,12 +499,19 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	}
 
 	// 动态更新白名单/黑名单（原子替换，避免清空-重填中间态）
-	if g.whitelistBlacklist != nil && newCfg.Security.Enabled {
-		g.whitelistBlacklist.ReplaceWhitelist(newCfg.Security.Whitelist)
-		g.whitelistBlacklist.ReplaceBlacklist(newCfg.Security.Blacklist)
-		tlog.Info(context.TODO(), "whitelist/blacklist updated whitelist=%d blacklist=%d",
-			len(newCfg.Security.Whitelist),
-			len(newCfg.Security.Blacklist))
+	if g.whitelistBlacklist != nil {
+		if newCfg.Security.Enabled {
+			g.whitelistBlacklist.ReplaceWhitelist(newCfg.Security.Whitelist)
+			g.whitelistBlacklist.ReplaceBlacklist(newCfg.Security.Blacklist)
+			tlog.Info(context.TODO(), "whitelist/blacklist updated whitelist=%d blacklist=%d",
+				len(newCfg.Security.Whitelist),
+				len(newCfg.Security.Blacklist))
+		} else {
+			// 关闭安全链时清空残留列表，避免 fail-stale 继续拦截
+			g.whitelistBlacklist.ReplaceWhitelist(nil)
+			g.whitelistBlacklist.ReplaceBlacklist(nil)
+			tlog.Info(context.TODO(), "security disabled, whitelist/blacklist cleared")
+		}
 	}
 
 	// 动态更新过载保护阈值
@@ -514,8 +523,8 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	g.connectionManager.UpdateLimits(newCfg.Protection.MaxConnections, newCfg.Protection.MaxConnectionsPerIP)
 
 	// gRPC/stream 运行时快照随配置更新（GetGRPCConfig/GetStreamConfig 消费）
-	g.grpcCfg = newCfg.GRPC
-	g.streamCfg = newCfg.Stream
+	g.grpcCfg.Store(newCfg.GRPC)
+	g.streamCfg.Store(newCfg.Stream)
 
 	// 动态更新 JWT 密钥
 	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
@@ -561,11 +570,13 @@ func (g *Gateway) GetConnectionManager() *connection.ConnectionManager {
 }
 
 func (g *Gateway) GetGRPCConfig() config.GRPCConfig {
-	return g.grpcCfg
+	v, _ := g.grpcCfg.Load().(config.GRPCConfig)
+	return v
 }
 
 func (g *Gateway) GetStreamConfig() config.StreamConfig {
-	return g.streamCfg
+	v, _ := g.streamCfg.Load().(config.StreamConfig)
+	return v
 }
 
 func (g *Gateway) GetShardedCoalescer() *connection.ShardedWriteCoalescer {
@@ -616,6 +627,16 @@ func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
 }
 
 func (g *Gateway) OnShutdown(engine gnet.Engine) {
+	// gnet 在 engine 自身关闭流程中回调 OnShutdown；Close 会对所有 engine 调 Stop，
+	// 对正在回调的 engine 调 Stop 会与之互等死锁。先把该 engine 摘除再走 Close。
+	g.enginesMu.Lock()
+	for i, e := range g.engines {
+		if e == engine {
+			g.engines = append(g.engines[:i], g.engines[i+1:]...)
+			break
+		}
+	}
+	g.enginesMu.Unlock()
 	g.Close()
 }
 
@@ -731,8 +752,6 @@ func newGateway(cfg *config.Config) *Gateway {
 	gw := &Gateway{
 		connectionManager: connection.NewConnectionManager(cfg.Protection.MaxConnections, cfg.Protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
-		grpcCfg:           cfg.GRPC,
-		streamCfg:         cfg.Stream,
 		serverID:          cfg.ServerID,
 		zone:              cfg.Zone,
 
@@ -751,10 +770,31 @@ func newGateway(cfg *config.Config) *Gateway {
 	stored := *cfg
 	gw.cfg.Store(&stored)
 	gw.protection.Store(stored.Protection)
+	gw.grpcCfg.Store(stored.GRPC)
+	gw.streamCfg.Store(stored.Stream)
 	gw.ctx = context.Background()
 	gw.pipeline = NewMessagePipeline(gw)
+	gw.loginSlots = make(chan struct{}, 256)
 
 	return gw
+}
+
+// acquireLoginSlot 获取并发登录槽位；满返回 false（调用方回 429）。
+func (g *Gateway) acquireLoginSlot() bool {
+	select {
+	case g.loginSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseLoginSlot 释放并发登录槽位。
+func (g *Gateway) releaseLoginSlot() {
+	select {
+	case <-g.loginSlots:
+	default:
+	}
 }
 
 func gatewayInstanceID(cfg config.Config) string {

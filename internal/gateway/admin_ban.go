@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -56,7 +57,7 @@ func (g *Gateway) adminAuthed(r *http.Request) bool {
 	if !strings.HasPrefix(auth, prefix) {
 		return false
 	}
-	return auth[len(prefix):] == token
+	return subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(token)) == 1
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -91,6 +92,14 @@ func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {
 		ttl = time.Duration(req.TTLSec) * time.Second
 	}
 	rec := banStore.Add(req.UserUUID, req.Reason, req.Jti, ttl)
+	// 管理端携带 jti 时立即撤销
+	if rec.Jti != "" && g.jwtAuth != nil {
+		exp := rec.ExpiresAt.Unix()
+		if rec.ExpiresAt.IsZero() {
+			exp = time.Now().Unix() + int64((24 * time.Hour).Seconds())
+		}
+		g.jwtAuth.Revoke(rec.Jti, exp)
+	}
 	offline := g.enforceBan(req.UserUUID, rec)
 	tlog.Info(context.TODO(), "admin ban user=%s reason=%s ttlSec=%d offline=%d",
 		req.UserUUID, req.Reason, req.TTLSec, offline)
@@ -198,9 +207,39 @@ func (g *Gateway) pushBanNotice(conn *connection.Connection, rec security.BanRec
 	_ = conn.Send(data)
 }
 
+// findBan 查找有效封禁：精确键 → 裸 userId 后缀（防完整键封禁后裸键重登）。
+// 注意 banMatches(connUUID, banKey) 的方向是"完整连接键 vs 封禁键"，
+// 这里查询入参是裸 userId、封禁键可能是完整键，方向相反需单独判断。
+func findBan(userID string) *security.BanRecord {
+	if userID == "" {
+		return nil
+	}
+	if rec := banStore.Get(userID); rec != nil {
+		return rec
+	}
+	for _, rec := range banStore.List() {
+		banKey := rec.UserUUID
+		if banKey == userID {
+			return &rec
+		}
+		// 封禁键为完整键（serverId:userId），查询为裸 userId → 后缀匹配
+		if i := strings.LastIndex(banKey, ":"); i >= 0 && banKey[i+1:] == userID {
+			return &rec
+		}
+		// 封禁键为裸 userId，查询为完整键 → 复用 banMatches 方向
+		if banMatches(userID, banKey) {
+			return &rec
+		}
+	}
+	return nil
+}
+
 // rejectIfBanned 在 LoginGate 绑定前检查封禁；命中返回 true 并回调 403。
 func (g *Gateway) rejectIfBanned(connectionID, userID string, send func(code int32, text string)) bool {
-	if rec := banStore.Get(userID); rec != nil {
+	if userID == "" {
+		return false
+	}
+	if rec := findBan(userID); rec != nil {
 		tlog.Warn(context.TODO(), "banned user login rejected connectionID=%s user=%s reason=%s",
 			connectionID, userID, rec.Reason)
 		send(403, "banned: "+rec.Reason)
@@ -209,7 +248,7 @@ func (g *Gateway) rejectIfBanned(connectionID, userID string, send func(code int
 	if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
 		full := conn.GetUserUUID()
 		if full != "" && full != userID {
-			if rec := banStore.Get(full); rec != nil {
+			if rec := findBan(full); rec != nil {
 				tlog.Warn(context.TODO(), "banned user login rejected connectionID=%s full=%s reason=%s",
 					connectionID, full, rec.Reason)
 				send(403, "banned: "+rec.Reason)

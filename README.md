@@ -115,7 +115,7 @@ go build -o bench\bench1_tcp\bench1_tcp.exe .\bench\bench1_tcp
 .\bench\logic1_tcp\logic1_tcp.exe -port 50050 -id logic1-tcp
 ```
 
-逻辑服启动后会在 etcd 注册 `Logic:default` 服务，网关通过服务发现找到它。
+逻辑服启动后会在 etcd 注册 `default/SERVER_TYPE_LOGICSERVER:default` 服务（键为 `/services/{belong}/SERVER_TYPE_LOGICSERVER:{zone}/{instanceId}`），网关通过服务发现找到它。
 
 ### 步骤 3：启动网关
 
@@ -177,7 +177,7 @@ sgate.exe [选项]
 
 ```
 1. 启动 etcd（可选，逻辑服发现需要）
-2. 启动逻辑服（在 etcd 注册 Logic:{zone} 服务）
+2. 启动逻辑服（在 etcd 注册 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}` 服务）
 3. 启动 sgate 网关
 4. 客户端连接网关
 ```
@@ -230,7 +230,7 @@ cluster:
 ```
 
 **行为：**
-- 在 etcd 注册网关自身连接信息（`{belong}/SGATE:{zone}`），供 loginserver 等服务发现
+- 在 etcd 注册网关自身连接信息（`/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`），供 loginserver 等服务发现
 - 保留：逻辑服发现（etcd）、负载均衡
 - 跳过网关间发现（GatewayClientPool 不创建）
 - 跳过 Leader 选举
@@ -246,7 +246,7 @@ cluster:
 ```
 
 **行为：**
-- 在 etcd 注册网关自身（`{belong}/SGATE:{zone}`）
+- 在 etcd 注册网关自身（`/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`）
 - 发现同一 zone 的其他网关实例
 - 启用 Leader 选举
 - 创建网关间 gRPC 客户端池
@@ -274,10 +274,10 @@ cluster:
 
 | 字段 | 类型 | 默认值 | 作用 |
 | --- | --- | --- | --- |
-| `port` | int | `8080` | 网关基础端口。实际客户端端口由 `transports` 指定 |
-| `serverId` | string | `gateway-1` | 实例 ID，集群中必须唯一。也可由 `GATEWAY_SERVER_ID` 环境变量覆盖 |
-| `serverType` | string | `Gateway` | 服务类型 |
-| `zone` | string | `default` | 可用区名称 |
+| `httpPort` | int | 必填（`config/config.yaml` 为 `8081`） | stats/admin 等 HTTP 端口。实际客户端端口由 `transports` 指定 |
+| `serverId` | string | 必填（`config/config.yaml` 为 `gateway-1`） | 实例 ID，集群中必须唯一 |
+| `serverType` | string | 必填（`config/config.yaml` 为 `Gateway`） | 服务类型 |
+| `zone` | string | 必填（`config/config.yaml` 为 `default`） | 可用区名称 |
 
 ### 6.2 `transports` 客户端监听
 
@@ -309,11 +309,11 @@ transports:
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | 是否启用逻辑服发现 |
+| `enabled` | bool | `false` | 是否启用逻辑服发现（`config/config.yaml` 默认 `true`） |
 | `serviceName` | string | `logic` | 逻辑服服务名 |
 | `zone` | string | `default` | 优先选择的可用区 |
-| `gatewayDiscovery` | bool | `true` | 是否发现其他网关（集群模式下生效） |
-| `registerSelf` | bool | `true` | standalone 模式下是否向 etcd 注册网关自身连接信息（供 loginserver 发现） |
+| `gatewayDiscovery` | bool | `false` | 是否发现其他网关（集群模式下生效） |
+| `registerSelf` | bool | `false` | standalone 模式下是否向 etcd 注册网关自身连接信息（供 loginserver 发现；`config/config.yaml` 默认 `true`） |
 
 ### 6.4.1 etcd 注册地址格式
 
@@ -335,7 +335,7 @@ transports:
 | `tcp` | string | TCP 客户端连接地址（可选） |
 | `websocket` | string | WebSocket 客户端连接地址（可选） |
 
-loginserver 可通过 etcd watch `{belong}/SGATE:{zone}` 前缀获取网关连接地址。
+loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` 前缀获取网关连接地址。
 
 ### 6.5 `cluster` 集群配置
 
@@ -351,7 +351,7 @@ loginserver 可通过 etcd watch `{belong}/SGATE:{zone}` 前缀获取网关连�
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `port` | int | `50051` | gRPC 监听端口 |
-| `windowSize` | int | `16MiB` | HTTP/2 流控窗口 |
+| `windowSize` | int | `512KiB`（零值回退；`config/config.yaml` 为 `64MiB`） | HTTP/2 流控窗口 |
 | `maxMessageSize` | int | `8MiB` | 单条消息最大字节数 |
 
 ### 6.7 `stream` 流分片和队列
@@ -360,7 +360,7 @@ loginserver 可通过 etcd watch `{belong}/SGATE:{zone}` 前缀获取网关连�
 | --- | --- | --- | --- |
 | `shardCount` | int | 自动 | gRPC 流分片数，`0` 时按 CPU 数计算 |
 | `connGroupCount` | int | `4` | gateway→logic 独立 TCP 连接组数。每个组承载 `shardCount/N` 个 stream，各自拥有独立的 HTTP/2 写锁，实现并行写入 |
-| `sendChannelSize` | int | `131072` | 每个分片发送队列容量 |
+| `sendChannelSize` | int | `65536`（零值回退；`config/config.yaml` 为 `1048576`） | 每个分片发送队列容量 |
 | `receiveBatchSize` | int | `64` | 接收处理批次大小 |
 | `batchPush` | bool | `false` | 是否将推送按连接合并为 PushBatch |
 
@@ -369,15 +369,15 @@ loginserver 可通过 etcd watch `{belong}/SGATE:{zone}` 前缀获取网关连�
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `maxFrameSize` | int | `4MiB` | TCP 单帧最大载荷 |
-| `maxFrameBufSize` | int | `64KiB` | TCP 帧缓冲区上限（百万连接场景需降低） |
+| `maxFrameBufSize` | int | `4MiB` (零值回退，百万连接建议显式 `64KiB`) | TCP 帧缓冲区上限（百万连接场景需降低） |
 | `maxWSFrameSize` | int | `4MiB` | WebSocket 单帧最大载荷 |
 | `maxConnections` | int | `0` | 网关最大总连接数，`0`=不限制。生产环境建议设置 |
 | `maxConnectionsPerIP` | int | `0` | 单 IP 最大连接数，`0`=不限制。防止单客户端耗尽连接 |
 | `cpuThreshold` | float | `90` | CPU 过载阈值（%） |
-| `dropOnOverload` | bool | `true` | 过载时丢弃新消息 |
+| `dropOnOverload` | bool | `false` | 过载时丢弃新消息（`config/config.yaml` 默认 `true`） |
 | `wsHeartbeatTimeout` | int | `60` | WebSocket 心跳超时（秒） |
-| `connIdleTimeout` | string | `30s` | 连接空闲超时 |
-| `preAuthCommands` | []int | `[1000001]` | 认证前允许的命令 |
+| `connIdleTimeout` | string | `5m` | 连接空闲超时 |
+| `preAuthCommands` | []int | `[1000001]` | 认证前（未绑定 `serverId` 前）允许通过 pipeline 的命令。`CmdLoginGate` 本身走捷径不经 pipeline |
 
 ### 6.8.1 `admin` 管理端接口（stats server）
 
@@ -399,8 +399,8 @@ loginserver 可通过 etcd watch `{belong}/SGATE:{zone}` 前缀获取网关连�
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | 是否启用安全链 |
-| `rateLimit.enabled` | bool | `true` | 令牌桶限流 |
+| `enabled` | bool | `false` | 是否启用安全链（`config/config.yaml` 默认开启） |
+| `rateLimit.enabled` | bool | `false` | 令牌桶限流（`config/config.yaml` 默认开启） |
 | `rateLimit.maxTokens` | int | `1000000` | 最大令牌数 |
 | `circuitBreaker.enabled` | bool | `false` | 熔断器 |
 
@@ -544,7 +544,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 | `-parallel` | `100` | 并发连接数 |
 | `-push-interval` | — | 推送间隔，**必须设为 `0`** 才能测极限吞吐 |
 | `-push-size` | `64` | 推送载荷字节数 |
-| `-expected-members` | `100` | 逻辑服等待加入组的连接数 |
+| `-expected-members` | `0` | 等待组内成员达到该数后再开始推送；`0`=不等待立即推送（命令示例传 `100`） |
 | `-push-workers` | `12` | 逻辑服推送工作协程数 |
 
 ### 7.8 压测注意事项
@@ -632,7 +632,11 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 | --- | ---: | --- |
 | `CmdLoginGate` | `1000001` | 客户端登录网关 |
 | `CmdLoginGateAck` | `1000002` | 登录应答 |
+| `CmdLogoutGate` | `1000003` | 客户端登出请求（断连前连接，业务推送停止） |
+| `CmdLogoutGateAck` | `1000004` | 登出应答 |
+| `CmdBanNtf` | `1000005` | 封禁通知（主动断连） |
 | `CmdHeartbeatReq` | `1100010` | 心跳请求 |
+| `CmdHeartbeatAck` | `1100011` | 心跳应答 |
 | `CmdUserOffline` | `1100012` | 用户下线通知 |
 | `CmdPushBatch` | `9000002` | 网关批量推送 |
 
@@ -697,7 +701,6 @@ internal/security/        白名单、限流、熔断、WAF、JWT
 internal/traffic/         灰度、镜像、降级
 internal/cluster/         集群、负载均衡、Leader 选举
 internal/obs/             监控、追踪、pprof
-internal/codec/           TCP/WebSocket 编解码器
 internal/types/           过滤器链、公共类型
 internal/logic/           逻辑服 SDK（bench 用）
 internal/netutil/         网络工具
@@ -772,7 +775,7 @@ etcd 未启动。启动 etcd 或在配置中设置 `etcd.enabled: false`（此�
 
 ### Q: 客户端连接后无响应
 
-确认逻辑服已启动并在 etcd 注册。检查网关日志中是否有 `Logic:default` 服务发现记录。
+确认逻辑服已启动并在 etcd 注册。检查网关日志中是否有 `SERVER_TYPE_LOGICSERVER` 服务发现记录。
 
 ### Q: 集群模式下报 `client X is closing`
 

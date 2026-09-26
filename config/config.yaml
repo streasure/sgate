@@ -5,6 +5,7 @@ serverType: "Gateway"
 zone: "default"
 
 etcd:
+  enabled: true          # false=纯静态地址模式（无服务发现/注册/登录服发现）
   endpoints: ["http://127.0.0.1:2379"]
   servicePrefix: "/services"
   leaseTTL: "10s"

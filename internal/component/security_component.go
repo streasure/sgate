@@ -64,7 +64,7 @@ func (c *SecurityComponent) Init() error {
 	// 限流器。
 	if c.cfg.RateLimit.Enabled {
 		refresh := time.Second
-		if d, err := time.ParseDuration(c.cfg.RateLimit.TokenRefresh); err == nil {
+		if d, err := time.ParseDuration(c.cfg.RateLimit.TokenRefresh); err == nil && d > 0 {
 			refresh = d
 		}
 		tokens := c.cfg.RateLimit.MaxTokens

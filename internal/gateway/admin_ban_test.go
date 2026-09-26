@@ -56,6 +56,31 @@ func TestRejectIfBanned_BareAndFullKey(t *testing.T) {
 	BanStore().Remove("banned-user")
 }
 
+// TestFindBan_FullKeySuffixFallback 完整键封禁（serverId:userId）应通过后缀匹配拦截裸 userId。
+func TestFindBan_FullKeySuffixFallback(t *testing.T) {
+	for _, rec := range BanStore().List() {
+		BanStore().Remove(rec.UserUUID)
+	}
+	defer func() {
+		for _, rec := range BanStore().List() {
+			BanStore().Remove(rec.UserUUID)
+		}
+	}()
+
+	BanStore().Add("logic:default:u9", "cheat", "", time.Hour)
+
+	if rec := findBan("u9"); rec == nil {
+		t.Fatal("bare userId should match full-key ban via suffix fallback")
+	}
+	if rec := findBan("other"); rec != nil {
+		t.Fatalf("unrelated user matched ban: %+v", rec)
+	}
+	// 空 userID 不应 panic 也不应误中
+	if rec := findBan(""); rec != nil {
+		t.Fatalf("empty userID matched ban: %+v", rec)
+	}
+}
+
 func TestAdminAuthed_RequiresToken(t *testing.T) {
 	gw := newGateway(minimalConfig())
 	defer gw.Close()

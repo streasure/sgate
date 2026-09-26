@@ -37,6 +37,10 @@ type TokenBucket struct {
 // tryConsume 消耗一个令牌，同时按时间差补充令牌
 // 补充速率 = maxTokens 个/每个 tokenRefresh 周期，上限为 burstTokens
 func (tb *TokenBucket) tryConsume() bool {
+	// 防御：tokenRefresh<=0 会除零 panic（配置 "0s" 时）
+	if tb.tokenRefresh <= 0 {
+		return tb.tokens.Load() > 0
+	}
 	now := time.Now().UnixNano()
 	last := tb.lastUpdate.Load()
 
@@ -103,6 +107,9 @@ func (rl *RateLimiter) resetConfig(maxTokens int, tokenRefresh time.Duration) {
 }
 
 func newTokenBucket(maxTokens, burstTokens int, tokenRefresh time.Duration) *TokenBucket {
+	if tokenRefresh <= 0 {
+		tokenRefresh = time.Second
+	}
 	bucket := &TokenBucket{maxTokens: int64(maxTokens), burstTokens: int64(burstTokens), tokenRefresh: tokenRefresh}
 	bucket.tokens.Store(int64(maxTokens))
 	bucket.lastUpdate.Store(time.Now().UnixNano())

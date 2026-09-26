@@ -491,15 +491,20 @@ type HealthChecker struct {
 	maxFailures int            // 最大允许失败次数
 	failCount   int            // 当前连续失败次数
 	enabled     bool           // 是否启用主动健康检查
+	stopOnce    sync.Once      // 保护 stopCh 只 close 一次
 	stopCh      chan struct{}  // 停止信号
 	wg          sync.WaitGroup // 等待检查循环退出
 }
 
 // NewHealthChecker 创建健康检查器实例
 func NewHealthChecker(lc *LogicClient, config HealthCheckConfig) *HealthChecker {
+	interval := config.Interval
+	if interval <= 0 {
+		interval = 10 * time.Second // 防 time.NewTicker(0) panic
+	}
 	return &HealthChecker{
 		lc:          lc,
-		interval:    config.Interval,
+		interval:    interval,
 		timeout:     config.Timeout,
 		maxFailures: config.MaxFailures,
 		enabled:     config.Enabled,
@@ -513,9 +518,9 @@ func (hc *HealthChecker) Start() {
 	go hc.checkLoop()
 }
 
-// Stop 停止健康检查循环并等待退出
+// Stop 停止健康检查循环并等待退出（幂等）
 func (hc *HealthChecker) Stop() {
-	close(hc.stopCh)
+	hc.stopOnce.Do(func() { close(hc.stopCh) })
 	hc.wg.Wait()
 }
 

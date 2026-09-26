@@ -36,6 +36,7 @@ type Connection struct {
 	logicClient atomic.Value // LogicClientProvider 缓存，避免每条消息查询连接池
 	jwtJti      atomic.Value // string：JWT jti（logout/封禁时撤销）
 	jwtExp      atomic.Int64 // JWT exp（Unix 秒；0=未知）
+	offlineSent atomic.Bool  // CmdUserOffline 已发送标记（防显式通知+OnClose 双发）
 
 	// 连接级流控
 	msgRateMu      sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
@@ -143,6 +144,16 @@ func (c *Connection) SetJWTExp(exp int64) { c.jwtExp.Store(exp) }
 
 // GetJWTExp 返回连接上缓存的 JWT exp。
 func (c *Connection) GetJWTExp() int64 { return c.jwtExp.Load() }
+
+// ClaimOfflineNotify CAS 标记下线通知已发送；返回 true 表示本次应发送。
+func (c *Connection) ClaimOfflineNotify() bool {
+	return !c.offlineSent.Swap(true)
+}
+
+// TouchActive 刷新最后活跃时间（入站流量路径调用；与 Send 的 push 采样独立）。
+func (c *Connection) TouchActive() {
+	c.LastActive.Store(time.Now().UnixMilli())
+}
 
 // CheckAndIncrementMsgRate 检查连接级消息速率是否超限，未超限则自增计数。
 // maxPerConn=0 表示不限制。返回 true 表示允许，false 表示超限。

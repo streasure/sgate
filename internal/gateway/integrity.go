@@ -50,8 +50,11 @@ func (mi *MessageIntegrity) Stop() {
 	mi.stopOnce.Do(func() { close(mi.stopCh) })
 }
 
-func (mi *MessageIntegrity) ProcessMessage(msg *protoGw.StreamData) error {
-	msgID := fmt.Sprintf("%s-%s-%d-%d", msg.SessionId, msg.UserKey, msg.Cmd, msg.SeqId)
+// ProcessMessage 按连接维度做重放检测。
+// key 必须包含 connectionID：消息帧内 SessionId/UserKey 解码后恒为空，
+// 用原始字段会让所有连接共享同一 key（互丢消息）。
+func (mi *MessageIntegrity) ProcessMessage(connectionID string, msg *protoGw.StreamData) error {
+	msgID := fmt.Sprintf("%s-%s-%d-%d", connectionID, msg.UserKey, msg.Cmd, msg.SeqId)
 	mi.cacheMutex.Lock()
 	if _, exists := mi.replayCache[msgID]; exists {
 		mi.cacheMutex.Unlock()

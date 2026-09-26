@@ -47,7 +47,12 @@ func (c *ClusterComponent) Order() int   { return 400 }
 func (c *ClusterComponent) Init() error {
 	c.Balancer = clusterPkg.NewBalancer(c.cfg.Balancer)
 	if c.cfg.ConfigCenter.Enabled {
-		c.ConfigCenter = clusterPkg.NewConfigCenter(c.cfg.ConfigCenter, c.cfg.Etcd)
+		if c.cfg.Etcd.IsEnabled() {
+			c.ConfigCenter = clusterPkg.NewConfigCenter(c.cfg.ConfigCenter, c.cfg.Etcd)
+		} else {
+			// 配置中心后端是 etcd；etcd 关闭时不可用
+			tlog.Warn(context.TODO(), "config center enabled but etcd disabled, config center skipped")
+		}
 	}
 	if c.cfg.Alert.Enabled {
 		c.AlertWebhook = clusterPkg.NewAlertWebhook(c.cfg.Alert)
@@ -87,6 +92,14 @@ func (c *ClusterComponent) Start() error {
 	clusterMode := c.cfg.Cluster.Mode
 	if clusterMode == "" {
 		clusterMode = "standalone"
+	}
+
+	// etcd.enabled: false → 跳过全部 etcd 组件（服务发现/注册/登录服发现/Leader 选举），
+	// 纯静态地址模式。消费方需容忍 discovery 为 nil。
+	if !c.cfg.Etcd.IsEnabled() {
+		tlog.Info(context.TODO(), "etcd disabled by config, running in static-address mode (no discovery/registration)")
+		setClusterStartResources(nil, nil, nil, nil)
+		return nil
 	}
 
 	etcdCfg := uetcd.Config{Endpoints: c.cfg.Etcd.Endpoints, Endpoint: c.cfg.Etcd.Endpoint, Username: c.cfg.Etcd.Username, Password: c.cfg.Etcd.Password, ServicePrefix: c.cfg.Etcd.ServicePrefix}

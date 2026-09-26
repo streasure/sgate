@@ -105,6 +105,23 @@ func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
 }
 
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
+	// LoginGate 走捷径不经 pipeline，此处补齐过载/IP 限流检查
+	if g.overloadProtector != nil && g.overloadProtector.IsOverloaded() {
+		g.overloadProtector.RecordDrop(1)
+		g.messagesDroppedOverload.Add(1)
+		ack := &protoGw.LoginGateAck{Code: 503, Message: "server overload", SessionId: connectionID}
+		body, _ := proto.Marshal(ack)
+		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		return gnet.None
+	}
+	if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", getRemoteIP(c)) {
+		g.messagesDroppedRateLimit.Add(1)
+		ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
+		body, _ := proto.Marshal(ack)
+		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		return gnet.None
+	}
+
 	req := new(protoGw.LoginGateReq)
 	if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
 		writeAck := func(code int32, text, serverID string) {
@@ -125,9 +142,20 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		return gnet.Close
 	}
 
+	// 并发登录上限：满则快速拒绝，防无限起 finishLoginGate 协程
+	if !g.acquireLoginSlot() {
+		ack := &protoGw.LoginGateAck{Code: 429, Message: "too many concurrent logins", SessionId: connectionID, ServerId: req.ServerId}
+		body, _ := proto.Marshal(ack)
+		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		return gnet.None
+	}
+
 	// 校验与绑定在 worker 中执行，避免同步 gRPC 阻塞 event loop。
 	// 成功后在 worker 中回写 LoginGateAck（writeFrame 在 worker 中改用 AsyncWrite）。
-	go g.finishLoginGate(c, connectionID, message, req)
+	go func() {
+		defer g.releaseLoginSlot()
+		g.finishLoginGate(c, connectionID, message, req)
+	}()
 	return gnet.None
 }
 
@@ -199,6 +227,10 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 }
 
 func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {
+	// 幂等：显式路径与 OnClose 可能都触发，仅首个调用者发送
+	if !conn.ClaimOfflineNotify() {
+		return
+	}
 	serverID := conn.GetServerID()
 	if serverID == "" {
 		return

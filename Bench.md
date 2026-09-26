@@ -49,6 +49,11 @@ go build -o bench\bench2_tcp\bench2_tcp.exe .\bench\bench2_tcp
 go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 ```
 
+### tools/client_logincheck（非压测工具）
+
+`tools/client_logincheck` 是手动联调工具：调用 loginserver HTTP `/api/v1/login` 取 token 后走 LoginGate 验证登录链路。
+**它不属于压测程序**（放在 `bench/` 下会违反 AGENTS.md「bench 禁止调用 /api/v1/login」），吞吐压测时不要编译/运行它。
+
 ## 已验证结果
 
 ### 最新：架构重构后（2026-09-24）✅ 性能增加

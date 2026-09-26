@@ -57,7 +57,7 @@ type WebSocketConnection struct {
 	Conn         gnet.Conn
 	State        atomic.Int32
 	Buffer       []byte
-	ConnectionID string
+	connID       atomic.Value // string：ConnectionID（事件循环写、心跳协程读，须原子）
 	lastPingUnix atomic.Int64 // 纳秒时间戳，避免 time.Time 字段跨协程读写竞态
 
 	// 分片帧重组（FIN=0 的 continuation）
@@ -65,6 +65,15 @@ type WebSocketConnection struct {
 	fragBuf  []byte
 	fragging bool
 }
+
+// ConnectionID 返回连接标识（并发安全）。
+func (c *WebSocketConnection) ConnectionID() string {
+	v, _ := c.connID.Load().(string)
+	return v
+}
+
+// SetConnectionID 设置连接标识（并发安全）。
+func (c *WebSocketConnection) SetConnectionID(id string) { c.connID.Store(id) }
 
 // maxWSHandshakeSize WebSocket 握手请求最大字节数（防半包无限缓冲）。
 const maxWSHandshakeSize = 16 * 1024
@@ -152,17 +161,17 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 
 	wsConn.State.Store(int32(WSStateOpen))
 
-	if wsConn.ConnectionID == "" {
+	if wsConn.ConnectionID() == "" {
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
 		connectionID := g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID)
-		wsConn.ConnectionID = connectionID
+		wsConn.SetConnectionID(connectionID)
 	}
 
-	if conn := g.connectionManager.GetConnection(wsConn.ConnectionID); conn != nil && !conn.IsWebSocket() {
+	if conn := g.connectionManager.GetConnection(wsConn.ConnectionID()); conn != nil && !conn.IsWebSocket() {
 		conn.SetWS(true)
 	}
 
-	tlog.Debug(context.TODO(), "WebSocket handshake success connectionID=%s", wsConn.ConnectionID)
+	tlog.Debug(context.TODO(), "WebSocket handshake success connectionID=%s", wsConn.ConnectionID())
 
 	return gnet.None
 }
@@ -265,14 +274,14 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 		}
 		// RFC6455：客户端帧必须 mask
 		if !masked {
-			tlog.Warn(context.TODO(), "unmasked client frame rejected connectionID=%s", wsConn.ConnectionID)
+			tlog.Warn(context.TODO(), "unmasked client frame rejected connectionID=%s", wsConn.ConnectionID())
 			return gnet.Close
 		}
 
 		// 分片重组
 		if opCode == 0x0 { // continuation
 			if !wsConn.fragging {
-				tlog.Warn(context.TODO(), "unexpected continuation frame connectionID=%s", wsConn.ConnectionID)
+				tlog.Warn(context.TODO(), "unexpected continuation frame connectionID=%s", wsConn.ConnectionID())
 				return gnet.Close
 			}
 			if len(wsConn.fragBuf)+len(payload) > g.getMaxWSFrameSize() {
@@ -354,18 +363,31 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
 	}
 
+	// 入站数据帧刷新心跳与活跃时间（浏览器客户端不发 WS ping，仅靠 ping 会被超时踢出）
+	wsConn.setLastPingTime(time.Now())
 	// 确保WebSocket连接已建立
-	connectionID := wsConn.ConnectionID
+	connectionID := wsConn.ConnectionID()
 	if connectionID == "" {
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
 		connectionID = g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID)
-		wsConn.ConnectionID = connectionID
+		wsConn.SetConnectionID(connectionID)
 	}
 	if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
 		conn.SetWS(true)
+		conn.TouchActive()
 	}
 
 	if message.Cmd == routes.CmdLoginGate {
+		// LoginGate 走捷径不经 pipeline，补齐过载/IP 限流检查（与 TCP 路径一致）
+		if g.overloadProtector != nil && g.overloadProtector.IsOverloaded() {
+			g.overloadProtector.RecordDrop(1)
+			g.messagesDroppedOverload.Add(1)
+			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server overload", "")
+		}
+		if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", getRemoteIP(wsConn.Conn)) {
+			g.messagesDroppedRateLimit.Add(1)
+			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "rate limited", "")
+		}
 		req := new(protoGw.LoginGateReq)
 		if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
 			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 400, "invalid login gate request", req.ServerId)
@@ -377,7 +399,11 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			Data:    append([]byte(nil), message.Data...),
 			UserKey: message.UserKey,
 		}
+		if !g.acquireLoginSlot() {
+			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "too many concurrent logins", req.ServerId)
+		}
 		go func() {
+			defer g.releaseLoginSlot()
 			g.finishWSLoginGate(wsConn, connectionID, msgCopy, req)
 		}()
 		return nil
@@ -512,8 +538,8 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 	}
 
 	wsConn.State.Store(int32(WSStateClosed))
-	if wsConn.ConnectionID != "" {
-		g.connectionManager.RemoveConnection(wsConn.ConnectionID)
+	if wsConn.ConnectionID() != "" {
+		g.connectionManager.RemoveConnection(wsConn.ConnectionID())
 	}
 	g.wsConnections.Delete(wsConn)
 	// 关闭底层 TCP，触发 OnClose 清理（H1：原先仅清 map 不关 socket → FD 泄漏）
