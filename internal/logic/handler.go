@@ -118,13 +118,3 @@ func (s *Server) builtinCommand(msg *protocol.StreamData) bool {
 	}
 	return false
 }
-
-// registeredCommands 获取所有已注册的命令码列表
-func (s *Server) registeredCommands() []int32 {
-	commands := make([]int32, 0)
-	s.handlers.Range(func(key, _ any) bool {
-		commands = append(commands, key.(int32))
-		return true
-	})
-	return commands
-}

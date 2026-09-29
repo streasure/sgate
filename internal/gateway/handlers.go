@@ -241,16 +241,6 @@ func (g *Gateway) isPreAuthCommand(cmd int32) bool {
 	return slices.Contains(g.getProtection().PreAuthCommands, cmd)
 }
 
-func (g *Gateway) getLogicClient() connection.LogicClientProvider {
-	if g.logicClientPool != nil && g.logicClientPool.IsConnected() {
-		return g.logicClientPool
-	}
-	if g.logicClient != nil && g.logicClient.IsConnected() {
-		return g.logicClient
-	}
-	return nil
-}
-
 func (g *Gateway) GetLogicClient(serverID string) connection.LogicClientProvider {
 	if g.logicClientPool == nil {
 		return nil

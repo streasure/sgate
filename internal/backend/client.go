@@ -165,7 +165,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	// 创建 N 条独立 gRPC 连接
 	newGroups := make([]connGroup, connGroupCount)
 	for g := 0; g < connGroupCount; g++ {
-		conn, err := grpc.Dial(lc.address,
+		conn, err := grpc.NewClient(lc.address,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithInitialWindowSize(windowSize),
 			grpc.WithInitialConnWindowSize(windowSize),
@@ -180,7 +180,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 			}),
 		)
 		if err != nil {
-			tlog.Error(context.TODO(), "grpc.Dial failed error=%v address=%s connGroup=%d", err, lc.address, g)
+			tlog.Error(context.TODO(), "grpc.NewClient failed error=%v address=%s connGroup=%d", err, lc.address, g)
 			// 关闭已创建的连接
 			for j := 0; j < g; j++ {
 				newGroups[j].conn.Close()

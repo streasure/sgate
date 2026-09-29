@@ -24,11 +24,9 @@ type rateSample struct {
 }
 
 type messageRateTracker struct {
-	mu        sync.Mutex
-	samples   []rateSample
-	window    time.Duration
-	lastCount int64
-	lastTime  time.Time
+	mu      sync.Mutex
+	samples []rateSample
+	window  time.Duration
 }
 
 func newMessageRateTracker(window time.Duration) *messageRateTracker {

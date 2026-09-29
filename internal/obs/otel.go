@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -33,7 +32,6 @@ type OTelSpan struct {
 // OTelTracer 标准 OpenTelemetry / Zipkin v2 风格追踪导出器
 // 通过 HTTP 上报 span 到 Zipkin / Jaeger / OTel collector
 type OTelTracer struct {
-	mu            sync.Mutex
 	endpoint      string // Zipkin v2 API URL（如 http://zipkin:9411/api/v2/spans）
 	serviceName   string
 	localEndpoint map[string]string

@@ -24,7 +24,6 @@ type StreamShard struct {
 	stopCh      chan struct{}                      // 停止信号通道
 	stopOnce    sync.Once                          // 确保只关闭一次 stopCh
 	ctx         context.Context                    // 流上下文
-	cancel      context.CancelFunc                 // 取消函数
 	index       int                                // 分片索引
 	lc          *LogicClient                       // 所属的逻辑服客户端
 	closed      atomic.Bool                        // 是否已关闭

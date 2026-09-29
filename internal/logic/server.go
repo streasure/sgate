@@ -11,7 +11,6 @@ import (
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/proto"
 )
 
 // streamConn 表示与网关的 gRPC 流连接
@@ -434,15 +433,6 @@ func (s *Server) Broadcast(targetCmd int32, data []byte) int {
 		return true
 	})
 	return sent
-}
-
-// mustMarshal 将 protobuf 消息序列化为字节数组，失败时返回 nil
-func mustMarshal(message proto.Message) []byte {
-	data, err := proto.Marshal(message)
-	if err != nil {
-		return nil
-	}
-	return data
 }
 
 // RegisterGatewayStreamServer 将逻辑服务端注册为网关流服务实现

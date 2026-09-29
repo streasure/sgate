@@ -111,15 +111,6 @@ type Gateway struct {
 	messagesDroppedFilterChain atomic.Int64 // filter chain 中止
 	messagesDroppedAuth        atomic.Int64 // 认证拦截（缺少 serverID 或 userUUID）
 
-	// Prometheus 看板扩展计数器（Grafana dashboard 引用）
-	circuitBreakerTripped  atomic.Int64
-	degradationTriggered   atomic.Int64
-	canaryHit              atomic.Int64
-	trafficMirrorForwarded atomic.Int64
-	trafficMirrorDropped   atomic.Int64
-	alertSent              atomic.Int64
-	alertDropped           atomic.Int64
-
 	// 连接生命周期指标
 	connectionDurationSum     atomic.Int64        // 连接总存活时长（毫秒），用于计算平均值
 	connectionDurationCount   atomic.Int64        // 已关闭连接数，用于计算平均值
@@ -177,8 +168,7 @@ func buildTLSConfig(cfg *config.Config) *tls.Config {
 			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		},
-		PreferServerCipherSuites: true,
-		CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
+		CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},
 	}
 	if !cfg.TLS.Enabled || cfg.TLS.CertFile == "" || cfg.TLS.KeyFile == "" {
 		return tlsConfig

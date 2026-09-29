@@ -50,7 +50,7 @@ func (g *Gateway) handleLoginServerChange(event uetcd.ServiceEvent) {
 	if g.loginServerAddr == event.Address {
 		return
 	}
-	conn, err := grpc.Dial(event.Address,
+	conn, err := grpc.NewClient(event.Address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 30 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true}),
 	)

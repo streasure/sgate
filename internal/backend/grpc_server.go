@@ -22,7 +22,6 @@ type GRPCServer struct {
 	protoGw.UnimplementedGatewayStreamServer
 	protoGw.UnimplementedGatewayServer
 	gateway GatewayInterface
-	mu      sync.Mutex
 }
 
 // NewGRPCServer 创建 gRPC 服务端实例
