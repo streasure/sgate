@@ -63,7 +63,7 @@ func (f *EBPFAcceleratorFilter) Process(fc *types.FilterContext) (bool, error) {
 }
 
 func init() {
-	types.RegisterFilter("ebpf-accelerator", func(cfg map[string]interface{}) (types.Filter, error) {
+	types.RegisterFilter("ebpf-accelerator", func(cfg map[string]any) (types.Filter, error) {
 		hook := GetKernelHook()
 		return &EBPFAcceleratorFilter{hook: hook}, nil
 	})

@@ -20,7 +20,7 @@ func (mockConn) RemoteAddr() net.Addr { return nil }
 // 历史 bug：Range 持 shard 锁调用回调，回调 RemoveConnection → Delete 同一把锁 → 死锁。
 func TestShardedMapRange_CallbackCanDelete(t *testing.T) {
 	m := newShardedMap[string]()
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		m.Store(string(rune('a'+i%26))+string(rune('0'+i/26)), "v")
 	}
 
@@ -52,12 +52,10 @@ func TestRemoveConnection_Idempotent(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			cm.RemoveConnection(conn)
-		}()
+		})
 	}
 	wg.Wait()
 

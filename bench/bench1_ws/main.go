@@ -29,9 +29,10 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:48081", "sgate WebSocket address")
 	duration := flag.Duration("duration", 10*time.Second, "benchmark duration")
 	parallel := flag.Int("parallel", 100, "number of parallel connections")
+	serverID := flag.String("server-id", "logic1", "logic server instance ID to bind")
 	flag.Parse()
 
-	fmt.Printf("bench1_ws: addr=%s duration=%s parallel=%d\n", *addr, *duration, *parallel)
+	fmt.Printf("bench1_ws: addr=%s duration=%s parallel=%d serverID=%s\n", *addr, *duration, *parallel, *serverID)
 
 	var totalForwarded atomic.Int64
 	var totalAck atomic.Int64
@@ -45,7 +46,7 @@ func main() {
 
 	fmt.Println("阶段1：登录中...")
 	loginDeadline := time.Now().Add(30 * time.Second)
-	for i := 0; i < *parallel; i++ {
+	for i := range *parallel {
 		if time.Now().After(loginDeadline) {
 			fmt.Fprintf(os.Stderr, "login phase timeout after %d connections\n", i)
 			connectionsFailed.Add(int64(*parallel - i))
@@ -71,7 +72,7 @@ func main() {
 		}
 
 		loginReq := &protocol.LoginGateReq{
-			ServerId: "logic1",
+			ServerId: *serverID,
 			UserId:   fmt.Sprintf("bench_user_%d", i),
 			LoginKey: "",
 		}

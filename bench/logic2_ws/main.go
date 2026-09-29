@@ -76,14 +76,11 @@ func main() {
 			time.Sleep(10 * time.Second)
 			tlog.Info(context.TODO(), "logic2 push phase started transport=websocket members=%d", *expectedMembers)
 		}
-		workers := *pushWorkers
-		if workers < 1 {
-			workers = 1
-		}
+		workers := max(*pushWorkers, 1)
 		jobs := make(chan string, workers*64)
 		var workerWG sync.WaitGroup
 		workerWG.Add(workers)
-		for i := 0; i < workers; i++ {
+		for range workers {
 			go func() {
 				defer workerWG.Done()
 				for sessionID := range jobs {

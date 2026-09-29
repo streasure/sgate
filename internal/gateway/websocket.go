@@ -516,7 +516,7 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 			SeqId:     message.SeqId,
 		}
 		go func() {
-			for i := 0; i < 20; i++ {
+			for range 20 {
 				if lc := g.GetLogicClient(req.ServerId); lc != nil {
 					if err := lc.SendMessage(forwardMsg); err == nil {
 						return

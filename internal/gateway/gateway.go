@@ -382,7 +382,7 @@ func (g *Gateway) wsHeartbeatChecker() {
 }
 
 func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
-	g.wsConnections.Range(func(key, value interface{}) bool {
+	g.wsConnections.Range(func(key, value any) bool {
 		conn, ok := key.(*WebSocketConnection)
 		if !ok {
 			return true

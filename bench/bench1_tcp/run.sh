@@ -34,7 +34,7 @@ sleep 3
 
 # 运行压测
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始压测 (TCP, $DURATION, $PARALLEL 连接)..."
-./bench/bench1_tcp/bench1_tcp -addr 127.0.0.1:48080 -duration "$DURATION" -parallel "$PARALLEL"
+./bench/bench1_tcp/bench1_tcp -addr 127.0.0.1:48080 -duration "$DURATION" -parallel "$PARALLEL" -server-id logic1-tcp
 
 # 清理
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 清理进程..."

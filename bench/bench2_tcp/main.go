@@ -40,10 +40,7 @@ func main() {
 	var measureStart atomic.Int64
 
 	// 阶段1：分批登录，每批 loginBatch 个连接
-	batchSize := *loginBatch
-	if batchSize > *parallel {
-		batchSize = *parallel
-	}
+	batchSize := min(*loginBatch, *parallel)
 
 	// 存活连接：登录成功后存入，start 信号后开始接收
 	type connEntry struct {
@@ -56,10 +53,7 @@ func main() {
 	tlog.Info(context.TODO(), "bench2 login phase started parallel=%d batchSize=%d", *parallel, batchSize)
 
 	for batch := 0; batch < *parallel; batch += batchSize {
-		end := batch + batchSize
-		if end > *parallel {
-			end = *parallel
-		}
+		end := min(batch+batchSize, *parallel)
 
 		var batchReady sync.WaitGroup
 		batchReady.Add(end - batch)
@@ -153,10 +147,7 @@ func main() {
 				}
 				remaining := int(dataLen)
 				for remaining > 0 {
-					n := remaining
-					if n > len(skip) {
-						n = len(skip)
-					}
+					n := min(remaining, len(skip))
 					if _, err := readFull(entry.conn, skip[:n]); err != nil {
 						return
 					}

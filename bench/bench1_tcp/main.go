@@ -25,9 +25,10 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:48080", "sgate TCP address")
 	duration := flag.Duration("duration", 10*time.Second, "benchmark duration")
 	parallel := flag.Int("parallel", 100, "number of parallel connections")
+	serverID := flag.String("server-id", "logic1", "logic server instance ID to bind")
 	flag.Parse()
 
-	fmt.Printf("bench1_tcp: addr=%s duration=%s parallel=%d\n", *addr, *duration, *parallel)
+	fmt.Printf("bench1_tcp: addr=%s duration=%s parallel=%d serverID=%s\n", *addr, *duration, *parallel, *serverID)
 
 	var totalForwarded atomic.Int64
 	var totalAck atomic.Int64
@@ -41,7 +42,7 @@ func main() {
 	results := make([]connResult, *parallel)
 
 	fmt.Println("阶段1：登录中...")
-	for i := 0; i < *parallel; i++ {
+	for i := range *parallel {
 		conn, err := net.DialTimeout("tcp", *addr, 5*time.Second)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "client %d dial error: %v\n", i, err)
@@ -51,7 +52,7 @@ func main() {
 		}
 
 		loginReq := &protocol.LoginGateReq{
-			ServerId: "logic1",
+			ServerId: *serverID,
 			UserId:   fmt.Sprintf("bench_user_%d", i),
 			LoginKey: "",
 		}

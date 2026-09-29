@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,11 +21,10 @@ import (
 	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/util/tlog"
-	"google.golang.org/protobuf/proto"
 )
 
 var connContextPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &ConnContext{
 			ConnectionID: "",
 			FrameBuf:     nil,
@@ -72,7 +72,7 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 
 	localAddr := c.LocalAddr().String()
 	isWS := false
-	g.transportType.Range(func(key, value interface{}) bool {
+	g.transportType.Range(func(key, value any) bool {
 		port := key.(string)
 		t := value.(string)
 		if strings.HasSuffix(localAddr, ":"+port) && t == "websocket" {
@@ -238,12 +238,7 @@ func (g *Gateway) isPreAuthCommand(cmd int32) bool {
 	if cmd == routes.CmdLogicLoginReq {
 		return true
 	}
-	for _, allowed := range g.getProtection().PreAuthCommands {
-		if cmd == allowed {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(g.getProtection().PreAuthCommands, cmd)
 }
 
 func (g *Gateway) getLogicClient() connection.LogicClientProvider {
@@ -335,7 +330,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	result := g.pipeline.Process(c, data, message, connectionID)
 	if result.Error != nil {
 		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
-		respData, _ := proto.Marshal(errorResp)
+		respData := routes.MarshalClientError(errorResp)
 		writeFrame(c, respData)
 	}
 	return result.Action

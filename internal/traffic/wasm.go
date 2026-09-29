@@ -145,7 +145,7 @@ func applyWasmOutput(fc *types.FilterContext, out []byte) {
 var ErrWasmRuntimeNotEnabled = fmt.Errorf("wasm runtime is not available in the standard build")
 
 func init() {
-	types.RegisterFilter("wasm-filter", func(cfg map[string]interface{}) (types.Filter, error) {
+	types.RegisterFilter("wasm-filter", func(cfg map[string]any) (types.Filter, error) {
 		return NewWasmFilter(gatewayutil.GetString(cfg, "module"), gatewayutil.GetString(cfg, "function"))
 	})
 }

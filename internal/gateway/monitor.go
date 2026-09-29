@@ -406,7 +406,7 @@ func (g *Gateway) collectMetrics() obs.HealthMetrics {
 }
 
 func (g *Gateway) ServeHealthHTTP(w http.ResponseWriter, r *http.Request) {
-	var response interface{}
+	var response any
 	var statusCode int
 
 	switch r.URL.Path {

@@ -217,7 +217,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	// 关闭旧的流分片
 	if oldSM := lc.streamManager.Load(); oldSM != nil {
-		for i := 0; i < len(oldSM.shards); i++ {
+		for i := range oldSM.shards {
 			if shard := oldSM.shards[i]; shard != nil {
 				shard.closed.Store(true)
 				shard.mu.Lock()
@@ -249,7 +249,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 	var firstErr error
 	var errOnce sync.Once
 
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -288,7 +288,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	if firstErr != nil {
 		tlog.Error(context.TODO(), "failed to establish all stream shards error=%v", firstErr)
-		for i := 0; i < shardCount; i++ {
+		for i := range shardCount {
 			shard := newSM.shards[i]
 			shard.mu.Lock()
 			if shard.stream != nil {
@@ -311,7 +311,7 @@ func (lc *LogicClient) doConnect(isReconnect bool) error {
 
 	lc.setState(LogicStateConnected)
 
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		newSM.shards[i].lc = lc
 		go newSM.shards[i].startSendLoop()
 		go newSM.shards[i].receiveMessages(lc, i)
@@ -352,7 +352,7 @@ func (lc *LogicClient) Close() {
 	}
 
 	if oldSM := lc.streamManager.Load(); oldSM != nil {
-		for i := 0; i < len(oldSM.shards); i++ {
+		for i := range oldSM.shards {
 			if shard := oldSM.shards[i]; shard != nil {
 				shard.closed.Store(true)
 				shard.stop()
@@ -687,10 +687,7 @@ func (rm *ReconnectManager) doReconnect() {
 
 		tlog.Warn(context.TODO(), "reconnect failed attempt=%d error=%v", attempt, err)
 
-		interval = time.Duration(float64(interval) * rm.config.Multiplier)
-		if interval > rm.config.MaxInterval {
-			interval = rm.config.MaxInterval
-		}
+		interval = min(time.Duration(float64(interval)*rm.config.Multiplier), rm.config.MaxInterval)
 	}
 }
 

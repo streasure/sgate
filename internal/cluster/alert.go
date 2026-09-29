@@ -27,12 +27,12 @@ const (
 
 // AlertEvent 告警事件
 type AlertEvent struct {
-	Level     AlertLevel             `json:"level"`
-	Title     string                 `json:"title"`
-	Content   string                 `json:"content"`
-	Source    string                 `json:"source"`
-	Timestamp int64                  `json:"timestamp"`
-	Metrics   map[string]interface{} `json:"metrics,omitempty"`
+	Level     AlertLevel     `json:"level"`
+	Title     string         `json:"title"`
+	Content   string         `json:"content"`
+	Source    string         `json:"source"`
+	Timestamp int64          `json:"timestamp"`
+	Metrics   map[string]any `json:"metrics,omitempty"`
 }
 
 // AlertWebhook 告警通知器
@@ -147,7 +147,7 @@ func (a *AlertWebhook) buildPayload(h webhookConfig, event AlertEvent) []byte {
 			event.Title, event.Level, event.Source,
 			time.Unix(event.Timestamp, 0).Format("2006-01-02 15:04:05"),
 			event.Content)
-		body, _ := json.Marshal(map[string]interface{}{
+		body, _ := json.Marshal(map[string]any{
 			"msgtype":  "markdown",
 			"markdown": map[string]string{"content": content},
 		})
@@ -158,7 +158,7 @@ func (a *AlertWebhook) buildPayload(h webhookConfig, event AlertEvent) []byte {
 			event.Title, event.Level, event.Source,
 			time.Unix(event.Timestamp, 0).Format("2006-01-02 15:04:05"),
 			event.Content)
-		body, _ := json.Marshal(map[string]interface{}{
+		body, _ := json.Marshal(map[string]any{
 			"msgtype":  "markdown",
 			"markdown": map[string]string{"title": event.Title, "text": text},
 		})

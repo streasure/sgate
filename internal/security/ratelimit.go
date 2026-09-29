@@ -51,10 +51,7 @@ func (tb *TokenBucket) tryConsume() bool {
 			refill := int64(elapsed/tb.tokenRefresh) * tb.maxTokens
 			if refill > 0 {
 				current := tb.tokens.Load()
-				newTokens := current + refill
-				if newTokens > tb.burstTokens {
-					newTokens = tb.burstTokens
-				}
+				newTokens := min(current+refill, tb.burstTokens)
 				tb.tokens.Store(newTokens)
 			}
 		}

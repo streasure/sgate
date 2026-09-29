@@ -241,7 +241,7 @@ func (b *Balancer) pickConsistent(key string) *BalancerNode {
 		lo = 0
 	}
 	// 找第一个健康节点
-	for i := 0; i < len(b.ring); i++ {
+	for i := range b.ring {
 		idx := (lo + i) % len(b.ring)
 		if n, ok := b.ringMap[b.ring[idx]]; ok && n.IsHealthy() {
 			return n
@@ -256,7 +256,7 @@ func (b *Balancer) rebuildRingLocked() {
 	b.ringMap = make(map[uint32]*BalancerNode, len(b.nodes)*160)
 	// 每个节点 160 个虚拟节点
 	for _, n := range b.nodes {
-		for i := 0; i < 160; i++ {
+		for i := range 160 {
 			vh := fnvHash32(n.ID + "-" + strconv.Itoa(i))
 			b.ring = append(b.ring, vh)
 			b.ringMap[vh] = n
@@ -315,12 +315,12 @@ func (b *Balancer) SetHealthCheckFunc(fn func(id, addr string) bool) {
 }
 
 // Stats 返回节点统计
-func (b *Balancer) Stats() []map[string]interface{} {
+func (b *Balancer) Stats() []map[string]any {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	out := make([]map[string]interface{}, 0, len(b.nodes))
+	out := make([]map[string]any, 0, len(b.nodes))
 	for _, n := range b.nodes {
-		out = append(out, map[string]interface{}{
+		out = append(out, map[string]any{
 			"id":       n.ID,
 			"address":  n.Address,
 			"weight":   n.Weight,

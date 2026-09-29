@@ -36,7 +36,7 @@ func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gateway
 		gatewayID: gatewayID, sessionIDs: make(map[string]struct{}),
 	}
 	go func() {
-		defer close(c.done)
+		defer c.shutdown()
 		for {
 			select {
 			case <-c.done:
@@ -46,13 +46,21 @@ func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gateway
 					return
 				}
 				if err := c.stream.Send(msg); err != nil {
-					c.closed.Store(true)
+					c.shutdown()
 					return
 				}
 			}
 		}
 	}()
 	return c
+}
+
+// shutdown 原子地置 closed 并关闭 done，与 Close 共用 closeOnce，避免 double close。
+func (c *streamConn) shutdown() {
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		close(c.done)
+	})
 }
 
 // Send 向流连接发送消息，连接已关闭时返回错误。
@@ -80,10 +88,7 @@ func (c *streamConn) bindSession(sessionID string) {
 // Close 关闭流连接，确保只执行一次。
 // 置 closed → close(done) 通知 Send 失败；不关闭 sendCh（避免 send-on-closed-channel）。
 func (c *streamConn) Close() {
-	c.closeOnce.Do(func() {
-		c.closed.Store(true)
-		close(c.done)
-	})
+	c.shutdown()
 }
 
 // pushGroup 推送组，维护组内成员会话
@@ -557,12 +562,10 @@ func (s *Server) Stop() {
 		var wg sync.WaitGroup
 		s.streams.Range(func(_, value any) bool {
 			conn := value.(*streamConn)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				conn.Close()
 				<-conn.done
-			}()
+			})
 			return true
 		})
 		wg.Wait()

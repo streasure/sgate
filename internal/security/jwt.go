@@ -196,7 +196,7 @@ func (f *JWTAuthFilter) Issue(claims JWTClaims) (string, error) {
 
 // init 自动注册到 SPI 注册表
 func init() {
-	types.RegisterFilter("jwt-auth", func(cfg map[string]interface{}) (types.Filter, error) {
+	types.RegisterFilter("jwt-auth", func(cfg map[string]any) (types.Filter, error) {
 		c := config.JWTAuthConfig{
 			Secret:      gatewayutil.GetString(cfg, "secret"),
 			Issuer:      gatewayutil.GetString(cfg, "issuer"),
@@ -204,7 +204,7 @@ func init() {
 		}
 		// 跳过配置中指定的路由。
 		if v, ok := cfg["skipRoutes"]; ok {
-			if arr, ok := v.([]interface{}); ok {
+			if arr, ok := v.([]any); ok {
 				for _, x := range arr {
 					if route, ok := x.(string); ok {
 						c.SkipRoutes = append(c.SkipRoutes, route)

@@ -101,13 +101,13 @@ func (f *CanaryFilter) UpdateConfig(cfg config.CanaryConfig) {
 }
 
 func init() {
-	types.RegisterFilter("canary", func(cfg map[string]interface{}) (types.Filter, error) {
+	types.RegisterFilter("canary", func(cfg map[string]any) (types.Filter, error) {
 		c := config.CanaryConfig{
 			Percent:     gatewayutil.GetInt(cfg, "percent"),
 			TargetRoute: gatewayutil.GetString(cfg, "targetRoute"),
 		}
 		if v, ok := cfg["headers"]; ok {
-			if mp, ok := v.(map[string]interface{}); ok {
+			if mp, ok := v.(map[string]any); ok {
 				c.Headers = make(map[string]string)
 				for k, v := range mp {
 					if s, ok := v.(string); ok {
@@ -117,7 +117,7 @@ func init() {
 			}
 		}
 		if v, ok := cfg["userIDs"]; ok {
-			if arr, ok := v.([]interface{}); ok {
+			if arr, ok := v.([]any); ok {
 				for _, x := range arr {
 					if s, ok := x.(string); ok {
 						c.UserIDs = append(c.UserIDs, s)

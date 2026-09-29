@@ -4,6 +4,7 @@ package types
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"sync/atomic"
 )
@@ -45,7 +46,7 @@ type Filter interface {
 }
 
 // FilterFactory SPI 工厂：按名称动态构造过滤器
-type FilterFactory func(cfg map[string]interface{}) (Filter, error)
+type FilterFactory func(cfg map[string]any) (Filter, error)
 
 // FilterChain 过滤器链
 type FilterChain struct {
@@ -84,9 +85,7 @@ func GetFilterChain() *FilterChain {
 func NewFilterChain() *FilterChain {
 	globalFilterRegistryMu.RLock()
 	registry := make(map[string]FilterFactory, len(globalFilterRegistry))
-	for name, factory := range globalFilterRegistry {
-		registry[name] = factory
-	}
+	maps.Copy(registry, globalFilterRegistry)
 	globalFilterRegistryMu.RUnlock()
 	fc := &FilterChain{
 		registry: registry,
@@ -103,7 +102,7 @@ func (fc *FilterChain) Register(name string, f FilterFactory) {
 }
 
 // LoadByName 按名称动态加载过滤器（SPI）
-func (fc *FilterChain) LoadByName(name string, cfg map[string]interface{}) error {
+func (fc *FilterChain) LoadByName(name string, cfg map[string]any) error {
 	fc.regMu.RLock()
 	factory, ok := fc.registry[name]
 	fc.regMu.RUnlock()

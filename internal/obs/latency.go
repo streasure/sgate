@@ -67,10 +67,7 @@ func (lt *LatencyTracker) GetStats() LatencyStats {
 	slices.Sort(buf)
 
 	getPct := func(p float64) time.Duration {
-		idx := int(math.Ceil(p*float64(len(buf)))) - 1
-		if idx < 0 {
-			idx = 0
-		}
+		idx := max(int(math.Ceil(p*float64(len(buf))))-1, 0)
 		if idx >= len(buf) {
 			idx = len(buf) - 1
 		}

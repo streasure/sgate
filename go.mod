@@ -1,6 +1,6 @@
 module github.com/streasure/sgate
 
-go 1.22.5
+go 1.26.8
 
 require (
 	github.com/bytedance/sonic v1.15.3
@@ -65,3 +65,5 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	howett.net/plist v0.0.0-20181124034731-591f970eefbb // indirect
 )
+
+replace github.com/streasure/util => ../util

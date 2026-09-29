@@ -152,12 +152,12 @@ func (m *DegradationManager) AddRule(rc config.DegradationRuleConfig) {
 }
 
 func init() {
-	types.RegisterFilter("degradation", func(cfg map[string]interface{}) (types.Filter, error) {
+	types.RegisterFilter("degradation", func(cfg map[string]any) (types.Filter, error) {
 		rules := []config.DegradationRuleConfig{}
 		if v, ok := cfg["rules"]; ok {
-			if arr, ok := v.([]interface{}); ok {
+			if arr, ok := v.([]any); ok {
 				for _, x := range arr {
-					if mp, ok := x.(map[string]interface{}); ok {
+					if mp, ok := x.(map[string]any); ok {
 						rules = append(rules, config.DegradationRuleConfig{
 							Route:          gatewayutil.GetString(mp, "route"),
 							ErrorThreshold: gatewayutil.GetFloat(mp, "errorThreshold"),

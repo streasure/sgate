@@ -24,7 +24,7 @@ type writeCoalescer struct {
 // coalescerBufPool 复用 coalescer 的 data buffer，避免每帧 append 分配导致 GC 风暴。
 // buffer 初始容量 4KB，可动态扩展。归还时保留扩展后的容量（上限 1MB）以复用。
 var coalescerBufPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		b := make([]byte, 0, 4096)
 		return &b
 	},
@@ -107,7 +107,7 @@ func NewShardedWriteCoalescer(cm *ConnectionManager, shardCount int) *ShardedWri
 		cm:     cm,
 		stopCh: make(chan struct{}),
 	}
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		sw.shards[i] = newWriteCoalescer()
 	}
 	sw.wg.Add(1)

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	protocol "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -35,7 +36,7 @@ func (s *Server) RegisterProto(cmd int32, reqProto proto.Message, respCmd int32,
 	if cmd == 0 {
 		panic("logic: RegisterProto requires a non-zero cmd")
 	}
-	if reqProto == nil || reflect.TypeOf(reqProto).Kind() != reflect.Ptr {
+	if reqProto == nil || reflect.TypeOf(reqProto).Kind() != reflect.Pointer {
 		panic("logic: RegisterProto requires a non-nil protobuf pointer")
 	}
 	if handler == nil {
@@ -56,6 +57,10 @@ func (s *Server) RegisterProto(cmd int32, reqProto proto.Message, respCmd int32,
 func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protocol.StreamData)) {
 	value, ok := s.handlers.Load(msg.Cmd)
 	if !ok {
+		// 未注册的命令先尝试内置处理（网关系统指令），否则告警丢弃。
+		if s.builtinCommand(msg) {
+			return
+		}
 		tlog.Warn(context.TODO(), "received unregistered cmd cmd=%d sessionID=%s", msg.Cmd, msg.SessionId)
 		return
 	}
@@ -98,6 +103,20 @@ func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protoc
 		Data:      data,
 		ClientIp:  msg.ClientIp,
 	})
+}
+
+// builtinCommand 处理网关系统内置命令。返回 true 表示已消费（不告警）。
+//   - CmdHeartbeatReq: 网关健康检查心跳，无需应答
+//   - CmdUserOffline: 用户下线通知，清理会话/分组/用户映射（防止泄漏）
+func (s *Server) builtinCommand(msg *protocol.StreamData) bool {
+	switch msg.Cmd {
+	case routes.CmdHeartbeatReq:
+		return true
+	case routes.CmdUserOffline:
+		s.Offline(msg.SessionId, msg.UserKey)
+		return true
+	}
+	return false
 }
 
 // registeredCommands 获取所有已注册的命令码列表

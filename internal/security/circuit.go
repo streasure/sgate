@@ -194,7 +194,7 @@ func (cbm *CircuitBreakerManager) GetTrippedCount() int64 {
 
 func (cbm *CircuitBreakerManager) ListBreakers() map[string]*CircuitBreaker {
 	breakers := make(map[string]*CircuitBreaker)
-	cbm.breakers.Range(func(key, value interface{}) bool {
+	cbm.breakers.Range(func(key, value any) bool {
 		breakers[key.(string)] = value.(*CircuitBreaker)
 		return true
 	})

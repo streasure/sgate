@@ -168,12 +168,9 @@ func isLikelyText(data []byte) bool {
 		return false
 	}
 	// 检查前 100 字节中可打印字符比例
-	checkLen := len(data)
-	if checkLen > 100 {
-		checkLen = 100
-	}
+	checkLen := min(len(data), 100)
 	printable := 0
-	for i := 0; i < checkLen; i++ {
+	for i := range checkLen {
 		b := data[i]
 		if (b >= 0x20 && b <= 0x7E) || b == '\n' || b == '\r' || b == '\t' || b >= 0x80 {
 			printable++

@@ -55,20 +55,15 @@ func main() {
 	batchNum := 0
 
 	for remaining > 0 {
-		n := *batchSize
-		if n > remaining {
-			n = remaining
-		}
+		n := min(*batchSize, remaining)
 		batchNum++
 
 		var wg sync.WaitGroup
-		for i := 0; i < n; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range n {
+			wg.Go(func() {
 				// 随机选一个端口
 				port := portList[rand.Intn(len(portList))]
-				target := fmt.Sprintf("%s:%d", *addr, port)
+				target := net.JoinHostPort(*addr, fmt.Sprintf("%d", port))
 
 				conn, err := net.DialTimeout("tcp", target, 3*time.Second)
 				if err != nil {
@@ -81,7 +76,7 @@ func main() {
 				mu.Lock()
 				conns = append(conns, conn)
 				mu.Unlock()
-			}()
+			})
 		}
 		wg.Wait()
 
@@ -122,11 +117,11 @@ func main() {
 func parsePorts(s string) []int {
 	var ports []int
 	// 支持 "48080" 和 "49000-49050" 格式
-	for _, part := range strings.Split(s, ",") {
+	for part := range strings.SplitSeq(s, ",") {
 		part = strings.TrimSpace(part)
-		if idx := strings.Index(part, "-"); idx >= 0 {
-			start, _ := strconv.Atoi(part[:idx])
-			end, _ := strconv.Atoi(part[idx+1:])
+		if before, after, ok := strings.Cut(part, "-"); ok {
+			start, _ := strconv.Atoi(before)
+			end, _ := strconv.Atoi(after)
 			for i := start; i <= end; i++ {
 				ports = append(ports, i)
 			}

@@ -42,7 +42,7 @@ func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 	if workers <= 0 {
 		workers = 2
 	}
-	for i := 0; i < workers; i++ {
+	for range workers {
 		tm.workersWG.Add(1)
 		go tm.worker()
 	}
@@ -131,7 +131,7 @@ func (tm *TrafficMirror) Stats() (forwarded, dropped int64) {
 }
 
 func init() {
-	types.RegisterFilter("traffic-mirror", func(cfg map[string]interface{}) (types.Filter, error) {
+	types.RegisterFilter("traffic-mirror", func(cfg map[string]any) (types.Filter, error) {
 		c := config.TrafficMirrorConfig{
 			Percent:    gatewayutil.GetInt(cfg, "percent"),
 			TargetAddr: gatewayutil.GetString(cfg, "targetAddr"),

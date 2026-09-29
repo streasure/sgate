@@ -29,7 +29,7 @@ type GatewayClientProvider interface {
 }
 
 var streamDataPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &protoGw.StreamData{}
 	},
 }

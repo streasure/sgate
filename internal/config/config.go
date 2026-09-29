@@ -199,8 +199,8 @@ type FilterChainConfig struct {
 
 // FilterItemConfig 单个过滤器配置
 type FilterItemConfig struct {
-	Name   string                 `yaml:"name"`
-	Config map[string]interface{} `yaml:"config"`
+	Name   string         `yaml:"name"`
+	Config map[string]any `yaml:"config"`
 }
 
 // SecurityConfig 安全防护配置（白名单/黑名单/限流/熔断）

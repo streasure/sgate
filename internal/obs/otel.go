@@ -64,7 +64,7 @@ func NewOTelTracer(cfg config.OTelTracerConfig) *OTelTracer {
 	if workers <= 0 {
 		workers = 2
 	}
-	for i := 0; i < workers; i++ {
+	for range workers {
 		go t.exportLoop()
 	}
 	return t
@@ -214,7 +214,7 @@ func (f *OTelSpanFilter) Process(fc *types.FilterContext) (bool, error) {
 }
 
 func init() {
-	types.RegisterFilter("otel-tracer", func(cfg map[string]interface{}) (types.Filter, error) {
+	types.RegisterFilter("otel-tracer", func(cfg map[string]any) (types.Filter, error) {
 		c := config.OTelTracerConfig{
 			Endpoint:    gatewayutil.GetString(cfg, "endpoint"),
 			ServiceName: gatewayutil.GetString(cfg, "serviceName"),

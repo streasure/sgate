@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"runtime"
 	"strconv"
@@ -16,7 +17,6 @@ import (
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
-	"google.golang.org/protobuf/proto"
 )
 
 // PipelineResult 携带通过共享消息管道处理客户端消息的结果。
@@ -392,7 +392,7 @@ func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWork
 		gw:      gw,
 	}
 
-	for i := 0; i < shards; i++ {
+	for i := range shards {
 		p.workers[i].taskCh = make(chan pipelineTask, queueSize/shards)
 		p.wg.Add(1)
 		go p.runWorker(i)
@@ -419,7 +419,7 @@ func (p *PipelineWorkerPool) processTask(task *pipelineTaskData) {
 	result := p.gw.pipeline.Process(task.conn, task.data, task.message, task.connectionID)
 	if result.Error != nil {
 		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
-		respData, _ := proto.Marshal(errorResp)
+		respData := routes.MarshalClientError(errorResp)
 		writeFrameAsync(task.conn, respData)
 	}
 	applyAsyncResult(task.conn, nil, result)
@@ -449,11 +449,17 @@ func applyAsyncResult(conn gnet.Conn, wsConn *WebSocketConnection, result Pipeli
 }
 
 // writeFrameAsync 从 worker goroutine 安全写 TCP 帧（gnet 要求跨协程用 AsyncWrite）。
+// 必须与 writeFrame 一致：先写 4 字节大端长度前缀，否则客户端按前缀读长度会得到垃圾值。
 func writeFrameAsync(conn gnet.Conn, data []byte) {
 	if conn == nil {
 		return
 	}
-	_ = conn.AsyncWrite(data, noopAsyncCallback)
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
+	buf := make([]byte, 4+len(data))
+	copy(buf, header[:])
+	copy(buf[4:], data)
+	_ = conn.AsyncWrite(buf, noopAsyncCallback)
 }
 
 // noopAsyncCallback AsyncWrite 完成回调，忽略错误。
@@ -505,7 +511,7 @@ func fnvHashString(s string) uint32 {
 		prime32  = 16777619
 	)
 	h := uint32(offset32)
-	for i := 0; i < len(s); i++ {
+	for i := range s {
 		h ^= uint32(s[i])
 		h *= prime32
 	}

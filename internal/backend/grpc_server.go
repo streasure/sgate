@@ -36,7 +36,7 @@ func NewGRPCServer(gateway GatewayInterface) *GRPCServer {
 func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 	connectionID := connection.GenerateConnectionID()
 
-	ctx := map[string]interface{}{
+	ctx := map[string]any{
 		"connection_id": connectionID,
 		"stream":        stream,
 	}
@@ -47,7 +47,7 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 			return err
 		}
 
-		s.handleGRPCMessage(connectionID, msg, func(response interface{}) {
+		s.handleGRPCMessage(connectionID, msg, func(response any) {
 			if protoMsg, ok := response.(*protoGw.StreamData); ok {
 				if err := stream.Send(protoMsg); err != nil {
 					tlog.Warn(context.TODO(), "OnData: stream.Send failed error=%v", err)
@@ -244,7 +244,7 @@ func encodePushMessage(cmd int32, data []byte) ([]byte, error) {
 func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (*protoGw.StreamData, error) {
 	connectionID := connection.GenerateConnectionID()
 
-	grpcCtx := map[string]interface{}{
+	grpcCtx := map[string]any{
 		"connection_id": connectionID,
 		"context":       ctx,
 	}
@@ -253,7 +253,7 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	s.handleGRPCMessage(connectionID, msg, func(resp interface{}) {
+	s.handleGRPCMessage(connectionID, msg, func(resp any) {
 		defer wg.Done()
 		if protoMsg, ok := resp.(*protoGw.StreamData); ok {
 			response = protoMsg
@@ -272,7 +272,7 @@ func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (
 }
 
 // handleGRPCMessage 处理 gRPC 消息，返回错误提示（网关不直接处理命令）
-func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamData, callback func(interface{}), ctx map[string]interface{}) {
+func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamData, callback func(any), ctx map[string]any) {
 	if msg.Cmd == 0 {
 		callback(routes.NewErrorResponse("error", "Missing cmd", "", ""))
 		return
