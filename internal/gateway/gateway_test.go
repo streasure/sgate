@@ -59,8 +59,8 @@ func TestNewGatewayAppliesDefaultsAndStoresCopy(t *testing.T) {
 
 	// 应存指针副本：改入参 cfg 不影响内部存储
 	cfg.ServerID = "mutated"
-	stored, ok := gw.cfg.Load().(*config.Config)
-	if !ok || stored == nil {
+	stored := gw.cfg.Load()
+	if stored == nil {
 		t.Fatal("gw.cfg not stored as *config.Config")
 	}
 	if stored.ServerID == "mutated" {

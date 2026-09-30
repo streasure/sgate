@@ -57,8 +57,8 @@ type WebSocketConnection struct {
 	Conn         gnet.Conn
 	State        atomic.Int32
 	Buffer       []byte
-	connID       atomic.Value // string：ConnectionID（事件循环写、心跳协程读，须原子）
-	lastPingUnix atomic.Int64 // 纳秒时间戳，避免 time.Time 字段跨协程读写竞态
+	connID       atomic.Pointer[string] // ConnectionID（事件循环写、心跳协程读，须原子）
+	lastPingUnix atomic.Int64           // 纳秒时间戳，避免 time.Time 字段跨协程读写竞态
 
 	// 分片帧重组（FIN=0 的 continuation）
 	fragOp   WSOpCode
@@ -68,12 +68,14 @@ type WebSocketConnection struct {
 
 // ConnectionID 返回连接标识（并发安全）。
 func (c *WebSocketConnection) ConnectionID() string {
-	v, _ := c.connID.Load().(string)
-	return v
+	if v := c.connID.Load(); v != nil {
+		return *v
+	}
+	return ""
 }
 
 // SetConnectionID 设置连接标识（并发安全）。
-func (c *WebSocketConnection) SetConnectionID(id string) { c.connID.Store(id) }
+func (c *WebSocketConnection) SetConnectionID(id string) { c.connID.Store(&id) }
 
 // maxWSHandshakeSize WebSocket 握手请求最大字节数（防半包无限缓冲）。
 const maxWSHandshakeSize = 16 * 1024
@@ -392,6 +394,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
 			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 400, "invalid login gate request", req.ServerId)
 		}
+		// 切维护检查：目标 serverId（或其所属 zone）在维护中 → 拒绝新登录
+		if g.isMaintenanceTarget(req.ServerId) {
+			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server in maintenance", req.ServerId)
+		}
 		// 校验与绑定在后台协程执行，避免同步 gRPC 阻塞 event loop；完成后异步回写 ack。
 		msgCopy := &protoGw.StreamData{
 			Cmd:     message.Cmd,
@@ -479,6 +485,11 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 	if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
 		ack(code, text)
 	}) {
+		return
+	}
+	// 二次切维护检查（worker 路径，防标记在快照后置入的竞态）
+	if g.isMaintenanceTarget(req.ServerId) {
+		ack(503, "server in maintenance")
 		return
 	}
 	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)

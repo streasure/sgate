@@ -1,10 +1,11 @@
 module github.com/streasure/sgate
 
-go 1.26.8
+go 1.26.5
 
 require (
 	github.com/bytedance/sonic v1.15.3
 	github.com/gobwas/ws v1.4.0
+	github.com/mitchellh/mapstructure v1.5.0
 	github.com/panjf2000/gnet/v2 v2.9.7
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/spf13/cast v1.10.0
@@ -34,7 +35,6 @@ require (
 	github.com/joeshaw/multierror v0.0.0-20140124173710-69b34d4ec901 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
-	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/panjf2000/ants/v2 v2.11.3 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
@@ -66,4 +66,8 @@ require (
 	howett.net/plist v0.0.0-20181124034731-591f970eefbb // indirect
 )
 
-replace github.com/streasure/util => ../util
+replace (
+	github.com/streasure/protocol => ../protocol
+	github.com/streasure/treasure-slog => ../treasure-slog
+	github.com/streasure/util => ../util
+)

@@ -11,7 +11,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"runtime"
 	"strconv"
@@ -62,7 +62,7 @@ func main() {
 		for range n {
 			wg.Go(func() {
 				// 随机选一个端口
-				port := portList[rand.Intn(len(portList))]
+				port := portList[rand.IntN(len(portList))]
 				target := net.JoinHostPort(*addr, fmt.Sprintf("%d", port))
 
 				conn, err := net.DialTimeout("tcp", target, 3*time.Second)

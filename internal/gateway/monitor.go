@@ -9,7 +9,6 @@ import (
 	"time"
 
 	json "github.com/bytedance/sonic"
-	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/util/prometheus"
 	"github.com/streasure/util/tlog"
@@ -449,7 +448,7 @@ func (g *Gateway) startConfigCenterWatcher() {
 			if len(yamlBytes) == 0 {
 				continue
 			}
-			currentCfg := g.cfg.Load().(*config.Config)
+			currentCfg := g.cfg.Load()
 			newCfg := *currentCfg
 			if err := yaml.Unmarshal(yamlBytes, &newCfg); err != nil {
 				tlog.Warn(context.TODO(), "config center content parse failed error=%v", err)

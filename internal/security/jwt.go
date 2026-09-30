@@ -13,8 +13,8 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/sgate/internal/types"
-	"github.com/streasure/util/gatewayutil"
 )
 
 // JWTAuthFilter JWT 鉴权过滤器

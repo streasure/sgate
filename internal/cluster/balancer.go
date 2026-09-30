@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
 

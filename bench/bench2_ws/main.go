@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
@@ -207,7 +207,7 @@ func main() {
 }
 
 func wsUpgrade(conn net.Conn, host string) error {
-	key := base64.StdEncoding.EncodeToString([]byte(strconv.FormatInt(rand.Int63(), 16)))
+	key := base64.StdEncoding.EncodeToString([]byte(strconv.FormatUint(rand.Uint64(), 16)))
 	req := fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", host, key)
 	if _, err := conn.Write([]byte(req)); err != nil {
 		return err
@@ -238,7 +238,7 @@ func sendWSBinary(conn net.Conn, frame *protocol.MessageFrame) error {
 	if err != nil {
 		return err
 	}
-	mask := [4]byte{byte(rand.Intn(256)), byte(rand.Intn(256)), byte(rand.Intn(256)), byte(rand.Intn(256))}
+	mask := [4]byte{byte(rand.IntN(256)), byte(rand.IntN(256)), byte(rand.IntN(256)), byte(rand.IntN(256))}
 	var wsFrame []byte
 	n := len(data)
 	if n < 126 {

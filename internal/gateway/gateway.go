@@ -3,7 +3,9 @@ package gateway
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"strings"
@@ -42,7 +44,7 @@ type Gateway struct {
 	clusterID         string
 	gatewayID         string
 	isLeader          bool
-	cfg               atomic.Value
+	cfg               atomic.Pointer[config.Config]
 	wsConnections     sync.Map
 	configPath        string
 	configUpdateChan  chan *config.Config
@@ -61,9 +63,10 @@ type Gateway struct {
 	statsServer       *http.Server
 	msgRate           *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
 	zone              string
-	protection        atomic.Value // stores config.ProtectionConfig — 热路径无锁读取
-	grpcCfg           atomic.Value // stores config.GRPCConfig（热更新原子替换）
-	streamCfg         atomic.Value // stores config.StreamConfig（热更新原子替换）
+	protection        atomic.Pointer[config.ProtectionConfig] // 热路径无锁读取
+	grpcCfg           atomic.Pointer[config.GRPCConfig]       // 热更新原子替换
+	streamCfg         atomic.Pointer[config.StreamConfig]     // 热更新原子替换
+	maintenance       *maintenanceState                       // 切维护状态（serverId/zone → reason）
 	// 安全防护组件
 	whitelistBlacklist *security.WhitelistBlacklist
 	circuitBreakerMgr  *security.CircuitBreakerManager
@@ -130,7 +133,10 @@ func (g *Gateway) SetTransportType(port string, transportType string) {
 
 // getProtection 无锁读取 ProtectionConfig（热路径使用）。
 func (g *Gateway) getProtection() config.ProtectionConfig {
-	return g.protection.Load().(config.ProtectionConfig)
+	if p := g.protection.Load(); p != nil {
+		return *p
+	}
+	return config.ProtectionConfig{}
 }
 
 // AddPushedToClient 增加已推送到客户端的消息计数（接收方向：逻辑服到网关再到客户端）。
@@ -231,7 +237,7 @@ func (g *Gateway) Destroy() { g.Close() }
 // StartServices 启动网关特定服务：gRPC服务器、统计HTTP服务、
 // Prometheus监控指标、过载保护器、WebSocket心跳检测、配置文件监听
 func (g *Gateway) StartServices() {
-	cfg := g.cfg.Load().(*config.Config)
+	cfg := g.cfg.Load()
 
 	g.overloadProtector.Start()
 	go g.wsHeartbeatChecker()
@@ -420,11 +426,11 @@ func (g *Gateway) configWatcher() {
 	if g.configPath == "" {
 		g.configPath = "config/config.yaml"
 	}
-	if _, err := os.Stat(g.configPath); os.IsNotExist(err) {
+	if _, err := os.Stat(g.configPath); errors.Is(err, fs.ErrNotExist) {
 		altPaths := []string{"config/config.yaml", "../config/config.yaml", "../../config/config.yaml"}
 		found := false
 		for _, path := range altPaths {
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
+			if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 				g.configPath = path
 				found = true
 				break
@@ -473,7 +479,6 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 先补齐运行时默认值，再原子替换（防止零值热更把连接踢飞）
 	newCfg.ApplyRuntimeDefaults()
 	g.cfg.Store(newCfg)
-
 	// 动态更新限流阈值（无需重启）
 	if g.rateLimiter != nil && newCfg.Security.RateLimit.Enabled {
 		refresh := time.Second
@@ -506,15 +511,15 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 
 	// 动态更新过载保护阈值
 	if g.overloadProtector != nil {
-		g.protection.Store(newCfg.Protection)
+		g.protection.Store(&newCfg.Protection)
 	}
 
 	// 动态更新连接限制参数
 	g.connectionManager.UpdateLimits(newCfg.Protection.MaxConnections, newCfg.Protection.MaxConnectionsPerIP)
 
 	// gRPC/stream 运行时快照随配置更新（GetGRPCConfig/GetStreamConfig 消费）
-	g.grpcCfg.Store(newCfg.GRPC)
-	g.streamCfg.Store(newCfg.Stream)
+	g.grpcCfg.Store(&newCfg.GRPC)
+	g.streamCfg.Store(&newCfg.Stream)
 
 	// 动态更新 JWT 密钥
 	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
@@ -560,13 +565,17 @@ func (g *Gateway) GetConnectionManager() *connection.ConnectionManager {
 }
 
 func (g *Gateway) GetGRPCConfig() config.GRPCConfig {
-	v, _ := g.grpcCfg.Load().(config.GRPCConfig)
-	return v
+	if v := g.grpcCfg.Load(); v != nil {
+		return *v
+	}
+	return config.GRPCConfig{}
 }
 
 func (g *Gateway) GetStreamConfig() config.StreamConfig {
-	v, _ := g.streamCfg.Load().(config.StreamConfig)
-	return v
+	if v := g.streamCfg.Load(); v != nil {
+		return *v
+	}
+	return config.StreamConfig{}
 }
 
 func (g *Gateway) GetShardedCoalescer() *connection.ShardedWriteCoalescer {
@@ -598,8 +607,8 @@ func (g *Gateway) logMetrics() {
 // metricsLogEnabled 返回是否允许每秒打印 metrics 日志（热更新生效）。
 // monitoring.disableMetricsLog=true 时关闭（线上默认建议打开该关闭项）。
 func (g *Gateway) metricsLogEnabled() bool {
-	cfg, ok := g.cfg.Load().(*config.Config)
-	if !ok || cfg == nil {
+	cfg := g.cfg.Load()
+	if cfg == nil {
 		return true
 	}
 	return !cfg.Monitoring.DisableMetricsLog
@@ -759,9 +768,10 @@ func newGateway(cfg *config.Config) *Gateway {
 	// 存指针副本，避免调用方后续原地改写共享配置
 	stored := *cfg
 	gw.cfg.Store(&stored)
-	gw.protection.Store(stored.Protection)
-	gw.grpcCfg.Store(stored.GRPC)
-	gw.streamCfg.Store(stored.Stream)
+	gw.protection.Store(&stored.Protection)
+	gw.grpcCfg.Store(&stored.GRPC)
+	gw.streamCfg.Store(&stored.Stream)
+	gw.maintenance = newMaintenanceState()
 	gw.ctx = context.Background()
 	gw.pipeline = NewMessagePipeline(gw)
 	gw.loginSlots = make(chan struct{}, 256)

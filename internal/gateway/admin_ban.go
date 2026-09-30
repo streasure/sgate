@@ -10,7 +10,6 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
@@ -44,8 +43,8 @@ type banResponse struct {
 }
 
 func (g *Gateway) adminAuthed(r *http.Request) bool {
-	cfg, ok := g.cfg.Load().(*config.Config)
-	if !ok || cfg == nil {
+	cfg := g.cfg.Load()
+	if cfg == nil {
 		return false
 	}
 	token := cfg.Admin.Token
@@ -71,6 +70,7 @@ func (g *Gateway) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/ban", g.handleAdminBan)
 	mux.HandleFunc("/admin/unban", g.handleAdminUnban)
 	mux.HandleFunc("/admin/bans", g.handleAdminBans)
+	mux.HandleFunc("/admin/maintenance", g.handleAdminMaintenance)
 }
 
 func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {

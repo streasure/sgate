@@ -29,6 +29,7 @@ type LogicClientPool struct {
 	rrIndex    atomic.Uint64               // 轮询索引（原子操作）
 	fastClient atomic.Pointer[LogicClient] // 快速路径：单客户端时的原子指针
 	addressMap map[string]string           // 地址映射（serverID -> address，来自 etcd）
+	zoneMap    map[string]string           // zone 映射（serverID -> zone，来自 etcd ServiceID {belong}/{type}:{zone}）
 }
 
 // RegisterClient 注册逻辑服客户端到池中
@@ -62,6 +63,7 @@ func NewLogicClientPool(gateway GatewayInterface) *LogicClientPool {
 	return &LogicClientPool{
 		clients:    make(map[string]*LogicClient),
 		addressMap: make(map[string]string),
+		zoneMap:    make(map[string]string),
 		gateway:    gateway,
 		stopCh:     make(chan struct{}),
 	}
@@ -84,6 +86,22 @@ func (pool *LogicClientPool) LookupAddress(serverID string) string {
 	pool.mu.RLock()
 	defer pool.mu.RUnlock()
 	return pool.addressMap[serverID]
+}
+
+// ZoneOf 返回指定 serverID 所属的 zone（来自 etcd ServiceID）；未知返回空串。
+func (pool *LogicClientPool) ZoneOf(serverID string) string {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	return pool.zoneMap[serverID]
+}
+
+// zoneFromServiceID 从 {belong}/{serverType}:{zone} 中提取 zone。
+func zoneFromServiceID(serviceID string) string {
+	i := strings.LastIndex(serviceID, ":")
+	if i < 0 || i == len(serviceID)-1 {
+		return ""
+	}
+	return serviceID[i+1:]
 }
 
 // IsClientConnected 检查指定 serverID 的客户端是否已连接。
@@ -141,6 +159,9 @@ func (pool *LogicClientPool) handleServiceRegister(event uetcd.ServiceEvent) {
 	client.shardCount = runtime.NumCPU() * 8
 	pool.clients[event.InstanceID] = client
 	pool.addressMap[event.InstanceID] = event.Address
+	if z := zoneFromServiceID(event.ServiceID); z != "" {
+		pool.zoneMap[event.InstanceID] = z
+	}
 	if !slices.Contains(pool.ordered, event.InstanceID) {
 		pool.ordered = append(pool.ordered, event.InstanceID)
 	}
@@ -215,6 +236,7 @@ func (pool *LogicClientPool) handleServiceDeregister(event uetcd.ServiceEvent) {
 			pool.mu.Lock()
 			delete(pool.clients, event.InstanceID)
 			delete(pool.addressMap, event.InstanceID)
+			delete(pool.zoneMap, event.InstanceID)
 			pool.ordered = slices.DeleteFunc(pool.ordered, func(v string) bool { return v == event.InstanceID })
 			pool.updateFastClient()
 			pool.mu.Unlock()
@@ -300,6 +322,8 @@ func (pool *LogicClientPool) Close() {
 		delete(pool.clients, id)
 	}
 	pool.ordered = pool.ordered[:0]
+	clear(pool.addressMap)
+	clear(pool.zoneMap)
 }
 
 // ClientCount 获取客户端池中的客户端数量

@@ -30,13 +30,13 @@ type Connection struct {
 	state       atomic.Int32
 
 	// 原子字段，用于无锁并发访问
-	userUUID    atomic.Value // 保存用户唯一标识。
-	serverID    atomic.Value // 保存绑定的逻辑服标识。
+	userUUID    atomic.Pointer[string] // 保存用户唯一标识。
+	serverID    atomic.Pointer[string] // 保存绑定的逻辑服标识。
 	isWS        atomic.Bool
-	logicClient atomic.Value // LogicClientProvider 缓存，避免每条消息查询连接池
-	jwtJti      atomic.Value // string：JWT jti（logout/封禁时撤销）
-	jwtExp      atomic.Int64 // JWT exp（Unix 秒；0=未知）
-	offlineSent atomic.Bool  // CmdUserOffline 已发送标记（防显式通知+OnClose 双发）
+	logicClient atomic.Pointer[LogicClientProvider] // LogicClientProvider 缓存，避免每条消息查询连接池
+	jwtJti      atomic.Pointer[string]              // string：JWT jti（logout/封禁时撤销）
+	jwtExp      atomic.Int64                        // JWT exp（Unix 秒；0=未知）
+	offlineSent atomic.Bool                         // CmdUserOffline 已发送标记（防显式通知+OnClose 双发）
 
 	// 连接级流控
 	msgRateMu      sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
@@ -61,7 +61,7 @@ func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Conn
 		msgWindowStart: now,
 	}
 	c.LastActive.Store(now)
-	c.userUUID.Store(userUUID)
+	c.userUUID.Store(&userUUID)
 	c.state.Store(int32(StateForward))
 	return c
 }
@@ -80,12 +80,12 @@ func (c *Connection) SetState(old, new ConnState) bool {
 // IsBound 判断连接是否已绑定到服务器。
 func (c *Connection) IsBound() bool {
 	v := c.serverID.Load()
-	return v != nil && v.(string) != ""
+	return v != nil && *v != ""
 }
 
 // IsAuthenticated 判断连接是否已完成用户认证（UUID非空且不以temp_开头）。
 func (c *Connection) IsAuthenticated() bool {
-	uuid := c.userUUID.Load().(string)
+	uuid := c.GetUserUUID()
 	return uuid != "" && !strings.HasPrefix(uuid, "temp_")
 }
 
@@ -93,10 +93,10 @@ func (c *Connection) IsAuthenticated() bool {
 func (c *Connection) IsWebSocket() bool { return c.isWS.Load() }
 
 // SetUserUUID 设置连接关联的用户 UUID。
-func (c *Connection) SetUserUUID(uuid string) { c.userUUID.Store(uuid) }
+func (c *Connection) SetUserUUID(uuid string) { c.userUUID.Store(&uuid) }
 func (c *Connection) GetUserUUID() string {
 	if v := c.userUUID.Load(); v != nil {
-		return v.(string)
+		return *v
 	}
 	return ""
 }
@@ -104,21 +104,21 @@ func (c *Connection) GetUserUUID() string {
 // GetCachedLogicClient 获取缓存的LogicClient，避免每次消息都查询连接池。
 func (c *Connection) GetCachedLogicClient() LogicClientProvider {
 	if v := c.logicClient.Load(); v != nil {
-		return v.(LogicClientProvider)
+		return *v
 	}
 	return nil
 }
 
 // SetCachedLogicClient 设置缓存的LogicClient。
 func (c *Connection) SetCachedLogicClient(lc LogicClientProvider) {
-	c.logicClient.Store(lc)
+	c.logicClient.Store(&lc)
 }
 
 // SetServerID 设置连接关联的服务器 ID。
-func (c *Connection) SetServerID(sid string) { c.serverID.Store(sid) }
+func (c *Connection) SetServerID(sid string) { c.serverID.Store(&sid) }
 func (c *Connection) GetServerID() string {
 	if v := c.serverID.Load(); v != nil {
-		return v.(string)
+		return *v
 	}
 	return ""
 }
@@ -127,14 +127,12 @@ func (c *Connection) GetServerID() string {
 func (c *Connection) SetWS(v bool) { c.isWS.Store(v) }
 
 // SetJWTJti 持久化当前会话 JWT jti（供 logout/封禁撤销）。
-func (c *Connection) SetJWTJti(jti string) { c.jwtJti.Store(jti) }
+func (c *Connection) SetJWTJti(jti string) { c.jwtJti.Store(&jti) }
 
 // GetJWTJti 返回连接上缓存的 JWT jti，无则空串。
 func (c *Connection) GetJWTJti() string {
 	if v := c.jwtJti.Load(); v != nil {
-		if s, ok := v.(string); ok {
-			return s
-		}
+		return *v
 	}
 	return ""
 }

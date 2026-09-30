@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
 

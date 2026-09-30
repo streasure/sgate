@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"sync/atomic"
-
-	"github.com/streasure/util/uconfig"
 )
 
 // Config 网关服务的完整配置结构体，包含所有模块配置
@@ -340,7 +338,7 @@ type Transport struct {
 }
 
 var conf atomic.Pointer[Config]
-var confPath atomic.Value // string：最近一次 Load 的配置文件路径
+var confPath atomic.Pointer[string] // 最近一次 Load 的配置文件路径
 
 // Validate 校验必填配置项。Load/LoadConfig 解析成功后调用。
 func (c *Config) Validate() error {
@@ -506,7 +504,7 @@ func (c *Config) ApplyRuntimeDefaults() {
 // LoadConfig 从指定的 YAML 文件加载配置，若未找到则使用默认配置
 // 采用合并语义：默认配置 + YAML 覆盖
 func LoadConfig(configFiles ...string) (*Config, error) {
-	cfg, err := uconfig.Load[Config](configFiles...)
+	cfg, err := loadFiles[Config](configFiles...)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +517,7 @@ func LoadConfig(configFiles ...string) (*Config, error) {
 
 // Load 从指定的 YAML 文件加载配置并存入全局变量，返回配置指针。
 func Load(configFiles ...string) (*Config, error) {
-	cfg, err := uconfig.Load[Config](configFiles...)
+	cfg, err := loadFiles[Config](configFiles...)
 	if err != nil {
 		return nil, err
 	}
@@ -529,7 +527,8 @@ func Load(configFiles ...string) (*Config, error) {
 	cfg.ApplyRuntimeDefaults()
 	conf.Store(cfg)
 	if len(configFiles) > 0 && configFiles[0] != "" {
-		confPath.Store(configFiles[0])
+		p := configFiles[0]
+		confPath.Store(&p)
 	}
 	return cfg, nil
 }
@@ -541,8 +540,8 @@ func Get() *Config {
 
 // Path 返回最近一次 Load 使用的配置文件路径（未 Load 时返回空串）。
 func Path() string {
-	if v, ok := confPath.Load().(string); ok {
-		return v
+	if v := confPath.Load(); v != nil {
+		return *v
 	}
 	return ""
 }

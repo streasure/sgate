@@ -17,7 +17,6 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cast"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/config"
 	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/util/tlog"
@@ -349,7 +348,7 @@ func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 	successThreshold := 3
 	timeout := 30 * time.Second
 	enabled := true
-	if cfg, ok := g.cfg.Load().(*config.Config); ok && cfg != nil {
+	if cfg := g.cfg.Load(); cfg != nil {
 		cb := cfg.Security.CircuitBreaker
 		enabled = cb.Enabled
 		if cb.FailureThreshold > 0 {

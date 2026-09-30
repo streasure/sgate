@@ -54,6 +54,7 @@ const (
 	CmdBanNtf        int32 = 1000005 // 封禁通知推送（先推后断）
 	CmdLogicLoginReq int32 = 1100001 // 逻辑层登录请求
 	CmdLogicLoginAck int32 = 1100002 // 逻辑层登录响应
+	CmdKickNotify    int32 = 1100009 // 踢下线通知推送（先推后断，body 为 logic.KickNotify）
 	CmdHeartbeatReq  int32 = 1100010 // 心跳请求
 	CmdHeartbeatAck  int32 = 1100011 // 心跳响应
 	CmdUserOffline   int32 = 1100012 // 用户下线通知

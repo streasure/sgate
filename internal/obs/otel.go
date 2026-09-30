@@ -10,8 +10,8 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/sgate/internal/types"
-	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
 

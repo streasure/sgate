@@ -70,7 +70,7 @@ func (g *Gateway) handleLoginServerChange(event uetcd.ServiceEvent) {
 
 // loginValidationEnabled 读取热更新后的登录校验开关。
 func (g *Gateway) loginValidationEnabled() bool {
-	if cfg, ok := g.cfg.Load().(*config.Config); ok && cfg != nil {
+	if cfg := g.cfg.Load(); cfg != nil {
 		return cfg.LoginValidation.Enabled
 	}
 	if cfg := config.Get(); cfg != nil {
@@ -142,6 +142,14 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		return gnet.Close
 	}
 
+	// 切维护检查：目标 serverId（或其所属 zone）在维护中 → 拒绝新登录
+	if g.isMaintenanceTarget(req.ServerId) {
+		ack := &protoGw.LoginGateAck{Code: 503, Message: "server in maintenance", SessionId: connectionID, ServerId: req.ServerId}
+		body, _ := proto.Marshal(ack)
+		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		return gnet.Close
+	}
+
 	// 并发登录上限：满则快速拒绝，防无限起 finishLoginGate 协程
 	if !g.acquireLoginSlot() {
 		ack := &protoGw.LoginGateAck{Code: 429, Message: "too many concurrent logins", SessionId: connectionID, ServerId: req.ServerId}
@@ -175,6 +183,11 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 	if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
 		writeAck(code, text, req.ServerId)
 	}) {
+		return
+	}
+	// 二次切维护检查（worker 路径，防标记在快照后置入的竞态）
+	if g.isMaintenanceTarget(req.ServerId) {
+		writeAck(503, "server in maintenance", req.ServerId)
 		return
 	}
 	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
