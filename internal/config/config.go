@@ -51,7 +51,7 @@ type AdminConfig struct {
 type PipelineConfig struct {
 	AsyncEnabled    bool `yaml:"asyncEnabled"`    // 启用异步 pipeline（worker pool 模式）
 	WorkerShards    int  `yaml:"workerShards"`    // worker 分片数（默认 CPU×4）
-	WorkerQueueSize int  `yaml:"workerQueueSize"` // 每个分片的任务队列大小
+	WorkerQueueSize int  `yaml:"workerQueueSize"` // 任务队列总大小（全池共享，启动时按分片数均分，默认 65536）
 }
 
 // PerfConfig 运行时性能调优参数（GC、内存限制），参数以机器资源百分比表示，跨机器通用。
@@ -138,11 +138,8 @@ type ConfigCenterConfig struct {
 	PollInterval string `yaml:"pollInterval"`
 }
 
-// EtcdConfig etcd 服务注册与发现配置
+// EtcdConfig etcd 服务注册与发现配置（etcd 默认接入，无启用开关）
 type EtcdConfig struct {
-	// Enabled 是否启用 etcd（nil=true；yaml `etcd.enabled`）。
-	// 关闭时跳过 etcd 启动（无逻辑服务发现/网关注册，standalone 纯静态地址模式）。
-	Enabled       *bool    `yaml:"enabled"`
 	Endpoints     []string `yaml:"endpoints"`
 	Endpoint      string   `yaml:"endpoint"`
 	Username      string   `yaml:"username"`
@@ -151,9 +148,6 @@ type EtcdConfig struct {
 	ServicePrefix string   `yaml:"servicePrefix"`
 	LeaseTTL      string   `yaml:"leaseTTL"`
 }
-
-// IsEnabled 返回 etcd 是否启用（缺省 true）。
-func (e EtcdConfig) IsEnabled() bool { return e.Enabled == nil || *e.Enabled }
 
 // AlertWebhookConfig 告警 webhook 配置
 type AlertWebhookConfig struct {
@@ -299,15 +293,11 @@ type StreamQueueConfig struct {
 }
 
 type StreamConfig struct {
-	ShardCount       int  `yaml:"shardCount"`
-	ConnGroupCount   int  `yaml:"connGroupCount"` // gateway��logic ���� TCP ���������Ĭ�� 4��
-	SendChannelSize  int  `yaml:"sendChannelSize"`
-	ReceiveBatchSize int  `yaml:"receiveBatchSize"`
-	BatchPush        bool `yaml:"batchPush"`
-	// BatchUpstream 将 gateway<->logic 数据流的多条 StreamData 合并为单个
-	// StreamBatch gRPC 帧（双向均生效）。两端必须同时开启；对端未升级时严禁开启。
-	BatchUpstream bool              `yaml:"batchUpstream"`
-	QueuePolicy   StreamQueueConfig `yaml:"queuePolicy"`
+	ShardCount      int               `yaml:"shardCount"`
+	ConnGroupCount  int               `yaml:"connGroupCount"` // gateway→logic 并行 TCP 连接组数（默认 4）
+	SendChannelSize int               `yaml:"sendChannelSize"`
+	BatchPush       bool              `yaml:"batchPush"`
+	QueuePolicy     StreamQueueConfig `yaml:"queuePolicy"`
 }
 
 type ProtectionConfig struct {
@@ -410,9 +400,6 @@ func (c *Config) ApplyRuntimeDefaults() {
 	if s.SendChannelSize <= 0 {
 		s.SendChannelSize = DefaultGatewayStreamSendChannelSize
 	}
-	if s.ReceiveBatchSize <= 0 {
-		s.ReceiveBatchSize = DefaultStreamReceiveBatchSize
-	}
 	if s.QueuePolicy.Policy == "" {
 		s.QueuePolicy.Policy = DefaultStreamQueuePolicy
 	}
@@ -457,7 +444,7 @@ func (c *Config) ApplyRuntimeDefaults() {
 		c.Pipeline.WorkerShards = 0 // 0 = runtime.NumCPU()*4，由 pool 计算
 	}
 	if c.Pipeline.WorkerQueueSize <= 0 {
-		c.Pipeline.WorkerQueueSize = 4096
+		c.Pipeline.WorkerQueueSize = DefaultPipelineWorkerQueueSize
 	}
 	if c.Protection.CheckIntervalMs <= 0 {
 		c.Protection.CheckIntervalMs = DefaultOverloadCheckIntervalMs

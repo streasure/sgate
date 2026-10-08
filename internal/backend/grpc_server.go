@@ -66,6 +66,14 @@ func (s *GRPCServer) handleLogicStream(meta routes.LogicStreamMeta, stream proto
 	return nil
 }
 
+// sendLegacyFrame 向旧版握手流发送单条消息（StreamBatch 为固定线格式，
+// 接收端固定按 StreamBatch 解码，绝不能混发裸帧）。
+func sendLegacyFrame(stream interface {
+	SendMsg(m any) error
+}, msg *protoGw.StreamData) error {
+	return stream.SendMsg(&protoGw.StreamBatch{Items: []*protoGw.StreamData{msg}})
+}
+
 // handleLegacyStream 旧版握手：sgate 主动拨入时的命令流处理。
 func (s *GRPCServer) handleLegacyStream(stream protoGw.GatewayStream_OnDataServer) error {
 	connectionID := connection.GenerateConnectionID()
@@ -75,51 +83,37 @@ func (s *GRPCServer) handleLegacyStream(stream protoGw.GatewayStream_OnDataServe
 		"stream":        stream,
 	}
 
-	batchUpstream := s.gateway != nil && s.gateway.GetStreamConfig().BatchUpstream
-	var batchRecv interface{ RecvMsg(m any) error }
-	if batchUpstream {
-		if mr, ok := stream.(interface{ RecvMsg(m any) error }); ok {
-			batchRecv = mr
-		}
-	}
-
 	process := func(msg *protoGw.StreamData) {
 		s.handleGRPCMessage(connectionID, msg, func(response any) {
 			if protoMsg, ok := response.(*protoGw.StreamData); ok {
-				if err := stream.Send(protoMsg); err != nil {
+				if err := sendLegacyFrame(stream, protoMsg); err != nil {
 					tlog.Warn(context.TODO(), "OnData: stream.Send failed error=%v", err)
 				}
 			} else if errorMsg, ok := response.(*commonstruct.ErrorResponse); ok {
 				responseMsg := &protoGw.StreamData{
 					Data: []byte(errorMsg.Error.Message),
 				}
-				if err := stream.Send(responseMsg); err != nil {
+				if err := sendLegacyFrame(stream, responseMsg); err != nil {
 					tlog.Warn(context.TODO(), "OnData: stream.Send error response failed error=%v", err)
 				}
 			}
 		}, ctx)
 	}
 
-	for {
-		if batchRecv != nil {
-			sb := &protoGw.StreamBatch{}
-			if err := batchRecv.RecvMsg(sb); err != nil {
-				return err
-			}
-			for _, m := range sb.Items {
-				if m == nil {
-					continue
-				}
-				process(m)
-			}
-			continue
-		}
+	// 合帧接收缓冲：循环外复用，避免每帧分配 StreamBatch。
+	sb := &protoGw.StreamBatch{}
 
-		msg, err := stream.Recv()
-		if err != nil {
+	for {
+		sb.Reset()
+		if err := stream.RecvMsg(sb); err != nil {
 			return err
 		}
-		process(msg)
+		for _, m := range sb.Items {
+			if m == nil {
+				continue
+			}
+			process(m)
+		}
 	}
 }
 

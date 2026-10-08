@@ -3,6 +3,7 @@ package connection
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,7 @@ type Connection struct {
 	jwtJti      atomic.Pointer[string]              // string：JWT jti（logout/封禁时撤销）
 	jwtExp      atomic.Int64                        // JWT exp（Unix 秒；0=未知）
 	offlineSent atomic.Bool                         // CmdUserOffline 已发送标记（防显式通知+OnClose 双发）
+	remoteHost  atomic.Pointer[string]              // 去端口对端 IP（每连接缓存一次，热路径免 SplitHostPort）
 
 	// 连接级流控
 	msgRateMu      sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
@@ -121,6 +123,20 @@ func (c *Connection) GetServerID() string {
 		return *v
 	}
 	return ""
+}
+
+// RemoteHost 返回去掉端口的对端 IP，每连接首次调用后缓存。
+// 热路径（过滤器上下文、安全链按 IP 限流）逐消息调用可免 SplitHostPort 分配。
+func (c *Connection) RemoteHost() string {
+	if v := c.remoteHost.Load(); v != nil {
+		return *v
+	}
+	host, _, err := net.SplitHostPort(c.RemoteAddr)
+	if err != nil {
+		host = c.RemoteAddr
+	}
+	c.remoteHost.Store(&host)
+	return host
 }
 
 // SetWS 设置连接是否使用 WebSocket 传输。

@@ -22,7 +22,6 @@ func main() {
 	shardCount := flag.Int("shardCount", 0, "streams dialed into each gateway (0=NumCPU*8)")
 	logConfig := flag.String("config", "config/tlog.yaml", "log configuration")
 	pprofAddr := flag.String("pprof", "", "pprof listen address (empty=off), e.g. 127.0.0.1:6065")
-	batchUpstream := flag.Bool("batchUpstream", false, "StreamBatch framing (must match gateway stream.batchUpstream)")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()
 
@@ -38,7 +37,6 @@ func main() {
 		logic.WithZone("default"),
 		logic.WithEtcd("http://127.0.0.1:2379"),
 		logic.WithShardCount(*shardCount),
-		logic.WithBatchUpstream(*batchUpstream),
 	)
 	svc.RegisterProto(1000001, &protocol.LoginGateReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
 		tlog.Info(context.TODO(), "login gate received accountId=%s sessionID=%s", ctx.UserUUID, ctx.ConnectionID)

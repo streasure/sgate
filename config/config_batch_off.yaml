@@ -41,9 +41,7 @@ cluster:
 stream:
   shardCount: 96
   sendChannelSize: 65536
-  receiveBatchSize: 128
   batchPush: true
-  batchUpstream: true
 
 protection:
   maxFrameSize: 4194304

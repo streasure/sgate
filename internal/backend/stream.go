@@ -18,10 +18,13 @@ import (
 )
 
 // dataStream 数据流抽象：兼容旧模式（sgate 拨出的客户端流）与
-// flip 模式（logic 主动拨入、sgate 侧的服务端流），二者均有 Send/Recv。
+// flip 模式（logic 主动拨入、sgate 侧的服务端流）。
+// SendMsg/RecvMsg 用于 StreamBatch 合帧收发（固定线格式，无开关）。
 type dataStream interface {
 	Send(*protoGw.StreamData) error
 	Recv() (*protoGw.StreamData, error)
+	SendMsg(any) error
+	RecvMsg(any) error
 }
 
 type StreamShard struct {
@@ -34,9 +37,6 @@ type StreamShard struct {
 	lc          *LogicClient             // 所属的逻辑服客户端
 	closed      atomic.Bool              // 是否已关闭
 	sendTimeout time.Duration            // 发送超时
-	// batchUpstream 为 true 时多条 StreamData 合并为单个 StreamBatch gRPC 帧发送
-	// （两端必须同时开启 stream.batchUpstream，见 config.StreamConfig）。
-	batchUpstream bool
 }
 
 // StreamManager 流连接管理器，通过分片减少并发竞争
@@ -46,7 +46,7 @@ type StreamManager struct {
 }
 
 // NewStreamManager 创建流管理器，根据 CPU 核心数和配置初始化分片
-func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Duration, batchUpstream bool) *StreamManager {
+func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Duration) *StreamManager {
 	if shardCount <= 0 {
 		shardCount = runtime.NumCPU() * 4
 	}
@@ -62,11 +62,10 @@ func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Dura
 	}
 	for i := range sm.shards {
 		sm.shards[i] = &StreamShard{
-			sendCh:        make(chan *protoGw.StreamData, sendChannelSize),
-			stopCh:        make(chan struct{}),
-			index:         i,
-			sendTimeout:   sendTimeout,
-			batchUpstream: batchUpstream,
+			sendCh:      make(chan *protoGw.StreamData, sendChannelSize),
+			stopCh:      make(chan struct{}),
+			index:       i,
+			sendTimeout: sendTimeout,
 		}
 	}
 	return sm
@@ -143,38 +142,18 @@ func (s *StreamShard) startSendLoop() {
 			continue
 		}
 
-		// 使用单个流引用发送整批消息。
-		// StreamBatch 合帧：开启合帧时整批（含单条）压成单个 gRPC 帧，
+		// StreamBatch 合帧：整批（含单条）压成单个 gRPC 帧（固定线格式），
 		// 接收端固定按 StreamBatch 解码，绝不能在同一股流上混发裸 StreamData。
-		sendIdx := 0
-		if s.batchUpstream {
-			if ms, ok := stream.(interface{ SendMsg(m any) error }); ok {
-				if err := ms.SendMsg(&protoGw.StreamBatch{Items: batch}); err != nil {
-					tlog.Warn(context.TODO(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
-					s.detach(stream)
-				} else {
-					for _, m := range batch {
-						PutStreamData(m)
-					}
-					sendIdx = len(batch)
-				}
+		if err := stream.SendMsg(&protoGw.StreamBatch{Items: batch}); err != nil {
+			tlog.Warn(context.TODO(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
+			s.detach(stream)
+			// 整批未能发出，归还对象池并计数丢弃。
+			if s.lc != nil && s.lc.gateway != nil {
+				s.lc.gateway.AddPushDroppedNoConn(int64(len(batch)))
 			}
 		}
-		for sendIdx < len(batch) {
-			if err := stream.Send(batch[sendIdx]); err != nil {
-				tlog.Warn(context.TODO(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
-				s.detach(stream)
-				break
-			}
-			PutStreamData(batch[sendIdx])
-			sendIdx++
-		}
-		// 将未发送的消息归还到对象池并计数。
-		if sendIdx < len(batch) && s.lc != nil && s.lc.gateway != nil {
-			s.lc.gateway.AddPushDroppedNoConn(int64(len(batch) - sendIdx))
-		}
-		for i := sendIdx; i < len(batch); i++ {
-			PutStreamData(batch[i])
+		for _, m := range batch {
+			PutStreamData(m)
 		}
 	}
 }
@@ -222,6 +201,27 @@ func (s *StreamShard) stop() {
 	})
 }
 
+// connBatch batchPush 冲刷时按连接聚合的推送项集合（池化复用）。
+type connBatch struct {
+	conn  *connection.Connection
+	items []*protoGw.PushItem
+}
+
+// 批量推送冲刷热路径的池化对象：每条上游消息一个 PushItem，
+// 每次冲刷一个 connBatch/PushBatch 与序列化缓冲。
+var (
+	pushItemPool  = sync.Pool{New: func() any { return &protoGw.PushItem{} }}
+	connBatchPool = sync.Pool{New: func() any {
+		return &connBatch{items: make([]*protoGw.PushItem, 0, 8)}
+	}}
+	pushBatchPool  = sync.Pool{New: func() any { return &protoGw.PushBatch{} }}
+	marshalBufPool = sync.Pool{New: func() any {
+		b := make([]byte, 0, 256)
+		return &b
+	}}
+)
+
+// receiveMessages 分片接收循环：从 gRPC 流接收消息并分发给连接。
 // connGroup 代表一条独立的 gRPC 连接及其 gRPC 客户端
 func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	defer func() {
@@ -239,28 +239,22 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	}
 
 	batchPush := false
-	batchUpstream := false
 	if lc.gateway != nil {
-		streamCfg := lc.gateway.GetStreamConfig()
-		batchPush = streamCfg.BatchPush
-		batchUpstream = streamCfg.BatchUpstream
+		batchPush = lc.gateway.GetStreamConfig().BatchPush
 	}
 
 	// batchPush 模式：收集消息并以 PushBatch 形式刷新。
 	// 批量推送模式：收集消息并以 PushBatch 形式批量刷新
 	const batchFlushSize = 128
 	batch := make([]*protoGw.StreamData, 0, batchFlushSize)
+	// connMap 跨冲刷复用（条目随冲刷回收），避免每次冲刷重建 map。
+	connMap := make(map[string]*connBatch)
 
 	flushBatch := func() {
 		if len(batch) == 0 || lc.gateway == nil {
 			batch = batch[:0]
 			return
 		}
-		type connBatch struct {
-			conn  *connection.Connection
-			items []*protoGw.PushItem
-		}
-		connMap := make(map[string]*connBatch)
 		for _, m := range batch {
 			if m.SessionId == "" {
 				continue
@@ -272,29 +266,55 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 					lc.gateway.AddPushDroppedNoConn(1)
 					continue
 				}
-				cb = &connBatch{conn: conn}
+				cb = connBatchPool.Get().(*connBatch)
+				cb.conn = conn
 				connMap[m.SessionId] = cb
 			}
-			cb.items = append(cb.items, &protoGw.PushItem{
-				SessionId: m.SessionId,
-				Cmd:       m.Cmd,
-				Data:      m.Data,
-				SeqId:     m.SeqId,
-			})
+			item := pushItemPool.Get().(*protoGw.PushItem)
+			item.SessionId = m.SessionId
+			item.Cmd = m.Cmd
+			item.Data = m.Data
+			item.SeqId = m.SeqId
+			cb.items = append(cb.items, item)
 		}
-		for _, cb := range connMap {
-			batchMsg := &protoGw.PushBatch{Items: cb.items}
-			batchData, err := proto.Marshal(batchMsg)
+		// releaseCB 归还聚合项与连接条目（连接可能已断开，下次冲刷重新查表）。
+		releaseCB := func(sid string, cb *connBatch) {
+			for _, item := range cb.items {
+				item.Data = nil
+				pushItemPool.Put(item)
+			}
+			cb.items = cb.items[:0]
+			cb.conn = nil
+			connBatchPool.Put(cb)
+			delete(connMap, sid)
+		}
+		for sid, cb := range connMap {
+			// 池化 PushBatch 与序列化缓冲：MarshalAppend 复用容量，
+			// 帧组装（MarshalClientMessage）会拷贝 batchData，缓冲可立即归还。
+			batchMsg := pushBatchPool.Get().(*protoGw.PushBatch)
+			batchMsg.Items = cb.items
+			buf := marshalBufPool.Get().(*[]byte)
+			batchData, err := (&proto.MarshalOptions{}).MarshalAppend((*buf)[:0], batchMsg)
 			if err != nil {
+				*buf = (*buf)[:0]
+				marshalBufPool.Put(buf)
+				batchMsg.Items = nil
+				pushBatchPool.Put(batchMsg)
 				lc.gateway.AddPushDroppedNoConn(int64(len(cb.items)))
+				releaseCB(sid, cb)
 				continue
 			}
-			responseData, err := routes.MarshalClientMessage(&protoGw.StreamData{
+			responseData, marshalFrameErr := routes.MarshalClientMessage(&protoGw.StreamData{
 				Cmd:  int32(routes.CmdPushBatch),
 				Data: batchData,
 			})
-			if err != nil {
+			*buf = batchData[:0]
+			marshalBufPool.Put(buf)
+			batchMsg.Items = nil
+			pushBatchPool.Put(batchMsg)
+			if marshalFrameErr != nil {
 				lc.gateway.AddPushDroppedNoConn(int64(len(cb.items)))
+				releaseCB(sid, cb)
 				continue
 			}
 			if lc.gateway.GetShardedCoalescer() != nil {
@@ -305,6 +325,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			} else {
 				lc.gateway.AddPushedToClient(int64(len(cb.items)))
 			}
+			releaseCB(sid, cb)
 		}
 		batch = batch[:0]
 	}
@@ -374,13 +395,9 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		}
 	}
 
-	// StreamBatch 合帧接收：两端开启 stream.batchUpstream 时对端按批发送。
-	var batchRecv interface{ RecvMsg(m any) error }
-	if batchUpstream {
-		if mr, ok := stream.(interface{ RecvMsg(m any) error }); ok {
-			batchRecv = mr
-		}
-	}
+	// StreamBatch 合帧接收（固定线格式）。
+	// 合帧接收缓冲循环外复用，避免每帧分配 StreamBatch。
+	sb := &protoGw.StreamBatch{}
 
 	handleRecvErr := func(err error) {
 		lc.mu.RLock()
@@ -406,26 +423,16 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		default:
 		}
 
-		if batchRecv != nil {
-			sb := &protoGw.StreamBatch{}
-			if err := batchRecv.RecvMsg(sb); err != nil {
-				handleRecvErr(err)
-				return
-			}
-			for _, m := range sb.Items {
-				if m == nil {
-					continue
-				}
-				processOne(m)
-			}
-			continue
-		}
-
-		msg, err := stream.Recv()
-		if err != nil {
+		sb.Reset()
+		if err := stream.RecvMsg(sb); err != nil {
 			handleRecvErr(err)
 			return
 		}
-		processOne(msg)
+		for _, m := range sb.Items {
+			if m == nil {
+				continue
+			}
+			processOne(m)
+		}
 	}
 }

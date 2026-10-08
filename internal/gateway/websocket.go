@@ -382,21 +382,40 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		if g.overloadProtector != nil && g.overloadProtector.IsOverloaded() {
 			g.overloadProtector.RecordDrop(1)
 			g.messagesDroppedOverload.Add(1)
-			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server overload", "")
+			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server overload", "")
+			routes.PutClientMessage(message)
+			return ackErr
 		}
 		if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", netutil.AddrHost(wsConn.Conn.RemoteAddr())) {
 			g.messagesDroppedRateLimit.Add(1)
-			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "rate limited", "")
+			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "rate limited", "")
+			routes.PutClientMessage(message)
+			return ackErr
 		}
 		req := new(protoGw.LoginGateReq)
 		if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
-			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 400, "invalid login gate request", req.ServerId)
+			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 400, "invalid login gate request", req.ServerId)
+			routes.PutClientMessage(message)
+			return ackErr
+		}
+		// 登录前封禁检查（与 TCP 路径一致；finishWSLoginGate 内二次校验防竞态）
+		if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
+			_ = g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, code, text, req.ServerId)
+		}) {
+			routes.PutClientMessage(message)
+			wsConn.State.Store(int32(WSStateClosing))
+			if wsConn.Conn != nil {
+				_ = wsConn.Conn.Close()
+			}
+			return nil
 		}
 		// 切维护检查：目标 serverId（或其所属 zone）在维护中 → 拒绝新登录
 		if g.isMaintenanceTarget(req.ServerId) {
-			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server in maintenance", req.ServerId)
+			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server in maintenance", req.ServerId)
+			routes.PutClientMessage(message)
+			return ackErr
 		}
-		// 校验与绑定在后台协程执行，避免同步 gRPC 阻塞 event loop；完成后异步回写 ack。
+		// 拷贝出异步持有的副本后，原解码池消息立即归还（与 TCP 失败路径同策略）。
 		msgCopy := &protoGw.StreamData{
 			Cmd:     message.Cmd,
 			SeqId:   message.SeqId,
@@ -404,8 +423,11 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			UserKey: message.UserKey,
 		}
 		if !g.acquireLoginSlot() {
-			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "too many concurrent logins", req.ServerId)
+			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "too many concurrent logins", req.ServerId)
+			routes.PutClientMessage(message)
+			return ackErr
 		}
+		routes.PutClientMessage(message)
 		go func() {
 			defer g.releaseLoginSlot()
 			g.finishWSLoginGate(wsConn, connectionID, msgCopy, req)
@@ -414,7 +436,9 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	}
 
 	if message.Cmd == routes.CmdLogoutGate {
-		return g.handleWSLogoutGate(wsConn, connectionID, message)
+		action := g.handleWSLogoutGate(wsConn, connectionID, message)
+		routes.PutClientMessage(message)
+		return action
 	}
 
 	// 异步路径：投递到 worker pool

@@ -12,7 +12,7 @@ import (
 func TestBuiltinUserOfflineCleansSession(t *testing.T) {
 	s := NewServer(WithServerID("logic1"))
 	fs := &fakeStream{}
-	conn := newStreamConn(fs, 4, "gw-1", false)
+	conn := newStreamConn(fs, 4, "gw-1")
 	defer conn.Close()
 
 	const sessionID = "conn_test_1"

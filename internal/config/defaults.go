@@ -47,8 +47,9 @@ const (
 	// 队列满则触发 ErrNotConnected 快速失败，防止背压堆积
 	DefaultStreamSendChannelSize = 131072 // 128K
 
-	// DefaultStreamReceiveBatchSize 反向接收批量大小（每批 ACK 数）
-	DefaultStreamReceiveBatchSize = 64
+	// DefaultPipelineWorkerQueueSize 异步 pipeline worker 任务队列总大小
+	// （全池共享，启动时按分片数均分；A/B 实测同步路径更优，仅异步模式生效）
+	DefaultPipelineWorkerQueueSize = 65536
 
 	// DefaultStreamQueuePolicy 队列满时默认策略：丢弃最旧消息
 	DefaultStreamQueuePolicy = "drop"

@@ -298,9 +298,10 @@ transports:
 
 ### 6.3 `etcd` 服务注册
 
+etcd 默认接入（无启用开关），启动网关前必须先启动 etcd。
+
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | 是否启用 etcd |
 | `endpoints` | []string | `http://127.0.0.1:2379` | etcd 地址列表 |
 | `servicePrefix` | string | `/services` | 服务注册键前缀 |
 | `leaseTTL` | string | `10s` | 租约有效期 |
@@ -361,8 +362,9 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | `shardCount` | int | 自动 | gRPC 流分片数，`0` 时按 CPU 数计算 |
 | `connGroupCount` | int | `4` | gateway→logic 独立 TCP 连接组数。每个组承载 `shardCount/N` 个 stream，各自拥有独立的 HTTP/2 写锁，实现并行写入 |
 | `sendChannelSize` | int | `65536`（零值回退；`config/config.yaml` 为 `1048576`） | 每个分片发送队列容量 |
-| `receiveBatchSize` | int | `64` | 接收处理批次大小 |
 | `batchPush` | bool | `false` | 是否将推送按连接合并为 PushBatch |
+
+> gateway↔logic 数据流固定以 `StreamBatch` 合帧（多条 StreamData 打包进单个 gRPC 帧），无开关、两端无需配置。
 
 ### 6.8 `protection` 连接防护
 
@@ -432,7 +434,15 @@ loginValidation:
 | `configCenter` | `enabled` | 配置中心 |
 | `alert` | `enabled`, `webhooks` | 告警 Webhook |
 | `degradation` | `enabled`, `rules` | 业务降级 |
-| `monitoring` | `pprofAddr`, `disableMetricsLog` | pprof 地址；`disableMetricsLog=true` 关闭每秒 metrics 日志 |
+| `monitoring` | `pprofAddr`, `disableMetricsLog`, `disableTracer` | pprof 地址；`disableMetricsLog=true` 关闭每秒 metrics 日志；`disableTracer=true` 关闭每消息内部 Tracer（热路径零 span 分配，吞吐压测建议开启） |
+
+### 6.11 `pipeline` 异步消息管道
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `asyncEnabled` | bool | `false` | 异步 pipeline（worker pool 模式）。A/B 实测同步 498K/s > 异步 482K/s（异步另有队列丢弃），默认同步 |
+| `workerShards` | int | `0`（= CPU×4） | worker 分片数；按 connectionID 哈希分片保证同连接严格有序 |
+| `workerQueueSize` | int | `65536` | 任务队列**总大小**（全池共享，启动时按分片数均分，每分片至少 1）。仅 `asyncEnabled=true` 时生效 |
 
 ---
 
@@ -623,7 +633,7 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 | 通信方向 | 消息 | 编码方式 |
 | --- | --- | --- |
 | 客户端 ↔ sgate | `MessageFrame` | TCP：4 字节大端长度前缀；WS：二进制帧 |
-| sgate ↔ 逻辑服 | `StreamData` | gRPC 双向流 protobuf |
+| sgate ↔ 逻辑服 | `StreamData`（打包为 `StreamBatch` 合帧） | gRPC 双向流 protobuf |
 | sgate → 客户端批量推送 | `MessageFrame(CmdPushBatch)` | Body 嵌套 `PushBatch` |
 
 主要命令号：
@@ -771,7 +781,7 @@ log:
 
 ### Q: 启动报 `connect: connection refused`
 
-etcd 未启动。启动 etcd 或在配置中设置 `etcd.enabled: false`（此时无法发现逻辑服）。
+etcd 未启动。etcd 默认接入（无关闭开关），请先启动 etcd 再启动网关。
 
 ### Q: 客户端连接后无响应
 

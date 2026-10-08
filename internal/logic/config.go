@@ -30,7 +30,6 @@ type ServiceConfig struct {
 	Passthrough        bool          `yaml:"passthrough"`        // 是否直通模式
 	ShardCount         int           `yaml:"shardCount"`         // 拨入每个网关的流分片数（<=0 时 NumCPU*8）
 	ConnGroupCount     int           `yaml:"connGroupCount"`     // 拨入每个网关的独立 TCP 连接组数（<=0 时 4）
-	BatchUpstream      bool          `yaml:"batchUpstream"`      // StreamBatch 合帧收发（须与网关 stream.batchUpstream 同步开启）
 	Gateways           []string      `yaml:"gateways"`           // 静态网关 gRPC 地址列表（ip:port），与 etcd 发现互补
 }
 
@@ -84,9 +83,4 @@ func WithGateways(addrs ...string) ServiceOption {
 // WithShardCount 设置拨入每个网关的流分片数。
 func WithShardCount(n int) ServiceOption {
 	return func(c *ServiceConfig) { c.ShardCount = n }
-}
-
-// WithBatchUpstream 开启 StreamBatch 合帧收发（须与网关 stream.batchUpstream 一致）。
-func WithBatchUpstream(enabled bool) ServiceOption {
-	return func(c *ServiceConfig) { c.BatchUpstream = enabled }
 }

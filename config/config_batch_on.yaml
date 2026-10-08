@@ -41,9 +41,7 @@ cluster:
 stream:
   shardCount: 96
   sendChannelSize: 65536
-  receiveBatchSize: 128
   batchPush: true
-  batchUpstream: true
 
 protection:
   maxFrameSize: 4194304
@@ -80,5 +78,5 @@ perf:
   memoryLimitPercent: 80   # 软内存上限
 
 pipeline:
-  asyncEnabled: true       # 异步 pipeline（worker pool）
-  workerQueueSize: 262144  # 每分片任务队列（默认 4096 高吞吐下会溢出丢弃）
+  asyncEnabled: false      # A/B 实测：同步 498K > 异步 482K；「全开」仅指 batch 系列开关
+  workerQueueSize: 262144  # 任务队列总大小（默认 65536 高吞吐下建议调大；仅异步模式生效）

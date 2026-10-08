@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,20 +30,44 @@ func loginReqFrameFor(t *testing.T, serverID string) *protoGw.StreamData {
 }
 
 // kickMockConn 捕获踢人通知帧（Connection.Send → AsyncWritev）并记录关闭。
+// 踢人流程异步执行（kickConnectionsAsync），读写均需加锁避免 test -race。
 type kickMockConn struct {
 	gnet.Conn
+	mu      sync.Mutex
 	written []byte
 	closed  bool
 }
 
 func (c *kickMockConn) AsyncWritev(chunks [][]byte, _ gnet.AsyncCallback) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, ch := range chunks {
 		c.written = append(c.written, ch...)
 	}
 	return nil
 }
 
-func (c *kickMockConn) Close() error { c.closed = true; return nil }
+func (c *kickMockConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return nil
+}
+
+// isClosed 关闭标记的加锁读取。
+func (c *kickMockConn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// writtenCopy 加锁拷贝已写入字节（供 decodeKickNotify 解析）。
+func (c *kickMockConn) writtenCopy() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.written...)
+}
+
 func (c *kickMockConn) RemoteAddr() net.Addr {
 	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234}
 }
@@ -164,11 +189,11 @@ func TestKickForMaintenance(t *testing.T) {
 
 	gw.kickForMaintenance(conn, "upgrade")
 
-	kn := decodeKickNotify(t, mc.written)
+	kn := decodeKickNotify(t, mc.writtenCopy())
 	if kn == nil || kn.Reason != "upgrade" || kn.Code != 503 {
 		t.Fatalf("kickNotify=%v want reason=upgrade code=503", kn)
 	}
-	if !mc.closed {
+	if !mc.isClosed() {
 		t.Fatal("connection should be closed")
 	}
 }
@@ -251,14 +276,14 @@ func TestHandleAdminMaintenance(t *testing.T) {
 	}
 
 	// 等待异步踢人完成（无 gnet 事件循环，OnClose 不触发；断言 kick 帧 + 连接关闭）
-	for i := 0; i < 100 && !(s1Mocks[0].closed && s1Mocks[1].closed); i++ {
+	for i := 0; i < 100 && !(s1Mocks[0].isClosed() && s1Mocks[1].isClosed()); i++ {
 		time.Sleep(10 * time.Millisecond)
 	}
 	for i, mc := range s1Mocks {
-		if !mc.closed {
+		if !mc.isClosed() {
 			t.Fatalf("s1 conn %d should be closed by async kick", i)
 		}
-		kn := decodeKickNotify(t, mc.written)
+		kn := decodeKickNotify(t, mc.writtenCopy())
 		if kn == nil || kn.Reason != "upgrade" {
 			t.Fatalf("s1 conn %d kickNotify=%v want reason=upgrade", i, kn)
 		}

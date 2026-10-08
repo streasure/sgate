@@ -108,13 +108,16 @@ func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
 }
 
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
-	// LoginGate 走捷径不经 pipeline，此处补齐过载/IP 限流检查
+	// LoginGate 走捷径不经 pipeline，此处补齐过载/IP 限流检查。
+	// 成功路径由 finishLoginGate 异步持有 message（不归还解码池）；
+	// 所有同步拒绝路径回写 ack 后立即归还，避免解码池对象泄漏到 GC。
 	if g.overloadProtector != nil && g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
 		ack := &protoGw.LoginGateAck{Code: 503, Message: "server overload", SessionId: connectionID}
 		body, _ := proto.Marshal(ack)
 		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		routes.PutClientMessage(message)
 		return gnet.None
 	}
 	if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", netutil.AddrHost(c.RemoteAddr())) {
@@ -122,6 +125,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
 		body, _ := proto.Marshal(ack)
 		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		routes.PutClientMessage(message)
 		return gnet.None
 	}
 
@@ -133,6 +137,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 			writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		}
 		writeAck(400, "invalid login gate request", req.ServerId)
+		routes.PutClientMessage(message)
 		return gnet.None
 	}
 
@@ -142,6 +147,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		body, _ := proto.Marshal(ack)
 		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 	}) {
+		routes.PutClientMessage(message)
 		return gnet.Close
 	}
 
@@ -150,6 +156,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		ack := &protoGw.LoginGateAck{Code: 503, Message: "server in maintenance", SessionId: connectionID, ServerId: req.ServerId}
 		body, _ := proto.Marshal(ack)
 		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		routes.PutClientMessage(message)
 		return gnet.Close
 	}
 
@@ -158,6 +165,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		ack := &protoGw.LoginGateAck{Code: 429, Message: "too many concurrent logins", SessionId: connectionID, ServerId: req.ServerId}
 		body, _ := proto.Marshal(ack)
 		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		routes.PutClientMessage(message)
 		return gnet.None
 	}
 

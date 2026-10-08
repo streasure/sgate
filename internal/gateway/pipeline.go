@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
@@ -18,7 +19,6 @@ import (
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/hashutil"
-	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -50,6 +50,11 @@ var (
 	errPipelineUnauthed   = errors.New("connection not authenticated")
 	errPipelineRateLimit  = errors.New("connection rate limit exceeded")
 )
+
+// loginBindGrace 新连接的登录绑定宽限期：绑定在后台协程完成
+// （loginKey 校验为同步 HTTP），窗口内到达的非 preAuth 消息只丢弃不断连。
+// 为包级变量便于测试覆盖。
+var loginBindGrace = 5 * time.Second
 
 // routeKeyCache 命令号到路由键字符串的驻留缓存（熔断/限流/降级按键读取）。
 var routeKeyCache sync.Map
@@ -114,6 +119,11 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	unbound := connObj.GetServerID() == ""
 	if unbound && !g.isPreAuthCommand(cmd) {
 		g.messagesDroppedAuth.Add(1)
+		// 登录宽限期内（绑定在后台协程完成，含 loginKey HTTP 校验）：
+		// 抢跑的非 preAuth 消息只丢弃不断连，避免「不等 ack 先发心跳」的客户端被误杀。
+		if time.Since(time.UnixMilli(connObj.CreatedAt)) < loginBindGrace {
+			return PipelineResult{Action: gnet.None}
+		}
 		return PipelineResult{
 			Action: gnet.Close,
 			Error:  errPipelineUnbound,
@@ -121,6 +131,10 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	}
 	if !unbound && !connObj.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
 		g.messagesDroppedAuth.Add(1)
+		// 同上：serverID 已绑定但 userUUID 尚未更新的短暂窗口按宽限期处理。
+		if time.Since(time.UnixMilli(connObj.CreatedAt)) < loginBindGrace {
+			return PipelineResult{Action: gnet.None}
+		}
 		return PipelineResult{
 			Action: gnet.Close,
 			Error:  errPipelineUnauthed,
@@ -181,7 +195,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	} else {
 		// 完整路径，包含安全链处理
 		routeKey = routeKeyFor(cmd)
-		remoteIP = netutil.AddrHost(conn.RemoteAddr())
+		remoteIP = connObj.RemoteHost()
 
 		// 阶段3：安全链（黑名单 -> 限流 -> WAF -> 熔断器）
 		if g.whitelistBlacklist != nil {
@@ -438,6 +452,8 @@ type PipelineWorkerPool struct {
 
 // NewPipelineWorkerPool 创建并启动异步 pipeline 工作池。
 // shardCount 应为 2 的幂以优化哈希取模。
+// cfg.WorkerQueueSize 为全池总任务数，启动时按分片数均分（每分片至少 1，
+// 防止 queueSize < shards 时退化为无缓冲通道导致 Submit 全量丢弃）。
 func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWorkerPool {
 	shards := cfg.WorkerShards
 	if shards <= 0 {
@@ -445,7 +461,7 @@ func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWork
 	}
 	queueSize := cfg.WorkerQueueSize
 	if queueSize <= 0 {
-		queueSize = 65536
+		queueSize = config.DefaultPipelineWorkerQueueSize
 	}
 
 	p := &PipelineWorkerPool{
@@ -454,12 +470,13 @@ func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWork
 		gw:      gw,
 	}
 
+	perShard := max(queueSize/shards, 1)
 	for i := range shards {
-		p.workers[i].taskCh = make(chan pipelineTask, queueSize/shards)
+		p.workers[i].taskCh = make(chan pipelineTask, perShard)
 		p.wg.Go(func() { p.runWorker(i) })
 	}
 
-	tlog.Info(context.TODO(), "pipeline worker pool started shards=%d queueSize=%d", shards, queueSize)
+	tlog.Info(context.TODO(), "pipeline worker pool started shards=%d queueSize=%d perShard=%d", shards, queueSize, perShard)
 	return p
 }
 

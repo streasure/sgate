@@ -17,10 +17,13 @@ import (
 )
 
 // dataStream 逻辑侧数据流抽象：兼容旧模式（网关拨入的服务端流）与
-// flip 模式（logic 主动拨入网关的客户端流），二者均有 Send/Recv。
+// flip 模式（logic 主动拨入网关的客户端流），二者均有 Send/Recv；
+// SendMsg/RecvMsg 用于 StreamBatch 合帧收发（固定线格式，无开关）。
 type dataStream interface {
 	Send(*protocol.StreamData) error
 	Recv() (*protocol.StreamData, error)
+	SendMsg(any) error
+	RecvMsg(any) error
 }
 
 // streamConn 表示与网关的 gRPC 流连接
@@ -33,19 +36,16 @@ type streamConn struct {
 	gatewayID  string                    // 网关标识
 	sessionMu  sync.Mutex                // 会话列表互斥锁
 	sessionIDs map[string]struct{}       // 关联的会话 ID 集合
-	// batchUpstream 为 true 时多条 StreamData 合并为单个 StreamBatch gRPC 帧发送
-	// （须与网关 stream.batchUpstream 同步开启）。
-	batchUpstream bool
 }
 
 // newStreamConn 创建新的流连接，启动发送协程
-func newStreamConn(stream dataStream, size int, gatewayID string, batchUpstream bool) *streamConn {
+func newStreamConn(stream dataStream, size int, gatewayID string) *streamConn {
 	if size <= 0 {
 		size = 65536
 	}
 	c := &streamConn{
 		stream: stream, sendCh: make(chan *protocol.StreamData, size), done: make(chan struct{}),
-		gatewayID: gatewayID, sessionIDs: make(map[string]struct{}), batchUpstream: batchUpstream,
+		gatewayID: gatewayID, sessionIDs: make(map[string]struct{}),
 	}
 	go func() {
 		defer c.shutdown()
@@ -74,22 +74,11 @@ func newStreamConn(stream dataStream, size int, gatewayID string, batchUpstream 
 				if c.closed.Load() {
 					return
 				}
-				// 合帧发送：开启时整批（含单条）压成单个 gRPC 帧，
-				// 接收端固定按 StreamBatch 解码，不能混发裸 StreamData。
-				if c.batchUpstream {
-					if ms, ok := c.stream.(interface{ SendMsg(m any) error }); ok {
-						if err := ms.SendMsg(&protocol.StreamBatch{Items: batch}); err != nil {
-							c.shutdown()
-							return
-						}
-						continue
-					}
-				}
-				for _, m := range batch {
-					if err := c.stream.Send(m); err != nil {
-						c.shutdown()
-						return
-					}
+				// 合帧发送：整批（含单条）压成单个 gRPC 帧（StreamBatch 为固定线格式，
+				// 接收端固定按 StreamBatch 解码，不能混发裸 StreamData）。
+				if err := c.stream.SendMsg(&protocol.StreamBatch{Items: batch}); err != nil {
+					c.shutdown()
+					return
 				}
 			}
 		}
@@ -179,12 +168,11 @@ type Server struct {
 	groups        map[string]*pushGroup          // 组 ID -> 推送组
 	sessionGroups map[string]map[string]struct{} // 会话 ID -> 所属组 ID 集合
 
-	serverID      string        // 逻辑服务端标识
-	streamSeq     atomic.Uint64 // 流连接序号生成器
-	streamChSize  int           // 流发送通道大小
-	batchUpstream bool          // StreamBatch 合帧收发（与网关 stream.batchUpstream 同步）
-	stopOnce      sync.Once     // 确保只停止一次
-	metrics       PushMetrics   // 推送监控指标
+	serverID     string        // 逻辑服务端标识
+	streamSeq    atomic.Uint64 // 流连接序号生成器
+	streamChSize int           // 流发送通道大小
+	stopOnce     sync.Once     // 确保只停止一次
+	metrics      PushMetrics   // 推送监控指标
 }
 
 // ServerOption 服务端配置选项函数
@@ -195,11 +183,6 @@ func WithServerID(serverID string) ServerOption { return func(s *Server) { s.ser
 
 // WithStreamChSize 设置流发送通道大小
 func WithStreamChSize(n int) ServerOption { return func(s *Server) { s.streamChSize = n } }
-
-// WithServerBatchUpstream 开启 StreamBatch 合帧收发（与网关 stream.batchUpstream 一致）。
-func WithServerBatchUpstream(enabled bool) ServerOption {
-	return func(s *Server) { s.batchUpstream = enabled }
-}
 
 // NewServer 创建逻辑层服务端实例
 func NewServer(opts ...ServerOption) *Server {
@@ -232,7 +215,7 @@ func (s *Server) handleStream(stream dataStream, gatewayID string) error {
 	if gatewayID == "" {
 		gatewayID = streamID
 	}
-	conn := newStreamConn(stream, s.streamChSize, gatewayID, s.batchUpstream)
+	conn := newStreamConn(stream, s.streamChSize, gatewayID)
 	s.streams.Store(streamID, conn)
 	defer func() {
 		s.streams.Delete(streamID)
@@ -264,34 +247,22 @@ func (s *Server) handleStream(stream dataStream, gatewayID string) error {
 		})
 	}
 
-	// StreamBatch 合帧接收：两端开启 stream.batchUpstream 时网关按批发送。
-	var batchRecv interface{ RecvMsg(m any) error }
-	if s.batchUpstream {
-		if mr, ok := stream.(interface{ RecvMsg(m any) error }); ok {
-			batchRecv = mr
-		}
-	}
+	// StreamBatch 合帧接收（StreamBatch 为固定线格式）。
+	// 合帧接收缓冲循环外复用，避免每帧分配 StreamBatch（proto.Unmarshal
+	// 自身会 Reset，且 repeated 元素对象不复用，见 routes.TestStreamBatchRecvReuseSafety）。
+	sb := &protocol.StreamBatch{}
 
 	for {
-		if batchRecv != nil {
-			sb := &protocol.StreamBatch{}
-			if err := batchRecv.RecvMsg(sb); err != nil {
-				return err
-			}
-			for _, m := range sb.Items {
-				if m == nil {
-					continue
-				}
-				process(m)
-			}
-			continue
-		}
-
-		msg, err := stream.Recv()
-		if err != nil {
+		sb.Reset()
+		if err := stream.RecvMsg(sb); err != nil {
 			return err
 		}
-		process(msg)
+		for _, m := range sb.Items {
+			if m == nil {
+				continue
+			}
+			process(m)
+		}
 	}
 }
 

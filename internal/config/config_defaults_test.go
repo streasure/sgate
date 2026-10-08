@@ -50,8 +50,8 @@ func TestApplyRuntimeDefaults_ZeroValuesGetDefaults(t *testing.T) {
 	if c.Stream.SendChannelSize != DefaultGatewayStreamSendChannelSize {
 		t.Errorf("Stream.SendChannelSize = %d, want %d", c.Stream.SendChannelSize, DefaultGatewayStreamSendChannelSize)
 	}
-	if c.Stream.ReceiveBatchSize != DefaultStreamReceiveBatchSize {
-		t.Errorf("Stream.ReceiveBatchSize = %d, want %d", c.Stream.ReceiveBatchSize, DefaultStreamReceiveBatchSize)
+	if c.Pipeline.WorkerQueueSize != DefaultPipelineWorkerQueueSize {
+		t.Errorf("Pipeline.WorkerQueueSize = %d, want %d", c.Pipeline.WorkerQueueSize, DefaultPipelineWorkerQueueSize)
 	}
 	if c.Stream.QueuePolicy.Policy != DefaultStreamQueuePolicy {
 		t.Errorf("QueuePolicy.Policy = %q, want %q", c.Stream.QueuePolicy.Policy, DefaultStreamQueuePolicy)

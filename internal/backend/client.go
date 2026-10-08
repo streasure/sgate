@@ -35,10 +35,8 @@ type LogicClient struct {
 func NewLogicClient(gateway GatewayInterface) *LogicClient {
 	queuePolicy := config.StreamQueueConfig{}
 	var sendTimeout time.Duration
-	var batchUpstream bool
 	if gateway != nil {
 		queuePolicy = gateway.GetStreamConfig().QueuePolicy
-		batchUpstream = gateway.GetStreamConfig().BatchUpstream
 		if d := gatewayutil.ParseDurationDefault(queuePolicy.SendTimeout, 0); d > 0 {
 			sendTimeout = d
 		}
@@ -49,7 +47,7 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 		closed:       make(chan struct{}),
 		messageQueue: NewStreamMessageQueue(queuePolicy),
 	}
-	lc.streamManager.Store(NewStreamManager(0, 0, sendTimeout, batchUpstream))
+	lc.streamManager.Store(NewStreamManager(0, 0, sendTimeout))
 	return lc
 }
 
@@ -90,16 +88,14 @@ func (lc *LogicClient) notifyStateChange(oldState, newState LogicConnectionState
 func (lc *LogicClient) initAccepted(totalShards int) {
 	sendChannelSize := 0
 	var sendTimeout time.Duration
-	var batchUpstream bool
 	if lc.gateway != nil {
 		streamCfg := lc.gateway.GetStreamConfig()
 		sendChannelSize = streamCfg.SendChannelSize
-		batchUpstream = streamCfg.BatchUpstream
 		if d := gatewayutil.ParseDurationDefault(streamCfg.QueuePolicy.SendTimeout, 0); d > 0 {
 			sendTimeout = d
 		}
 	}
-	sm := NewStreamManager(totalShards, sendChannelSize, sendTimeout, batchUpstream)
+	sm := NewStreamManager(totalShards, sendChannelSize, sendTimeout)
 	for i := range sm.shards {
 		sm.shards[i].lc = lc
 		go sm.shards[i].startSendLoop()
