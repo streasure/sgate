@@ -5,7 +5,9 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/backend"
 	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/util/netutil"
 )
 
 // buildFilterContext 从原始请求构造过滤器上下文。
@@ -14,7 +16,7 @@ func (g *Gateway) buildFilterContext(c gnet.Conn, data []byte, connectionID stri
 	fc := &types.FilterContext{
 		Ctx:          g.ctx,
 		ConnectionID: connectionID,
-		RemoteIP:     getRemoteIP(c),
+		RemoteIP:     netutil.AddrHost(c.RemoteAddr()),
 		Cmd:          cmd,
 		Data:         data,
 		Metadata:     make(map[string]string),
@@ -63,12 +65,11 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, data []byte, connectionID str
 		payload = data
 	}
 	// 构造转发消息（允许过滤器修改 metadata）
-	msg := &protoGw.StreamData{
-		SessionId: connectionID,
-		Data:      payload,
-		Cmd:       cmd,
-		SeqId:     seqID,
-	}
+	msg := backend.GetStreamData()
+	msg.SessionId = connectionID
+	msg.Data = payload
+	msg.Cmd = cmd
+	msg.SeqId = seqID
 	if fcx.UserUUID != "" {
 		msg.UserKey = fcx.UserUUID
 	}

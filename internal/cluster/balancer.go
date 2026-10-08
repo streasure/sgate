@@ -2,15 +2,16 @@ package cluster
 
 import (
 	"context"
-	"hash/fnv"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/gatewayutil"
+	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/hashutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -226,17 +227,9 @@ func (b *Balancer) pickConsistent(key string) *BalancerNode {
 	if len(b.ring) == 0 {
 		return nil
 	}
-	h := fnvHash32(key)
+	h := hashutil.FNV1a32(key)
 	// 二分查找第一个 >= h 的节点
-	lo, hi := 0, len(b.ring)
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if b.ring[mid] < h {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
+	lo, _ := slices.BinarySearch(b.ring, h)
 	if lo == len(b.ring) {
 		lo = 0
 	}
@@ -257,17 +250,12 @@ func (b *Balancer) rebuildRingLocked() {
 	// 每个节点 160 个虚拟节点
 	for _, n := range b.nodes {
 		for i := range 160 {
-			vh := fnvHash32(n.ID + "-" + strconv.Itoa(i))
+			vh := hashutil.FNV1a32(n.ID + "-" + strconv.Itoa(i))
 			b.ring = append(b.ring, vh)
 			b.ringMap[vh] = n
 		}
 	}
-	// 排序
-	for i := 1; i < len(b.ring); i++ {
-		for j := i; j > 0 && b.ring[j] < b.ring[j-1]; j-- {
-			b.ring[j], b.ring[j-1] = b.ring[j-1], b.ring[j]
-		}
-	}
+	slices.Sort(b.ring)
 }
 
 // recoverLoop 周期性尝试恢复被摘除的节点
@@ -330,10 +318,4 @@ func (b *Balancer) Stats() []map[string]any {
 		})
 	}
 	return out
-}
-
-func fnvHash32(s string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(s))
-	return h.Sum32()
 }

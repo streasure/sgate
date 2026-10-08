@@ -26,7 +26,7 @@ import (
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
-	"github.com/streasure/util/prometheus"
+	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/ugrpc"
@@ -54,14 +54,12 @@ type Gateway struct {
 	logicClientPool   *backend.LogicClientPool
 	gatewayClientPool *backend.GatewayClientPool
 	serverID          string
-	serviceDiscovery  *uetcd.Component
 	gatewayDiscovery  *uetcd.Component // 发现其他网关（Gateway:{zone}）
 	gatewayEvents     []uetcd.ServiceEvent
 	overloadProtector *OverloadProtector
 	grpcServer        *ugrpc.Server
-	promExporter      *prometheus.Exporter // Prometheus 指标导出器（enabled=false 时为空）。
 	statsServer       *http.Server
-	msgRate           *messageRateTracker // 消息速率滚动窗口（供 Stats() 计算 msgs/sec）
+	msgRate           *messageRateTracker // 消息速率滚动窗口（供 /health 与速率展示计算 msgs/sec）
 	zone              string
 	protection        atomic.Pointer[config.ProtectionConfig] // 热路径无锁读取
 	grpcCfg           atomic.Pointer[config.GRPCConfig]       // 热更新原子替换
@@ -209,7 +207,6 @@ func (g *Gateway) Init() error {
 	g.canaryFilter = component.CanaryFilter()
 	g.trafficMirror = component.TrafficMirror()
 	g.degradation = component.Degradation()
-	g.serviceDiscovery = component.Discovery()
 	g.gatewayDiscovery = component.GatewayDiscovery()
 	g.gatewayEvents = component.GatewayEvents()
 	g.balancer = component.Balancer()
@@ -220,7 +217,6 @@ func (g *Gateway) Init() error {
 }
 func (g *Gateway) Start() error {
 	// ClusterComponent 在 Start 中创建 discovery，需在其后重新读取。
-	g.serviceDiscovery = component.Discovery()
 	g.gatewayDiscovery = component.GatewayDiscovery()
 	g.gatewayEvents = component.GatewayEvents()
 	g.balancer = component.Balancer()
@@ -235,7 +231,7 @@ func (g *Gateway) Start() error {
 func (g *Gateway) Destroy() { g.Close() }
 
 // StartServices 启动网关特定服务：gRPC服务器、统计HTTP服务、
-// Prometheus监控指标、过载保护器、WebSocket心跳检测、配置文件监听
+// 过载保护器、WebSocket心跳检测、配置文件监听
 func (g *Gateway) StartServices() {
 	cfg := g.cfg.Load()
 
@@ -250,11 +246,11 @@ func (g *Gateway) StartServices() {
 	// 初始化分片写合并器（推送路径：logic → client）
 	g.shardedCoalescer = connection.NewShardedWriteCoalescer(g.connectionManager, 16)
 
-	connCheckInterval, _ := time.ParseDuration(g.getProtection().ConnCheckInterval)
+	connCheckInterval := gatewayutil.ParseDurationDefault(g.getProtection().ConnCheckInterval, 5*time.Minute)
 	if connCheckInterval <= 0 {
 		connCheckInterval = 5 * time.Minute
 	}
-	connIdleTimeout, _ := time.ParseDuration(g.getProtection().ConnIdleTimeout)
+	connIdleTimeout := gatewayutil.ParseDurationDefault(g.getProtection().ConnIdleTimeout, 30*time.Second)
 	if connIdleTimeout <= 0 {
 		connIdleTimeout = 30 * time.Second
 	}
@@ -278,9 +274,6 @@ func (g *Gateway) StartServices() {
 	g.logicClient.SetGateway(g)
 	g.logicClientPool = backend.NewLogicClientPool(g)
 
-	if g.serviceDiscovery != nil {
-		g.logicClientPool.SetDiscovery(g.serviceDiscovery)
-	}
 	if g.balancer != nil {
 		g.logicClientPool.SetBalancer(g.balancer)
 		g.balancer.SetHealthCheckFunc(func(id, addr string) bool {
@@ -300,7 +293,7 @@ func (g *Gateway) StartServices() {
 	grpcPort := fmt.Sprintf(":%d", grpcCfg.Port)
 	tlog.Info(context.TODO(), "starting gRPC server port=%s", grpcPort)
 	go func() {
-		if server, err := backend.StartGRPCServer(g, grpcPort, grpcCfg.MaxMessageSize, grpcCfg.WindowSize); err != nil {
+		if server, err := backend.StartGRPCServer(g, g.logicClientPool, grpcPort, grpcCfg.MaxMessageSize, grpcCfg.WindowSize); err != nil {
 			tlog.Error(context.TODO(), "failed to start gRPC server error=%v", err)
 		} else {
 			g.grpcServerMu.Lock()
@@ -315,18 +308,6 @@ func (g *Gateway) StartServices() {
 
 	// 启动TCP/WebSocket传输层
 	g.startTransports(cfg)
-
-	// Prometheus监控指标导出
-	if cfg.Monitoring.Prometheus.Enabled {
-		g.promExporter = prometheus.NewExporter(prometheus.ExporterConfig{
-			Enabled: true,
-			Addr:    cfg.Monitoring.Prometheus.Addr,
-			Path:    cfg.Monitoring.Prometheus.Path,
-			Prefix:  cfg.Monitoring.Prometheus.Prefix,
-		}, g)
-		g.promExporter.Init()
-		g.promExporter.Start()
-	}
 }
 
 func (g *Gateway) startTransports(cfg *config.Config) {
@@ -482,7 +463,7 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 动态更新限流阈值（无需重启）
 	if g.rateLimiter != nil && newCfg.Security.RateLimit.Enabled {
 		refresh := time.Second
-		if d, err := time.ParseDuration(newCfg.Security.RateLimit.TokenRefresh); err == nil && d > 0 {
+		if d := gatewayutil.ParseDurationDefault(newCfg.Security.RateLimit.TokenRefresh, 0); d > 0 {
 			refresh = d
 		}
 		tokens := newCfg.Security.RateLimit.MaxTokens
@@ -710,9 +691,6 @@ func (g *Gateway) Close() {
 
 		g.connectionManager.CloseAllConnections()
 
-		if g.promExporter != nil {
-			g.promExporter.Destroy()
-		}
 		g.StopStatsServer()
 
 		tlog.Info(context.TODO(), "gateway closed")

@@ -6,8 +6,9 @@ import (
 	"sync/atomic"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/hashutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -31,7 +32,7 @@ func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 	tm := &TrafficMirror{
 		percent:    cfg.Percent,
 		targetAddr: cfg.TargetAddr,
-		queue:      make(chan *types.FilterContext, gatewayutil.MaxInt(cfg.QueueSize, 1024)),
+		queue:      make(chan *types.FilterContext, max(cfg.QueueSize, 1024)),
 		stopCh:     make(chan struct{}),
 	}
 	if cfg.Enabled {
@@ -43,8 +44,7 @@ func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 		workers = 2
 	}
 	for range workers {
-		tm.workersWG.Add(1)
-		go tm.worker()
+		tm.workersWG.Go(tm.worker)
 	}
 	return tm
 }
@@ -75,7 +75,7 @@ func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
 		return
 	}
 	// 按 connectionID 哈希采样（实际可换成更精确的随机）
-	h := gatewayutil.SimpleHash(fc.ConnectionID) % 100
+	h := hashutil.FNV1a32(fc.ConnectionID) % 100
 	if int(h) >= percent {
 		return
 	}
@@ -99,7 +99,6 @@ func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
 }
 
 func (tm *TrafficMirror) worker() {
-	defer tm.workersWG.Done()
 	for {
 		select {
 		case <-tm.stopCh:

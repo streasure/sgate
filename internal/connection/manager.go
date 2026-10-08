@@ -2,13 +2,13 @@ package connection
 
 import (
 	"context"
-	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -154,7 +154,7 @@ func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) stri
 	cm.totalConnections.Add(1)
 	cm.activeConnections.Add(1)
 	// 追踪 IP 连接数
-	remoteIP := extractIP(remoteAddr)
+	remoteIP := netutil.Host(remoteAddr)
 	cm.incrementIP(remoteIP)
 	return connectionID
 }
@@ -193,7 +193,7 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	// 扫描所有 group，移除该 serverUser 成员
 	cm.removeMemberFromAllGroups(serverID, userUUID)
 	// 追踪 IP 连接数
-	remoteIP := extractIP(conn.RemoteAddr)
+	remoteIP := netutil.Host(conn.RemoteAddr)
 	cm.decrementIP(remoteIP)
 	cm.count.Add(-1)
 	cm.activeConnections.Add(-1)
@@ -459,13 +459,4 @@ func (cm *ConnectionManager) ForEach(fn func(conn *Connection) bool) {
 	cm.connections.Range(func(_ string, conn *Connection) bool {
 		return fn(conn)
 	})
-}
-
-// extractIP 从地址字符串中提取 IP 部分（去掉端口）。
-func extractIP(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr
-	}
-	return host
 }

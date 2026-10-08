@@ -16,8 +16,9 @@ import (
 type ObservabilityComponent struct {
 	component.BaseComponent
 
-	otelCfg   config.OTelTracerConfig
-	pprofAddr string
+	otelCfg       config.OTelTracerConfig
+	pprofAddr     string
+	disableTracer bool
 
 	Tracer         *obs.Tracer
 	OTelTracer     *obs.OTelTracer
@@ -29,8 +30,9 @@ type ObservabilityComponent struct {
 func NewObservabilityComponent() *ObservabilityComponent {
 	cfg := config.Get()
 	return &ObservabilityComponent{
-		otelCfg:   cfg.OTelTracer,
-		pprofAddr: cfg.Monitoring.PprofAddr,
+		otelCfg:       cfg.OTelTracer,
+		pprofAddr:     cfg.Monitoring.PprofAddr,
+		disableTracer: cfg.Monitoring.DisableTracer,
 	}
 }
 
@@ -40,7 +42,12 @@ func (c *ObservabilityComponent) Order() int   { return 200 }
 func (c *ObservabilityComponent) Init() error {
 	tlog.Info(context.TODO(), "observability component init")
 
-	c.Tracer = obs.NewTracer(5 * time.Minute)
+	if c.disableTracer {
+		// 关闭后 component.Tracer() 返回 nil，消息管道走超级快速路径。
+		tlog.Info(context.TODO(), "internal tracer disabled (monitoring.disableTracer=true)")
+	} else {
+		c.Tracer = obs.NewTracer(5 * time.Minute)
+	}
 	c.LatencyTracker = obs.NewLatencyTracker(10000)
 	c.LogSanitizer = obs.NewLogSanitizer()
 

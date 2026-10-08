@@ -217,19 +217,6 @@ const (
 const (
 	// DefaultPprofAddr pprof 调试端点监听地址。配置为空可关闭。
 	DefaultPprofAddr = ":6060"
-
-	// DefaultPrometheusAddr sgate Prometheus 指标端点监听地址
-	// 使用方法：在 config.yaml 的 monitoring.prometheus.addr 字段覆盖
-	// 注意：默认 :9101 避免与 node_exporter 默认的 :9100 冲突
-	DefaultPrometheusAddr = ":9101"
-
-	// DefaultPrometheusPath Prometheus 指标路径
-	// 使用方法：Prometheus 抓取配置的 metrics_path 必须与此一致
-	DefaultPrometheusPath = "/metrics"
-
-	// DefaultPrometheusPrefix Prometheus 指标前缀
-	// 使用方法：所有指标自动加此前缀（如 app_connections_total）
-	DefaultPrometheusPrefix = "app"
 )
 
 // --- 灰度 ---

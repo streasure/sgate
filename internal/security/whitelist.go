@@ -1,6 +1,8 @@
 package security
 
 import (
+	"maps"
+	"slices"
 	"sync"
 )
 
@@ -162,12 +164,7 @@ func (wbl *WhitelistBlacklist) GetWhitelist() []string {
 	wbl.mu.RLock()
 	defer wbl.mu.RUnlock()
 
-	whitelist := make([]string, 0, len(wbl.whitelist))
-	for key := range wbl.whitelist {
-		whitelist = append(whitelist, key)
-	}
-
-	return whitelist
+	return slices.Collect(maps.Keys(wbl.whitelist))
 }
 
 // GetBlacklist 获取黑名单
@@ -178,10 +175,5 @@ func (wbl *WhitelistBlacklist) GetBlacklist() []string {
 	wbl.mu.RLock()
 	defer wbl.mu.RUnlock()
 
-	blacklist := make([]string, 0, len(wbl.blacklist))
-	for key := range wbl.blacklist {
-		blacklist = append(blacklist, key)
-	}
-
-	return blacklist
+	return slices.Collect(maps.Keys(wbl.blacklist))
 }

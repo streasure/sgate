@@ -8,6 +8,7 @@ import (
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
+	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -64,7 +65,7 @@ func (c *SecurityComponent) Init() error {
 	// 限流器。
 	if c.cfg.RateLimit.Enabled {
 		refresh := time.Second
-		if d, err := time.ParseDuration(c.cfg.RateLimit.TokenRefresh); err == nil && d > 0 {
+		if d := gatewayutil.ParseDurationDefault(c.cfg.RateLimit.TokenRefresh, 0); d > 0 {
 			refresh = d
 		}
 		tokens := c.cfg.RateLimit.MaxTokens

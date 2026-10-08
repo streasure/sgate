@@ -12,7 +12,7 @@ import (
 
 	"github.com/streasure/protocol/enums"
 	protocol "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/netutil"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
 	"google.golang.org/grpc"
@@ -20,10 +20,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Service 逻辑层服务封装，管理 gRPC 服务器、etcd 注册和生命周期
+// Service 逻辑层服务封装，管理 gRPC 服务器、etcd 注册、网关拨入和生命周期
 type Service struct {
 	server     *Server          // 逻辑层服务端
 	registry   *uetcd.Component // etcd 注册组件
+	dialer     *Dialer          // 网关拨入管理器（flip：logic 主动拨入 sgate）
 	listener   net.Listener     // TCP 监听器
 	grpcServer *grpc.Server     // gRPC 服务器
 	cfg        ServiceConfig    // 服务配置
@@ -37,9 +38,13 @@ func NewService(opts ...ServiceOption) *Service {
 		opt(&cfg)
 	}
 	if cfg.AdvertiseAddr == "" {
-		cfg.AdvertiseAddr = netutil.GetOutboundIPv4() + ":" + cfg.ListenPort
+		cfg.AdvertiseAddr = netutil.OutboundIPv4() + ":" + cfg.ListenPort
 	}
-	serverOpts := []ServerOption{WithServerID(cfg.ServiceID), WithStreamChSize(cfg.StreamSendChSize)}
+	serverOpts := []ServerOption{
+		WithServerID(cfg.ServiceID),
+		WithStreamChSize(cfg.StreamSendChSize),
+		WithServerBatchUpstream(cfg.BatchUpstream),
+	}
 	return &Service{server: NewServer(serverOpts...), cfg: cfg}
 }
 
@@ -62,7 +67,7 @@ func (s *Service) UnregisterUser(userUUID string) { s.server.UnregisterUser(user
 // Start 启动 gRPC 服务器和 etcd 注册
 func (s *Service) Start() error {
 	if s.cfg.AdvertiseAddr == "" {
-		s.cfg.AdvertiseAddr = netutil.GetOutboundIPv4() + ":" + s.cfg.ListenPort
+		s.cfg.AdvertiseAddr = netutil.OutboundIPv4() + ":" + s.cfg.ListenPort
 	}
 	listener, err := net.Listen("tcp", s.cfg.ListenAddr+":"+s.cfg.ListenPort)
 	if err != nil {
@@ -91,7 +96,13 @@ func (s *Service) Start() error {
 	// 等待 gRPC 服务就绪后再注册 etcd，避免 sgate 连接时服务端还没 accept
 	time.Sleep(200 * time.Millisecond)
 	s.initRegistry()
-	tlog.Info(context.TODO(), "logic service started serviceID=%s address=%s", s.cfg.ServiceID, s.cfg.AdvertiseAddr)
+	// flip：主动拨入同 zone 网关（etcd 发现 + 静态地址），连接责任在本侧。
+	s.dialer = NewDialer(s.server, s.cfg)
+	if err := s.dialer.Start(); err != nil {
+		tlog.Error(context.TODO(), "gateway dialer start failed error=%v", err)
+	}
+	tlog.Info(context.TODO(), "logic service started serviceID=%s address=%s shards=%d connGroups=%d",
+		s.cfg.ServiceID, s.cfg.AdvertiseAddr, s.dialer.shardCount, s.dialer.connGroupCount)
 	return nil
 }
 
@@ -125,9 +136,12 @@ func (s *Service) initRegistry() {
 	}
 }
 
-// Stop 优雅停止服务（等待连接关闭）
+// Stop 优雅停止服务（先停网关拨入，再等待存量服务端流结束）
 func (s *Service) Stop() {
 	s.stopOnce.Do(func() {
+		if s.dialer != nil {
+			s.dialer.Stop()
+		}
 		if s.registry != nil {
 			s.registry.Destroy()
 		}

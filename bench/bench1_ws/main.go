@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -29,7 +30,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:48081", "sgate WebSocket address")
 	duration := flag.Duration("duration", 10*time.Second, "benchmark duration")
 	parallel := flag.Int("parallel", 100, "number of parallel connections")
-	serverID := flag.String("server-id", "logic1", "logic server instance ID to bind")
+	serverID := flag.String("server-id", "logic1-ws", "logic server instance ID to bind")
 	flag.Parse()
 
 	fmt.Printf("bench1_ws: addr=%s duration=%s parallel=%d serverID=%s\n", *addr, *duration, *parallel, *serverID)
@@ -323,13 +324,5 @@ func readWSBinary(conn net.Conn) (*protocol.MessageFrame, error) {
 
 // readFull 从连接中读取指定字节数的数据
 func readFull(conn net.Conn, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := conn.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
+	return io.ReadFull(conn, buf)
 }

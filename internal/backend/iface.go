@@ -18,7 +18,6 @@ type GatewayInterface interface {
 	AddPushedToClient(n int64)
 	AddPushDroppedNoConn(n int64)
 	GetLogicClient(serverID string) connection.LogicClientProvider
-	LookupLogicAddress(serverID string) string
 	GetGatewayClient(serverID string) GatewayClientProvider
 	GetShardedCoalescer() *connection.ShardedWriteCoalescer
 }
@@ -41,6 +40,14 @@ func GetStreamData() *protoGw.StreamData {
 
 // PutStreamData 归还 StreamData 到池中。
 func PutStreamData(msg *protoGw.StreamData) {
+	if msg == nil {
+		return
+	}
+	// 保留 Data 缓冲容量：GetStreamData 的调用方（消息管道热路径）
+	// 通过 append(msg.Data[:0], ...) 复用，消除每消息的字节切片分配。
+	// gRPC SendMsg 在返回前已完成序列化，归还后引用失效是安全的。
+	kept := msg.Data[:0]
 	msg.Reset()
+	msg.Data = kept
 	streamDataPool.Put(msg)
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/bench/logutil"
+	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -31,7 +33,7 @@ func main() {
 	duration := flag.Duration("duration", 30*time.Second, "benchmark duration")
 	parallel := flag.Int("parallel", 1, "number of parallel connections")
 	serverID := flag.String("server-id", "logic2-ws", "logic server ID for login")
-	logConfig := flag.String("config", "configs/log.yaml", "log config")
+	logConfig := flag.String("config", "config/tlog.yaml", "log config")
 	loginBatch := flag.Int("login-batch", 100, "concurrent login batch size")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()
@@ -136,7 +138,8 @@ func main() {
 			defer recvWG.Done()
 			header := make([]byte, 2)
 			ext := make([]byte, 8)
-			skip := make([]byte, 64*1024)
+			var payload []byte // 复用，按需扩容
+			frame := &protocol.MessageFrame{}
 			for {
 				if _, err := readFull(entry.conn, header); err != nil {
 					return
@@ -154,15 +157,25 @@ func main() {
 					}
 					length = binary.BigEndian.Uint64(ext)
 				}
-				remaining := int(length)
-				for remaining > 0 {
-					n := min(remaining, len(skip))
-					if _, err := readFull(entry.conn, skip[:n]); err != nil {
-						return
-					}
-					remaining -= n
+				if length == 0 || length > 4*1024*1024 {
+					return
 				}
-				totalRecv.Add(1)
+				if length > uint64(cap(payload)) {
+					payload = make([]byte, length)
+				}
+				buf := payload[:length]
+				if _, err := readFull(entry.conn, buf); err != nil {
+					return
+				}
+				// 按消息条数统计：批量推送帧展开 items，其余帧计 1。
+				n := int64(1)
+				if err := proto.Unmarshal(buf, frame); err == nil && frame.Cmd == routes.CmdPushBatch {
+					pb := &protocol.PushBatch{}
+					if perr := proto.Unmarshal(frame.Body, pb); perr == nil {
+						n = int64(len(pb.GetItems()))
+					}
+				}
+				totalRecv.Add(n)
 			}
 		}(e)
 	}
@@ -297,13 +310,5 @@ func readWSBinary(conn net.Conn) (*protocol.MessageFrame, error) {
 }
 
 func readFull(conn net.Conn, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := conn.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
+	return io.ReadFull(conn, buf)
 }

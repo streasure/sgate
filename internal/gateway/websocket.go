@@ -11,12 +11,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/streasure/sgate/internal/backend"
 	"github.com/streasure/sgate/internal/connection"
 
 	ws "github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -116,7 +118,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		return gnet.Close
 	}
 
-	reqLine := strings.Split(lines[0], " ")
+	reqLine := strings.Fields(lines[0])
 	if len(reqLine) != 3 {
 		g.sendHTTPResponse(wsConn.Conn, 400, "Bad Request", nil)
 		return gnet.Close
@@ -128,9 +130,8 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		if line == "" {
 			break
 		}
-		parts := strings.SplitN(line, ": ", 2)
-		if len(parts) == 2 {
-			headers[strings.ToLower(parts[0])] = parts[1]
+		if name, value, ok := strings.Cut(line, ": "); ok {
+			headers[strings.ToLower(name)] = value
 		}
 	}
 
@@ -354,15 +355,12 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	message, ok := routes.DecodeClientMessage(payload)
 	if !ok {
 		tlog.Error(context.TODO(), "WebSocket message unmarshal failed")
-		errorMsg := routes.NewErrorResponse("error", "Invalid message format", "invalid message frame", string(payload))
-		responseData := routes.MarshalClientError(errorMsg)
-		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
+		return g.sendWebSocketMessage(wsConn, WSOpBinary, routes.NewErrorFrame("error", "Invalid message format", "invalid message frame", string(payload)))
 	}
 
 	if message.Cmd == 0 {
-		errorMsg := routes.NewErrorResponse("error", "Invalid message format: missing cmd", "", "")
-		responseData := routes.MarshalClientError(errorMsg)
-		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
+		routes.PutClientMessage(message)
+		return g.sendWebSocketMessage(wsConn, WSOpBinary, routes.NewErrorFrame("error", "Invalid message format: missing cmd", "", ""))
 	}
 
 	// 入站数据帧刷新心跳与活跃时间（浏览器客户端不发 WS ping，仅靠 ping 会被超时踢出）
@@ -386,7 +384,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			g.messagesDroppedOverload.Add(1)
 			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server overload", "")
 		}
-		if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", getRemoteIP(wsConn.Conn)) {
+		if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", netutil.AddrHost(wsConn.Conn.RemoteAddr())) {
 			g.messagesDroppedRateLimit.Add(1)
 			return g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "rate limited", "")
 		}
@@ -421,21 +419,30 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 
 	// 异步路径：投递到 worker pool
 	if g.pipelineWorkerPool != nil {
-		payloadCopy := append([]byte(nil), payload...)
-		g.pipelineWorkerPool.SubmitWS(wsPipelineTaskData{
+		payloadCopy := getMsgBuf(len(payload))
+		copy(payloadCopy, payload)
+		task := wsPipelineTaskPool.Get().(*wsPipelineTaskData)
+		*task = wsPipelineTaskData{
 			wsConn:       wsConn,
 			payload:      payloadCopy,
 			message:      message,
 			connectionID: connectionID,
-		})
+		}
+		if !g.pipelineWorkerPool.SubmitWS(task) {
+			routes.PutClientMessage(task.message)
+			putMsgBuf(task.payload)
+			wsPipelineTaskPool.Put(task)
+		}
 		return nil
 	}
 
 	result := g.pipeline.ProcessForWS(wsConn.Conn, payload, message, connectionID)
+	routes.PutClientMessage(message)
 	if result.Error != nil {
-		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
-		responseData := routes.MarshalClientError(errorResp)
-		return g.sendWebSocketMessage(wsConn, WSOpBinary, responseData)
+		if result.ProtoMsg != nil {
+			backend.PutStreamData(result.ProtoMsg)
+		}
+		return g.sendWebSocketMessage(wsConn, WSOpBinary, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
 	}
 	return nil
 }
@@ -526,17 +533,7 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 			Cmd:       message.Cmd,
 			SeqId:     message.SeqId,
 		}
-		go func() {
-			for range 20 {
-				if lc := g.GetLogicClient(req.ServerId); lc != nil {
-					if err := lc.SendMessage(forwardMsg); err == nil {
-						return
-					}
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			tlog.Warn(context.TODO(), "WS login forward to logic timed out serverID=%s", req.ServerId)
-		}()
+		g.forwardLoginAsync(req.ServerId, forwardMsg, "WS login forward to logic timed out serverID=%s")
 	}
 }
 

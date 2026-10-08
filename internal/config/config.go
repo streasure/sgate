@@ -4,39 +4,41 @@ import (
 	"fmt"
 	"strconv"
 	"sync/atomic"
+
+	"github.com/streasure/util/uconfig"
 )
 
 // Config 网关服务的完整配置结构体，包含所有模块配置
 type Config struct {
-	HttpPort        int                   `validate:"required"`
-	Belong          string                `validate:"required"` // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
-	ServerID        string                `validate:"required"`
-	ServerType      string                `validate:"required"`
-	Zone            string                `validate:"required"`
-	Discovery       DiscoveryConfig       `validate:"required"`
-	Transports      []Transport           `validate:"required"`
-	GRPC            GRPCConfig            `validate:"required"`
-	Etcd            EtcdConfig            `validate:"required"`
-	Stream          StreamConfig          `default:""`
-	Protection      ProtectionConfig      `default:""`
-	Security        SecurityConfig        `default:""`
-	LoginValidation LoginValidationConfig `default:""`
-	WAF             WAFConfig             `default:""`
-	TLS             TLSConfig             `default:""`
-	Cluster         ClusterConfig         `default:""`
-	Balancer        BalancerConfig        `default:""`
-	JWTAuth         JWTAuthConfig         `default:""`
-	Canary          CanaryConfig          `default:""`
-	TrafficMirror   TrafficMirrorConfig   `default:""`
-	OTelTracer      OTelTracerConfig      `default:""`
-	ConfigCenter    ConfigCenterConfig    `default:""`
-	Alert           AlertWebhookConfig    `default:""`
-	Degradation     DegradationConfig     `default:""`
-	FilterChain     FilterChainConfig     `default:""`
-	Monitoring      MonitoringConfig      `default:""`
-	Perf            PerfConfig            `default:""`
-	Pipeline        PipelineConfig        `default:""`
-	Admin           AdminConfig           `default:""`
+	HttpPort        int             `validate:"required"`
+	Belong          string          `validate:"required"` // 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
+	ServerID        string          `validate:"required"`
+	ServerType      string          `validate:"required"`
+	Zone            string          `validate:"required"`
+	Discovery       DiscoveryConfig `validate:"required"`
+	Transports      []Transport     `validate:"required"`
+	GRPC            GRPCConfig      `validate:"required"`
+	Etcd            EtcdConfig      `validate:"required"`
+	Stream          StreamConfig
+	Protection      ProtectionConfig
+	Security        SecurityConfig
+	LoginValidation LoginValidationConfig
+	WAF             WAFConfig
+	TLS             TLSConfig
+	Cluster         ClusterConfig
+	Balancer        BalancerConfig
+	JWTAuth         JWTAuthConfig
+	Canary          CanaryConfig
+	TrafficMirror   TrafficMirrorConfig
+	OTelTracer      OTelTracerConfig
+	ConfigCenter    ConfigCenterConfig
+	Alert           AlertWebhookConfig
+	Degradation     DegradationConfig
+	FilterChain     FilterChainConfig
+	Monitoring      MonitoringConfig
+	Perf            PerfConfig
+	Pipeline        PipelineConfig
+	Admin           AdminConfig
 }
 
 // AdminConfig 管理端 HTTP 接口鉴权（stats server 上的 /admin/*）。
@@ -67,22 +69,16 @@ func (c *Config) PortAddress() string {
 }
 
 // MonitoringConfig 监控接入配置（可插拔）
-// 通过 enabled 开关控制是否启动 Prometheus 指标服务
-// 关闭时 sgate 单体也能正常运行，只是不暴露 /metrics 端点
+// 关闭时 sgate 单体也能正常运行
 type MonitoringConfig struct {
-	Prometheus PrometheusConfig `yaml:"prometheus"`
-	PprofAddr  string           `yaml:"pprofAddr"`
-	// DisableMetricsLog 关闭每秒打印 gateway metrics 日志（OnTick）。
-	// 线上建议 true，避免日志洪水；压测/排障可 false 打开。默认 false=保持每秒打。
+	PprofAddr string `yaml:"pprofAddr"`
+	// DisableMetricsLog 关闭每秒打印 gateway metrics 日志（OnTick输出）。
+	// 配置为 true 关闭该日志（水位压测/演练时 false 打开）；默认 false=保持每秒
 	DisableMetricsLog bool `yaml:"disableMetricsLog"`
-}
-
-// PrometheusConfig Prometheus 指标暴露配置
-type PrometheusConfig struct {
-	Enabled bool   `yaml:"enabled"` // 是否启动 /metrics 端点（关闭则 sgate 不暴露 Prometheus 指标）
-	Addr    string `yaml:"addr"`    // 监听地址（如 :9090）
-	Path    string `yaml:"path"`    // 指标路径（默认 /metrics）
-	Prefix  string `yaml:"prefix"`  // 指标前缀（默认 "app"）
+	// DisableTracer 关闭内部 Tracer（每消息 span/属性采样）。
+	// 关闭后消息管道走超级快速路径（跳过安全链/过滤器链的追踪分支），热路径分配大幅下降。
+	// 仅需日志级排障时开启；压测与生产吞吐场景应为 true。默认 false=开启（兼容旧行为）。
+	DisableTracer bool `yaml:"disableTracer"`
 }
 
 // BalancerConfig 负载均衡配置
@@ -303,12 +299,15 @@ type StreamQueueConfig struct {
 }
 
 type StreamConfig struct {
-	ShardCount       int               `yaml:"shardCount"`
-	ConnGroupCount   int               `yaml:"connGroupCount"` // gateway→logic 独立 TCP 连接组数（默认 4）
-	SendChannelSize  int               `yaml:"sendChannelSize"`
-	ReceiveBatchSize int               `yaml:"receiveBatchSize"`
-	BatchPush        bool              `yaml:"batchPush"`
-	QueuePolicy      StreamQueueConfig `yaml:"queuePolicy"`
+	ShardCount       int  `yaml:"shardCount"`
+	ConnGroupCount   int  `yaml:"connGroupCount"` // gateway��logic ���� TCP ���������Ĭ�� 4��
+	SendChannelSize  int  `yaml:"sendChannelSize"`
+	ReceiveBatchSize int  `yaml:"receiveBatchSize"`
+	BatchPush        bool `yaml:"batchPush"`
+	// BatchUpstream 将 gateway<->logic 数据流的多条 StreamData 合并为单个
+	// StreamBatch gRPC 帧（双向均生效）。两端必须同时开启；对端未升级时严禁开启。
+	BatchUpstream bool              `yaml:"batchUpstream"`
+	QueuePolicy   StreamQueueConfig `yaml:"queuePolicy"`
 }
 
 type ProtectionConfig struct {
@@ -467,17 +466,6 @@ func (c *Config) ApplyRuntimeDefaults() {
 		c.Protection.CPUThreshold = DefaultOverloadCPUThreshold
 	}
 	// Monitoring.PprofAddr 空串 = 关闭 pprof，不填默认值
-	if c.Monitoring.Prometheus.Enabled {
-		if c.Monitoring.Prometheus.Addr == "" {
-			c.Monitoring.Prometheus.Addr = DefaultPrometheusAddr
-		}
-		if c.Monitoring.Prometheus.Path == "" {
-			c.Monitoring.Prometheus.Path = DefaultPrometheusPath
-		}
-		if c.Monitoring.Prometheus.Prefix == "" {
-			c.Monitoring.Prometheus.Prefix = DefaultPrometheusPrefix
-		}
-	}
 	if c.OTelTracer.ServiceName == "" {
 		c.OTelTracer.ServiceName = DefaultOTelServiceName
 	}
@@ -504,7 +492,7 @@ func (c *Config) ApplyRuntimeDefaults() {
 // LoadConfig 从指定的 YAML 文件加载配置，若未找到则使用默认配置
 // 采用合并语义：默认配置 + YAML 覆盖
 func LoadConfig(configFiles ...string) (*Config, error) {
-	cfg, err := loadFiles[Config](configFiles...)
+	cfg, err := uconfig.Load[Config](configFiles...)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +505,7 @@ func LoadConfig(configFiles ...string) (*Config, error) {
 
 // Load 从指定的 YAML 文件加载配置并存入全局变量，返回配置指针。
 func Load(configFiles ...string) (*Config, error) {
-	cfg, err := loadFiles[Config](configFiles...)
+	cfg, err := uconfig.Load[Config](configFiles...)
 	if err != nil {
 		return nil, err
 	}

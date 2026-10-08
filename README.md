@@ -432,7 +432,7 @@ loginValidation:
 | `configCenter` | `enabled` | 配置中心 |
 | `alert` | `enabled`, `webhooks` | 告警 Webhook |
 | `degradation` | `enabled`, `rules` | 业务降级 |
-| `monitoring` | `pprofAddr`, `disableMetricsLog`, `prometheus` | pprof 地址；`disableMetricsLog=true` 关闭每秒 metrics 日志 |
+| `monitoring` | `pprofAddr`, `disableMetricsLog` | pprof 地址；`disableMetricsLog=true` 关闭每秒 metrics 日志 |
 
 ---
 
@@ -668,7 +668,7 @@ internal/gateway/         接入层（package gateway）
   websocket.go              WebSocket 握手、帧解析
   pipeline.go               认证、安全、过滤、转发管道
   filter.go                 过滤器链 SPI
-  monitor.go                /stats、Prometheus、配置热更新
+  monitor.go                /stats、配置热更新
   overload.go               过载保护
   integrity.go              消息完整性（时间戳/去重）
   version.go                版本信息
@@ -821,5 +821,5 @@ etcd:
 2. 启动 etcd 集群（3 节点）
 3. 配置 `cluster.mode: "cluster"` 启用多实例
 4. 前置 Nginx/HAProxy 做 TLS 终止和负载均衡
-5. 配置 `monitoring.pprofAddr` 和 Prometheus 指标
+5. 配置 `monitoring.pprofAddr`
 6. 配置告警 Webhook

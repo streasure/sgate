@@ -59,7 +59,7 @@ Gateway 结构体承载全部接入侧状态：
 | WebSocket | websocket.go | 握手升级、帧编解码 |
 | 消息管道 | pipeline.go | 认证→安全→过滤→转发 |
 | 过滤器 | filter.go | SPI 加载、`types.GetFilterChain()` |
-| 监控 | monitor.go | `/stats`、Prometheus、配置热更新 |
+| 监控 | monitor.go | `/stats`、配置热更新 |
 | 过载保护 | overload.go | `OverloadProtector`、CPU 阈值 |
 | 完整性 | integrity.go | `MessageIntegrity`（时间戳、去重） |
 | 版本 | version.go | `Version`、`BuildInfo` |

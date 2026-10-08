@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -15,10 +14,11 @@ import (
 	"github.com/streasure/sgate/internal/connection"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/spf13/cast"
 	protoGw "github.com/streasure/protocol/gateway"
 	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
+	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -58,7 +58,7 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	}()
 
 	// 连接数限制检查（P0: 防止 OOM 和连接耗尽）
-	remoteIP := getRemoteIP(c)
+	remoteIP := netutil.AddrHost(c.RemoteAddr())
 	if !g.connectionManager.CanAccept(remoteIP) {
 		tlog.Warn(context.TODO(), "连接数限制，拒绝新连接 remoteIP=%s activeConnections=%d maxConnections=%d ipConnections=%d maxPerIP=%d",
 			remoteIP,
@@ -154,7 +154,7 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "handleNormalTraffic panic recovered error=%s", cast.ToString(r))
+			tlog.Error(context.TODO(), "handleNormalTraffic panic recovered error=%v", r)
 			action = gnet.Close
 		}
 	}()
@@ -247,14 +247,6 @@ func (g *Gateway) GetLogicClient(serverID string) connection.LogicClientProvider
 	return g.logicClientPool.GetClient(serverID)
 }
 
-// LookupLogicAddress 通过 serverID 在服务发现中查询逻辑服地址。
-func (g *Gateway) LookupLogicAddress(serverID string) string {
-	if g.logicClientPool == nil {
-		return ""
-	}
-	return g.logicClientPool.LookupAddress(serverID)
-}
-
 func (g *Gateway) GetGatewayClient(serverID string) backend.GatewayClientProvider {
 	if g.gatewayClientPool == nil {
 		return nil
@@ -294,48 +286,46 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	}
 	cmd := message.Cmd
 	if cmd == routes.CmdLoginGate {
+		// LoginGate 消息由 finishLoginGate 异步持有，不归还解码池。
 		return g.handleLoginGate(c, connectionID, message)
 	}
 	if cmd == routes.CmdLogoutGate {
-		return g.handleLogoutGate(c, connectionID, message)
+		action := g.handleLogoutGate(c, connectionID, message)
+		routes.PutClientMessage(message)
+		return action
 	}
 
 	// 异步路径：投递到 worker pool，event loop 立即返回
 	if g.pipelineWorkerPool != nil {
-		remoteIP := getRemoteIP(c)
-		// 深拷贝 data，因为 FrameBuf 会被 event loop 复用
-		dataCopy := append([]byte(nil), data...)
-		g.pipelineWorkerPool.Submit(pipelineTaskData{
+		// 深拷贝 data，因为 FrameBuf 会被 event loop 复用（缓冲池化复用）
+		dataCopy := getMsgBuf(len(data))
+		copy(dataCopy, data)
+		task := pipelineTaskPool.Get().(*pipelineTaskData)
+		*task = pipelineTaskData{
 			conn:         c,
 			data:         dataCopy,
 			message:      message,
 			connectionID: connectionID,
-			remoteIP:     remoteIP,
-		})
+		}
+		if !g.pipelineWorkerPool.Submit(task) {
+			routes.PutClientMessage(task.message)
+			putMsgBuf(task.data)
+			pipelineTaskPool.Put(task)
+		}
 		return
 	}
 
 	// 同步路径：直接在 event loop 中处理
 	result := g.pipeline.Process(c, data, message, connectionID)
+	routes.PutClientMessage(message)
 	if result.Error != nil {
-		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
-		respData := routes.MarshalClientError(errorResp)
-		writeFrame(c, respData)
+		if result.ProtoMsg != nil {
+			backend.PutStreamData(result.ProtoMsg)
+		}
+		writeFrame(c, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		return result.Action
 	}
 	return result.Action
-}
-
-// getRemoteIP 从 gnet.Conn 获取客户端 IP
-func getRemoteIP(c gnet.Conn) string {
-	addr := c.RemoteAddr()
-	if addr == nil {
-		return "unknown"
-	}
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return addr.String()
-	}
-	return host
 }
 
 // getOrCreateBreaker 获取或创建指定 route 的熔断器。
@@ -357,10 +347,8 @@ func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 		if cb.SuccessThreshold > 0 {
 			successThreshold = cb.SuccessThreshold
 		}
-		if cb.Timeout != "" {
-			if d, err := time.ParseDuration(cb.Timeout); err == nil && d > 0 {
-				timeout = d
-			}
+		if d := gatewayutil.ParseDurationDefault(cb.Timeout, 0); d > 0 {
+			timeout = d
 		}
 	}
 	if !enabled {

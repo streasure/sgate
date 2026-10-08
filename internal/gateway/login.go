@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"strings"
 	"time"
@@ -13,6 +14,8 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogin "github.com/streasure/protocol/loginserver"
 	routes "github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/netutil"
+	"github.com/streasure/util/retry"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
 	"google.golang.org/grpc"
@@ -114,7 +117,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		return gnet.None
 	}
-	if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", getRemoteIP(c)) {
+	if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", netutil.AddrHost(c.RemoteAddr())) {
 		g.messagesDroppedRateLimit.Add(1)
 		ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
 		body, _ := proto.Marshal(ack)
@@ -225,18 +228,28 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 			Cmd:       message.Cmd,
 			SeqId:     message.SeqId,
 		}
-		go func() {
-			for range 20 {
-				if lc := g.GetLogicClient(req.ServerId); lc != nil {
-					if err := lc.SendMessage(forwardMsg); err == nil {
-						return
-					}
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			tlog.Warn(context.TODO(), "login forward to logic timed out serverID=%s", req.ServerId)
-		}()
+		g.forwardLoginAsync(req.ServerId, forwardMsg, "login forward to logic timed out serverID=%s")
 	}
+}
+
+// errLogicClientUnavailable 逻辑服客户端尚未就绪（重试中间态）。
+var errLogicClientUnavailable = errors.New("logic client unavailable")
+
+// forwardLoginAsync 异步转发登录消息到逻辑服：最多 20 次、间隔 100ms，
+// 全部失败时按 warnFormat（唯一参数 serverID）打点。TCP/WS 登录共用。
+func (g *Gateway) forwardLoginAsync(serverID string, msg *protoGw.StreamData, warnFormat string) {
+	go func() {
+		err := retry.Do(context.TODO(), 20, 100*time.Millisecond, func() error {
+			lc := g.GetLogicClient(serverID)
+			if lc == nil {
+				return errLogicClientUnavailable
+			}
+			return lc.SendMessage(msg)
+		})
+		if err != nil {
+			tlog.Warn(context.TODO(), warnFormat, serverID)
+		}
+	}()
 }
 
 func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {

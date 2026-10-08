@@ -3,39 +3,54 @@ package logic
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	protocol "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
 
+// dataStream 逻辑侧数据流抽象：兼容旧模式（网关拨入的服务端流）与
+// flip 模式（logic 主动拨入网关的客户端流），二者均有 Send/Recv。
+type dataStream interface {
+	Send(*protocol.StreamData) error
+	Recv() (*protocol.StreamData, error)
+}
+
 // streamConn 表示与网关的 gRPC 流连接
 type streamConn struct {
-	stream     protocol.GatewayStream_OnDataServer // gRPC 流对象
-	sendCh     chan *protocol.StreamData           // 发送通道
-	done       chan struct{}                       // 流结束信号
-	closed     atomic.Bool                         // 连接是否已关闭
-	closeOnce  sync.Once                           // 确保只关闭一次
-	gatewayID  string                              // 网关标识
-	sessionMu  sync.Mutex                          // 会话列表互斥锁
-	sessionIDs map[string]struct{}                 // 关联的会话 ID 集合
+	stream     dataStream                // gRPC 流对象
+	sendCh     chan *protocol.StreamData // 发送通道
+	done       chan struct{}             // 流结束信号
+	closed     atomic.Bool               // 连接是否已关闭
+	closeOnce  sync.Once                 // 确保只关闭一次
+	gatewayID  string                    // 网关标识
+	sessionMu  sync.Mutex                // 会话列表互斥锁
+	sessionIDs map[string]struct{}       // 关联的会话 ID 集合
+	// batchUpstream 为 true 时多条 StreamData 合并为单个 StreamBatch gRPC 帧发送
+	// （须与网关 stream.batchUpstream 同步开启）。
+	batchUpstream bool
 }
 
 // newStreamConn 创建新的流连接，启动发送协程
-func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gatewayID string) *streamConn {
+func newStreamConn(stream dataStream, size int, gatewayID string, batchUpstream bool) *streamConn {
 	if size <= 0 {
 		size = 65536
 	}
 	c := &streamConn{
 		stream: stream, sendCh: make(chan *protocol.StreamData, size), done: make(chan struct{}),
-		gatewayID: gatewayID, sessionIDs: make(map[string]struct{}),
+		gatewayID: gatewayID, sessionIDs: make(map[string]struct{}), batchUpstream: batchUpstream,
 	}
 	go func() {
 		defer c.shutdown()
+		const maxBatch = 256
+		batch := make([]*protocol.StreamData, 0, maxBatch)
 		for {
 			select {
 			case <-c.done:
@@ -44,9 +59,37 @@ func newStreamConn(stream protocol.GatewayStream_OnDataServer, size int, gateway
 				if c.closed.Load() {
 					return
 				}
-				if err := c.stream.Send(msg); err != nil {
-					c.shutdown()
+				// 有界排空后合帧发送：批内消息共享一次 gRPC 帧开销。
+				batch = batch[:0]
+				batch = append(batch, msg)
+				drained := true
+				for drained && len(batch) < maxBatch {
+					select {
+					case m := <-c.sendCh:
+						batch = append(batch, m)
+					default:
+						drained = false
+					}
+				}
+				if c.closed.Load() {
 					return
+				}
+				// 合帧发送：开启时整批（含单条）压成单个 gRPC 帧，
+				// 接收端固定按 StreamBatch 解码，不能混发裸 StreamData。
+				if c.batchUpstream {
+					if ms, ok := c.stream.(interface{ SendMsg(m any) error }); ok {
+						if err := ms.SendMsg(&protocol.StreamBatch{Items: batch}); err != nil {
+							c.shutdown()
+							return
+						}
+						continue
+					}
+				}
+				for _, m := range batch {
+					if err := c.stream.Send(m); err != nil {
+						c.shutdown()
+						return
+					}
 				}
 			}
 		}
@@ -136,11 +179,12 @@ type Server struct {
 	groups        map[string]*pushGroup          // 组 ID -> 推送组
 	sessionGroups map[string]map[string]struct{} // 会话 ID -> 所属组 ID 集合
 
-	serverID     string        // 逻辑服务端标识
-	streamSeq    atomic.Uint64 // 流连接序号生成器
-	streamChSize int           // 流发送通道大小
-	stopOnce     sync.Once     // 确保只停止一次
-	metrics      PushMetrics   // 推送监控指标
+	serverID      string        // 逻辑服务端标识
+	streamSeq     atomic.Uint64 // 流连接序号生成器
+	streamChSize  int           // 流发送通道大小
+	batchUpstream bool          // StreamBatch 合帧收发（与网关 stream.batchUpstream 同步）
+	stopOnce      sync.Once     // 确保只停止一次
+	metrics       PushMetrics   // 推送监控指标
 }
 
 // ServerOption 服务端配置选项函数
@@ -151,6 +195,11 @@ func WithServerID(serverID string) ServerOption { return func(s *Server) { s.ser
 
 // WithStreamChSize 设置流发送通道大小
 func WithStreamChSize(n int) ServerOption { return func(s *Server) { s.streamChSize = n } }
+
+// WithServerBatchUpstream 开启 StreamBatch 合帧收发（与网关 stream.batchUpstream 一致）。
+func WithServerBatchUpstream(enabled bool) ServerOption {
+	return func(s *Server) { s.batchUpstream = enabled }
+}
 
 // NewServer 创建逻辑层服务端实例
 func NewServer(opts ...ServerOption) *Server {
@@ -167,14 +216,23 @@ func NewServer(opts ...ServerOption) *Server {
 
 func (s *Server) GetServerID() string { return s.serverID }
 
-// OnData 处理来自网关的流数据，按命令码分发到注册的处理器
+// OnData 旧版握手：网关主动拨入时的流处理。
 func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
-	streamID := fmt.Sprintf("stream_%s_%d", s.serverID, s.streamSeq.Add(1))
-	gatewayID := streamID
-	if values := metadata.ValueFromIncomingContext(stream.Context(), "sgate-gateway-id"); len(values) > 0 && values[0] != "" {
+	gatewayID := ""
+	if values := metadata.ValueFromIncomingContext(stream.Context(), routes.MetaGatewayID); len(values) > 0 && values[0] != "" {
 		gatewayID = values[0]
 	}
-	conn := newStreamConn(stream, s.streamChSize, gatewayID)
+	return s.handleStream(stream, gatewayID)
+}
+
+// handleStream 流会话主循环：注册 streamConn、接收并分发消息，
+// 流结束时清理会话/用户/分组绑定。新旧两种拨入方向共用。
+func (s *Server) handleStream(stream dataStream, gatewayID string) error {
+	streamID := fmt.Sprintf("stream_%s_%d", s.serverID, s.streamSeq.Add(1))
+	if gatewayID == "" {
+		gatewayID = streamID
+	}
+	conn := newStreamConn(stream, s.streamChSize, gatewayID, s.batchUpstream)
 	s.streams.Store(streamID, conn)
 	defer func() {
 		s.streams.Delete(streamID)
@@ -190,11 +248,8 @@ func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 		conn.sessionMu.Unlock()
 	}()
 
-	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			return err
-		}
+	// process 分发单条上游消息：绑定会话并交给协议处理器。
+	process := func(msg *protocol.StreamData) {
 		if msg.SessionId != "" {
 			s.sessions.Store(msg.SessionId, conn)
 			conn.bindSession(msg.SessionId)
@@ -207,6 +262,36 @@ func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 				tlog.Warn(context.TODO(), "failed to queue response cmd=%d sessionID=%s error=%v", response.Cmd, response.SessionId, err)
 			}
 		})
+	}
+
+	// StreamBatch 合帧接收：两端开启 stream.batchUpstream 时网关按批发送。
+	var batchRecv interface{ RecvMsg(m any) error }
+	if s.batchUpstream {
+		if mr, ok := stream.(interface{ RecvMsg(m any) error }); ok {
+			batchRecv = mr
+		}
+	}
+
+	for {
+		if batchRecv != nil {
+			sb := &protocol.StreamBatch{}
+			if err := batchRecv.RecvMsg(sb); err != nil {
+				return err
+			}
+			for _, m := range sb.Items {
+				if m == nil {
+					continue
+				}
+				process(m)
+			}
+			continue
+		}
+
+		msg, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		process(msg)
 	}
 }
 
@@ -311,11 +396,7 @@ func (s *Server) GetGroupMembers(groupID string) []string {
 	if group == nil {
 		return nil
 	}
-	members := make([]string, 0, len(group.members))
-	for sessionID := range group.members {
-		members = append(members, sessionID)
-	}
-	return members
+	return slices.Collect(maps.Keys(group.members))
 }
 
 // GetGroupCount 获取指定组的成员数量（不分配 slice）

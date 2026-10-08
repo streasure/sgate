@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"runtime"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/hashutil"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -36,6 +39,29 @@ type MessagePipeline struct {
 // NewMessagePipeline 创建绑定到指定网关的消息管道。
 func NewMessagePipeline(gw *Gateway) *MessagePipeline {
 	return &MessagePipeline{gw: gw}
+}
+
+// 管道拒绝路径的哨兵错误：热路径上避免 fmt.Errorf 的每消息分配。
+var (
+	errPipelineOverload   = errors.New("server overload")
+	errPipelineMissingCmd = errors.New("missing cmd")
+	errPipelineNoConn     = errors.New("unknown connection")
+	errPipelineUnbound    = errors.New("connection not bound (login pending)")
+	errPipelineUnauthed   = errors.New("connection not authenticated")
+	errPipelineRateLimit  = errors.New("connection rate limit exceeded")
+)
+
+// routeKeyCache 命令号到路由键字符串的驻留缓存（熔断/限流/降级按键读取）。
+var routeKeyCache sync.Map
+
+// routeKeyFor 返回 cmd 的驻留路由键：首次 strconv 分配一次，之后零分配。
+func routeKeyFor(cmd int32) string {
+	if v, ok := routeKeyCache.Load(cmd); ok {
+		return v.(string)
+	}
+	key := strconv.Itoa(int(cmd))
+	actual, _ := routeKeyCache.LoadOrStore(cmd, key)
+	return actual.(string)
 }
 
 // Process 运行通用消息处理管道：
@@ -65,7 +91,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		g.messagesDroppedOverload.Add(1)
 		return PipelineResult{
 			Action: gnet.None,
-			Error:  fmt.Errorf("server overload"),
+			Error:  errPipelineOverload,
 		}
 	}
 
@@ -73,7 +99,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	if cmd == 0 {
 		return PipelineResult{
 			Action: gnet.None,
-			Error:  fmt.Errorf("missing cmd"),
+			Error:  errPipelineMissingCmd,
 		}
 	}
 
@@ -81,7 +107,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	connObj := g.connectionManager.GetConnection(connectionID)
 	if connObj == nil {
 		g.messagesDroppedAuth.Add(1)
-		return PipelineResult{Action: gnet.Close, Error: fmt.Errorf("unknown connection")}
+		return PipelineResult{Action: gnet.Close, Error: errPipelineNoConn}
 	}
 	// preAuth 命令（如 LoginGate）在 serverID 绑定完成前也放行，否则 preAuthCommands 配置永远无效。
 	// 未绑定时 connObj 仍可用于 rate 控制与转发（LoginGate 处理器内部完成绑定）。
@@ -90,14 +116,14 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		g.messagesDroppedAuth.Add(1)
 		return PipelineResult{
 			Action: gnet.Close,
-			Error:  fmt.Errorf("connection not bound (login pending)"),
+			Error:  errPipelineUnbound,
 		}
 	}
 	if !unbound && !connObj.IsAuthenticated() && !g.isPreAuthCommand(cmd) {
 		g.messagesDroppedAuth.Add(1)
 		return PipelineResult{
 			Action: gnet.Close,
-			Error:  fmt.Errorf("connection not authenticated"),
+			Error:  errPipelineUnauthed,
 		}
 	}
 
@@ -106,7 +132,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		g.messagesDroppedRateLimit.Add(1)
 		return PipelineResult{
 			Action: gnet.None,
-			Error:  fmt.Errorf("connection rate limit exceeded"),
+			Error:  errPipelineRateLimit,
 		}
 	}
 
@@ -148,13 +174,14 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		protoMsg = backend.GetStreamData()
 		protoMsg.SessionId = connectionID
 		protoMsg.UserKey = connObj.GetUserUUID()
-		protoMsg.Data = append([]byte(nil), message.Data...)
+		// 复用池化消息的 Data 缓冲容量（PutStreamData 保留容量），热路径零分配。
+		protoMsg.Data = append(protoMsg.Data[:0], message.Data...)
 		protoMsg.SeqId = message.SeqId
 		protoMsg.Cmd = cmd
 	} else {
 		// 完整路径，包含安全链处理
-		routeKey = strconv.FormatInt(int64(cmd), 10)
-		remoteIP = getRemoteIP(conn)
+		routeKey = routeKeyFor(cmd)
+		remoteIP = netutil.AddrHost(conn.RemoteAddr())
 
 		// 阶段3：安全链（黑名单 -> 限流 -> WAF -> 熔断器）
 		if g.whitelistBlacklist != nil {
@@ -222,13 +249,12 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			return PipelineResult{Action: gnet.None}
 		}
 		if protoMsg == nil {
-			protoMsg = &protoGw.StreamData{
-				SessionId: connectionID,
-				UserKey:   connObj.GetUserUUID(),
-				ClientIp:  remoteIP,
-				Data:      append([]byte(nil), message.Data...),
-				SeqId:     message.SeqId,
-			}
+			protoMsg = backend.GetStreamData()
+			protoMsg.SessionId = connectionID
+			protoMsg.UserKey = connObj.GetUserUUID()
+			protoMsg.ClientIp = remoteIP
+			protoMsg.Data = append(protoMsg.Data[:0], message.Data...)
+			protoMsg.SeqId = message.SeqId
 			if cmd > 0 {
 				protoMsg.Cmd = cmd
 			}
@@ -246,6 +272,16 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 				protoMsg.SeqId = message.SeqId
 			}
 		}
+	}
+
+	// 阶段5.5：切断 Data 别名。过滤器链可能让 protoMsg.Data 直接引用
+	// message.Data（入站解码池化缓冲）：入站消息在处理结束后归还解码池，
+	// 转发消息要到 gRPC 序列化后才归还，二者生命周期不同，必须复制。
+	if len(protoMsg.Data) > 0 && len(message.Data) > 0 &&
+		&protoMsg.Data[0] == &message.Data[0] {
+		aliased := make([]byte, len(protoMsg.Data))
+		copy(aliased, protoMsg.Data)
+		protoMsg.Data = aliased
 	}
 
 	// 阶段6：转发到LogicClient（使用阶段2缓存的客户端）
@@ -347,7 +383,6 @@ type pipelineTaskData struct {
 	data         []byte
 	message      *protoGw.StreamData
 	connectionID string
-	remoteIP     string
 }
 
 // wsPipelineTaskData WebSocket pipeline 任务数据。
@@ -356,6 +391,33 @@ type wsPipelineTaskData struct {
 	payload      []byte
 	message      *protoGw.StreamData
 	connectionID string
+}
+
+// 池化：pipeline 任务结构与入站帧缓冲（热路径每消息一任务/一帧拷贝）。
+var (
+	pipelineTaskPool   = sync.Pool{New: func() any { return &pipelineTaskData{} }}
+	wsPipelineTaskPool = sync.Pool{New: func() any { return &wsPipelineTaskData{} }}
+	msgBufPool         = sync.Pool{New: func() any { b := make([]byte, 0, 512); return &b }}
+)
+
+// getMsgBuf 返回长度为 n 的入站帧缓冲；池中对象容量不足时退化为新分配。
+func getMsgBuf(n int) []byte {
+	if v := msgBufPool.Get(); v != nil {
+		b := *(v.(*[]byte))
+		if cap(b) >= n {
+			return b[:n]
+		}
+	}
+	return make([]byte, n)
+}
+
+// putMsgBuf 归还入站帧缓冲；超大缓冲（>1MB）不入池，交还 GC 一次性回收。
+func putMsgBuf(b []byte) {
+	if cap(b) == 0 || cap(b) > 1<<20 {
+		return
+	}
+	v := b[:0]
+	msgBufPool.Put(&v)
 }
 
 // pipelineWorker 是单个 worker goroutine，处理一个分片内的所有连接。
@@ -394,8 +456,7 @@ func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWork
 
 	for i := range shards {
 		p.workers[i].taskCh = make(chan pipelineTask, queueSize/shards)
-		p.wg.Add(1)
-		go p.runWorker(i)
+		p.wg.Go(func() { p.runWorker(i) })
 	}
 
 	tlog.Info(context.TODO(), "pipeline worker pool started shards=%d queueSize=%d", shards, queueSize)
@@ -404,7 +465,6 @@ func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWork
 
 // runWorker 是单个 worker goroutine 的主循环。
 func (p *PipelineWorkerPool) runWorker(shard int) {
-	defer p.wg.Done()
 	for t := range p.workers[shard].taskCh {
 		if t.wsTask != nil {
 			p.processWSTask(t.wsTask)
@@ -416,22 +476,34 @@ func (p *PipelineWorkerPool) runWorker(shard int) {
 
 // processTask 在 worker goroutine 中执行 TCP pipeline 处理。
 func (p *PipelineWorkerPool) processTask(task *pipelineTaskData) {
+	defer func() {
+		routes.PutClientMessage(task.message)
+		putMsgBuf(task.data)
+		pipelineTaskPool.Put(task)
+	}()
 	result := p.gw.pipeline.Process(task.conn, task.data, task.message, task.connectionID)
 	if result.Error != nil {
-		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
-		respData := routes.MarshalClientError(errorResp)
-		writeFrameAsync(task.conn, respData)
+		if result.ProtoMsg != nil {
+			backend.PutStreamData(result.ProtoMsg)
+		}
+		writeFrameAsync(task.conn, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
 	}
 	applyAsyncResult(task.conn, nil, result)
 }
 
 // processWSTask 在 worker goroutine 中执行 WebSocket pipeline 处理。
 func (p *PipelineWorkerPool) processWSTask(task *wsPipelineTaskData) {
+	defer func() {
+		routes.PutClientMessage(task.message)
+		putMsgBuf(task.payload)
+		wsPipelineTaskPool.Put(task)
+	}()
 	result := p.gw.pipeline.ProcessForWS(task.wsConn.Conn, task.payload, task.message, task.connectionID)
 	if result.Error != nil {
-		errorResp := routes.NewErrorResponse("error", result.Error.Error(), "", "")
-		responseData := routes.MarshalClientError(errorResp)
-		p.gw.sendWebSocketMessageAsync(task.wsConn, WSOpBinary, responseData)
+		if result.ProtoMsg != nil {
+			backend.PutStreamData(result.ProtoMsg)
+		}
+		p.gw.sendWebSocketMessageAsync(task.wsConn, WSOpBinary, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
 	}
 	applyAsyncResult(task.wsConn.Conn, task.wsConn, result)
 }
@@ -466,11 +538,12 @@ func writeFrameAsync(conn gnet.Conn, data []byte) {
 func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
 
 // Submit 将 TCP pipeline 任务提交到对应分片的 worker。
-func (p *PipelineWorkerPool) Submit(task pipelineTaskData) bool {
+// 提交失败（队列满）时返回 false，调用方负责归还任务与其缓冲。
+func (p *PipelineWorkerPool) Submit(task *pipelineTaskData) bool {
 	p.submitted.Add(1)
 	shard := p.getShard(task.connectionID)
 	select {
-	case p.workers[shard].taskCh <- pipelineTask{task: &task}:
+	case p.workers[shard].taskCh <- pipelineTask{task: task}:
 		return true
 	default:
 		p.dropped.Add(1)
@@ -483,11 +556,12 @@ func (p *PipelineWorkerPool) Submit(task pipelineTaskData) bool {
 }
 
 // SubmitWS 将 WebSocket pipeline 任务提交到对应分片的 worker。
-func (p *PipelineWorkerPool) SubmitWS(task wsPipelineTaskData) bool {
+// 提交失败（队列满）时返回 false，调用方负责归还任务与其缓冲。
+func (p *PipelineWorkerPool) SubmitWS(task *wsPipelineTaskData) bool {
 	p.submitted.Add(1)
 	shard := p.getShard(task.connectionID)
 	select {
-	case p.workers[shard].taskCh <- pipelineTask{wsTask: &task}:
+	case p.workers[shard].taskCh <- pipelineTask{wsTask: task}:
 		return true
 	default:
 		p.dropped.Add(1)
@@ -501,21 +575,7 @@ func (p *PipelineWorkerPool) SubmitWS(task wsPipelineTaskData) bool {
 
 // getShard 根据 connectionID 计算分片索引。
 func (p *PipelineWorkerPool) getShard(connectionID string) uint32 {
-	return fnvHashString(connectionID) % uint32(p.shards)
-}
-
-// fnvHashString 内联 FNV-1a，避免热路径每次分配 hash.Hash32 接口。
-func fnvHashString(s string) uint32 {
-	const (
-		offset32 = 2166136261
-		prime32  = 16777619
-	)
-	h := uint32(offset32)
-	for i := range s {
-		h ^= uint32(s[i])
-		h *= prime32
-	}
-	return h
+	return hashutil.FNV1a32(connectionID) % uint32(p.shards)
 }
 
 // Stats 返回工作池统计信息。

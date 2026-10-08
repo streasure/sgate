@@ -1,9 +1,10 @@
 package connection
 
 import (
-	"hash/fnv"
 	"sync"
 	"time"
+
+	"github.com/streasure/util/hashutil"
 )
 
 // writeCoalescer 轻量 dirty-set 跟踪器。
@@ -110,15 +111,12 @@ func NewShardedWriteCoalescer(cm *ConnectionManager, shardCount int) *ShardedWri
 	for i := range shardCount {
 		sw.shards[i] = newWriteCoalescer()
 	}
-	sw.wg.Add(1)
-	go sw.flushLoop()
+	sw.wg.Go(sw.flushLoop)
 	return sw
 }
 
 func (sw *ShardedWriteCoalescer) getShard(connID string) *writeCoalescer {
-	h := fnv.New32a()
-	h.Write([]byte(connID))
-	return sw.shards[h.Sum32()%sw.shardN]
+	return sw.shards[hashutil.FNV1a32(connID)%sw.shardN]
 }
 
 // AddMulti 将消息追加到连接的 coalescing buffer，并将连接标记为 dirty。
@@ -128,7 +126,6 @@ func (sw *ShardedWriteCoalescer) AddMulti(connID string, payload []byte, conn *C
 
 // flushLoop 定时刷新所有分片的 dirty-set。
 func (sw *ShardedWriteCoalescer) flushLoop() {
-	defer sw.wg.Done()
 	ticker := time.NewTicker(coalesceFlushInterval)
 	defer ticker.Stop()
 	for {

@@ -3,8 +3,10 @@
 package types
 
 import (
+	"cmp"
 	"context"
 	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -157,11 +159,9 @@ func (fc *FilterChain) RunByPhase(phase FilterPhase, fcx *FilterContext) bool {
 }
 
 func (fc *FilterChain) sortFiltersLocked() {
-	for i := 1; i < len(fc.filters); i++ {
-		for j := i; j > 0 && fc.filters[j].Priority() < fc.filters[j-1].Priority(); j-- {
-			fc.filters[j], fc.filters[j-1] = fc.filters[j-1], fc.filters[j]
-		}
-	}
+	slices.SortStableFunc(fc.filters, func(a, b Filter) int {
+		return cmp.Compare(a.Priority(), b.Priority())
+	})
 }
 
 // ErrFilterNotFound 过滤器未注册错误

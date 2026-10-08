@@ -12,6 +12,7 @@ import (
 	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/httputil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -170,20 +171,19 @@ func (g *Gateway) kickConnectionsAsync(matched []*connection.Connection, reason 
 		var wg sync.WaitGroup
 		const workers = 32
 		chunkSize := (total + workers - 1) / workers
-		for w := 0; w < workers; w++ {
+		for w := range workers {
 			lo := w * chunkSize
 			if lo >= total {
 				break
 			}
 			hi := min(lo+chunkSize, total)
-			wg.Add(1)
-			go func(chunk []*connection.Connection) {
-				defer wg.Done()
+			chunk := matched[lo:hi]
+			wg.Go(func() {
 				for _, conn := range chunk {
 					g.kickForMaintenance(conn, reason)
 					kicked.Add(1)
 				}
-			}(matched[lo:hi])
+			})
 		}
 		wg.Wait()
 		tlog.Info(context.TODO(), "maintenance kick done matched=%d kicked=%d reason=%s", total, kicked.Load(), reason)
@@ -210,29 +210,21 @@ type maintenanceResponse struct {
 	Removed  bool   `json:"removed,omitempty"`  // disable：标记确实被移除
 }
 
-// handleAdminMaintenance POST /admin/maintenance 切维护接口。
+// handleAdminMaintenance POST /admin/maintenance 切维护接口（方法与鉴权由 adminHandler 统一处理）。
 func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	if !g.adminAuthed(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
 	var req maintenanceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
 		return
 	}
 	serverID := strings.TrimSpace(req.ServerID)
 	zone := strings.TrimSpace(req.Zone)
 	if (serverID == "") == (zone == "") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "serverId or zone required (exactly one)"})
+		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "serverId or zone required (exactly one)"})
 		return
 	}
 	if g.maintenance == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "maintenance not initialized"})
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "maintenance not initialized"})
 		return
 	}
 
@@ -250,7 +242,7 @@ func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request)
 		g.kickConnectionsAsync(matched, reason)
 		tlog.Info(context.TODO(), "maintenance enabled action=enable serverId=%s zone=%s reason=%s matched=%d",
 			serverID, zone, reason, len(matched))
-		writeJSON(w, http.StatusOK, maintenanceResponse{
+		httputil.WriteJSON(w, http.StatusOK, maintenanceResponse{
 			OK: true, Action: "enable", ServerID: serverID, Zone: zone,
 			Reason: reason, Matched: len(matched), Accepted: true,
 		})
@@ -258,10 +250,10 @@ func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request)
 		removed := g.maintenance.disable(serverID, zone)
 		tlog.Info(context.TODO(), "maintenance disabled action=disable serverId=%s zone=%s removed=%v",
 			serverID, zone, removed)
-		writeJSON(w, http.StatusOK, maintenanceResponse{
+		httputil.WriteJSON(w, http.StatusOK, maintenanceResponse{
 			OK: true, Action: "disable", ServerID: serverID, Zone: zone, Removed: removed,
 		})
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action must be enable or disable"})
+		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "action must be enable or disable"})
 	}
 }

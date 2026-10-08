@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/util/gatewayutil"
 )
 
 // WasmRuntime WebAssembly 插件运行时抽象

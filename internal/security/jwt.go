@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,8 +14,8 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/util/gatewayutil"
 )
 
 // JWTAuthFilter JWT 鉴权过滤器
@@ -153,11 +154,7 @@ func (f *JWTAuthFilter) Revoke(jti string, exp int64) {
 	defer f.mu.Unlock()
 	now := time.Now().Unix()
 	if len(f.revoked) > 1024 {
-		for k, e := range f.revoked {
-			if e <= now {
-				delete(f.revoked, k)
-			}
-		}
+		maps.DeleteFunc(f.revoked, func(_ string, e int64) bool { return e <= now })
 	}
 	f.revoked[jti] = exp
 }

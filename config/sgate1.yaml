@@ -29,11 +29,6 @@ grpc:
 monitoring:
   pprofAddr: ":6060"
   disableMetricsLog: true   # 线上关闭每秒 metrics 日志
-  prometheus:
-    enabled: false
-    addr: ":9101"
-    path: "/metrics"
-    prefix: "app"
 
 configCenter:
   enabled: false

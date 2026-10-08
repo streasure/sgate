@@ -2,8 +2,6 @@ package backend
 
 import (
 	"context"
-	"fmt"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,62 +9,47 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/metadata"
 )
 
-type connGroup struct {
-	conn   *grpc.ClientConn
-	client protoGw.GatewayStreamClient
-}
-
-// LogicClient 逻辑服客户端，管理与单个逻辑服实例的连接和流通信
+// LogicClient 逻辑服连接：sgate 不再主动拨号，logic 主动拨入后
+// 由 LogicClientPool.Attach 附着到本对象。连接可用性完全由
+// 分片接入计数驱动（attached == totalShards 即 Connected），
+// 重连责任在 logic 拨出侧。
 type LogicClient struct {
-	mu                sync.RWMutex                  // 保护状态和连接的读写锁
-	connectMu         sync.Mutex                    // 串行化 doConnect，防止并发重连创建多套流
-	state             atomic.Int32                  // 连接状态（原子操作）
-	address           string                        // 逻辑服地址
-	streamManager     atomic.Pointer[StreamManager] // 流分片管理器（原子替换，热路径无锁读取）
-	streamCtx         context.Context               // 流上下文
-	streamCancel      context.CancelFunc            // 取消流上下文
-	reconnectConfig   ReconnectConfig               // 重连配置
-	healthCheckConfig HealthCheckConfig             // 健康检查配置
-	healthChecker     *HealthChecker                // 健康检查器
-	reconnectManager  *ReconnectManager             // 重连管理器
-	messageQueue      *StreamMessageQueue           // 断线期间的消息缓存队列
-	gateway           GatewayInterface              // 网关接口引用
-	closing           bool                          // 是否正在关闭
-	closed            chan struct{}                 // 关闭完成信号
-	shardCount        int                           // 分片数量
-	connGroupCount    int                           // 独立 TCP 连接组数（默认 4）
-	connGroups        []connGroup                   // N 条独立 gRPC 连接
-	serverID          string                        // 逻辑服标识
+	mu            sync.RWMutex                  // 保护状态和连接的读写锁
+	state         atomic.Int32                  // 连接状态（原子操作）
+	address       string                        // 逻辑服地址（握手元数据，诊断用）
+	streamManager atomic.Pointer[StreamManager] // 流分片管理器（原子替换，热路径无锁读取）
+	messageQueue  *StreamMessageQueue           // 断线期间的消息缓存队列
+	gateway       GatewayInterface              // 网关接口引用
+	closing       bool                          // 是否正在关闭
+	closed        chan struct{}                 // 关闭完成信号
+	totalShards   int                           // 分片总数（握手时确定，创建后只读）
+	attached      atomic.Int32                  // 当前已接入的分片数
+	serverID      string                        // 逻辑服标识
 }
 
 // NewLogicClient 创建逻辑服客户端实例
 func NewLogicClient(gateway GatewayInterface) *LogicClient {
 	queuePolicy := config.StreamQueueConfig{}
 	var sendTimeout time.Duration
+	var batchUpstream bool
 	if gateway != nil {
 		queuePolicy = gateway.GetStreamConfig().QueuePolicy
-		if d, err := time.ParseDuration(queuePolicy.SendTimeout); err == nil && d > 0 {
+		batchUpstream = gateway.GetStreamConfig().BatchUpstream
+		if d := gatewayutil.ParseDurationDefault(queuePolicy.SendTimeout, 0); d > 0 {
 			sendTimeout = d
 		}
 	}
 	lc := &LogicClient{
-		state:             atomic.Int32{},
-		reconnectConfig:   DefaultReconnectConfig,
-		healthCheckConfig: DefaultHealthCheckConfig,
-		gateway:           gateway,
-		closing:           false,
-		closed:            make(chan struct{}),
-		shardCount:        runtime.NumCPU() * 8,
-		messageQueue:      NewStreamMessageQueue(queuePolicy),
+		gateway:      gateway,
+		closing:      false,
+		closed:       make(chan struct{}),
+		messageQueue: NewStreamMessageQueue(queuePolicy),
 	}
-	lc.streamManager.Store(NewStreamManager(0, 0, sendTimeout))
+	lc.streamManager.Store(NewStreamManager(0, 0, sendTimeout, batchUpstream))
 	return lc
 }
 
@@ -102,242 +85,99 @@ func (lc *LogicClient) notifyStateChange(oldState, newState LogicConnectionState
 	)
 }
 
-// Connect 连接到逻辑服
-func (lc *LogicClient) Connect(address string) error {
-	lc.mu.Lock()
-	if lc.closing {
-		lc.mu.Unlock()
-		return ErrConnectionClosing
-	}
-	lc.address = address
-	lc.mu.Unlock()
-	return lc.doConnect(false)
-}
-
-// doConnect 执行实际的连接/重连操作。
-// connectMu 串行化重连，防止并发 doConnect 创建多套 connGroup/stream。
-func (lc *LogicClient) doConnect(isReconnect bool) error {
-	lc.connectMu.Lock()
-	defer lc.connectMu.Unlock()
-
-	lc.mu.Lock()
-	if lc.closing {
-		lc.mu.Unlock()
-		return ErrConnectionClosing
-	}
-
-	var oldState LogicConnectionState
-	if isReconnect {
-		oldState = LogicConnectionState(lc.state.Load())
-		lc.state.Store(int32(LogicStateReconnecting))
-	} else {
-		oldState = LogicConnectionState(lc.state.Load())
-		lc.state.Store(int32(LogicStateConnecting))
-	}
-
-	// 关闭旧的连接组
-	if len(lc.connGroups) > 0 {
-		tlog.Info(context.TODO(), "doConnect closing old connGroups count=%d isReconnect=%v", len(lc.connGroups), isReconnect)
-		for _, cg := range lc.connGroups {
-			cg.conn.Close()
-		}
-		lc.connGroups = nil
-	}
-	lc.mu.Unlock()
-
-	lc.notifyStateChange(oldState, LogicConnectionState(lc.state.Load()))
-
-	tlog.Info(context.TODO(), "connecting to logic server address=%s reconnect=%v", lc.address, isReconnect)
-
-	windowSize := int32(524288)
-	maxMsgSize := 4 * 1024 * 1024
-	connGroupCount := 4 // 默认 4 条独立 TCP 连接
-	if lc.gateway != nil {
-		grpcCfg := lc.gateway.GetGRPCConfig()
-		windowSize = int32(grpcCfg.WindowSize)
-		maxMsgSize = grpcCfg.MaxMessageSize
-		streamCfg := lc.gateway.GetStreamConfig()
-		if streamCfg.ConnGroupCount > 0 {
-			connGroupCount = streamCfg.ConnGroupCount
-		}
-	}
-
-	// 创建 N 条独立 gRPC 连接
-	newGroups := make([]connGroup, connGroupCount)
-	for g := 0; g < connGroupCount; g++ {
-		conn, err := grpc.NewClient(lc.address,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithInitialWindowSize(windowSize),
-			grpc.WithInitialConnWindowSize(windowSize),
-			grpc.WithDefaultCallOptions(
-				grpc.MaxCallRecvMsgSize(maxMsgSize),
-				grpc.MaxCallSendMsgSize(maxMsgSize),
-			),
-			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                30 * time.Second,
-				Timeout:             10 * time.Second,
-				PermitWithoutStream: true,
-			}),
-		)
-		if err != nil {
-			tlog.Error(context.TODO(), "grpc.NewClient failed error=%v address=%s connGroup=%d", err, lc.address, g)
-			// 关闭已创建的连接
-			for j := 0; j < g; j++ {
-				newGroups[j].conn.Close()
-			}
-			lc.setState(LogicStateDisconnected)
-			return err
-		}
-		newGroups[g] = connGroup{
-			conn:   conn,
-			client: protoGw.NewGatewayStreamClient(conn),
-		}
-	}
-
-	// 在阻塞的 dial 之后重新检查关闭状态
-	lc.mu.Lock()
-	if lc.closing {
-		lc.mu.Unlock()
-		for _, cg := range newGroups {
-			cg.conn.Close()
-		}
-		lc.setState(LogicStateDisconnected)
-		return ErrConnectionClosing
-	}
-	lc.connGroups = newGroups
-	lc.connGroupCount = connGroupCount
-	lc.mu.Unlock()
-
-	lc.mu.Lock()
-	if lc.streamCancel != nil {
-		lc.streamCancel()
-	}
-	lc.streamCtx, lc.streamCancel = context.WithCancel(context.Background())
-	lc.mu.Unlock()
-
-	// 关闭旧的流分片
-	if oldSM := lc.streamManager.Load(); oldSM != nil {
-		for i := range oldSM.shards {
-			if shard := oldSM.shards[i]; shard != nil {
-				shard.closed.Store(true)
-				shard.mu.Lock()
-				shard.stream = nil
-				shard.mu.Unlock()
-				shard.stop()
-			}
-		}
-	}
-
-	shardCount := lc.shardCount
+// initAccepted 构建接入（flip）模式的流分片管理器并启动各分片发送循环。
+// 由 LogicClientPool.Attach 在创建客户端时调用一次；totalShards 此后只读。
+func (lc *LogicClient) initAccepted(totalShards int) {
 	sendChannelSize := 0
 	var sendTimeout time.Duration
+	var batchUpstream bool
 	if lc.gateway != nil {
 		streamCfg := lc.gateway.GetStreamConfig()
 		sendChannelSize = streamCfg.SendChannelSize
-		if streamCfg.ShardCount > 0 {
-			shardCount = streamCfg.ShardCount
-		}
-		if d, err := time.ParseDuration(streamCfg.QueuePolicy.SendTimeout); err == nil && d > 0 {
+		batchUpstream = streamCfg.BatchUpstream
+		if d := gatewayutil.ParseDurationDefault(streamCfg.QueuePolicy.SendTimeout, 0); d > 0 {
 			sendTimeout = d
 		}
 	}
-	newSM := NewStreamManager(shardCount, sendChannelSize, sendTimeout)
-	lc.streamManager.Store(newSM)
-
-	// 建立 stream：每个 shard 分配到对应的 connGroup
-	var wg sync.WaitGroup
-	var firstErr error
-	var errOnce sync.Once
-
-	for i := range shardCount {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-
-			groupIdx := idx % connGroupCount
-			lc.mu.RLock()
-			cg := lc.connGroups[groupIdx]
-			ctx := lc.streamCtx
-			lc.mu.RUnlock()
-
-			if cg.client == nil || ctx == nil {
-				errOnce.Do(func() { firstErr = fmt.Errorf("client or context is nil") })
-				return
-			}
-
-			if lc.gateway != nil {
-				ctx = metadata.AppendToOutgoingContext(ctx, "sgate-gateway-id", lc.gateway.GetGatewayID())
-			}
-			stream, err := cg.client.OnData(ctx)
-			if err != nil {
-				errOnce.Do(func() { firstErr = err })
-				tlog.Error(context.TODO(), "failed to establish stream shard shard=%d connGroup=%d error=%v", idx, groupIdx, err)
-				return
-			}
-
-			shard := newSM.shards[idx]
-			shard.mu.Lock()
-			shard.stream = stream
-			shard.ctx = ctx
-			shard.mu.Unlock()
-
-			tlog.Info(context.TODO(), "stream shard established shard=%d connGroup=%d", idx, groupIdx)
-		}(i)
+	sm := NewStreamManager(totalShards, sendChannelSize, sendTimeout, batchUpstream)
+	for i := range sm.shards {
+		sm.shards[i].lc = lc
+		go sm.shards[i].startSendLoop()
 	}
-	wg.Wait()
+	lc.totalShards = totalShards
+	lc.streamManager.Store(sm)
+}
 
-	if firstErr != nil {
-		tlog.Error(context.TODO(), "failed to establish all stream shards error=%v", firstErr)
-		for i := range shardCount {
-			shard := newSM.shards[i]
-			shard.mu.Lock()
-			if shard.stream != nil {
-				shard.stream.CloseSend()
-				shard.stream = nil
-			}
-			shard.mu.Unlock()
+// attachShard 将 logic 拨入的一条流附着到指定分片。
+// 全部分片接入后置为 Connected 并冲刷断线期间缓存的消息。
+func (lc *LogicClient) attachShard(idx int, stream dataStream) error {
+	lc.mu.RLock()
+	closing := lc.closing
+	lc.mu.RUnlock()
+	if closing {
+		return ErrConnectionClosing
+	}
+	sm := lc.streamManager.Load()
+	if sm == nil || idx < 0 || idx >= len(sm.shards) {
+		return ErrNotConnected
+	}
+	sh := sm.shards[idx]
+
+	sh.mu.Lock()
+	prev := sh.stream
+	sh.stream = stream
+	sh.mu.Unlock()
+
+	if prev == nil {
+		lc.attached.Add(1)
+	} else {
+		// logic 重拨时旧流尚未报错：原地替换，计数不变。
+		tlog.Warn(context.TODO(), "shard stream replaced by new dial shard=%d serverID=%s", idx, lc.serverID)
+	}
+
+	if int(lc.attached.Load()) >= lc.totalShards && lc.getState() != LogicStateConnected {
+		lc.setState(LogicStateConnected)
+		if lc.messageQueue != nil {
+			go lc.messageQueue.Flush(lc)
 		}
-		lc.mu.Lock()
-		for _, cg := range lc.connGroups {
-			cg.conn.Close()
-		}
-		lc.connGroups = nil
-		lc.mu.Unlock()
-		lc.setState(LogicStateDisconnected)
-		return firstErr
 	}
-
-	tlog.Info(context.TODO(), "all stream shards established count=%d connGroups=%d", shardCount, connGroupCount)
-
-	lc.setState(LogicStateConnected)
-
-	for i := range shardCount {
-		newSM.shards[i].lc = lc
-		go newSM.shards[i].startSendLoop()
-		go newSM.shards[i].receiveMessages(lc, i)
-	}
-
-	// 冲刷断线期间缓存的消息。
-	if lc.messageQueue != nil {
-		go lc.messageQueue.Flush(lc)
-	}
-
-	if lc.reconnectManager == nil {
-		lc.reconnectManager = NewReconnectManager(lc, lc.reconnectConfig)
-		if lc.gateway != nil {
-			lc.reconnectManager.SetLookupAddress(lc.gateway.LookupLogicAddress)
-		}
-		go lc.reconnectManager.Run()
-	}
-
-	lc.startHealthChecker()
-
-	tlog.Info(context.TODO(), "successfully connected to logic server address=%s shards=%d connGroups=%d isReconnect=%v", lc.address, shardCount, connGroupCount, isReconnect)
-
 	return nil
 }
 
-// Close 关闭逻辑服客户端，释放所有资源
+// detachShard 解除分片与指定流的绑定（幂等）。
+// 仅当该流仍是分片当前绑定时生效；接入数低于总数即判定断开，
+// 消息重新进入断线队列，等待 logic 重新拨入。
+func (lc *LogicClient) detachShard(sh *StreamShard, stream dataStream) {
+	sh.mu.Lock()
+	if sh.stream != stream {
+		sh.mu.Unlock()
+		return
+	}
+	sh.stream = nil
+	sh.mu.Unlock()
+
+	lc.mu.RLock()
+	closing := lc.closing
+	lc.mu.RUnlock()
+	if closing {
+		return
+	}
+
+	n := lc.attached.Add(-1)
+	if n < 0 {
+		tlog.Error(context.TODO(), "detachShard: attached count went negative serverID=%s", lc.serverID)
+		return
+	}
+	if int(n) < lc.totalShards && lc.getState() == LogicStateConnected {
+		tlog.Warn(context.TODO(), "logic stream set incomplete, marking disconnected attached=%d total=%d serverID=%s",
+			int(n), lc.totalShards, lc.serverID)
+		lc.setState(LogicStateDisconnected)
+	}
+}
+
+// Close 关闭逻辑服客户端，释放所有资源。
+// 分片停止后，各 OnData 接收循环在下一次 Recv 报错时退出
+// （gRPC server Stop 会强制关闭底层连接）。
 func (lc *LogicClient) Close() {
 	lc.mu.Lock()
 	if lc.closing {
@@ -345,11 +185,6 @@ func (lc *LogicClient) Close() {
 		return
 	}
 	lc.closing = true
-	if lc.streamCancel != nil {
-		lc.streamCancel()
-		lc.streamCtx = nil
-		lc.streamCancel = nil
-	}
 
 	if oldSM := lc.streamManager.Load(); oldSM != nil {
 		for i := range oldSM.shards {
@@ -363,56 +198,8 @@ func (lc *LogicClient) Close() {
 
 	lc.setState(LogicStateDisconnected)
 
-	if lc.healthChecker != nil {
-		lc.healthChecker.Stop()
-	}
-	if lc.reconnectManager != nil {
-		lc.reconnectManager.Stop()
-	}
-
-	lc.mu.Lock()
-	for _, cg := range lc.connGroups {
-		cg.conn.Close()
-	}
-	lc.connGroups = nil
-	lc.mu.Unlock()
-
 	close(lc.closed)
 	tlog.Info(context.TODO(), "closed logic server connection")
-}
-
-// receiveMessages 从流中接收消息并推送到客户端连接
-func (lc *LogicClient) handleDisconnection() {
-	lc.mu.RLock()
-	closing := lc.closing
-	state := lc.getState()
-	lc.mu.RUnlock()
-
-	if closing {
-		return
-	}
-
-	if state == LogicStateConnecting || state == LogicStateReconnecting {
-		return
-	}
-
-	lc.setState(LogicStateDisconnected)
-
-	if lc.reconnectManager != nil {
-		lc.reconnectManager.NotifyDisconnection()
-	} else {
-		tlog.Info(context.TODO(), "logic server disconnected, attempting reconnect in 5s...")
-		time.Sleep(5 * time.Second)
-		if lc.closing {
-			return
-		}
-		err := lc.doConnect(true)
-		if err != nil {
-			tlog.Error(context.TODO(), "reconnect failed error=%v", err)
-		} else {
-			tlog.Info(context.TODO(), "reconnect succeeded")
-		}
-	}
 }
 
 // SendMessage 发送消息到逻辑服，支持断线缓存
@@ -514,8 +301,7 @@ func NewHealthChecker(lc *LogicClient, config HealthCheckConfig) *HealthChecker 
 
 // Start 启动健康检查循环
 func (hc *HealthChecker) Start() {
-	hc.wg.Add(1)
-	go hc.checkLoop()
+	hc.wg.Go(hc.checkLoop)
 }
 
 // Stop 停止健康检查循环并等待退出（幂等）
@@ -526,7 +312,6 @@ func (hc *HealthChecker) Stop() {
 
 // checkLoop 健康检查定时循环
 func (hc *HealthChecker) checkLoop() {
-	defer hc.wg.Done()
 	ticker := time.NewTicker(hc.interval)
 	defer ticker.Stop()
 	for {
@@ -564,130 +349,11 @@ func (hc *HealthChecker) doCheck() {
 		hc.failCount++
 		tlog.Warn(context.TODO(), "health check failed failCount=%d maxFailures=%d error=%v", hc.failCount, hc.maxFailures, err)
 		if hc.failCount >= hc.maxFailures {
-			tlog.Error(context.TODO(), "too many health check failures, triggering reconnect failCount=%d", hc.failCount)
-			hc.lc.handleDisconnection()
+			tlog.Error(context.TODO(), "too many health check failures, marking disconnected failCount=%d", hc.failCount)
+			hc.lc.setState(LogicStateDisconnected)
 		}
 	} else {
 		hc.failCount = 0
-	}
-}
-
-// startHealthChecker 启动健康检查器
-func (lc *LogicClient) startHealthChecker() {
-	if lc.healthChecker != nil {
-		lc.healthChecker.Stop()
-	}
-	lc.healthChecker = NewHealthChecker(lc, lc.healthCheckConfig)
-	lc.healthChecker.Start()
-}
-
-// ReconnectManager 重连管理器，处理断线后的自动重连逻辑
-type ReconnectManager struct {
-	lc            *LogicClient                 // 逻辑服客户端引用
-	config        ReconnectConfig              // 重连配置
-	stopCh        chan struct{}                // 停止信号
-	doneCh        chan struct{}                // 运行完成信号
-	disconnectCh  chan struct{}                // 断线通知通道
-	lookupAddress func(serverID string) string // 可选：通过 etcd 查询替换地址
-}
-
-// NewReconnectManager 创建重连管理器
-func NewReconnectManager(lc *LogicClient, config ReconnectConfig) *ReconnectManager {
-	return &ReconnectManager{
-		lc:           lc,
-		config:       config,
-		stopCh:       make(chan struct{}),
-		doneCh:       make(chan struct{}),
-		disconnectCh: make(chan struct{}, 1),
-	}
-}
-
-// SetLookupAddress 设置地址查询函数，用于 etcd 服务发现
-func (rm *ReconnectManager) SetLookupAddress(fn func(serverID string) string) {
-	rm.lookupAddress = fn
-}
-
-// Run 运行重连管理器事件循环
-func (rm *ReconnectManager) Run() {
-	defer close(rm.doneCh)
-	for {
-		select {
-		case <-rm.stopCh:
-			return
-		case <-rm.disconnectCh:
-			rm.doReconnect()
-		}
-	}
-}
-
-// Stop 停止重连管理器
-func (rm *ReconnectManager) Stop() {
-	close(rm.stopCh)
-	<-rm.doneCh
-}
-
-// NotifyDisconnection 通知发生断线，触发重连
-func (rm *ReconnectManager) NotifyDisconnection() {
-	select {
-	case rm.disconnectCh <- struct{}{}:
-	default:
-	}
-}
-
-// doReconnect 执行重连逻辑，支持指数退避和 etcd 服务发现
-func (rm *ReconnectManager) doReconnect() {
-	interval := rm.config.InitialInterval
-	attempt := 0
-	originalAddress := rm.lc.address
-
-	for {
-		select {
-		case <-rm.stopCh:
-			return
-		default:
-		}
-
-		if rm.config.MaxAttempts > 0 && attempt >= rm.config.MaxAttempts {
-			tlog.Error(context.TODO(), "max reconnect attempts reached, trying etcd discovery maxAttempts=%d serverID=%s",
-				rm.config.MaxAttempts, rm.lc.serverID)
-
-			// 尝试通过 etcd 服务发现查找替代节点。
-			// 尝试通过 etcd 发现替代节点
-			if rm.lookupAddress != nil {
-				if newAddr := rm.lookupAddress(rm.lc.serverID); newAddr != "" && newAddr != originalAddress {
-					tlog.Info(context.TODO(), "discovered replacement address from etcd serverID=%s oldAddress=%s newAddress=%s",
-						rm.lc.serverID, originalAddress, newAddr)
-					rm.lc.mu.Lock()
-					rm.lc.address = newAddr
-					rm.lc.mu.Unlock()
-					if err := rm.lc.doConnect(true); err == nil {
-						tlog.Info(context.TODO(), "reconnect to replacement node succeeded address=%s", newAddr)
-						return
-					}
-					tlog.Warn(context.TODO(), "reconnect to replacement node failed address=%s", newAddr)
-				}
-			}
-			return
-		}
-
-		attempt++
-		tlog.Info(context.TODO(), "attempting reconnect attempt=%d address=%s", attempt, rm.lc.address)
-
-		select {
-		case <-rm.stopCh:
-			return
-		case <-time.After(interval):
-		}
-
-		err := rm.lc.doConnect(true)
-		if err == nil {
-			tlog.Info(context.TODO(), "reconnect successful attempt=%d", attempt)
-			return
-		}
-
-		tlog.Warn(context.TODO(), "reconnect failed attempt=%d error=%v", attempt, err)
-
-		interval = min(time.Duration(float64(interval)*rm.config.Multiplier), rm.config.MaxInterval)
 	}
 }
 
@@ -709,12 +375,7 @@ func NewStreamMessageQueue(cfg config.StreamQueueConfig) *StreamMessageQueue {
 	if maxSize <= 0 {
 		maxSize = 100000
 	}
-	blockTimeout := 500 * time.Millisecond
-	if cfg.BlockTimeout != "" {
-		if d, err := time.ParseDuration(cfg.BlockTimeout); err == nil {
-			blockTimeout = d
-		}
-	}
+	blockTimeout := gatewayutil.ParseDurationDefault(cfg.BlockTimeout, 500*time.Millisecond)
 	threshold := cfg.BackpressureThreshold
 	if threshold <= 0 || threshold > 1 {
 		threshold = 0.8

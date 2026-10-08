@@ -4,13 +4,12 @@ import (
 	"context"
 	"os"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/process"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/sys"
 	"github.com/streasure/util/tlog"
 )
 
@@ -48,42 +47,12 @@ type OverloadProtector struct {
 // parseGOMEMLIMIT 读取 GOMEMLIMIT 环境变量（如 "4GiB"/"4096MiB"/"4294967296"）。
 // Go 1.19+ runtime 通过该环境变量设置软内存上限。
 func parseGOMEMLIMIT() uint64 {
-	v := os.Getenv("GOMEMLIMIT")
-	if v == "" {
-		return 0
-	}
-	v = strings.TrimSpace(v)
-	// 支持 B/KiB/MiB/GiB/TiB 后缀（Go runtime 格式）
-	multiplier := uint64(1)
-	numPart := v
-	switch {
-	case strings.HasSuffix(v, "GiB"):
-		multiplier = 1024 * 1024 * 1024
-		numPart = strings.TrimSuffix(v, "GiB")
-	case strings.HasSuffix(v, "MiB"):
-		multiplier = 1024 * 1024
-		numPart = strings.TrimSuffix(v, "MiB")
-	case strings.HasSuffix(v, "KiB"):
-		multiplier = 1024
-		numPart = strings.TrimSuffix(v, "KiB")
-	case strings.HasSuffix(v, "TiB"):
-		multiplier = 1024 * 1024 * 1024 * 1024
-		numPart = strings.TrimSuffix(v, "TiB")
-	case strings.HasSuffix(v, "G"):
-		multiplier = 1024 * 1024 * 1024
-		numPart = strings.TrimSuffix(v, "G")
-	case strings.HasSuffix(v, "M"):
-		multiplier = 1024 * 1024
-		numPart = strings.TrimSuffix(v, "M")
-	case strings.HasSuffix(v, "K"):
-		multiplier = 1024
-		numPart = strings.TrimSuffix(v, "K")
-	}
-	n, err := strconv.ParseFloat(numPart, 64)
+	// 支持 B/K/M/G/T 与 KiB/MiB/GiB/TiB 后缀（Go runtime 格式），非法或未设返回 0
+	v, err := sys.ParseByteSize(os.Getenv("GOMEMLIMIT"))
 	if err != nil {
 		return 0
 	}
-	return uint64(n * float64(multiplier))
+	return v
 }
 
 func NewOverloadProtector(cfg config.ProtectionConfig) *OverloadProtector {

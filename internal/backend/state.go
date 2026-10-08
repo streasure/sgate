@@ -38,22 +38,6 @@ var (
 	ErrBackpressure      = errors.New("背压已激活")
 )
 
-// ReconnectConfig 重连配置，控制指数退避策略
-type ReconnectConfig struct {
-	InitialInterval time.Duration // 初始重连间隔
-	MaxInterval     time.Duration // 最大重连间隔
-	MaxAttempts     int           // 最大重连尝试次数（0表示无限）
-	Multiplier      float64       // 退避倍数
-}
-
-// DefaultReconnectConfig 默认重连配置
-var DefaultReconnectConfig = ReconnectConfig{
-	InitialInterval: 1 * time.Second,
-	MaxInterval:     30 * time.Second,
-	MaxAttempts:     0,
-	Multiplier:      2.0,
-}
-
 // HealthCheckConfig 健康检查配置
 type HealthCheckConfig struct {
 	Interval    time.Duration // 检查间隔

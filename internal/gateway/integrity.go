@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -36,11 +37,9 @@ func (mi *MessageIntegrity) cleanupCache() {
 		case <-ticker.C:
 			mi.cacheMutex.Lock()
 			now := time.Now().UnixMilli()
-			for key, ts := range mi.replayCache {
-				if now-ts > mi.timeWindow {
-					delete(mi.replayCache, key)
-				}
-			}
+			maps.DeleteFunc(mi.replayCache, func(_ string, ts int64) bool {
+				return now-ts > mi.timeWindow
+			})
 			mi.cacheMutex.Unlock()
 		}
 	}

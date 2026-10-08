@@ -3,13 +3,13 @@ package backend
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/util/hashutil"
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
@@ -17,17 +17,26 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// dataStream 数据流抽象：兼容旧模式（sgate 拨出的客户端流）与
+// flip 模式（logic 主动拨入、sgate 侧的服务端流），二者均有 Send/Recv。
+type dataStream interface {
+	Send(*protoGw.StreamData) error
+	Recv() (*protoGw.StreamData, error)
+}
+
 type StreamShard struct {
-	stream      protoGw.GatewayStream_OnDataClient // gRPC 流客户端
-	mu          sync.Mutex                         // 保护 stream 引用的互斥锁
-	sendCh      chan *protoGw.StreamData           // 发送通道
-	stopCh      chan struct{}                      // 停止信号通道
-	stopOnce    sync.Once                          // 确保只关闭一次 stopCh
-	ctx         context.Context                    // 流上下文
-	index       int                                // 分片索引
-	lc          *LogicClient                       // 所属的逻辑服客户端
-	closed      atomic.Bool                        // 是否已关闭
-	sendTimeout time.Duration                      // 发送超时
+	stream      dataStream               // gRPC 流（接入后由握手填充）
+	mu          sync.Mutex               // 保护 stream 引用的互斥锁
+	sendCh      chan *protoGw.StreamData // 发送通道
+	stopCh      chan struct{}            // 停止信号通道
+	stopOnce    sync.Once                // 确保只关闭一次 stopCh
+	index       int                      // 分片索引
+	lc          *LogicClient             // 所属的逻辑服客户端
+	closed      atomic.Bool              // 是否已关闭
+	sendTimeout time.Duration            // 发送超时
+	// batchUpstream 为 true 时多条 StreamData 合并为单个 StreamBatch gRPC 帧发送
+	// （两端必须同时开启 stream.batchUpstream，见 config.StreamConfig）。
+	batchUpstream bool
 }
 
 // StreamManager 流连接管理器，通过分片减少并发竞争
@@ -37,7 +46,7 @@ type StreamManager struct {
 }
 
 // NewStreamManager 创建流管理器，根据 CPU 核心数和配置初始化分片
-func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Duration) *StreamManager {
+func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Duration, batchUpstream bool) *StreamManager {
 	if shardCount <= 0 {
 		shardCount = runtime.NumCPU() * 4
 	}
@@ -53,10 +62,11 @@ func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Dura
 	}
 	for i := range sm.shards {
 		sm.shards[i] = &StreamShard{
-			sendCh:      make(chan *protoGw.StreamData, sendChannelSize),
-			stopCh:      make(chan struct{}),
-			index:       i,
-			sendTimeout: sendTimeout,
+			sendCh:        make(chan *protoGw.StreamData, sendChannelSize),
+			stopCh:        make(chan struct{}),
+			index:         i,
+			sendTimeout:   sendTimeout,
+			batchUpstream: batchUpstream,
 		}
 	}
 	return sm
@@ -64,21 +74,14 @@ func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Dura
 
 // GetShard 根据连接 ID 的哈希值获取对应的分片
 func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
-	h := fnv.New32a()
-	h.Write([]byte(connectionID))
-	return sm.shards[h.Sum32()%uint32(len(sm.shards))]
+	return sm.shards[hashutil.FNV1a32(connectionID)%uint32(len(sm.shards))]
 }
 
-// markShardBroken 分片流失效后的统一处理：触发整体重连。
-// 没有这一步，逻辑服重启或网络闪断后 shard.stream 永远为 nil，
-// 正向消息会静默丢弃、反向推送归零，健康检查的 ping 也只会
-// 塞进已失效的 sendCh，永远无法探测出故障。
-func (s *StreamShard) markShardBroken() {
-	s.mu.Lock()
-	s.stream = nil
-	s.mu.Unlock()
+// detach 从发送失败侧解除本分片与指定流的绑定（幂等）。
+// 重连/重接入由 logic 拨入方负责：sgate 只维护状态与计数。
+func (s *StreamShard) detach(stream dataStream) {
 	if s.lc != nil {
-		go s.lc.handleDisconnection()
+		s.lc.detachShard(s, stream)
 	}
 }
 
@@ -129,7 +132,8 @@ func (s *StreamShard) startSendLoop() {
 		s.mu.Unlock()
 
 		if stream == nil {
-			// 流不可用时归还对象池，并统计推送丢弃
+			// 流不可用（分片尚未接入或已断开）：状态机已把消息切给
+			// 断线队列，这里只可能收到在途残余，归还对象池并统计丢弃。
 			if s.lc != nil && s.lc.gateway != nil {
 				s.lc.gateway.AddPushDroppedNoConn(int64(len(batch)))
 			}
@@ -140,11 +144,26 @@ func (s *StreamShard) startSendLoop() {
 		}
 
 		// 使用单个流引用发送整批消息。
+		// StreamBatch 合帧：开启合帧时整批（含单条）压成单个 gRPC 帧，
+		// 接收端固定按 StreamBatch 解码，绝不能在同一股流上混发裸 StreamData。
 		sendIdx := 0
+		if s.batchUpstream {
+			if ms, ok := stream.(interface{ SendMsg(m any) error }); ok {
+				if err := ms.SendMsg(&protoGw.StreamBatch{Items: batch}); err != nil {
+					tlog.Warn(context.TODO(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
+					s.detach(stream)
+				} else {
+					for _, m := range batch {
+						PutStreamData(m)
+					}
+					sendIdx = len(batch)
+				}
+			}
+		}
 		for sendIdx < len(batch) {
 			if err := stream.Send(batch[sendIdx]); err != nil {
 				tlog.Warn(context.TODO(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
-				s.markShardBroken()
+				s.detach(stream)
 				break
 			}
 			PutStreamData(batch[sendIdx])
@@ -216,15 +235,15 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	s.mu.Unlock()
 
 	if stream == nil {
-		if !lc.closing {
-			s.markShardBroken()
-		}
 		return
 	}
 
 	batchPush := false
+	batchUpstream := false
 	if lc.gateway != nil {
-		batchPush = lc.gateway.GetStreamConfig().BatchPush
+		streamCfg := lc.gateway.GetStreamConfig()
+		batchPush = streamCfg.BatchPush
+		batchUpstream = streamCfg.BatchUpstream
 	}
 
 	// batchPush 模式：收集消息并以 PushBatch 形式刷新。
@@ -290,36 +309,19 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		batch = batch[:0]
 	}
 
-	for {
-		select {
-		case <-s.stopCh:
-			return
-		default:
-		}
-		msg, err := stream.Recv()
-		if err != nil {
-			lc.mu.RLock()
-			closing := lc.closing
-			lc.mu.RUnlock()
-
-			if batchPush {
-				flushBatch()
-			}
-
-			if closing {
-				return
-			}
-
-			tlog.Warn(context.TODO(), "shard receive error, triggering reconnect shard=%d error=%v", shardIdx, err)
-			s.markShardBroken()
-			return
-		}
-
+	// processOne 分发单条上游消息（心跳/广播/按会话推送）。
+	// 收到与停止/错误路径由调用方处理（含 batchPush 冲刷）。
+	processOne := func(msg *protoGw.StreamData) {
 		if lc.gateway == nil {
-			continue
+			return
 		}
 
-		// Broadcast：空 SessionId 表示发送到此网关上的所有连接。
+		// 内置心跳：flip 模式下 logic 主动拨入后由本侧消费，无需应答
+		// （与 logic 的 builtinCommand 对称），绝不能落入空 SessionId 广播分支。
+		if msg.Cmd == int32(routes.CmdHeartbeatReq) {
+			return
+		}
+
 		// 广播：空 SessionId 表示发送到此网关上的所有连接
 		if msg.SessionId == "" {
 			if batchPush {
@@ -338,7 +340,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				}
 				return true
 			})
-			continue
+			return
 		}
 
 		if batchPush {
@@ -371,6 +373,59 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			}
 		}
 	}
-}
 
-// handleDisconnection 处理断线事件，触发重连
+	// StreamBatch 合帧接收：两端开启 stream.batchUpstream 时对端按批发送。
+	var batchRecv interface{ RecvMsg(m any) error }
+	if batchUpstream {
+		if mr, ok := stream.(interface{ RecvMsg(m any) error }); ok {
+			batchRecv = mr
+		}
+	}
+
+	handleRecvErr := func(err error) {
+		lc.mu.RLock()
+		closing := lc.closing
+		lc.mu.RUnlock()
+
+		if batchPush {
+			flushBatch()
+		}
+
+		if closing {
+			return
+		}
+
+		// 分片解绑由接收循环外层（OnData handler 的 defer）统一执行。
+		tlog.Warn(context.TODO(), "shard receive error shard=%d error=%v", shardIdx, err)
+	}
+
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		default:
+		}
+
+		if batchRecv != nil {
+			sb := &protoGw.StreamBatch{}
+			if err := batchRecv.RecvMsg(sb); err != nil {
+				handleRecvErr(err)
+				return
+			}
+			for _, m := range sb.Items {
+				if m == nil {
+					continue
+				}
+				processOne(m)
+			}
+			continue
+		}
+
+		msg, err := stream.Recv()
+		if err != nil {
+			handleRecvErr(err)
+			return
+		}
+		processOne(msg)
+	}
+}

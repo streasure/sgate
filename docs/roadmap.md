@@ -80,7 +80,6 @@
 | JWT jti 持久化到 Connection + Revoke 接入 logout/ban | ✅ |
 | WS 关键修复：close 关 TCP、握手半包累积、分片重组、强制客户端 mask | ✅ |
 | `OnTick` 每秒采样 `msgRate`（修 Health 速率失真） | ✅ |
-| `config_1m.yaml` 补 `prometheus` 段 | ✅ |
 | `architecture.md` 去掉不存在的 `config.Set` | ✅ |
 
 ### 封禁状态迁移 MySQL（TODO）

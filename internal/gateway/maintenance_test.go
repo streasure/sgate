@@ -229,7 +229,7 @@ func TestHandleAdminMaintenance(t *testing.T) {
 
 	// enable by serverId
 	rec := httptest.NewRecorder()
-	gw.handleAdminMaintenance(rec, maintenanceReq("enable", "s1", "", "upgrade"))
+	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, maintenanceReq("enable", "s1", "", "upgrade"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("enable status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -266,7 +266,7 @@ func TestHandleAdminMaintenance(t *testing.T) {
 
 	// disable 后恢复登录检查
 	rec = httptest.NewRecorder()
-	gw.handleAdminMaintenance(rec, maintenanceReq("disable", "s1", "", ""))
+	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, maintenanceReq("disable", "s1", "", ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("disable status=%d", rec.Code)
 	}
@@ -286,21 +286,21 @@ func TestHandleAdminMaintenance_Validation(t *testing.T) {
 
 	// GET → 405
 	rec := httptest.NewRecorder()
-	gw.handleAdminMaintenance(rec, httptest.NewRequest(http.MethodGet, "/admin/maintenance", nil))
+	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, httptest.NewRequest(http.MethodGet, "/admin/maintenance", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET status=%d want 405", rec.Code)
 	}
 
 	// serverId 与 zone 同时给 → 400
 	rec = httptest.NewRecorder()
-	gw.handleAdminMaintenance(rec, maintenanceReq("enable", "s1", "z1", ""))
+	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, maintenanceReq("enable", "s1", "z1", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("both params status=%d want 400", rec.Code)
 	}
 
 	// 非法 action → 400
 	rec = httptest.NewRecorder()
-	gw.handleAdminMaintenance(rec, maintenanceReq("pause", "s1", "", ""))
+	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, maintenanceReq("pause", "s1", "", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad action status=%d want 400", rec.Code)
 	}
@@ -309,7 +309,7 @@ func TestHandleAdminMaintenance_Validation(t *testing.T) {
 	body, _ := json.Marshal(maintenanceRequest{Action: "enable", ServerID: "s1"})
 	r := httptest.NewRequest(http.MethodPost, "/admin/maintenance", bytes.NewReader(body))
 	rec = httptest.NewRecorder()
-	gw.handleAdminMaintenance(rec, r)
+	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, r)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no auth status=%d want 401", rec.Code)
 	}

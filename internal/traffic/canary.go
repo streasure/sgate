@@ -1,13 +1,13 @@
 package traffic
 
 import (
-	"hash/fnv"
 	"sync"
 	"sync/atomic"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/hashutil"
 )
 
 // CanaryFilter 灰度发布过滤器
@@ -65,9 +65,7 @@ func (f *CanaryFilter) Process(fc *types.FilterContext) (bool, error) {
 
 	// 3) 百分比灰度（按 connectionID 哈希，保证同一连接稳定分流）
 	if !hit && f.percent > 0 {
-		h := fnv.New32a()
-		h.Write([]byte(fc.ConnectionID))
-		if int(h.Sum32()%100) < f.percent {
+		if int(hashutil.FNV1a32(fc.ConnectionID)%100) < f.percent {
 			hit = true
 		}
 	}

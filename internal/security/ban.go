@@ -1,6 +1,7 @@
 package security
 
 import (
+	"maps"
 	"sync"
 	"time"
 )
@@ -86,11 +87,10 @@ func (s *BanStore) List() []BanRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]BanRecord, 0, len(s.items))
-	for k, rec := range s.items {
-		if rec.Expired(now) {
-			delete(s.items, k)
-			continue
-		}
+	maps.DeleteFunc(s.items, func(_ string, rec BanRecord) bool {
+		return rec.Expired(now)
+	})
+	for _, rec := range s.items {
 		out = append(out, rec)
 	}
 	return out

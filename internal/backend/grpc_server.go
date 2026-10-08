@@ -14,6 +14,8 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/ugrpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -22,17 +24,50 @@ type GRPCServer struct {
 	protoGw.UnimplementedGatewayStreamServer
 	protoGw.UnimplementedGatewayServer
 	gateway GatewayInterface
+	pool    *LogicClientPool // flip 模式：logic 主动拨入时的附着池
 }
 
 // NewGRPCServer 创建 gRPC 服务端实例
-func NewGRPCServer(gateway GatewayInterface) *GRPCServer {
+func NewGRPCServer(gateway GatewayInterface, pool *LogicClientPool) *GRPCServer {
 	return &GRPCServer{
 		gateway: gateway,
+		pool:    pool,
 	}
 }
 
-// OnData 处理来自逻辑服的流式数据（服务端流 RPC）
+// OnData 处理来自逻辑服的流式数据。
+// 带逻辑服握手元数据（logic 主动拨入，flip 模式）时附着到连接池；
+// 否则回落到旧版握手（sgate 主动拨入的命令流）。
 func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
+	if meta, ok := routes.LogicStreamMetadataFromContext(stream.Context()); ok {
+		return s.handleLogicStream(meta, stream)
+	}
+	return s.handleLegacyStream(stream)
+}
+
+// handleLogicStream flip 模式接收循环：附着分片后由本 handler 驱动
+// 消息路由，流结束即返回，由 gRPC 框架回收；返回前统一解绑分片。
+func (s *GRPCServer) handleLogicStream(meta routes.LogicStreamMeta, stream protoGw.GatewayStream_OnDataServer) error {
+	if s.pool == nil {
+		return fmt.Errorf("logic stream rejected: pool not initialized")
+	}
+	client, shard, err := s.pool.Attach(meta, stream)
+	if err != nil {
+		tlog.Warn(context.TODO(), "logic stream attach failed serviceID=%s shard=%d/%d error=%v",
+			meta.LogicID, meta.ShardIdx, meta.ShardCount, err)
+		return err
+	}
+	defer client.detachShard(shard, stream)
+
+	tlog.Info(context.TODO(), "logic stream attached serviceID=%s zone=%s shard=%d/%d",
+		meta.LogicID, meta.Zone, meta.ShardIdx, meta.ShardCount)
+
+	shard.receiveMessages(client, meta.ShardIdx)
+	return nil
+}
+
+// handleLegacyStream 旧版握手：sgate 主动拨入时的命令流处理。
+func (s *GRPCServer) handleLegacyStream(stream protoGw.GatewayStream_OnDataServer) error {
 	connectionID := connection.GenerateConnectionID()
 
 	ctx := map[string]any{
@@ -40,12 +75,15 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 		"stream":        stream,
 	}
 
-	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			return err
+	batchUpstream := s.gateway != nil && s.gateway.GetStreamConfig().BatchUpstream
+	var batchRecv interface{ RecvMsg(m any) error }
+	if batchUpstream {
+		if mr, ok := stream.(interface{ RecvMsg(m any) error }); ok {
+			batchRecv = mr
 		}
+	}
 
+	process := func(msg *protoGw.StreamData) {
 		s.handleGRPCMessage(connectionID, msg, func(response any) {
 			if protoMsg, ok := response.(*protoGw.StreamData); ok {
 				if err := stream.Send(protoMsg); err != nil {
@@ -60,6 +98,28 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 				}
 			}
 		}, ctx)
+	}
+
+	for {
+		if batchRecv != nil {
+			sb := &protoGw.StreamBatch{}
+			if err := batchRecv.RecvMsg(sb); err != nil {
+				return err
+			}
+			for _, m := range sb.Items {
+				if m == nil {
+					continue
+				}
+				process(m)
+			}
+			continue
+		}
+
+		msg, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		process(msg)
 	}
 }
 
@@ -279,8 +339,11 @@ func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamD
 	callback(routes.NewErrorResponse("error", "Gateway does not handle commands locally, forward to logic server", "", ""))
 }
 
-// StartGRPCServer 启动 gRPC 服务器，监听指定端口
-func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSize int) (*ugrpc.Server, error) {
+// StartGRPCServer 启动 gRPC 服务器，监听指定端口。
+// keepalive：logic 作为拨出侧以 30s 间隔发送 keepalive ping，
+// 服务端 EnforcementPolicy 必须放宽到 10s 以内，否则会被 GOAWAY 断开；
+// ServerParameters 让本侧也能主动探测拨出方失联。
+func StartGRPCServer(gw GatewayInterface, pool *LogicClientPool, port string, maxMsgSize int, windowSize int) (*ugrpc.Server, error) {
 	if maxMsgSize <= 0 {
 		maxMsgSize = 4 * 1024 * 1024
 	}
@@ -294,9 +357,19 @@ func StartGRPCServer(gw GatewayInterface, port string, maxMsgSize int, windowSiz
 		ugrpc.WithMaxSendMsgSize(maxMsgSize),
 		ugrpc.WithWindowSize(windowSize),
 		ugrpc.WithGracefulStopTimeout(5*time.Second),
+		ugrpc.WithGrpcOptions(
+			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+				MinTime:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
+			grpc.KeepaliveParams(keepalive.ServerParameters{
+				Time:    30 * time.Second,
+				Timeout: 10 * time.Second,
+			}),
+		),
 	)
 	tlog.Info(context.TODO(), "registering GatewayService")
-	grpcService := NewGRPCServer(gw)
+	grpcService := NewGRPCServer(gw, pool)
 	protoGw.RegisterGatewayStreamServer(server, grpcService)
 	protoGw.RegisterGatewayServer(server, grpcService)
 

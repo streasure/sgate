@@ -27,13 +27,9 @@ grpc:
   windowSize: 67108864
 
 monitoring:
-  pprofAddr: ""
+  pprofAddr: "127.0.0.1:6060"
+  disableTracer: true   # 压测关闭分布式追踪（避免每消息 Span 分配）
   disableMetricsLog: true   # 压测关闭每秒 metrics 日志
-  prometheus:
-    enabled: false
-    addr: ":9101"
-    path: "/metrics"
-    prefix: "app"
 
 configCenter:
   enabled: false
@@ -44,9 +40,10 @@ cluster:
 
 stream:
   shardCount: 96
-  sendChannelSize: 1048576
+  sendChannelSize: 65536
   receiveBatchSize: 128
-  batchPush: false
+  batchPush: true
+  batchUpstream: true
 
 protection:
   maxFrameSize: 4194304
@@ -77,3 +74,11 @@ loginValidation:
 
 waf:
   enabled: false
+
+perf:
+  gcPercent: 300           # GOGC：堆增长 300% 时触发 GC（默认 100）
+  memoryLimitPercent: 80   # 软内存上限
+
+pipeline:
+  asyncEnabled: false     # A/B 实测：同步 498K > 异步 482K（队列溢出丢弃），保持同步
+  workerQueueSize: 262144 # 每分片任务队列（默认 4096 高吞吐下会溢出丢弃）

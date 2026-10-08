@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -15,6 +14,7 @@ import (
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/bench/logutil"
 	logic "github.com/streasure/sgate/internal/logic"
+	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -27,9 +27,16 @@ func main() {
 	pushWorkers := flag.Int("push-workers", 128, "parallel push workers")
 	pushSize := flag.Int("push-size", 64, "payload size in bytes")
 	expectedMembers := flag.Int("expected-members", 0, "wait for members before pushing")
-	logConfig := flag.String("config", "configs/logic2_tcp_log.yaml", "log config")
+	shardCount := flag.Int("shardCount", 0, "streams dialed into each gateway (0=NumCPU*8)")
+	logConfig := flag.String("config", "config/tlog.yaml", "log config")
+	pprofAddr := flag.String("pprof", "", "pprof listen address (empty=off), e.g. 127.0.0.1:6063")
+	batchUpstream := flag.Bool("batchUpstream", false, "StreamBatch framing (must match gateway stream.batchUpstream)")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()
+
+	if *pprofAddr != "" {
+		obs.StartPProfServer(*pprofAddr)
+	}
 
 	svc := logic.NewService(
 		logic.WithListenPort(*port),
@@ -38,6 +45,8 @@ func main() {
 		logic.WithServerType("Logic"),
 		logic.WithZone("default"),
 		logic.WithEtcd("http://127.0.0.1:2379"),
+		logic.WithShardCount(*shardCount),
+		logic.WithBatchUpstream(*batchUpstream),
 	)
 
 	var totalPushed atomic.Int64
@@ -107,7 +116,8 @@ func main() {
 				membersTS = now
 			}
 			if len(membersCached) == 0 {
-				runtime.Gosched()
+				// 空闲退避：无成员时避免 Gosched 忙等烧满整核。
+				time.Sleep(time.Millisecond)
 				continue
 			}
 			for _, sessionID := range membersCached {

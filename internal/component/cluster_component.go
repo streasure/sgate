@@ -9,8 +9,8 @@ import (
 	"github.com/streasure/protocol/enums"
 	clusterPkg "github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/netutil"
 	"github.com/streasure/util/component"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
 )
@@ -71,7 +71,7 @@ type registerAddress struct {
 
 // buildRegisterAddress 根据配置构建 JSON 格式的注册地址。
 func buildRegisterAddress(cfg config.Config, grpcPort int) string {
-	ip := netutil.GetOutboundIPv4()
+	ip := netutil.OutboundIPv4()
 	addr := registerAddress{IP: ip, GRPC: grpcPort}
 	for _, t := range cfg.Transports {
 		hostPort := fmt.Sprintf("%s:%d", ip, t.Port)

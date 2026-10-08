@@ -35,7 +35,7 @@ var _ grpc.ServerStream = (*fakeStream)(nil)
 // 随后 Close 再次 close(done) 曾触发 panic: close of closed channel 打挂 logic 进程。
 func TestStreamConnCloseNoDoubleClose(t *testing.T) {
 	fs := &fakeStream{sendErr: errors.New("stream broken")}
-	c := newStreamConn(fs, 4, "gw-1")
+	c := newStreamConn(fs, 4, "gw-1", false)
 
 	if err := c.Send(&protocol.StreamData{}); err != nil {
 		t.Fatalf("send before close: %v", err)

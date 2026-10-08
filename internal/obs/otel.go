@@ -10,8 +10,9 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/gatewayutil"
 	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/hashutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -50,7 +51,7 @@ func NewOTelTracer(cfg config.OTelTracerConfig) *OTelTracer {
 		serviceName:   cfg.ServiceName,
 		localEndpoint: map[string]string{"serviceName": cfg.ServiceName},
 		httpClient:    &http.Client{Timeout: 3 * time.Second},
-		queue:         make(chan *OTelSpan, gatewayutil.MaxInt(cfg.QueueSize, 1024)),
+		queue:         make(chan *OTelSpan, max(cfg.QueueSize, 1024)),
 		stopCh:        make(chan struct{}),
 	}
 	if cfg.SampleRate > 0 {
@@ -114,7 +115,7 @@ func (t *OTelTracer) shouldSample(traceID string) bool {
 		return true
 	}
 	// 简单采样：traceID 哈希取模
-	h := gatewayutil.SimpleHash(traceID)
+	h := hashutil.FNV1a32(traceID)
 	return h%uint32(sr) == 0
 }
 

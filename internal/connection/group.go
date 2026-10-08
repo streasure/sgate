@@ -1,6 +1,8 @@
 package connection
 
 import (
+	"maps"
+	"slices"
 	"sync"
 )
 
@@ -39,9 +41,5 @@ func (g *ConnectionGroupInfo) MemberCount() int {
 func (g *ConnectionGroupInfo) Snapshot() []serverUserKey {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	members := make([]serverUserKey, 0, len(g.Members))
-	for key := range g.Members {
-		members = append(members, key)
-	}
-	return members
+	return slices.Collect(maps.Keys(g.Members))
 }

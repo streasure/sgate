@@ -13,6 +13,7 @@ import (
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
+	"github.com/streasure/util/httputil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -59,32 +60,33 @@ func (g *Gateway) adminAuthed(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(token)) == 1
 }
 
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+// adminHandler 包装管理端接口：统一做方法校验与 Bearer 鉴权，handler 只保留业务逻辑。
+func (g *Gateway) adminHandler(method string, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			httputil.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		if !g.adminAuthed(r) {
+			httputil.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		h(w, r)
+	}
 }
 
 // registerAdminRoutes 在 stats mux 上挂载管理端封禁接口。
 func (g *Gateway) registerAdminRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/admin/ban", g.handleAdminBan)
-	mux.HandleFunc("/admin/unban", g.handleAdminUnban)
-	mux.HandleFunc("/admin/bans", g.handleAdminBans)
-	mux.HandleFunc("/admin/maintenance", g.handleAdminMaintenance)
+	mux.HandleFunc("/admin/ban", g.adminHandler(http.MethodPost, g.handleAdminBan))
+	mux.HandleFunc("/admin/unban", g.adminHandler(http.MethodPost, g.handleAdminUnban))
+	mux.HandleFunc("/admin/bans", g.adminHandler(http.MethodGet, g.handleAdminBans))
+	mux.HandleFunc("/admin/maintenance", g.adminHandler(http.MethodPost, g.handleAdminMaintenance))
 }
 
 func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	if !g.adminAuthed(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
 	var req banRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserUUID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
+		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
 		return
 	}
 	var ttl time.Duration
@@ -103,37 +105,21 @@ func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {
 	offline := g.enforceBan(req.UserUUID, rec)
 	tlog.Info(context.TODO(), "admin ban user=%s reason=%s ttlSec=%d offline=%d",
 		req.UserUUID, req.Reason, req.TTLSec, offline)
-	writeJSON(w, http.StatusOK, banResponse{OK: true, Banned: banStore.Len(), Record: &rec, Offline: offline})
+	httputil.WriteJSON(w, http.StatusOK, banResponse{OK: true, Banned: banStore.Len(), Record: &rec, Offline: offline})
 }
 
 func (g *Gateway) handleAdminUnban(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	if !g.adminAuthed(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
 	var req unbanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserUUID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
+		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
 		return
 	}
 	removed := banStore.Remove(req.UserUUID)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "banned": banStore.Len()})
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "banned": banStore.Len()})
 }
 
 func (g *Gateway) handleAdminBans(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	if !g.adminAuthed(r) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bans": banStore.List()})
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "bans": banStore.List()})
 }
 
 // enforceBan 对本实例上的在线连接执行封禁：撤销 JWT → 推送封禁通知 → 断开。

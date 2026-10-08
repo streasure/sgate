@@ -1,8 +1,9 @@
 package connection
 
 import (
-	"hash/fnv"
 	"sync"
+
+	"github.com/streasure/util/hashutil"
 )
 
 // ============================================================================
@@ -31,9 +32,7 @@ func newShardedMap[V any]() *shardedMap[V] {
 }
 
 func (m *shardedMap[V]) getShard(key string) *shard[V] {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return &m.shards[h.Sum32()%shardCount]
+	return &m.shards[hashutil.FNV1a32(key)%shardCount]
 }
 
 func (m *shardedMap[V]) Load(key string) (V, bool) {

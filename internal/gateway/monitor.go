@@ -10,7 +10,7 @@ import (
 
 	json "github.com/bytedance/sonic"
 	"github.com/streasure/sgate/internal/obs"
-	"github.com/streasure/util/prometheus"
+	"github.com/streasure/util/httputil"
 	"github.com/streasure/util/tlog"
 	"gopkg.in/yaml.v3"
 )
@@ -66,83 +66,6 @@ func (r *messageRateTracker) rate() float64 {
 		return 0
 	}
 	return float64(last.count-first.count) / duration
-}
-
-func (g *Gateway) Stats() prometheus.Stats {
-	var s prometheus.Stats
-
-	s.ConnectionsTotal = uint64(g.connectionsTotal.Load())
-	s.ConnectionsActive = g.connectionsActive.Load()
-
-	s.MessagesReceived = g.messagesReceived.Load()
-	s.MessagesForwarded = g.messagesForwarded.Load()
-	s.MessagesPushed = g.messagesPushedToClient.Load()
-	s.MessagesDroppedOverload = g.messagesDroppedOverload.Load()
-	s.MessagesDroppedFull = g.messagesDroppedFull.Load()
-	s.MessagesDroppedNoLogic = g.messagesDroppedNoLogic.Load()
-	s.MessagesDroppedNoLogicNotConn = g.messagesDroppedNoLogicNotConnected.Load()
-	s.MessagesPushDroppedNoConn = g.messagesPushDroppedNoConn.Load()
-	s.MessagesDroppedBlacklist = g.messagesDroppedBlacklist.Load()
-	s.MessagesDroppedRateLimit = g.messagesDroppedRateLimit.Load()
-	s.MessagesDroppedWAF = g.messagesDroppedWAF.Load()
-	s.MessagesDroppedCircuit = g.messagesDroppedCircuit.Load()
-	s.MessagesDroppedIntegrity = g.messagesDroppedIntegrity.Load()
-	s.MessagesDroppedFilterChain = g.messagesDroppedFilterChain.Load()
-	s.MessagesDroppedAuth = g.messagesDroppedAuth.Load()
-	s.MessagesProcessed = g.messagesProcessed.Load()
-	s.MessagesFailed = g.messagesFailed.Load()
-
-	now := time.Now()
-	_ = now
-	if g.msgRate != nil {
-		// 采样由 OnTick 每秒执行；此处只读取速率，避免与 OnTick 双写导致失真
-		s.MessagesPerSecond = g.msgRate.rate()
-	}
-
-	if g.latencyTracker != nil {
-		ls := g.latencyTracker.GetStats()
-		s.LatencyP50Us = ls.P50.Microseconds()
-		s.LatencyP95Us = ls.P95.Microseconds()
-		s.LatencyP99Us = ls.P99.Microseconds()
-		s.LatencyMaxUs = ls.Max.Microseconds()
-	}
-
-	if g.waf != nil {
-		s.WAFBlocked = g.waf.GetBlockedCount()
-	}
-	if g.circuitBreakerMgr != nil {
-		s.CircuitBreakerTripped = g.circuitBreakerMgr.GetTrippedCount()
-	}
-	if g.degradation != nil {
-		s.DegradationTriggered = g.degradation.GetTriggeredCount()
-	}
-
-	if g.cluster != nil && g.cluster.IsLeader() {
-		s.IsLeader = 1
-	}
-
-	if g.canaryFilter != nil {
-		s.CanaryHit = g.canaryFilter.GetHitCount()
-	}
-	if g.trafficMirror != nil {
-		s.TrafficMirrorForwarded, s.TrafficMirrorDropped = g.trafficMirror.Stats()
-	}
-
-	if g.alertWebhook != nil {
-		s.AlertSent, s.AlertDropped = g.alertWebhook.Stats()
-	}
-
-	if g.overloadProtector != nil {
-		s.CPUUsagePercent, s.MemUsagePercent, _, _ = g.overloadProtector.Stats()
-	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	s.Goroutines = runtime.NumGoroutine()
-	s.MemoryAlloc = m.Alloc
-	s.MemorySys = m.Sys
-	s.GCCount = m.NumGC
-
-	return s
 }
 
 type statsPayload struct {
@@ -427,10 +350,7 @@ func (g *Gateway) ServeHealthHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	data, _ := json.Marshal(response)
-	w.Write(data)
+	httputil.WriteJSON(w, statusCode, response)
 }
 
 // startConfigCenterWatcher 启动配置中心监听并桥接到现有 handleConfigUpdate

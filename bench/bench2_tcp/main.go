@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/bench/logutil"
+	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -26,8 +28,8 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:48080", "sgate TCP address")
 	duration := flag.Duration("duration", 30*time.Second, "benchmark duration")
 	parallel := flag.Int("parallel", 1, "number of parallel connections")
-	serverID := flag.String("server-id", "logic2", "logic server ID for login")
-	logConfig := flag.String("config", "configs/log.yaml", "log config")
+	serverID := flag.String("server-id", "logic2-tcp", "logic server ID for login")
+	logConfig := flag.String("config", "config/tlog.yaml", "log config")
 	loginBatch := flag.Int("login-batch", 100, "concurrent login batch size")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()
@@ -133,7 +135,8 @@ func main() {
 		go func(entry *connEntry) {
 			defer recvWG.Done()
 			header := make([]byte, 4)
-			skip := make([]byte, 64*1024) // 64KB 复用 buffer
+			var payload []byte // 复用，按需扩容
+			frame := &protocol.MessageFrame{}
 			for {
 				if _, err := readFull(entry.conn, header); err != nil {
 					return
@@ -142,15 +145,22 @@ func main() {
 				if dataLen == 0 || dataLen > 4*1024*1024 {
 					return
 				}
-				remaining := int(dataLen)
-				for remaining > 0 {
-					n := min(remaining, len(skip))
-					if _, err := readFull(entry.conn, skip[:n]); err != nil {
-						return
-					}
-					remaining -= n
+				if int(dataLen) > cap(payload) {
+					payload = make([]byte, dataLen)
 				}
-				totalRecv.Add(1)
+				buf := payload[:dataLen]
+				if _, err := readFull(entry.conn, buf); err != nil {
+					return
+				}
+				// 按消息条数统计：批量推送帧展开 items，其余帧计 1。
+				n := int64(1)
+				if err := proto.Unmarshal(buf, frame); err == nil && frame.Cmd == routes.CmdPushBatch {
+					pb := &protocol.PushBatch{}
+					if perr := proto.Unmarshal(frame.Body, pb); perr == nil {
+						n = int64(len(pb.GetItems()))
+					}
+				}
+				totalRecv.Add(n)
 			}
 		}(e)
 	}
@@ -229,13 +239,5 @@ func readTCPFrame(conn net.Conn) (*protocol.MessageFrame, error) {
 }
 
 func readFull(conn net.Conn, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := conn.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
+	return io.ReadFull(conn, buf)
 }

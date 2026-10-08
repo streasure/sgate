@@ -2,11 +2,10 @@ package obs
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/internal/gatewayutil"
+	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -263,5 +262,6 @@ func (t *Tracer) GetStats() map[string]int {
 //
 //	string: 追踪ID
 func GenerateTraceID() string {
-	return fmt.Sprintf("trace_%s", gatewayutil.GenerateConnectionID())
+	// 单次拼接分配（热路径：避免 fmt.Sprintf 的多次中间分配）。
+	return "trace_" + gatewayutil.GenerateConnectionID()
 }
