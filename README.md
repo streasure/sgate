@@ -361,7 +361,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | --- | --- | --- | --- |
 | `shardCount` | int | 自动 | gRPC 流分片数，`0` 时按 CPU 数计算 |
 | `connGroupCount` | int | `4` | gateway→logic 独立 TCP 连接组数。每个组承载 `shardCount/N` 个 stream，各自拥有独立的 HTTP/2 写锁，实现并行写入 |
-| `sendChannelSize` | int | `65536`（零值回退；`config/config.yaml` 为 `1048576`） | 每个分片发送队列容量 |
+| `sendChannelSize` | int | `65536`（零值回退） | 每个分片发送队列容量。按 `shardCount` 预分配，`1048576×96` 分片约占 768MB，除非极端突发不建议调大 |
 | `batchPush` | bool | `false` | 是否将推送按连接合并为 PushBatch |
 
 > gateway↔logic 数据流固定以 `StreamBatch` 合帧（多条 StreamData 打包进单个 gRPC 帧），无开关、两端无需配置。
@@ -520,8 +520,8 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 # 终端 1：网关
 .\sgate.exe -conf config\config_batch_off.yaml -logger config\log.yaml
 
-# 终端 2：逻辑服（push-interval=0 不人为限速）
-.\bench\logic2_ws\logic2_ws.exe -port 50061 -id logic2-ws -push-interval 0 -push-size 64 -expected-members 100 -push-workers 12 -config bench\logic2_ws\configs\logic2_ws_log.yaml
+# 终端 2：逻辑服（登录即开推）
+.\bench\logic2_ws\logic2_ws.exe -port 50061 -id logic2-ws -push-size 64 -expected-members 0 -push-workers 12 -config bench\logic2_ws\configs\logic2_ws_log.yaml
 
 # 终端 3：客户端
 .\bench\bench2_ws\bench2_ws.exe -addr 127.0.0.1:48081 -duration 10s -parallel 100 -server-id logic2-ws -config bench\bench2_ws\configs\log.yaml
@@ -538,7 +538,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 ```powershell
 # batchPush 关闭
 .\sgate.exe -conf config\config_batch_off.yaml -logger config\log.yaml
-.\bench\logic2_tcp\logic2_tcp.exe -port 50060 -id logic2-tcp -push-interval 0 -push-size 64 -expected-members 100 -push-workers 12 -config bench\logic2_tcp\configs\logic2_tcp_log.yaml
+.\bench\logic2_tcp\logic2_tcp.exe -port 50060 -id logic2-tcp -push-size 64 -expected-members 0 -push-workers 12 -config bench\logic2_tcp\configs\logic2_tcp_log.yaml
 .\bench\bench2_tcp\bench2_tcp.exe -addr 127.0.0.1:48080 -duration 10s -parallel 100 -server-id logic2-tcp -config bench\bench2_tcp\configs\log.yaml
 
 # batchPush 开启：替换网关配置
@@ -552,17 +552,19 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 | `-addr` | — | 网关客户端地址 |
 | `-duration` | `10s` | 压测持续时间 |
 | `-parallel` | `100` | 并发连接数 |
-| `-push-interval` | — | 推送间隔，**必须设为 `0`** 才能测极限吞吐 |
 | `-push-size` | `64` | 推送载荷字节数 |
-| `-expected-members` | `0` | 等待组内成员达到该数后再开始推送；`0`=不等待立即推送（命令示例传 `100`） |
+| `-expected-members` | `0` | 等待组内成员达到该数后再开始推送；`0`=登录即开推（压测必须为 `0`，非 0 会在满员后再等 10s） |
 | `-push-workers` | `12` | 逻辑服推送工作协程数 |
+| `-shardCount` | `0` | 逻辑服到网关的流数，`0`=`NumCPU*8` |
+| `-pprof` | 空 | pprof 监听地址（如 `127.0.0.1:6063`），空=关闭 |
 
 ### 7.8 压测注意事项
 
 - 每轮测试前确认 etcd、网关、逻辑服端口无残留进程
-- `push-interval` 设为 `1ms` 会限制逻辑服发送速率到 ~3.5K/s，不能用于测量极限吞吐
+- `expected-members` 必须为 `0`：非 0 会在组内满员后再 sleep 10s 才开推，窗口内收不到推送
 - 每轮持续时间、并发数、载荷大小、工作协程数应保持一致
-- 以 bench 客户端的 `avgReceiveRate` 为主要指标
+- 以 bench 客户端的 `avgReceiveRate` / `avg rate` 为主要指标
+- 后台应用（IM、游戏等）会占用核心，绝对数值请以同批测量内部对比为准
 
 ### 7.9 停止所有压测进程
 
@@ -574,53 +576,35 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 
 ## 八、性能数据
 
-### 8.1 当前基线（2026-09-24，架构重构后）✅ 性能增加
+当前工程实测吞吐清单。原始数据与逐秒明细见 `bench/latest_results.json`；绝对数值受本机后台负载影响，同配置多轮约 ±10%。
 
-条件：100 连接、10s、64B 载荷、12 推送协程、`shardCount=96`、`connGroupCount=4`、bench2 使用 `config_batch_off.yaml`（`batchPush=false`）、登录仅 LoginGate（无 HTTP login）。原始结果：`bench/latest_results.json`。
+### 8.1 测量条件
 
-#### bench1 转发
+- 100 连接、单轮 10s、64B 载荷；登录仅 LoginGate（`loginValidation.enabled: false`，无 HTTP login / token 校验）
+- 网关：`shardCount=96`、`connGroupCount=4`、`sendChannelSize=65536`、`disableTracer: true`、`disableMetricsLog: true`
+- 逻辑服：96 条流（`NumCPU*8`）；logic2 `push-size=64`、`push-workers=12`、`expected-members=0`（登录即开推）
+- bench1 = client→sgate→logic 上行转发；bench2 = logic→sgate→client 下行推送（`run.bat on|off` 切换 `batchPush`）
+- 运行方式见 `Bench.md` 与 `bench/*/run.bat|run.sh`
 
-| 协议 | 总转发量(10s) | 平均速率 | 失败 | droppedAuth |
+### 8.2 实测吞吐（2026-10-09，后台有负载）
+
+#### bench1 上行转发
+
+| 协议 | 总转发量(10s) | 平均速率 | 登录失败 | droppedAuth |
 | --- | ---: | ---: | ---: | ---: |
-| **WebSocket** | **506.8 万** | **502,216/s** | 0 | 0 |
-| **TCP** | **575.9 万** | **563,237/s** | 0 | 0 |
+| TCP | 426.0 万 | **423,989/s** | 0 | 0 |
+| WebSocket | 426.5 万 | **424,967/s** | 0 | 0 |
 
-#### bench2 推送（batchPush=false）
+#### bench2 下行推送
 
-| 协议 | 总接收量(10s) | 平均接收速率 | 失败 | droppedAuth |
-| --- | ---: | ---: | ---: | ---: |
-| **WebSocket** | **2,360.3 万** | **2,353,552/s** | 0 | 0 |
-| **TCP** | **1,258.1 万** | **1,249,510/s** | 0 | 0 |
+| 协议 | batchPush | 平均接收速率 | 连接失败 | droppedAuth |
+| --- | --- | ---: | ---: | ---: |
+| TCP | true | **1,424,357/s** | 0 | 0 |
+| TCP | false | 888,463/s | 0 | 0 |
+| WebSocket | true | **1,372,644/s** | 0 | 0 |
+| WebSocket | false | 855,332/s | 0 | 0 |
 
-#### 相对 2026-09-13/14 基线
-
-| 场景 | 旧 | 新 | 变化 |
-| --- | ---: | ---: | --- |
-| bench1 WS 平均 | 487K/s | 502K/s | **+3.1% ↑** |
-| bench1 TCP 平均 | 533K/s | 563K/s | **+5.6% ↑** |
-| bench2 WS（batch=false） | 442K/s | 2,354K/s | **+433% ↑** |
-| bench2 TCP（batch=false） | 421K/s | 1,250K/s | **+197% ↑** |
-
-**结论：重构后性能是增加的**（bench1 平均 +3~6%；bench2 同条件约 2～5 倍）。历史 1000 连接口径（TCP 69.4 万 / WS 128.9 万）连接数不同，不可直接横比。
-
-### 8.2 历史数据（2026-09-13/14）
-
-条件：100 连接、64B 载荷、12 推送协程、10s、`push-interval=0`、96 流分片。
-
-#### bench1 转发
-
-| 协议 | 总转发量(10s) | 峰值速率 | 平均速率 |
-| --- | ---: | ---: | ---: |
-| WebSocket | 941 万 | 920K/s | 487K/s |
-| TCP | 844 万 | 835K/s | 533K/s |
-
-#### bench2 推送（100 连接）
-
-| 模式 | TCP | WebSocket |
-| --- | ---: | ---: |
-| `batchPush=false` | 421K/s | 442K/s |
-| `batchPush=true` | 853K/s | 816K/s |
-| 提升 | +102% | +85% |
+> `batchPush=false` 为 2 轮中位，其余为单轮值（见 `bench/latest_results.json`）。安静后台时段参考：bench1 TCP 498,490/s、WS 527,297/s，bench2 on TCP 1,934,329/s、WS 1,713,708/s。
 
 详细报告见 [`docs/benchmark-report.md`](docs/benchmark-report.md)。
 
@@ -811,15 +795,6 @@ monitoring:
 monitoring:
   pprofAddr: ""
 ```
-
-### Q: 如何禁用 etcd
-
-```yaml
-etcd:
-  enabled: false
-```
-
-此时网关无法发现逻辑服，但可以作为独立的 TCP/WS 接入层使用。
 
 ### Q: batchPush 模式需要客户端做什么
 

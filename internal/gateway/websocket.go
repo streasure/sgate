@@ -570,8 +570,13 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 	}
 
 	wsConn.State.Store(int32(WSStateClosed))
-	if wsConn.ConnectionID() != "" {
-		g.connectionManager.RemoveConnection(wsConn.ConnectionID())
+	if connID := wsConn.ConnectionID(); connID != "" {
+		// 先通知逻辑服离线再移除：OnClose 走到时 conn 已不在 manager，
+		// 不显式通知会漏发离线（notifyLogicOffline 幂等，重复调用安全）。
+		if connObj := g.connectionManager.GetConnection(connID); connObj != nil {
+			g.notifyLogicOffline(connObj)
+		}
+		g.connectionManager.RemoveConnection(connID)
 	}
 	g.wsConnections.Delete(wsConn)
 	// 关闭底层 TCP，触发 OnClose 清理（H1：原先仅清 map 不关 socket → FD 泄漏）

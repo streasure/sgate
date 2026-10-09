@@ -47,8 +47,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	uperf.Apply(cfg.Perf.GcPercent, cfg.Perf.MemoryLimitPercent)
-
 	tlog.Info(context.TODO(), "gateway starting http port:%d version=%s cpu=%d GOMAXPROCS=%d",
 		cfg.HttpPort, gateway.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
@@ -63,6 +61,11 @@ func main() {
 
 	// 平铺创建所有生命周期组件，Container 由 main 统一创建和组装
 	container := component.NewContainer()
+	// uperf 组件 Order 最先：在任何业务组件分配大内存前应用 GC/内存软上限
+	container.Add(uperf.New(uperf.Config{
+		GcPercent:          cfg.Perf.GcPercent,
+		MemoryLimitPercent: cfg.Perf.MemoryLimitPercent,
+	}))
 	container.Add(comp.NewSecurityComponent())
 	container.Add(comp.NewObservabilityComponent())
 	container.Add(comp.NewTrafficComponent())

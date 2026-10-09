@@ -229,6 +229,8 @@ func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 			if qErr := lc.messageQueue.Enqueue(msg); qErr != nil {
 				return qErr
 			}
+			// 消息已入队：所有权转移给队列，返回 nil 避免调用方重复归还（双 Put）。
+			return nil
 		}
 		return err
 	}
@@ -457,6 +459,20 @@ func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 	return msg, true
 }
 
+// RequeueFront 将消息非阻塞放回队首（保持投递顺序）。
+// 队列已满时丢弃当前最旧消息腾位，绝不阻塞——Flush 冲刷失败必须走此路径，
+// 否则 Block 等策略的 Enqueue 会等待空间，而唯一能腾出空间的 Dequeue 正被
+// 自身占用，形成死锁。
+func (mq *StreamMessageQueue) RequeueFront(msg *protoGw.StreamData) {
+	mq.mu.Lock()
+	if len(mq.queue) >= mq.maxSize {
+		mq.queue = mq.queue[1:] // 与 Drop/Backpressure 一致：丢最旧
+	}
+	mq.queue = append([]*protoGw.StreamData{msg}, mq.queue...)
+	mq.cond.Signal()
+	mq.mu.Unlock()
+}
+
 // Flush 冲刷队列中的消息，重连后调用以恢复转发。
 // maxRetries 统计连续失败次数而非成功消息数，避免长队列在 100 条后停止冲刷。
 func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
@@ -481,6 +497,7 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 		lc.mu.RUnlock()
 
 		if closing {
+			PutStreamData(msg)
 			return
 		}
 
@@ -490,15 +507,8 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 				continue
 			}
 		}
-		// 发送失败，尝试重新入队
-		if mq.policy == config.QueuePolicyBlock {
-			// Block 策略 Enqueue 会阻塞直到有空间，不会丢消息
-			mq.Enqueue(msg)
-		} else {
-			if err := mq.Enqueue(msg); err != nil {
-				tlog.Warn(context.TODO(), "flush: re-enqueue failed, message dropped policy=%v error=%v", mq.policy, err)
-			}
-		}
+		// 发送失败：非阻塞放回队首保序重试，避免 Enqueue 等待空间造成自死锁。
+		mq.RequeueFront(msg)
 		failures++
 		time.Sleep(retryInterval)
 	}

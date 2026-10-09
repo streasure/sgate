@@ -11,7 +11,7 @@ require (
 	github.com/streasure/util v1.0.11
 	github.com/tetratelabs/wazero v1.8.0
 	google.golang.org/grpc v1.67.0
-	google.golang.org/protobuf v1.34.2
+	google.golang.org/protobuf v1.36.6
 	gopkg.in/yaml.v3 v3.0.1
 )
 

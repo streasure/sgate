@@ -30,6 +30,10 @@ type ConnectionManager struct {
 	maxConnections      atomic.Int32 // 网关最大总连接数，0=不限制
 	maxConnectionsPerIP atomic.Int32 // 单 IP 最大连接数，0=不限制
 
+	// onRemoveClose 管理器主动移除连接（空闲超时/关闭全部）前的回调，
+	// 供上层发送离线通知等收尾；nil 表示无回调。幂等性由回调方保证。
+	onRemoveClose func(*Connection)
+
 	totalConnections   atomic.Int64
 	activeConnections  atomic.Int64
 	closedConnections  atomic.Int64
@@ -412,6 +416,11 @@ func (cm *ConnectionManager) StartConnectionChecker(connIdleTimeout, connCheckIn
 	}()
 }
 
+// SetOnRemoveClose 设置管理器主动移除连接前的回调（须在启动检查器/关闭前调用）。
+func (cm *ConnectionManager) SetOnRemoveClose(fn func(*Connection)) {
+	cm.onRemoveClose = fn
+}
+
 // checkIdleConnections 检查并关闭超时的空闲连接。
 func (cm *ConnectionManager) checkIdleConnections(timeout time.Duration) {
 	now := time.Now().UnixMilli()
@@ -419,6 +428,11 @@ func (cm *ConnectionManager) checkIdleConnections(timeout time.Duration) {
 		lastActive := conn.LastActive.Load()
 		if now-lastActive > timeout.Milliseconds() {
 			tlog.Debug(context.TODO(), "closing idle connection connectionID=%s", conn.ID())
+			// 先回调（如离线通知）再关 socket/移除：OnClose 触发时 conn 可能已
+			// 不在 map，跳过回调会造成离线通知丢失
+			if cm.onRemoveClose != nil {
+				cm.onRemoveClose(conn)
+			}
 			if conn.Conn != nil {
 				conn.Conn.Close()
 			}
@@ -446,6 +460,9 @@ func (cm *ConnectionManager) StopConnectionChecker() {
 // CloseAllConnections 关闭所有连接并清理资源。
 func (cm *ConnectionManager) CloseAllConnections() {
 	cm.connections.Range(func(key string, conn *Connection) bool {
+		if cm.onRemoveClose != nil {
+			cm.onRemoveClose(conn)
+		}
 		if conn.Conn != nil {
 			conn.Conn.Close()
 		}

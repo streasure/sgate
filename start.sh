@@ -15,7 +15,7 @@ LOG_CONF="config/tlog.yaml"
 
 # 编译
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译 sgate..."
-go build -o sgate ./cmd/
+go build -o sgate ./cmd/gateway
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译完成"
 
 # 启动

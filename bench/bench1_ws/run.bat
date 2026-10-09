@@ -20,13 +20,13 @@ echo [%date% %time%] 编译完成
 
 :: 启动 logic
 echo [%date% %time%] 启动 logic1_ws...
-start /b "" ".\bench\logic1_ws\logic1_ws.exe" -port 50053 -id logic1-ws
-timeout /t 2 /nobreak >nul
+start /b "" ".\bench\logic1_ws\logic1_ws.exe" -port 50053 -id logic1-ws -pprof 127.0.0.1:6062
+ping -n 3 127.0.0.1 >nul
 
 :: 启动 sgate
 echo [%date% %time%] 启动 sgate...
 start /b "" ".\sgate.exe" -conf %CONF%
-timeout /t 3 /nobreak >nul
+ping -n 4 127.0.0.1 >nul
 
 :: 运行压测
 echo [%date% %time%] 开始压测 (WebSocket, %DURATION%, %PARALLEL% 连接)...

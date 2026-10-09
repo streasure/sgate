@@ -43,17 +43,20 @@ func (c *SecurityComponent) Order() int   { return 100 }
 func (c *SecurityComponent) Init() error {
 	tlog.Info(context.TODO(), "security component init")
 
-	c.WhitelistBlacklist = security.NewWhitelistBlacklist()
-	c.CircuitBreakerMgr = security.NewCircuitBreakerManager()
-
-	// 白名单和黑名单。
+	// 白名单/黑名单与熔断器按启动配置创建（与 WAF/JWT/限流一致：
+	// 组件创建与否由 Enabled 决定，热更新仅调整已创建组件的参数）。
+	// 未启用时不创建，安全链热路径判空即跳过，快速路径判定（pipeline）才可能生效。
 	if c.cfg.Enabled {
+		c.WhitelistBlacklist = security.NewWhitelistBlacklist()
 		for _, ip := range c.cfg.Whitelist {
 			c.WhitelistBlacklist.AddToWhitelist(ip)
 		}
 		for _, ip := range c.cfg.Blacklist {
 			c.WhitelistBlacklist.AddToBlacklist(ip)
 		}
+	}
+	if c.cfg.CircuitBreaker.Enabled {
+		c.CircuitBreakerMgr = security.NewCircuitBreakerManager()
 	}
 
 	// JWT 认证。

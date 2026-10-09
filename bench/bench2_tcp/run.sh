@@ -19,14 +19,13 @@ fi
 
 DURATION="10s"
 PARALLEL=100
-PUSH_INTERVAL=0
 PUSH_SIZE=64
-EXPECTED_MEMBERS=100
+EXPECTED_MEMBERS=0
 PUSH_WORKERS=12
 
 # 编译
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译..."
-go build -o sgate ./cmd/
+go build -o sgate ./cmd/gateway
 go build -o bench/logic2_tcp/logic2_tcp ./bench/logic2_tcp
 go build -o bench/bench2_tcp/bench2_tcp ./bench/bench2_tcp
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译完成"
@@ -34,8 +33,8 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译完成"
 # 启动 logic
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 logic2_tcp..."
 ./bench/logic2_tcp/logic2_tcp -port 50060 -id logic2-tcp \
-    -push-interval "$PUSH_INTERVAL" -push-size "$PUSH_SIZE" \
-    -expected-members "$EXPECTED_MEMBERS" -push-workers "$PUSH_WORKERS" &
+    -push-size "$PUSH_SIZE" \
+    -expected-members "$EXPECTED_MEMBERS" -push-workers "$PUSH_WORKERS" -pprof 127.0.0.1:6063 &
 LOGIC_PID=$!
 sleep 2
 

@@ -40,7 +40,7 @@ cluster:
 stream:
   shardCount: 96
   connGroupCount: 4          # gateway→logic 独立 TCP 连接组数（默认 4），每个组承载 shardCount/N 个 stream
-  sendChannelSize: 1048576
+  sendChannelSize: 65536    # 每分片发送队列；容量按 shardCount 预分配（96×1M×8B≈768MB，过大仅占内存）
   batchPush: false
 
 protection:

@@ -68,13 +68,17 @@ type Gateway struct {
 	// 安全防护组件
 	whitelistBlacklist *security.WhitelistBlacklist
 	circuitBreakerMgr  *security.CircuitBreakerManager
-	rateLimiter        *security.RateLimiter
-	waf                *security.WAF
-	cluster            *cluster.Cluster
-	latencyTracker     *obs.LatencyTracker
-	engines            []gnet.Engine // 所有 transport engine，关闭时逐个 Stop
-	enginesMu          sync.Mutex
-	grpcServerMu       sync.Mutex // 保护 grpcServer 赋值/读取（启动协程与 Close 竞态）
+	// breakerParams 熔断器参数快照：构造/热更时解析一次，
+	// 热路径（每消息两次 getOrCreateBreaker）只做一次原子读，
+	// 避免每消息 cfg.Load + time.ParseDuration。
+	breakerParams  atomic.Pointer[breakerParams]
+	rateLimiter    *security.RateLimiter
+	waf            *security.WAF
+	cluster        *cluster.Cluster
+	latencyTracker *obs.LatencyTracker
+	engines        []gnet.Engine // 所有 transport engine，关闭时逐个 Stop
+	enginesMu      sync.Mutex
+	grpcServerMu   sync.Mutex // 保护 grpcServer 赋值/读取（启动协程与 Close 竞态）
 
 	// 企业级扩展组件
 	filterChain   *types.FilterChain          // SPI 过滤器链
@@ -135,6 +139,36 @@ func (g *Gateway) getProtection() config.ProtectionConfig {
 		return *p
 	}
 	return config.ProtectionConfig{}
+}
+
+// breakerParams 预解析的熔断器参数；nil 表示熔断器未启用（热路径直接短路）。
+type breakerParams struct {
+	failureThreshold int
+	successThreshold int
+	timeout          time.Duration
+}
+
+// breakerParamsFrom 从配置解析熔断器参数，未启用时返回 nil。
+func breakerParamsFrom(cfg *config.Config) *breakerParams {
+	if cfg == nil || !cfg.Security.CircuitBreaker.Enabled {
+		return nil
+	}
+	cb := cfg.Security.CircuitBreaker
+	p := &breakerParams{
+		failureThreshold: 5,
+		successThreshold: 3,
+		timeout:          30 * time.Second,
+	}
+	if cb.FailureThreshold > 0 {
+		p.failureThreshold = cb.FailureThreshold
+	}
+	if cb.SuccessThreshold > 0 {
+		p.successThreshold = cb.SuccessThreshold
+	}
+	if d := gatewayutil.ParseDurationDefault(cb.Timeout, 0); d > 0 {
+		p.timeout = d
+	}
+	return p
 }
 
 // AddPushedToClient 增加已推送到客户端的消息计数（接收方向：逻辑服到网关再到客户端）。
@@ -213,6 +247,8 @@ func (g *Gateway) Init() error {
 	g.configCenter = component.ConfigCenter()
 	g.cluster = component.ClusterNode()
 	g.alertWebhook = component.AlertWebhook()
+	// 管理器主动移除连接（空闲超时/关闭全部）时先发离线通知
+	g.connectionManager.SetOnRemoveClose(g.notifyLogicOffline)
 	return nil
 }
 func (g *Gateway) Start() error {
@@ -366,11 +402,15 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 		}
 		if time.Since(conn.getLastPingTime()) > timeout {
 			tlog.Warn(context.TODO(), "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID())
+			if connID := conn.ConnectionID(); connID != "" {
+				// 先通知逻辑服离线再关闭/移除，避免 OnClose 时 conn 已查不到而漏发
+				if connObj := g.connectionManager.GetConnection(connID); connObj != nil {
+					g.notifyLogicOffline(connObj)
+				}
+				g.connectionManager.RemoveConnection(connID)
+			}
 			if conn.Conn != nil {
 				conn.Conn.Close()
-			}
-			if conn.ConnectionID() != "" {
-				g.connectionManager.RemoveConnection(conn.ConnectionID())
 			}
 			g.wsConnections.Delete(conn)
 		}
@@ -460,6 +500,7 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 先补齐运行时默认值，再原子替换（防止零值热更把连接踢飞）
 	newCfg.ApplyRuntimeDefaults()
 	g.cfg.Store(newCfg)
+	g.breakerParams.Store(breakerParamsFrom(newCfg))
 	// 动态更新限流阈值（无需重启）
 	if g.rateLimiter != nil && newCfg.Security.RateLimit.Enabled {
 		refresh := time.Second
@@ -746,6 +787,7 @@ func newGateway(cfg *config.Config) *Gateway {
 	// 存指针副本，避免调用方后续原地改写共享配置
 	stored := *cfg
 	gw.cfg.Store(&stored)
+	gw.breakerParams.Store(breakerParamsFrom(&stored))
 	gw.protection.Store(&stored.Protection)
 	gw.grpcCfg.Store(&stored.GRPC)
 	gw.streamCfg.Store(&stored.Stream)

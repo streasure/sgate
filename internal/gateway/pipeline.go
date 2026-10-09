@@ -43,7 +43,6 @@ func NewMessagePipeline(gw *Gateway) *MessagePipeline {
 
 // 管道拒绝路径的哨兵错误：热路径上避免 fmt.Errorf 的每消息分配。
 var (
-	errPipelineOverload   = errors.New("server overload")
 	errPipelineMissingCmd = errors.New("missing cmd")
 	errPipelineNoConn     = errors.New("unknown connection")
 	errPipelineUnbound    = errors.New("connection not bound (login pending)")
@@ -90,14 +89,14 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	g := p.gw
 	protection := g.getProtection()
 
-	// 阶段1：过载检查
+	// 阶段1：过载检查。过载丢弃静默（与黑名单/安全限流/登录宽限一致）：
+	// 此时逐条回错误帧会占用正被挤爆的事件循环与写带宽，等于放大负载；
+	// 可见性由 messagesDroppedOverload / overloadProtector 计数提供。
+	// 登录路径例外：LoginGate 必须回 503 ack（见 login.go）。
 	if g.overloadProtector.IsOverloaded() {
 		g.overloadProtector.RecordDrop(1)
 		g.messagesDroppedOverload.Add(1)
-		return PipelineResult{
-			Action: gnet.None,
-			Error:  errPipelineOverload,
-		}
+		return PipelineResult{Action: gnet.None}
 	}
 
 	cmd := message.Cmd

@@ -17,7 +17,6 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
-	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 )
@@ -109,6 +108,10 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 
 	var connectionID string
 	connCtx := c.Context()
+	// OnOpen 仅在成功 SetContext 后才对 connectionsActive 计数，故以
+	// connCtx != nil 作为"已计数"依据。WS 连接在首帧前关闭时 ConnectionID()
+	// 为空，若只在 connectionID != "" 分支递减会造成计数永久泄漏。
+	counted := connCtx != nil
 
 	if connCtx != nil {
 		if ctx, ok := connCtx.(*ConnContext); ok {
@@ -133,8 +136,10 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 			g.notifyLogicOffline(conn)
 		}
 		g.connectionManager.RemoveConnection(connectionID)
-		g.connectionsActive.Add(-1)
 		tlog.Debug(context.TODO(), "connection closed connectionID=%s error=%v", connectionID, err)
+	}
+	if counted {
+		g.connectionsActive.Add(-1)
 	}
 
 	return
@@ -329,32 +334,17 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 }
 
 // getOrCreateBreaker 获取或创建指定 route 的熔断器。
-// security.circuitBreaker.enabled=false 时返回 nil（调用方需判空）。
+// 未启用（breakerParams 为 nil）或管理器缺失时返回 nil（调用方需判空）。
+// 参数来自构造/热更时的快照，热路径不做配置解析。
 func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 	if g.circuitBreakerMgr == nil {
 		return nil
 	}
-	failureThreshold := 5
-	successThreshold := 3
-	timeout := 30 * time.Second
-	enabled := true
-	if cfg := g.cfg.Load(); cfg != nil {
-		cb := cfg.Security.CircuitBreaker
-		enabled = cb.Enabled
-		if cb.FailureThreshold > 0 {
-			failureThreshold = cb.FailureThreshold
-		}
-		if cb.SuccessThreshold > 0 {
-			successThreshold = cb.SuccessThreshold
-		}
-		if d := gatewayutil.ParseDurationDefault(cb.Timeout, 0); d > 0 {
-			timeout = d
-		}
-	}
-	if !enabled {
+	p := g.breakerParams.Load()
+	if p == nil {
 		return nil
 	}
-	return g.circuitBreakerMgr.GetCircuitBreaker(route, failureThreshold, successThreshold, timeout)
+	return g.circuitBreakerMgr.GetCircuitBreaker(route, p.failureThreshold, p.successThreshold, p.timeout)
 }
 
 func writeFrame(c gnet.Conn, data []byte) {

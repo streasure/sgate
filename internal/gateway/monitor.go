@@ -9,6 +9,7 @@ import (
 	"time"
 
 	json "github.com/bytedance/sonic"
+	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/util/httputil"
 	"github.com/streasure/util/tlog"
@@ -368,8 +369,20 @@ func (g *Gateway) startConfigCenterWatcher() {
 			if len(yamlBytes) == 0 {
 				continue
 			}
+			// 深拷贝现役配置：直接 *currentCfg 只是浅拷贝，map/slice 字段
+			// 与现役配置共享，yaml.Unmarshal 会写入共享 map 造成并发写崩溃。
+			// 配置中心更新低频，这里用 marshal→unmarshal 往返做深拷贝。
 			currentCfg := g.cfg.Load()
-			newCfg := *currentCfg
+			base, err := yaml.Marshal(currentCfg)
+			if err != nil {
+				tlog.Warn(context.TODO(), "config center snapshot marshal failed error=%v", err)
+				continue
+			}
+			newCfg := config.Config{}
+			if err := yaml.Unmarshal(base, &newCfg); err != nil {
+				tlog.Warn(context.TODO(), "config center snapshot parse failed error=%v", err)
+				continue
+			}
 			if err := yaml.Unmarshal(yamlBytes, &newCfg); err != nil {
 				tlog.Warn(context.TODO(), "config center content parse failed error=%v", err)
 				continue

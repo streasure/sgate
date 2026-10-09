@@ -348,11 +348,14 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			if batchPush {
 				flushBatch()
 			}
+			// 序列化提到循环外：每条广播消息只编解码一次，
+			// 原实现放在 ForEach 内会对每个连接重复编解码（O(连接数) 次）。
+			// respData 为只读共享（AppendCoalesced 复制、AsyncWrite 只读引用）。
+			respData, err := routes.MarshalClientMessage(msg)
+			if err != nil {
+				return
+			}
 			lc.gateway.GetConnectionManager().ForEach(func(conn *connection.Connection) bool {
-				respData, err := routes.MarshalClientMessage(msg)
-				if err != nil {
-					return true
-				}
 				if lc.gateway.GetShardedCoalescer() != nil {
 					lc.gateway.GetShardedCoalescer().AddMulti(conn.ID(), respData, conn)
 					lc.gateway.AddPushedToClient(1)

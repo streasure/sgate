@@ -1,124 +1,87 @@
-# sgate 未来待修复列表
+# sgate 路线图
 
-本文档记录 P2（应该修复）和 P3（架构增强）级别的待办事项，供后续迭代参考。
-
----
-
-## P2: 影响稳定性
-
-### 1. 广播性能优化
-- **问题：** `BroadcastAll` 同步遍历所有连接，百万连接时广播一次可能导致秒级延迟
-- **文件：** `internal/backend/grpc_server.go`、`internal/connection/manager.go`
-- **方案：** 广播改为异步分批投递，或按 zone 分片广播
-- **优先级：** P2
-
-### 2. 消息可靠投递（ACK + 重传）
-- **问题：** 当前 TCP 写失败直接丢弃。SLG 游戏对关键消息（战斗结果、资源变更）要求 at-least-once
-- **方案：** 消息 ACK + 重传机制，或逻辑服侧重试 + 幂等
-- **优先级：** P2
-
-### 3. 连接级流控
-- **问题：** 当前只有 IP 级和 route 级限流，无单连接限流。异常连接可占满 gRPC 发送队列
-- **文件：** `internal/security/ratelimit.go`、`internal/connection/connection.go`、`internal/gateway/pipeline.go`
-- **方案：** 添加 `maxMessagesPerConn` 配置，每连接每秒消息计数超限则丢弃
-- **优先级：** P2
-- **状态：** ✅ 已修复
-
-### 4. 连接生命周期指标完善
-- **问题：** 当前只有平均连接时长，缺少连接时长分布直方图
-- **文件：** `internal/gateway/monitor.go`、`internal/gateway/handlers.go`、`internal/obs/latency.go`
-- **方案：** 添加 P50/P95/P99 连接时长指标（基于滑动窗口 LatencyTracker）
-- **优先级：** P2
-- **状态：** ✅ 已修复
+本文档为工程现状能力清单与待办事项，供后续迭代参考。架构细节见 [`architecture.md`](architecture.md)。
 
 ---
 
-## P3: 架构增强
+## 当前已具备能力
 
-### 5. 跨网关路由（全局 Session 表）
-- **问题：** 当前 session ID 是网关本地生成，逻辑服必须知道用户在哪个网关。网关重启时连接需要客户端重新连接
-- **方案：** 全局 session ID + 网关路由表（etcd 维护 `session → gateway` 映射）
-- **优先级：** P3
+### 连接与资源
 
-### 6. 多 Zone 支持
-- **问题：** 当前只有单 zone。百万在线需要跨 zone 部署（如华北/华东/华南）
-- **方案：** zone 路由 + 跨 zone gRPC 转发
-- **优先级：** P3
-
-### 7. 滚动升级（连接迁移）
-- **问题：** 当前关闭网关时客户端全部断开重连。百万连接同时重连会冲击逻辑服
-- **方案：** 连接迁移机制（新网关接管旧连接）或分批重启策略
-- **优先级：** P3
-
-### 8. 热配置更新
-- **问题：** 当前配置修改需重启。`configWatcher` 监听文件变化但只更新部分字段
-- **方案：** 关键参数（限流阈值、开关、连接数限制）支持运行时热更新
-- **优先级：** P3
-- **状态：** ✅ 已修复（支持：限流阈值、黑名单、过载保护、JWT、灰度、流量镜像、降级、连接限制）
-
-### 9. SLG 特定：跨服战消息路由
-- **问题：** 跨 zone 战斗需要跨网关消息路由
-- **方案：** 全局路由表 + 跨 zone 转发
-- **前提：** 先完成 #5（全局 Session 表）和 #6（多 Zone）
-- **优先级：** P3
-
-### 10. SLG 特定：断线重连保持状态
-- **问题：** 重连后需要逻辑服重新下发状态，用户体验差
-- **方案：** 网关侧消息缓存（重连后重放最近 N 条消息）
-- **优先级：** P3
-
----
-
-## 已实现（本迭代）
-
-| 项 | 状态 |
+| 能力 | 说明 |
 | --- | --- |
-| LogoutGate 协议（`1000003/1000004`，断连无推送 + JWT Revoke） | ✅ |
-| Admin 封禁 HTTP（`/admin/ban|unban|bans`，先推 `CmdBanNtf` 再断，Bearer `admin.token`） | ✅ |
-| 进程内 `BanStore` | ✅（**TODO: 迁 MySQL**，多网关共享） |
-| LoginGate 封禁拦截（403） | ✅ |
-| JWT jti 持久化到 Connection + Revoke 接入 logout/ban | ✅ |
-| WS 关键修复：close 关 TCP、握手半包累积、分片重组、强制客户端 mask | ✅ |
-| `OnTick` 每秒采样 `msgRate`（修 Health 速率失真） | ✅ |
-| `architecture.md` 去掉不存在的 `config.Set` | ✅ |
+| 最大连接数限制 | `protection.maxConnections` |
+| 单 IP 连接数限制 | `protection.maxConnectionsPerIP` |
+| 启动 FD 检查 | 启动时校验文件描述符上限 |
+| FrameBuf 默认值 | 零值回退 `4MiB`；百万连接建议显式 `64KiB`（见 `config_defaults_test`） |
+| 连接级流控 | `protection.maxMessagesPerConn`（0=不限），pipeline 阶段 2.5 检查 |
+| 重连处理 | 重连时主动关闭旧连接 |
+| 分片化连接表 | ConnectionManager 分片 map；Group 成员无泄漏 |
+| 连接生命周期指标 | 平均时长 + P50/P95/P99（滑动窗口） |
 
-### 封禁状态迁移 MySQL（TODO）
+### 鉴权与安全
 
-- **问题：** `BanStore` 仅进程内存，重启丢失、多网关不共享
-- **方案：** MySQL 表 `user_bans(user_uuid PK, reason, jti, banned_at, expires_at)`；启动加载未过期记录；`/admin/ban` 双写内存+DB；定时清理过期行
-- **优先级：** P2
+| 能力 | 说明 |
+| --- | --- |
+| LogoutGate | `1000003/1000004`，断连无推送 + JWT Revoke |
+| Admin 封禁 HTTP | `/admin/ban|unban|bans`，先推 `CmdBanNtf` 再断，Bearer `admin.token` |
+| LoginGate 封禁拦截 | 403 |
+| BanStore | 进程内实现（**TODO: 迁 MySQL**，多网关共享） |
+| JWT | jti 持久化到 Connection，接入 logout/ban Revoke |
+| 登录校验开关 | `loginValidation.enabled`（压测恒为 false） |
+
+### 运维与配置
+
+| 能力 | 说明 |
+| --- | --- |
+| 热配置更新 | 限流阈值、黑名单、过载保护、JWT、灰度、流量镜像、降级、连接限制、连接级流控 |
+| 监控输出 | tlog 结构化日志、`/stats` HTTP API、`/debug/pprof/` |
+| 速率采样 | `OnTick` 每秒采样 `msgRate`（Health 速率准确） |
+| WS 实现要点 | close 正确关 TCP、握手半包累积、分片重组、强制客户端 mask |
+| 多 TCP 连接并行 | `stream.connGroupCount`（默认 4），解除 HTTP/2 单连接写锁串行化 |
+
+### 架构
+
+- 包依赖方向单向无环：`gateway → backend → connection`；共享帧工具位于 `routes`
+- 分层：`internal/gateway`（Gateway/handlers/pipeline）、`internal/backend`（LogicClient/Pool/Stream/GRPCServer）、`internal/connection`（Connection/Manager/Group/Coalescer）
 
 ---
 
-## 已修复（P0 + P1 + P2 + P3）
+## 待办
 
-以下问题已在当前版本修复：
+### P2：影响稳定性
 
-| 编号 | 问题 | 状态 |
-| --- | --- | --- |
-| P0-1 | 最大连接数限制 (`maxConnections`) | ✅ 已修复 |
-| P0-2 | 单 IP 连接数限制 (`maxConnectionsPerIP`) | ✅ 已修复 |
-| P0-3 | FrameBuf 默认值（零值回退 `4MiB`，百万连接建议显式 `64KiB`，见 `config_defaults_test`） | ✅ 已修复 |
-| P0-4 | 启动时检查 FD 限制 | ✅ 已修复 |
-| P1-1 | ConnectionManager sync.Map → 分片 map | ✅ 已修复 |
-| P1-2 | Group 成员泄漏修复 | ✅ 已修复 |
-| P1-3 | 重连时主动关闭旧连接 | ✅ 已修复 |
-| P1-4 | 连接级指标（平均连接时长） | ✅ 已修复 |
-| P2-3 | 连接级流控 (`maxMessagesPerConn`) | ✅ 已修复 |
-| P2-4 | 连接生命周期指标（P50/P95/P99） | ✅ 已修复 |
-| P3-8 | 热配置更新（运行时参数热更新） | ✅ 已修复 |
+1. **广播性能优化**
+   - 问题：`BroadcastAll` 同步遍历所有连接，百万连接时广播一次可能导致秒级延迟
+   - 文件：`internal/backend/grpc_server.go`、`internal/connection/manager.go`
+   - 方案：广播改为异步分批投递，或按 zone 分片广播
 
----
+2. **消息可靠投递（ACK + 重传）**
+   - 问题：当前 TCP 写失败直接丢弃。SLG 游戏对关键消息（战斗结果、资源变更）要求 at-least-once
+   - 方案：消息 ACK + 重传机制，或逻辑服侧重试 + 幂等
 
-## 架构重构（已完成）
+3. **封禁状态迁移 MySQL**
+   - 问题：`BanStore` 仅进程内存，重启丢失、多网关不共享
+   - 方案：MySQL 表 `user_bans(user_uuid PK, reason, jti, banned_at, expires_at)`；启动加载未过期记录；`/admin/ban` 双写内存+DB；定时清理过期行
 
-2026-09 完成四阶段包结构重构，详见 [`architecture.md`](architecture.md)：
+### P3：架构增强
 
-| 阶段 | 内容 | 状态 |
-| --- | --- | --- |
-| A | 死代码清理（GroupManager、MessageIntegrity 冗余方法、空目录） | ✅ |
-| B | 抽出 `internal/connection`（Connection/Manager/Group/Coalescer） | ✅ |
-| C | 抽出 `internal/backend`（LogicClient/Pool/Stream/GRPCServer） | ✅ |
-| D | 迁入 `internal/gateway`（Gateway/handlers/pipeline 等），删除根包 | ✅ |
+1. **跨网关路由（全局 Session 表）**
+   - 问题：session ID 网关本地生成，逻辑服必须知道用户在哪个网关；网关重启时连接需客户端重连
+   - 方案：全局 session ID + 网关路由表（etcd 维护 `session → gateway` 映射）
 
-**依赖方向：** `gateway → backend → connection`（单向无环）；共享帧工具位于 `routes`。
+2. **多 Zone 支持**
+   - 问题：当前单 zone，百万在线需跨 zone 部署（华北/华东/华南）
+   - 方案：zone 路由 + 跨 zone gRPC 转发
+
+3. **滚动升级（连接迁移）**
+   - 问题：关闭网关时客户端全部断开重连，百万连接同时重连冲击逻辑服
+   - 方案：连接迁移机制（新网关接管旧连接）或分批重启策略
+
+4. **SLG：跨服战消息路由**
+   - 问题：跨 zone 战斗需要跨网关消息路由
+   - 方案：全局路由表 + 跨 zone 转发（依赖 P3-1、P3-2）
+
+5. **SLG：断线重连保持状态**
+   - 问题：重连后需逻辑服重新下发状态，体验差
+   - 方案：网关侧消息缓存（重连后重放最近 N 条消息）

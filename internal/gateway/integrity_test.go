@@ -33,3 +33,14 @@ func TestIntegrity_PerConnectionKey(t *testing.T) {
 		t.Fatalf("conn-A new seq rejected: %v", err)
 	}
 }
+
+// TestIntegrity_SeqZeroRejected SeqId==0（未提供序号）应立即拒绝：
+// 旧实现首条 seq0 放行、后续同 cmd 全被误判为重放，行为不确定。
+func TestIntegrity_SeqZeroRejected(t *testing.T) {
+	mi := NewMessageIntegrity(60000)
+	defer mi.Stop()
+
+	if err := mi.ProcessMessage("conn-C", &protoGw.StreamData{Cmd: 100, SeqId: 0}); err == nil {
+		t.Fatal("seq_id=0 accepted, want explicit rejection when verifyInbound enabled")
+	}
+}

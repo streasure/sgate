@@ -52,7 +52,12 @@ func (mi *MessageIntegrity) Stop() {
 // ProcessMessage 按连接维度做重放检测。
 // key 必须包含 connectionID：消息帧内 SessionId/UserKey 解码后恒为空，
 // 用原始字段会让所有连接共享同一 key（互丢消息）。
+// 要求 SeqId 非 0：重放检测依赖每消息唯一序号；SeqId==0（未提供序号）
+// 会退化成「首条放行、同 cmd 后续全被误判重放」，故直接拒绝。
 func (mi *MessageIntegrity) ProcessMessage(connectionID string, msg *protoGw.StreamData) error {
+	if msg.SeqId == 0 {
+		return fmt.Errorf("seq_id required when verifyInbound enabled cmd=%d", msg.Cmd)
+	}
 	msgID := fmt.Sprintf("%s-%s-%d-%d", connectionID, msg.UserKey, msg.Cmd, msg.SeqId)
 	mi.cacheMutex.Lock()
 	if _, exists := mi.replayCache[msgID]; exists {

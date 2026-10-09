@@ -410,25 +410,6 @@ func (s *Server) Offline(sessionID, userUUID string) {
 	}
 }
 
-// sendRawControl 向所有网关连接发送控制消息
-func (s *Server) sendRawControl(cmd int32, data []byte) int {
-	count := 0
-	sent := make(map[string]struct{})
-	s.streams.Range(func(_, value any) bool {
-		conn := value.(*streamConn)
-		if _, ok := sent[conn.gatewayID]; ok {
-			return true
-		}
-		// 先记录 gatewayID 防止同一网关多流重复发送
-		sent[conn.gatewayID] = struct{}{}
-		if conn.Send(&protocol.StreamData{Cmd: cmd, Data: data}) == nil {
-			count++
-		}
-		return true
-	})
-	return count
-}
-
 // SendToUser 根据用户 UUID 查找连接并直接发送消息
 func (s *Server) SendToUser(userUUID string, targetCmd int32, data []byte) int {
 	if sessionID, ok := s.GetConnectionIDByUser(userUUID); ok {
@@ -439,7 +420,9 @@ func (s *Server) SendToUser(userUUID string, targetCmd int32, data []byte) int {
 	return 0
 }
 
-// Kick 发送踢下线通知
+// Kick 向指定会话发送踢下线通知（缺省 cmd 为 1100012 用户下线通知）。
+// 只投递到 sessionID 对应的会话；sessionID 为空或会话不存在时返回 0，
+// 绝不广播——广播会让网关把所有客户端踢下线。
 func (s *Server) Kick(sessionID string, args ...any) int {
 	var targetCmd int32
 	var data []byte
@@ -454,7 +437,13 @@ func (s *Server) Kick(sessionID string, args ...any) int {
 	if targetCmd == 0 {
 		targetCmd = 1100012 // 用户下线通知命令。
 	}
-	return s.sendRawControl(targetCmd, data)
+	if sessionID == "" {
+		return 0
+	}
+	if s.PushToConnection(sessionID, targetCmd, data) == nil {
+		return 1
+	}
+	return 0
 }
 
 // SendToGroup 向组内所有成员发送消息

@@ -15,14 +15,14 @@ PARALLEL=100
 
 # 编译
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译..."
-go build -o sgate ./cmd/
+go build -o sgate ./cmd/gateway
 go build -o bench/logic1_tcp/logic1_tcp ./bench/logic1_tcp
 go build -o bench/bench1_tcp/bench1_tcp ./bench/bench1_tcp
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译完成"
 
 # 启动 logic
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 logic1_tcp..."
-./bench/logic1_tcp/logic1_tcp -port 50052 -id logic1-tcp &
+./bench/logic1_tcp/logic1_tcp -port 50052 -id logic1-tcp -pprof 127.0.0.1:6061 &
 LOGIC_PID=$!
 sleep 2
 

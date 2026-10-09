@@ -19,9 +19,8 @@ if "%MODE%"=="on" (
 
 set DURATION=10s
 set PARALLEL=100
-set PUSH_INTERVAL=0
 set PUSH_SIZE=64
-set EXPECTED_MEMBERS=100
+set EXPECTED_MEMBERS=0
 set PUSH_WORKERS=12
 
 :: 编译
@@ -33,13 +32,13 @@ echo [%date% %time%] 编译完成
 
 :: 启动 logic
 echo [%date% %time%] 启动 logic2_ws...
-start /b "" ".\bench\logic2_ws\logic2_ws.exe" -port 50061 -id logic2-ws -push-interval %PUSH_INTERVAL% -push-size %PUSH_SIZE% -expected-members %EXPECTED_MEMBERS% -push-workers %PUSH_WORKERS%
-timeout /t 2 /nobreak >nul
+start /b "" ".\bench\logic2_ws\logic2_ws.exe" -port 50061 -id logic2-ws -push-size %PUSH_SIZE% -expected-members %EXPECTED_MEMBERS% -push-workers %PUSH_WORKERS% -pprof 127.0.0.1:6064
+ping -n 3 127.0.0.1 >nul
 
 :: 启动 sgate
 echo [%date% %time%] 启动 sgate (batchPush=%MODE%)...
 start /b "" ".\sgate.exe" -conf %CONF%
-timeout /t 3 /nobreak >nul
+ping -n 4 127.0.0.1 >nul
 
 :: 运行压测
 echo [%date% %time%] 开始压测 (WebSocket, %DURATION%, %PARALLEL% 连接, batchPush=%MODE%)...
