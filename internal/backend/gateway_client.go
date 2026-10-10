@@ -231,7 +231,10 @@ func (pool *GatewayClientPool) handleDeregister(event uetcd.ServiceEvent) {
 			tlog.Warn(context.TODO(), "网关代次已更新，关闭旧连接 serverID=%s address=%s gen=%d currentGen=%d",
 				event.InstanceID, event.Address, gen, currentGen)
 		} else {
-			tlog.Warn(context.TODO(), "网关已从 etcd 注销，但 gRPC 连接仍存活，保留连接 serverID=%s address=%s",
+			// 已从池中删除引用：必须关闭，否则 gRPC ClientConn 再无人持有（永久泄漏）。
+			// 若对端只是 etcd 会话抖动，重新注册事件会建立新连接。
+			go client.Close()
+			tlog.Warn(context.TODO(), "网关已从 etcd 注销，关闭仍存活的连接 serverID=%s address=%s",
 				event.InstanceID, event.Address)
 		}
 	}

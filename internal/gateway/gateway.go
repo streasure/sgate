@@ -37,7 +37,8 @@ import (
 type Gateway struct {
 	connectionManager *connection.ConnectionManager
 	stopChan          chan struct{}
-	closeOnce         sync.Once
+	closing           atomic.Bool   // 关闭流程状态：首个调用者执行，其余等待完成
+	closeDone         chan struct{} // 关闭流程完成信号（Close 等待者挂在此）
 	transportType     sync.Map
 	ctx               context.Context
 	tlsConfig         *tls.Config
@@ -360,6 +361,9 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 			gnet.WithWriteBufferCap(262144),
 			gnet.WithSocketRecvBuffer(4 * 1024 * 1024),
 			gnet.WithSocketSendBuffer(4 * 1024 * 1024),
+			// OnTick 依赖 ticker：不开启则 OnTick 永不回调，
+			// msgRate 采样与每秒 metrics 日志都会失效（/stats 速率恒 0）。
+			gnet.WithTicker(true),
 		}
 		if transportType == "" || transportType == "websocket" {
 			options = append(options, gnet.WithTCPNoDelay(gnet.TCPNoDelay))
@@ -373,25 +377,37 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 	}
 }
 
+// wsHeartbeatChecker 定期清理 WS 心跳超时连接。
+// 每轮热读 protection 配置（热更生效）；单轮 panic 恢复后继续下一轮，
+// 不像旧实现 recover 即退出——那会让 WS 心跳清理永久失效。
 func (g *Gateway) wsHeartbeatChecker() {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "wsHeartbeatChecker panic recovered error=%v", r)
-		}
-	}()
-	checkInterval := time.Duration(g.getProtection().WSCheckInterval) * time.Second
-	heartbeatTimeout := time.Duration(g.getProtection().WSHeartbeatTimeout) * time.Second
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
-
 	for {
+		interval := time.Duration(g.getProtection().WSCheckInterval) * time.Second
+		if interval <= 0 {
+			interval = 30 * time.Second // 防 time.NewTimer(0) 忙轮询
+		}
+		timer := time.NewTimer(interval)
 		select {
 		case <-g.stopChan:
+			timer.Stop()
 			return
-		case <-ticker.C:
-			g.checkWebSocketConnections(heartbeatTimeout)
+		case <-timer.C:
 		}
+
+		// 检查前热读超时值，使 wsHeartbeatTimeout 热更立即生效
+		timeout := time.Duration(g.getProtection().WSHeartbeatTimeout) * time.Second
+		g.runWSHeartbeatCheck(timeout)
 	}
+}
+
+// runWSHeartbeatCheck 执行一轮检查，独立 recover：单轮异常不终止清理协程。
+func (g *Gateway) runWSHeartbeatCheck(timeout time.Duration) {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error(context.TODO(), "wsHeartbeatCheck panic recovered error=%v", r)
+		}
+	}()
+	g.checkWebSocketConnections(timeout)
 }
 
 func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
@@ -499,6 +515,12 @@ func (g *Gateway) configWatcher() {
 func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 先补齐运行时默认值，再原子替换（防止零值热更把连接踢飞）
 	newCfg.ApplyRuntimeDefaults()
+	// 必填项校验（启动 Load 会走 Validate，热更路径此前缺失）：
+	// 非法配置整体拒绝，保留当前配置继续运行。
+	if err := newCfg.Validate(); err != nil {
+		tlog.Error(context.TODO(), "config update rejected, keeping current config error=%v", err)
+		return
+	}
 	g.cfg.Store(newCfg)
 	g.breakerParams.Store(breakerParamsFrom(newCfg))
 	// 动态更新限流阈值（无需重启）
@@ -543,10 +565,14 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	g.grpcCfg.Store(&newCfg.GRPC)
 	g.streamCfg.Store(&newCfg.Stream)
 
-	// 动态更新 JWT 密钥
+	// 动态更新 JWT 密钥（拒绝空 secret：空键可伪造任意令牌）
 	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
-		g.jwtAuth.UpdateSecret(newCfg.JWTAuth.Secret)
-		tlog.Info(context.TODO(), "jwt secret updated")
+		if newCfg.JWTAuth.Secret == "" {
+			tlog.Warn(context.TODO(), "jwt secret update rejected: empty secret")
+		} else {
+			g.jwtAuth.UpdateSecret(newCfg.JWTAuth.Secret)
+			tlog.Info(context.TODO(), "jwt secret updated")
+		}
 	}
 
 	// 动态更新灰度规则
@@ -647,9 +673,11 @@ func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
 	return 1 * time.Second, gnet.None
 }
 
+// OnShutdown 在 gnet engine 关闭流程中被回调（事件循环 goroutine 上执行）。
+// 必须先摘除该 engine（Close 会对所有 engine 调 Stop，与正在回调的 engine 互等死锁），
+// 且绝不能在此等待关闭流程完成：Close 可能正持有关闭状态并阻塞在 engines[i].Stop
+// 的 inShutdown 轮询上（gnet 需等本回调返回才置位），等待将形成互锁。
 func (g *Gateway) OnShutdown(engine gnet.Engine) {
-	// gnet 在 engine 自身关闭流程中回调 OnShutdown；Close 会对所有 engine 调 Stop，
-	// 对正在回调的 engine 调 Stop 会与之互等死锁。先把该 engine 摘除再走 Close。
 	g.enginesMu.Lock()
 	for i, e := range g.engines {
 		if e == engine {
@@ -658,97 +686,118 @@ func (g *Gateway) OnShutdown(engine gnet.Engine) {
 		}
 	}
 	g.enginesMu.Unlock()
-	g.Close()
-}
 
-func (g *Gateway) Close() {
-	g.closeOnce.Do(func() {
-		close(g.stopChan)
-
-		// 阶段1：停止接受新连接（所有 transport engine）
-		g.enginesMu.Lock()
-		engines := append([]gnet.Engine(nil), g.engines...)
-		g.enginesMu.Unlock()
-		for i := range engines {
-			_ = engines[i].Stop(context.Background())
-		}
-
-		// 阶段2：排空进行中的消息（最多2分钟）
-		drainTimeout := 2 * time.Minute
-		drainDone := make(chan struct{})
+	if g.closing.CompareAndSwap(false, true) {
+		// 首触发（engine 自行关闭、无人调用过 Close）：在独立协程执行，
+		// 本回调立即返回，让 gnet 完成 inShutdown 置位。
 		go func() {
-			g.drainConnections(drainTimeout)
-			close(drainDone)
+			defer close(g.closeDone)
+			g.closeBody()
 		}()
-
-		drainTimer := time.NewTimer(drainTimeout)
-		select {
-		case <-drainDone:
-			if !drainTimer.Stop() {
-				select {
-				case <-drainTimer.C:
-				default:
-				}
-			}
-			tlog.Info(context.TODO(), "connection drain completed")
-		case <-drainTimer.C:
-			tlog.Warn(context.TODO(), "connection drain timed out, forcing close")
-		}
-
-		if g.logicClientPool != nil {
-			g.logicClientPool.Close()
-		}
-		if g.gatewayClientPool != nil {
-			g.gatewayClientPool.Close()
-		}
-		if g.logicClient != nil {
-			g.logicClient.Close()
-		}
-		if g.overloadProtector != nil {
-			g.overloadProtector.Stop()
-		}
-		if g.messageIntegrity != nil {
-			g.messageIntegrity.Stop()
-		}
-
-		g.grpcServerMu.Lock()
-		grpcSrv := g.grpcServer
-		g.grpcServerMu.Unlock()
-		if grpcSrv != nil {
-			grpcSrv.Stop()
-		}
-
-		g.connectionManager.StopConnectionChecker()
-
-		// 停止 pipeline worker pool（等待所有 worker 退出）
-		if g.pipelineWorkerPool != nil {
-			g.pipelineWorkerPool.Stop()
-		}
-
-		// 停止分片写合并器（最终 flush）
-		if g.shardedCoalescer != nil {
-			g.shardedCoalescer.Stop()
-		}
-
-		g.connectionManager.CloseAllConnections()
-
-		g.StopStatsServer()
-
-		tlog.Info(context.TODO(), "gateway closed")
-	})
+	}
 }
 
-// drainConnections 等待所有连接完成进行中的工作。它将每个连接转换为 connection.StateClosed 状态并等待连接管理器清理。
-func (g *Gateway) drainConnections(timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
+// Close 执行一次性关闭流程：首个调用者同步执行，其余调用者等待其完成。
+// 不能用 sync.Once：gnet 的 Stop 需等事件循环回调 OnShutdown 返回后才置 inShutdown，
+// 若 OnShutdown 重入 Once.Do，将与持有 Once 的 Stop 轮询互锁（优雅退出挂死）。
+func (g *Gateway) Close() {
+	if !g.closing.CompareAndSwap(false, true) {
+		<-g.closeDone
+		return
+	}
+	defer close(g.closeDone)
+	g.closeBody()
+}
 
-	// 将所有 Forward 状态的连接转换为 Closed（拒绝新消息）
+// closeBody 关闭流程主体（Close/OnShutdown 已置 closing，仅执行一次）。
+func (g *Gateway) closeBody() {
+	close(g.stopChan)
+
+	// 阶段0：先拒绝新消息——将 Forward 连接置为 Closed。
+	// 必须在停止 engine 之前标记：gnet Stop 会拆除连接，之后状态标记已无意义。
 	g.connectionManager.ForEach(func(conn *connection.Connection) bool {
 		if conn.GetState() == connection.StateForward {
 			conn.SetState(connection.StateForward, connection.StateClosed)
 		}
 		return true
 	})
+
+	// 阶段1：停止接受新连接（所有 transport engine）
+	g.enginesMu.Lock()
+	engines := append([]gnet.Engine(nil), g.engines...)
+	g.enginesMu.Unlock()
+	for i := range engines {
+		_ = engines[i].Stop(context.Background())
+	}
+
+	// 阶段2：排空进行中的消息（最多2分钟）
+	drainTimeout := 2 * time.Minute
+	drainDone := make(chan struct{})
+	go func() {
+		g.drainConnections(drainTimeout)
+		close(drainDone)
+	}()
+
+	drainTimer := time.NewTimer(drainTimeout)
+	select {
+	case <-drainDone:
+		if !drainTimer.Stop() {
+			select {
+			case <-drainTimer.C:
+			default:
+			}
+		}
+		tlog.Info(context.TODO(), "connection drain completed")
+	case <-drainTimer.C:
+		tlog.Warn(context.TODO(), "connection drain timed out, forcing close")
+	}
+
+	if g.logicClientPool != nil {
+		g.logicClientPool.Close()
+	}
+	if g.gatewayClientPool != nil {
+		g.gatewayClientPool.Close()
+	}
+	if g.logicClient != nil {
+		g.logicClient.Close()
+	}
+	if g.overloadProtector != nil {
+		g.overloadProtector.Stop()
+	}
+	if g.messageIntegrity != nil {
+		g.messageIntegrity.Stop()
+	}
+
+	g.grpcServerMu.Lock()
+	grpcSrv := g.grpcServer
+	g.grpcServerMu.Unlock()
+	if grpcSrv != nil {
+		grpcSrv.Stop()
+	}
+
+	g.connectionManager.StopConnectionChecker()
+
+	// 停止 pipeline worker pool（等待所有 worker 退出）
+	if g.pipelineWorkerPool != nil {
+		g.pipelineWorkerPool.Stop()
+	}
+
+	// 停止分片写合并器（最终 flush）
+	if g.shardedCoalescer != nil {
+		g.shardedCoalescer.Stop()
+	}
+
+	g.connectionManager.CloseAllConnections()
+
+	g.StopStatsServer()
+
+	tlog.Info(context.TODO(), "gateway closed")
+}
+
+// drainConnections 等待连接管理器清理完成（连接数降为 0）或超时。
+// Forward→Closed 的状态标记在 closeBody 阶段0（停止 engine 之前）完成。
+func (g *Gateway) drainConnections(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
 
 	// 等待连接数降为0或超时
 	for time.Now().Before(deadline) {
@@ -770,6 +819,7 @@ func newGateway(cfg *config.Config) *Gateway {
 	gw := &Gateway{
 		connectionManager: connection.NewConnectionManager(cfg.Protection.MaxConnections, cfg.Protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
+		closeDone:         make(chan struct{}),
 		serverID:          cfg.ServerID,
 		zone:              cfg.Zone,
 

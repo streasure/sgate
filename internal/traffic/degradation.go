@@ -35,27 +35,33 @@ type degradeRule struct {
 	lastDegrade    atomic.Int64
 }
 
+// newDegradationRule 构造规则并补齐零值默认（启动构造与热更 AddRule 共用；
+// 缺默认会使 recentErrors 为空，RecordResult 对 windowSize 取模除零 panic）。
+func newDegradationRule(rc config.DegradationRuleConfig) *degradeRule {
+	r := &degradeRule{
+		route:          rc.Route,
+		errorThreshold: rc.ErrorThreshold,
+		windowSize:     rc.WindowSize,
+		recentErrors:   make([]bool, rc.WindowSize),
+		fallbackData:   []byte(rc.FallbackData),
+		coolDown:       gatewayutil.ParseDurationDefault(rc.CoolDown, 30*time.Second),
+	}
+	if r.errorThreshold <= 0 {
+		r.errorThreshold = 0.5
+	}
+	if r.windowSize <= 0 {
+		r.windowSize = 100
+		r.recentErrors = make([]bool, 100)
+	}
+	return r
+}
+
 // NewDegradationManager 创建降级管理器
 func NewDegradationManager(rules []config.DegradationRuleConfig) *DegradationManager {
 	m := &DegradationManager{rules: make(map[string]*degradeRule)}
 	m.enabled.Store(1)
 	for _, rc := range rules {
-		r := &degradeRule{
-			route:          rc.Route,
-			errorThreshold: rc.ErrorThreshold,
-			windowSize:     rc.WindowSize,
-			recentErrors:   make([]bool, rc.WindowSize),
-			fallbackData:   []byte(rc.FallbackData),
-			coolDown:       gatewayutil.ParseDurationDefault(rc.CoolDown, 30*time.Second),
-		}
-		if r.errorThreshold <= 0 {
-			r.errorThreshold = 0.5
-		}
-		if r.windowSize <= 0 {
-			r.windowSize = 100
-			r.recentErrors = make([]bool, 100)
-		}
-		m.rules[rc.Route] = r
+		m.rules[rc.Route] = newDegradationRule(rc)
 	}
 	return m
 }
@@ -137,18 +143,11 @@ func (m *DegradationManager) GetTriggeredCount() int64 {
 }
 func (m *DegradationManager) Disable() { m.enabled.Store(0) }
 
-// AddRule 动态添加降级规则
+// AddRule 动态添加降级规则（与启动构造共用零值默认，防止 windowSize=0 除零）
 func (m *DegradationManager) AddRule(rc config.DegradationRuleConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.rules[rc.Route] = &degradeRule{
-		route:          rc.Route,
-		errorThreshold: rc.ErrorThreshold,
-		windowSize:     rc.WindowSize,
-		recentErrors:   make([]bool, rc.WindowSize),
-		fallbackData:   []byte(rc.FallbackData),
-		coolDown:       gatewayutil.ParseDurationDefault(rc.CoolDown, 30*time.Second),
-	}
+	m.rules[rc.Route] = newDegradationRule(rc)
 }
 
 func init() {

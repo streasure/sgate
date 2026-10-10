@@ -135,7 +135,7 @@ func (s *Service) initRegistry() {
 	}
 }
 
-// Stop 优雅停止服务（先停网关拨入，再等待存量服务端流结束）
+// Stop 优雅停止服务：停拨入与注册 → 关闭存量流 → 限时 gRPC 优雅停止
 func (s *Service) Stop() {
 	s.stopOnce.Do(func() {
 		if s.dialer != nil {
@@ -144,13 +144,26 @@ func (s *Service) Stop() {
 		if s.registry != nil {
 			s.registry.Destroy()
 		}
+		// 先关闭所有服务端流（handleStream 循环随之退出）。
+		// 必须在 GracefulStop 之前：长活双向流不会自行结束，
+		// GracefulStop 将永远等待，SIGINT 挂死。
+		s.server.Stop()
 		if s.grpcServer != nil {
-			s.grpcServer.GracefulStop()
+			done := make(chan struct{})
+			go func() {
+				s.grpcServer.GracefulStop()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				tlog.Warn(context.TODO(), "grpc graceful stop timed out, forcing stop")
+				s.grpcServer.Stop()
+			}
 		}
 		if s.listener != nil {
 			_ = s.listener.Close()
 		}
-		s.server.Stop()
 	})
 }
 

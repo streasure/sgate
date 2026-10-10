@@ -82,6 +82,12 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 
 	if isWS {
 		wsConn := NewWebSocketConnection(c)
+		// 立即注册进 connectionManager：否则未完成握手的原始 WS 连接不计入
+		// maxConnections/maxPerIP，可被绕过打满。握手/首帧处仅在
+		// ConnectionID 为空时补注册，此处预注册天然幂等。
+		tempUserUUID := "temp_" + connection.GenerateConnectionID()
+		connectionID := g.connectionManager.AddConnection(c, tempUserUUID)
+		wsConn.SetConnectionID(connectionID)
 		c.SetContext(wsConn)
 		g.wsConnections.Store(wsConn, true)
 	} else {
@@ -109,8 +115,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 	var connectionID string
 	connCtx := c.Context()
 	// OnOpen 仅在成功 SetContext 后才对 connectionsActive 计数，故以
-	// connCtx != nil 作为"已计数"依据。WS 连接在首帧前关闭时 ConnectionID()
-	// 为空，若只在 connectionID != "" 分支递减会造成计数永久泄漏。
+	// connCtx != nil 作为"已计数"依据（与连接是否已注册管理器无关）。
 	counted := connCtx != nil
 
 	if connCtx != nil {

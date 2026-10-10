@@ -194,6 +194,11 @@ func (lc *LogicClient) Close() {
 
 	lc.setState(LogicStateDisconnected)
 
+	// 唤醒阻塞在满队列上的 Enqueue（block 策略无超时，不唤醒将永久挂起）
+	if lc.messageQueue != nil {
+		lc.messageQueue.Close()
+	}
+
 	close(lc.closed)
 	tlog.Info(context.TODO(), "closed logic server connection")
 }
@@ -230,6 +235,9 @@ func (lc *LogicClient) SendMessage(msg *protoGw.StreamData) error {
 				return qErr
 			}
 			// 消息已入队：所有权转移给队列，返回 nil 避免调用方重复归还（双 Put）。
+			// 必须立即触发 Flush：状态仍为 Connected 时不会有状态跃迁，
+			// 否则该消息要等完整断连-重连后才会发出（Flush 内有 CAS 幂等保护）。
+			go lc.messageQueue.Flush(lc)
 			return nil
 		}
 		return err
@@ -365,6 +373,7 @@ type StreamMessageQueue struct {
 	blockTimeout          time.Duration         // 阻塞超时
 	backpressureThreshold float64               // 背压阈值
 	flushing              atomic.Bool           // 防止并发 Flush
+	closed                bool                  // 已关闭：唤醒并拒绝阻塞入队
 }
 
 // NewStreamMessageQueue 创建消息队列
@@ -389,12 +398,25 @@ func NewStreamMessageQueue(cfg config.StreamQueueConfig) *StreamMessageQueue {
 	return mq
 }
 
+// Close 关闭队列：唤醒所有等待空间的入队者，后续阻塞入队快速失败。
+// 由 LogicClient.Close 调用，防止 block 策略 Enqueue 在关闭时永久挂起。
+func (mq *StreamMessageQueue) Close() {
+	mq.mu.Lock()
+	mq.closed = true
+	mq.mu.Unlock()
+	mq.cond.Broadcast()
+}
+
 // Enqueue 将消息入队，根据策略选择阻塞/超时/背压/丢弃
 func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 	mq.mu.Lock()
 	switch mq.policy {
 	case config.QueuePolicyBlock:
 		for len(mq.queue) >= mq.maxSize {
+			if mq.closed {
+				mq.mu.Unlock()
+				return ErrConnectionClosing
+			}
 			mq.cond.Wait()
 		}
 		mq.queue = append(mq.queue, msg)
@@ -404,6 +426,10 @@ func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 	case config.QueuePolicyTimeout:
 		deadline := time.Now().Add(mq.blockTimeout)
 		for len(mq.queue) >= mq.maxSize {
+			if mq.closed {
+				mq.mu.Unlock()
+				return ErrConnectionClosing
+			}
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				mq.mu.Unlock()

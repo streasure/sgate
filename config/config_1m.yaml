@@ -127,7 +127,7 @@ grpc:
   windowSize: 67108864
 
 monitoring:
-  pprofAddr: ":6060"
+  pprofAddr: "127.0.0.1:6060"
   disableMetricsLog: true   # 百万连接压测关闭每秒 metrics 日志
 
 cluster:

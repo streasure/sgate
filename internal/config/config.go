@@ -349,6 +349,10 @@ func (c *Config) Validate() error {
 	if len(c.Transports) == 0 {
 		return fmt.Errorf("transports is required")
 	}
+	if c.JWTAuth.Enabled && c.JWTAuth.Secret == "" {
+		// 空 secret时 HS256 用空键验签，任何知道此事实的人都能伪造任意用户令牌
+		return fmt.Errorf("jwtAuth.secret is required when jwtAuth.enabled=true")
+	}
 	return nil
 }
 

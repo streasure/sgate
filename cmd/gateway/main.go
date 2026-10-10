@@ -71,5 +71,9 @@ func main() {
 	container.Add(comp.NewTrafficComponent())
 	container.Add(comp.NewClusterComponent())
 	container.Add(gateway.NewGateway())
-	container.Serve()
+	if err := container.Serve(); err != nil {
+		// Init/Start 失败必须非零退出，避免容器/进程管理器误判为正常退出
+		tlog.Error(context.TODO(), "gateway serve failed error=%v", err)
+		os.Exit(1)
+	}
 }

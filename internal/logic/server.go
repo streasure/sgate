@@ -227,6 +227,9 @@ func (s *Server) handleStream(stream dataStream, gatewayID string) error {
 			if userUUID, ok := s.sessionUsers.LoadAndDelete(sessionID); ok {
 				s.userSessions.CompareAndDelete(userUUID.(string), sessionID)
 			}
+			// 异常断流（网关崩溃/网络中断）不会走 Offline 命令：
+			// 必须在此移除分组绑定，否则 groups/sessionGroups 永久滞留增长。
+			s.leaveAllGroups(sessionID)
 		}
 		conn.sessionMu.Unlock()
 	}()

@@ -2,6 +2,7 @@ package component
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
@@ -61,6 +62,10 @@ func (c *SecurityComponent) Init() error {
 
 	// JWT 认证。
 	if c.jwt.Enabled {
+		if c.jwt.Secret == "" {
+			// fail-closed：空 secret意味着 HS256 空键可伪造任意令牌
+			return fmt.Errorf("jwtAuth.enabled=true requires jwtAuth.secret")
+		}
 		c.JWTAuth = security.NewJWTAuthFilter(c.jwt)
 		types.GetFilterChain().AddFilter(c.JWTAuth)
 	}

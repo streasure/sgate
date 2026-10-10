@@ -20,6 +20,7 @@ type TraceSpan struct {
 	Duration     time.Duration     // 持续时间
 	Attributes   map[string]string // 附加属性
 	Events       []TraceEvent      // 事件
+	tracked      bool              // 是否已注册进 Tracer.traces（EndSpan 据此决定加锁）
 }
 
 // TraceEvent 追踪事件
@@ -96,6 +97,7 @@ func (t *Tracer) StartSpan(traceID, spanName, parentSpanID string) *TraceSpan {
 		}
 
 		t.traces[traceID] = append(t.traces[traceID], span)
+		span.tracked = true // 与注册同临界区：EndSpan 据此决定是否加锁
 	}
 
 	return span
@@ -106,8 +108,18 @@ func (t *Tracer) StartSpan(traceID, spanName, parentSpanID string) *TraceSpan {
 //
 //	span: 追踪 span
 func (t *Tracer) EndSpan(span *TraceSpan) {
-	span.EndTime = time.Now()
-	span.Duration = span.EndTime.Sub(span.StartTime)
+	now := time.Now()
+	if span.tracked {
+		// 已注册的 span 会被 cleanup/GetStats 在 t.mutex 下读 EndTime，
+		// 无锁写会造成 data race；未采样 span 不在 map 中，无需加锁。
+		t.mutex.Lock()
+		span.EndTime = now
+		span.Duration = now.Sub(span.StartTime)
+		t.mutex.Unlock()
+	} else {
+		span.EndTime = now
+		span.Duration = now.Sub(span.StartTime)
+	}
 
 	tlog.Debug(context.TODO(), "Span completed traceID=%s spanID=%s name=%s duration=%v",
 		span.TraceID,

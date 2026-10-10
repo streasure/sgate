@@ -199,6 +199,10 @@ func init() {
 			Issuer:      gatewayutil.GetString(cfg, "issuer"),
 			HeaderField: gatewayutil.GetString(cfg, "headerField"),
 		}
+		if c.Secret == "" {
+			// fail-closed：空 secret意味着 HS256 空键可伪造任意令牌
+			return nil, errors.New("jwt-auth: secret is required")
+		}
 		// 跳过配置中指定的路由。
 		if v, ok := cfg["skipRoutes"]; ok {
 			if arr, ok := v.([]any); ok {

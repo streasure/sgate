@@ -143,8 +143,17 @@ func setClusterStartResources(discovery, gatewayDiscovery, loginDiscovery *uetcd
 	globalCluster = clusterNode
 }
 
+// appendGatewayEvent 记录网关发现事件（供启动时 LoadEvents 顺序回放）。
+// 按 InstanceID 去重只保留最新一条：回放只关心各实例最终状态，语义等价
+// 且内存有界（否则反复注册/etcd 抖动会无界增长）。
 func appendGatewayEvent(event uetcd.ServiceEvent) {
 	globalGatewayEventsMu.Lock()
+	defer globalGatewayEventsMu.Unlock()
+	for i := range globalGatewayEvents {
+		if globalGatewayEvents[i].InstanceID == event.InstanceID {
+			globalGatewayEvents[i] = event
+			return
+		}
+	}
 	globalGatewayEvents = append(globalGatewayEvents, event)
-	globalGatewayEventsMu.Unlock()
 }

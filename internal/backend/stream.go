@@ -84,7 +84,8 @@ func (s *StreamShard) detach(stream dataStream) {
 	}
 }
 
-// startSendLoop 启动发送循环，批量消费 sendCh 中的消息并发送到流
+// startSendLoop 启动发送循环，批量消费 sendCh 中的消息并发送到流。
+// 发送主体在 sendBatch 中逐批 recover：单批 panic 只丢弃该批，循环继续。
 func (s *StreamShard) startSendLoop() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -125,36 +126,50 @@ func (s *StreamShard) startSendLoop() {
 			}
 		}
 
-		// 获取整批消息共用的流引用。
-		s.mu.Lock()
-		stream := s.stream
-		s.mu.Unlock()
+		s.sendBatch(batch)
+	}
+}
 
-		if stream == nil {
-			// 流不可用（分片尚未接入或已断开）：状态机已把消息切给
-			// 断线队列，这里只可能收到在途残余，归还对象池并统计丢弃。
-			if s.lc != nil && s.lc.gateway != nil {
-				s.lc.gateway.AddPushDroppedNoConn(int64(len(batch)))
-			}
-			for _, m := range batch {
-				PutStreamData(m)
-			}
-			continue
+// sendBatch 发送一批消息。独立 recover：单批 panic（如 SendMsg 异常）不能终止
+// 发送循环——旧实现 panic 后协程死亡，sendCh 无人消费，分片所有发送超时卡死。
+// panic 时批内消息不归还对象池（可能已部分归还，重复 Put 会别名化，宁可丢弃）。
+func (s *StreamShard) sendBatch(batch []*protoGw.StreamData) {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error(context.TODO(), "sendBatch panic recovered shard=%d count=%d error=%v",
+				s.index, len(batch), fmt.Sprintf("%v", r))
 		}
+	}()
 
-		// StreamBatch 合帧：整批（含单条）压成单个 gRPC 帧（固定线格式），
-		// 接收端固定按 StreamBatch 解码，绝不能在同一股流上混发裸 StreamData。
-		if err := stream.SendMsg(&protoGw.StreamBatch{Items: batch}); err != nil {
-			tlog.Warn(context.TODO(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
-			s.detach(stream)
-			// 整批未能发出，归还对象池并计数丢弃。
-			if s.lc != nil && s.lc.gateway != nil {
-				s.lc.gateway.AddPushDroppedNoConn(int64(len(batch)))
-			}
+	// 获取整批消息共用的流引用。
+	s.mu.Lock()
+	stream := s.stream
+	s.mu.Unlock()
+
+	if stream == nil {
+		// 流不可用（分片尚未接入或已断开）：状态机已把消息切给
+		// 断线队列，这里只可能收到在途残余，归还对象池并统计丢弃。
+		if s.lc != nil && s.lc.gateway != nil {
+			s.lc.gateway.AddPushDroppedNoConn(int64(len(batch)))
 		}
 		for _, m := range batch {
 			PutStreamData(m)
 		}
+		return
+	}
+
+	// StreamBatch 合帧：整批（含单条）压成单个 gRPC 帧（固定线格式），
+	// 接收端固定按 StreamBatch 解码，绝不能在同一股流上混发裸 StreamData。
+	if err := stream.SendMsg(&protoGw.StreamBatch{Items: batch}); err != nil {
+		tlog.Warn(context.TODO(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
+		s.detach(stream)
+		// 整批未能发出，归还对象池并计数丢弃。
+		if s.lc != nil && s.lc.gateway != nil {
+			s.lc.gateway.AddPushDroppedNoConn(int64(len(batch)))
+		}
+	}
+	for _, m := range batch {
+		PutStreamData(m)
 	}
 }
 
