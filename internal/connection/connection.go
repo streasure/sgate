@@ -228,14 +228,13 @@ func (c *Connection) SendMulti(combined []byte) error {
 }
 
 // SendMultiWithCallback 发送合并数据，写入完成后执行回调函数。
+// WebSocket 与 TCP 均执行回调：coalescer 依赖回调归还池化缓冲，
+// WS 分支曾丢弃回调导致缓冲永不归还。
 func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	if c.IsWebSocket() {
-		return c.Conn.AsyncWrite(combined, noopAsyncCallback)
-	}
 	return c.Conn.AsyncWrite(combined, func(_ gnet.Conn, _ error) error {
 		if cb != nil {
 			cb()
@@ -300,20 +299,17 @@ func (c *Connection) FlushCoalesced() int64 {
 		}
 	}
 
+	// data 为只读：TCP 路径直接引用 bufPtr 底层数组，WS 路径为 reframed 拷贝。
+	// 回调触发时 AsyncWrite 已完成，才可把 bufPtr 归还池；不能提前归还。
+	// WS 路径同样执行回调：否则 WS 连接的 coalescer 缓冲永不归还池。
 	_ = c.SendMultiWithCallback(data, func() {
 		if bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
 			*bufPtr = (*bufPtr)[:0]
 			coalescerBufPool.Put(bufPtr)
 		}
-		if reframedNeedsFree(data) {
-			// reframed 分配自 append，无需归还对象池
-		}
 	})
 	return int64(count)
 }
-
-// reframedNeedsFree 占位：reframe 结果使用普通分配，回调无需额外处理。
-func reframedNeedsFree(_ []byte) bool { return false }
 
 // reframeCoalescedAsWSFrames 将 coalescer 缓冲中的 [len][payload]* 序列转换为
 // 等价的 WS binary 帧序列（每个 payload 一个 FIN 帧）。解析失败返回 nil。
@@ -323,22 +319,6 @@ func reframeCoalescedAsWSFrames(data []byte) []byte {
 	}
 	out := make([]byte, 0, len(data)+len(data)/8+16)
 	off := 0
-	for off+4 <= len(data) {
-		n := int(binary.BigEndian.Uint32(data[off : off+4]))
-		off += 4
-		if n < 0 || off+n > len(data) {
-			return nil
-		}
-		out = EncodeWSFrame(0x82, data[off:off+n])
-		// EncodeWSFrame 返回独立 buffer，连续多帧需拼接
-		// 为避免二次分配，改为手动拼接：
-		// —— 实现见下方循环重写。
-		_ = out
-		off += n
-	}
-	// 正确路径：一次遍历拼接所有帧
-	out = out[:0]
-	off = 0
 	for off+4 <= len(data) {
 		n := int(binary.BigEndian.Uint32(data[off : off+4]))
 		off += 4

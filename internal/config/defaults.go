@@ -213,13 +213,6 @@ const (
 	DefaultAlertRateLimitPerMin = 30
 )
 
-// --- 监控接入 ---
-
-const (
-	// DefaultPprofAddr pprof 调试端点监听地址。配置为空可关闭。
-	DefaultPprofAddr = ":6060"
-)
-
 // --- 灰度 ---
 
 const (

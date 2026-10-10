@@ -450,7 +450,16 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			if m == nil {
 				continue
 			}
-			processOne(m)
+			// 逐条 recover：单条消息处理 panic 不得杀死整个接收循环
+			// （整循环只有一个外层 recover，panic 会导致分片接收永久中断）。
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						tlog.Error(context.TODO(), "receiveMessages processOne panic recovered shard=%d error=%v", shardIdx, fmt.Sprintf("%v", r))
+					}
+				}()
+				processOne(m)
+			}()
 		}
 	}
 }

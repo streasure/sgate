@@ -39,6 +39,9 @@ type moduleEntry struct {
 	module  waz.CompiledModule
 	memory  api.Memory
 	process api.Function
+	// mu 串行化 Invoke：wazero 单实例内存/栈非并发安全，
+	// 固定 offset=0 写入在并发调用下会互相覆盖。
+	mu sync.Mutex
 }
 
 // NewWazeroRuntime 创建运行时
@@ -85,12 +88,16 @@ func (w *WazeroRuntime) LoadModuleFromFile(name, path string) error {
 }
 
 // Invoke 调用 process(data_ptr, data_len) -> (out_ptr, out_len, status)。
+// 模块实例的内存写入/函数调用/读出必须整体串行（entry.mu），
+// 否则并发调用在 offset=0 互相覆盖输入。
 func (w *WazeroRuntime) Invoke(name, funcName string, input []byte) ([]byte, int, error) {
 	v, ok := w.modules.Load(name)
 	if !ok {
 		return nil, -1, fmt.Errorf("module not loaded: %s", name)
 	}
 	entry := v.(*moduleEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
 	// 把 input 写入 WASM 内存（offset=0；wazero 1.8 Write 返回 bool）
 	if !entry.memory.Write(0, input) {
 		return nil, -1, fmt.Errorf("wasm memory write failed (len=%d)", len(input))
@@ -116,10 +123,12 @@ func (w *WazeroRuntime) Invoke(name, funcName string, input []byte) ([]byte, int
 	return append([]byte(nil), out...), status, nil
 }
 
-// UnloadModule 卸载模块
+// UnloadModule 卸载模块（等在途 Invoke 完成后再 Close）。
 func (w *WazeroRuntime) UnloadModule(name string) error {
 	if v, ok := w.modules.LoadAndDelete(name); ok {
 		entry := v.(*moduleEntry)
+		entry.mu.Lock()
+		defer entry.mu.Unlock()
 		return entry.module.Close(w.ctx)
 	}
 	return fmt.Errorf("module not found: %s", name)

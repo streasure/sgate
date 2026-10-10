@@ -130,6 +130,13 @@ func (fc *FilterChain) AddFilter(f Filter) {
 	fc.sortFiltersLocked()
 }
 
+// Len 返回链上过滤器数量（供网关快速路径判定：链非空时不可跳过过滤器执行）。
+func (fc *FilterChain) Len() int {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return len(fc.filters)
+}
+
 // RunByPhase 执行指定阶段的过滤器，返回 false 表示链被中止。
 // 过滤器返回 error 时 fail-closed：中止链，不再放行。
 func (fc *FilterChain) RunByPhase(phase FilterPhase, fcx *FilterContext) bool {

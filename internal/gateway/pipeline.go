@@ -167,13 +167,16 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 	}
 
-	// 快速路径：当没有启用安全组件或全部为nil时，
-	// 跳过已认证连接的安全/过滤器链检查
+	// 快速路径：当没有启用安全组件或全部为nil，且过滤器链为空时，
+	// 跳过已认证连接的安全/过滤器链检查。
+	// 注意：JWT 等过滤器挂在 filterChain 上，链非空时绝不可走快速路径，
+	// 否则会绕过 JWT 校验（曾出现仅启用 jwtAuth 时整链被跳过）。
 	securityDisabled := g.whitelistBlacklist == nil &&
 		g.rateLimiter == nil &&
 		g.waf == nil &&
 		g.circuitBreakerMgr == nil &&
-		!protection.VerifyInbound
+		!protection.VerifyInbound &&
+		(g.filterChain == nil || g.filterChain.Len() == 0)
 
 	var remoteIP string
 	var routeKey string

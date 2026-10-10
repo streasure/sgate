@@ -37,6 +37,7 @@ type Tracer struct {
 	cleanupInterval time.Duration           // 清理间隔
 	sampleRate      float64                 // 采样率
 	stopCh          chan struct{}           // 停止信号
+	stopOnce        sync.Once               // Stop 只关闭一次
 	maxTraceAge     time.Duration           // 追踪最大保留时间
 }
 
@@ -205,7 +206,9 @@ func (t *Tracer) cleanup() {
 }
 
 func (t *Tracer) Stop() {
-	close(t.stopCh)
+	t.stopOnce.Do(func() {
+		close(t.stopCh)
+	})
 }
 
 // cleanupExpiredTraces 清理过期追踪

@@ -94,6 +94,11 @@ func (c *streamConn) shutdown() {
 	})
 }
 
+// defaultStreamSendTimeout 发送通道满时的最长等待。
+// 无超时会把单条慢流扩散成整个网关流的队头阻塞（接收循环卡死）。
+// 包级变量便于测试缩短超时。
+var defaultStreamSendTimeout = 5 * time.Second
+
 // Send 向流连接发送消息，连接已关闭时返回错误。
 // 关闭协议：先置 closed 标志，再 close(done) 通知发送方；sendCh 不在 Close 中关闭，
 // 避免与仍有 send 在途的 goroutine 竞态触发 send-on-closed-channel。
@@ -101,11 +106,25 @@ func (c *streamConn) Send(msg *protocol.StreamData) error {
 	if c.closed.Load() {
 		return fmt.Errorf("logic: gateway stream closed")
 	}
+	// 快速路径：通道未满直接入队。
 	select {
 	case c.sendCh <- msg:
 		return nil
 	case <-c.done:
 		return fmt.Errorf("logic: gateway stream closed")
+	default:
+	}
+	// 通道已满：限时等待，超时返回错误（由调用方记日志丢弃），
+	// 避免发送协程永久阻塞接收循环。
+	timer := time.NewTimer(defaultStreamSendTimeout)
+	defer timer.Stop()
+	select {
+	case c.sendCh <- msg:
+		return nil
+	case <-c.done:
+		return fmt.Errorf("logic: gateway stream closed")
+	case <-timer.C:
+		return fmt.Errorf("logic: gateway stream send queue full")
 	}
 }
 

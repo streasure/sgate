@@ -50,9 +50,14 @@ func (tb *TokenBucket) tryConsume() bool {
 			elapsed := time.Duration(now - last)
 			refill := int64(elapsed/tb.tokenRefresh) * tb.maxTokens
 			if refill > 0 {
-				current := tb.tokens.Load()
-				newTokens := min(current+refill, tb.burstTokens)
-				tb.tokens.Store(newTokens)
+				// CAS 循环加法：Load+Store 会与并发扣减竞争丢更新。
+				for {
+					current := tb.tokens.Load()
+					newTokens := min(current+refill, tb.burstTokens)
+					if tb.tokens.CompareAndSwap(current, newTokens) {
+						break
+					}
+				}
 			}
 		}
 	}
@@ -97,8 +102,10 @@ func (rl *RateLimiter) resetConfig(maxTokens int, tokenRefresh time.Duration) {
 	rl.tokenRefresh, rl.maxTokens, rl.burstTokens = tokenRefresh, maxTokens, maxTokens*2
 	rl.globalBucket = newTokenBucket(maxTokens*10, maxTokens*20, tokenRefresh)
 	rl.dimensionConfigs = map[string]DimensionConfig{
-		"ip":    {MaxTokens: maxTokens, BurstTokens: maxTokens * 2, TokenRefresh: tokenRefresh},
-		"user":  {MaxTokens: maxTokens / 2, BurstTokens: maxTokens, TokenRefresh: tokenRefresh},
+		"ip": {MaxTokens: maxTokens, BurstTokens: maxTokens * 2, TokenRefresh: tokenRefresh},
+		// user 维度限速为总速一半，但不小于 1：maxTokens=1 时 maxTokens/2==0
+		// 会让该维度新桶初始令牌为 0，请求被全部拒绝。
+		"user":  {MaxTokens: max(1, maxTokens/2), BurstTokens: maxTokens, TokenRefresh: tokenRefresh},
 		"route": {MaxTokens: maxTokens * 4, BurstTokens: maxTokens * 8, TokenRefresh: tokenRefresh},
 	}
 }

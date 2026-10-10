@@ -257,17 +257,17 @@ func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sen
 	}
 	cm := s.gateway.GetConnectionManager()
 	sessions := cm.GetGroupSessions(groupID)
+	// 编码提到循环外：cmd/data 全组相同，逐成员重复 Marshal 是 O(组员数) 次冗余编码。
+	msg, encodeErr := encodePushMessage(cmd, data)
+	if encodeErr != nil {
+		tlog.Warn(context.TODO(), "group push: encode failed groupID=%s error=%v", groupID, encodeErr)
+		return 0, len(sessions)
+	}
 	for _, sessionID := range sessions {
 		conn := cm.GetConnection(sessionID)
 		if conn == nil {
 			failed++
 			tlog.Warn(context.TODO(), "group push: session disappeared groupID=%s sessionID=%s", groupID, sessionID)
-			continue
-		}
-		msg, encodeErr := encodePushMessage(cmd, data)
-		if encodeErr != nil {
-			failed++
-			tlog.Warn(context.TODO(), "group push: encode failed groupID=%s error=%v", groupID, encodeErr)
 			continue
 		}
 		if err := conn.Send(msg); err != nil {
