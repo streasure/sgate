@@ -27,6 +27,7 @@ type ServiceConfig struct {
 	DispatchWorkers    int           `yaml:"dispatchWorkers"`    // 分发工作协程数
 	DispatchChSize     int           `yaml:"dispatchChSize"`     // 分发通道大小
 	StreamSendChSize   int           `yaml:"streamSendChSize"`   // 流发送通道大小
+	StreamSendTimeout  time.Duration `yaml:"streamSendTimeout"`  // 流发送通道满时的最长等待（<=0 用默认 5s）
 	Passthrough        bool          `yaml:"passthrough"`        // 是否直通模式
 	ShardCount         int           `yaml:"shardCount"`         // 拨入每个网关的流分片数（<=0 时 NumCPU*8）
 	ConnGroupCount     int           `yaml:"connGroupCount"`     // 拨入每个网关的独立 TCP 连接组数（<=0 时 4）
@@ -40,6 +41,7 @@ func defaultConfig() ServiceConfig {
 		ServiceName: "logic", Zone: "default", EtcdEndpoint: "http://127.0.0.1:2379",
 		EtcdServicePrefix: "/services", EtcdLeaseTTL: "10s", HeartbeatInterval: 3 * time.Second,
 		HeartbeatTTL: 10 * time.Second, GRPCWindowSize: 524288, GRPCMaxMessageSize: 4 * 1024 * 1024,
+		StreamSendTimeout: 5 * time.Second,
 	}
 }
 

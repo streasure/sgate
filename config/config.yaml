@@ -90,3 +90,11 @@ pipeline:
 # 管理端 /admin/* Bearer token；空 = 关闭（fail-closed）
 admin:
   token: ""
+
+# WASM 运行时：启用后启动时加载模块，供 filterChain 中的 wasm-filter 引用（module 名）。
+# 加载失败会令组件 Init 失败并终止启动（fail-fast，不静默降级）。
+# wasmRuntime:
+#   enabled: true
+#   modules:
+#     - name: "my-filter"
+#       path: "./wasm/my-filter.wasm"

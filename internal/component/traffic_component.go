@@ -2,6 +2,8 @@ package component
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/traffic"
@@ -17,6 +19,7 @@ type TrafficComponent struct {
 	canaryCfg      config.CanaryConfig
 	mirrorCfg      config.TrafficMirrorConfig
 	degradationCfg config.DegradationConfig
+	wasmCfg        config.WasmRuntimeConfig
 
 	CanaryFilter  *traffic.CanaryFilter
 	TrafficMirror *traffic.TrafficMirror
@@ -30,6 +33,7 @@ func NewTrafficComponent() *TrafficComponent {
 		canaryCfg:      cfg.Canary,
 		mirrorCfg:      cfg.TrafficMirror,
 		degradationCfg: cfg.Degradation,
+		wasmCfg:        cfg.WasmRuntime,
 	}
 }
 
@@ -57,7 +61,37 @@ func (c *TrafficComponent) Init() error {
 		types.GetFilterChain().AddFilter(c.Degradation)
 	}
 
+	// WASM 模块加载：启动时从文件读入并实例化，供 filterChain 的 wasm-filter 调用。
+	// 任一模块加载失败返回错误使组件 Init 失败（fail-fast，不静默降级）。
+	if c.wasmCfg.Enabled {
+		if err := c.loadWasmModules(); err != nil {
+			return err
+		}
+	}
+
 	setTrafficResources(c.CanaryFilter, c.TrafficMirror, c.Degradation)
+	return nil
+}
+
+// loadWasmModules 读取并加载配置中声明的所有 WASM 模块。
+func (c *TrafficComponent) loadWasmModules() error {
+	rt := traffic.GetWasmRuntime()
+	if rt == nil {
+		return fmt.Errorf("wasm runtime enabled but no runtime implementation available")
+	}
+	for _, m := range c.wasmCfg.Modules {
+		if m.Name == "" || m.Path == "" {
+			return fmt.Errorf("wasm module entry requires name and path (name=%q path=%q)", m.Name, m.Path)
+		}
+		bytes, err := os.ReadFile(m.Path)
+		if err != nil {
+			return fmt.Errorf("read wasm module %q from %q: %w", m.Name, m.Path, err)
+		}
+		if err := rt.LoadModule(m.Name, bytes); err != nil {
+			return fmt.Errorf("load wasm module %q: %w", m.Name, err)
+		}
+		tlog.Info(context.TODO(), "wasm module loaded name=%s path=%s runtime=%s", m.Name, m.Path, rt.Type())
+	}
 	return nil
 }
 
@@ -73,5 +107,14 @@ func (c *TrafficComponent) Destroy() {
 	tlog.Info(context.TODO(), "traffic component destroying")
 	if c.TrafficMirror != nil {
 		c.TrafficMirror.Stop()
+	}
+	if c.wasmCfg.Enabled {
+		if rt := traffic.GetWasmRuntime(); rt != nil {
+			for _, m := range c.wasmCfg.Modules {
+				if err := rt.UnloadModule(m.Name); err != nil {
+					tlog.Warn(context.TODO(), "unload wasm module failed name=%s error=%v", m.Name, err)
+				}
+			}
+		}
 	}
 }

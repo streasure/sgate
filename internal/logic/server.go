@@ -28,24 +28,29 @@ type dataStream interface {
 
 // streamConn 表示与网关的 gRPC 流连接
 type streamConn struct {
-	stream     dataStream                // gRPC 流对象
-	sendCh     chan *protocol.StreamData // 发送通道
-	done       chan struct{}             // 流结束信号
-	closed     atomic.Bool               // 连接是否已关闭
-	closeOnce  sync.Once                 // 确保只关闭一次
-	gatewayID  string                    // 网关标识
-	sessionMu  sync.Mutex                // 会话列表互斥锁
-	sessionIDs map[string]struct{}       // 关联的会话 ID 集合
+	stream      dataStream                // gRPC 流对象
+	sendCh      chan *protocol.StreamData // 发送通道
+	done        chan struct{}             // 流结束信号
+	closed      atomic.Bool               // 连接是否已关闭
+	closeOnce   sync.Once                 // 确保只关闭一次
+	gatewayID   string                    // 网关标识
+	sessionMu   sync.Mutex                // 会话列表互斥锁
+	sessionIDs  map[string]struct{}       // 关联的会话 ID 集合
+	sendTimeout time.Duration             // 发送通道满时的最长等待（零值回退 defaultStreamSendTimeout）
 }
 
-// newStreamConn 创建新的流连接，启动发送协程
-func newStreamConn(stream dataStream, size int, gatewayID string) *streamConn {
+// newStreamConn 创建新的流连接，启动发送协程。
+// sendTimeout 传 0 表示使用 defaultStreamSendTimeout（测试缩短超时用）。
+func newStreamConn(stream dataStream, size int, gatewayID string, sendTimeout time.Duration) *streamConn {
 	if size <= 0 {
 		size = 65536
 	}
+	if sendTimeout <= 0 {
+		sendTimeout = defaultStreamSendTimeout
+	}
 	c := &streamConn{
 		stream: stream, sendCh: make(chan *protocol.StreamData, size), done: make(chan struct{}),
-		gatewayID: gatewayID, sessionIDs: make(map[string]struct{}),
+		gatewayID: gatewayID, sessionIDs: make(map[string]struct{}), sendTimeout: sendTimeout,
 	}
 	go func() {
 		defer c.shutdown()
@@ -115,8 +120,8 @@ func (c *streamConn) Send(msg *protocol.StreamData) error {
 	default:
 	}
 	// 通道已满：限时等待，超时返回错误（由调用方记日志丢弃），
-	// 避免发送协程永久阻塞接收循环。
-	timer := time.NewTimer(defaultStreamSendTimeout)
+	// 避免发送协程永久阻塞接收循环。超时由配置注入，测试可缩短。
+	timer := time.NewTimer(c.sendTimeout)
 	defer timer.Stop()
 	select {
 	case c.sendCh <- msg:
@@ -187,11 +192,12 @@ type Server struct {
 	groups        map[string]*pushGroup          // 组 ID -> 推送组
 	sessionGroups map[string]map[string]struct{} // 会话 ID -> 所属组 ID 集合
 
-	serverID     string        // 逻辑服务端标识
-	streamSeq    atomic.Uint64 // 流连接序号生成器
-	streamChSize int           // 流发送通道大小
-	stopOnce     sync.Once     // 确保只停止一次
-	metrics      PushMetrics   // 推送监控指标
+	serverID          string        // 逻辑服务端标识
+	streamSeq         atomic.Uint64 // 流连接序号生成器
+	streamChSize      int           // 流发送通道大小
+	streamSendTimeout time.Duration // 流发送通道满时的最长等待（零值回退 defaultStreamSendTimeout）
+	stopOnce          sync.Once     // 确保只停止一次
+	metrics           PushMetrics   // 推送监控指标
 }
 
 // ServerOption 服务端配置选项函数
@@ -202,6 +208,16 @@ func WithServerID(serverID string) ServerOption { return func(s *Server) { s.ser
 
 // WithStreamChSize 设置流发送通道大小
 func WithStreamChSize(n int) ServerOption { return func(s *Server) { s.streamChSize = n } }
+
+// WithStreamSendTimeout 设置流发送通道满时的最长等待（<=0 不生效，保持默认）。
+// 单条慢流不应把整个网关流卡死：超时后丢弃并由调用方记日志。
+func WithStreamSendTimeout(d time.Duration) ServerOption {
+	return func(s *Server) {
+		if d > 0 {
+			s.streamSendTimeout = d
+		}
+	}
+}
 
 // NewServer 创建逻辑层服务端实例
 func NewServer(opts ...ServerOption) *Server {
@@ -234,7 +250,7 @@ func (s *Server) handleStream(stream dataStream, gatewayID string) error {
 	if gatewayID == "" {
 		gatewayID = streamID
 	}
-	conn := newStreamConn(stream, s.streamChSize, gatewayID)
+	conn := newStreamConn(stream, s.streamChSize, gatewayID, s.streamSendTimeout)
 	s.streams.Store(streamID, conn)
 	defer func() {
 		s.streams.Delete(streamID)

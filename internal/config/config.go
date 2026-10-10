@@ -35,6 +35,7 @@ type Config struct {
 	Alert           AlertWebhookConfig
 	Degradation     DegradationConfig
 	FilterChain     FilterChainConfig
+	WasmRuntime     WasmRuntimeConfig
 	Monitoring      MonitoringConfig
 	Perf            PerfConfig
 	Pipeline        PipelineConfig
@@ -183,6 +184,18 @@ type DegradationRuleConfig struct {
 type FilterChainConfig struct {
 	Enabled bool               `yaml:"enabled"`
 	Filters []FilterItemConfig `yaml:"filters"`
+}
+
+// WasmRuntimeConfig WASM 运行时配置（启动时加载 .wasm 模块，供 wasm-filter SPI 使用）
+type WasmRuntimeConfig struct {
+	Enabled bool               `yaml:"enabled"`
+	Modules []WasmModuleConfig `yaml:"modules"`
+}
+
+// WasmModuleConfig 单个 WASM 模块
+type WasmModuleConfig struct {
+	Name string `yaml:"name"` // 模块名（filterChain 中 wasm-filter 的 module 引用此名）
+	Path string `yaml:"path"` // .wasm 文件路径
 }
 
 // FilterItemConfig 单个过滤器配置

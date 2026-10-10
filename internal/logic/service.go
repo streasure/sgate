@@ -43,6 +43,7 @@ func NewService(opts ...ServiceOption) *Service {
 	serverOpts := []ServerOption{
 		WithServerID(cfg.ServiceID),
 		WithStreamChSize(cfg.StreamSendChSize),
+		WithStreamSendTimeout(cfg.StreamSendTimeout),
 	}
 	return &Service{server: NewServer(serverOpts...), cfg: cfg}
 }

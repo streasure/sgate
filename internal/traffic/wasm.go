@@ -141,8 +141,9 @@ func applyWasmOutput(fc *types.FilterContext, out []byte) {
 	}
 }
 
-// ErrWasmRuntimeNotEnabled WASM 运行时未启用
-var ErrWasmRuntimeNotEnabled = fmt.Errorf("wasm runtime is not available in the standard build")
+// ErrWasmRuntimeNotEnabled 运行时未注入（仅在 SetWasmRuntime 从未被调用时可能出现；
+// 标准构建下 wasm_wazero.go 的 init() 恒会注入，正常不会返回此错误）
+var ErrWasmRuntimeNotEnabled = fmt.Errorf("wasm runtime is not initialized")
 
 func init() {
 	types.RegisterFilter("wasm-filter", func(cfg map[string]any) (types.Filter, error) {

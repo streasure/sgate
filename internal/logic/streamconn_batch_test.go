@@ -52,7 +52,7 @@ func waitBatchSent(f *capturingStream) bool {
 // 混发裸帧会导致对端 unmarshal 失败 → 重拨风暴）。
 func TestStreamConnSendsStreamBatch(t *testing.T) {
 	fs := &capturingStream{}
-	c := newStreamConn(fs, 16, "gw-1")
+	c := newStreamConn(fs, 16, "gw-1", 0)
 
 	if err := c.Send(&protocol.StreamData{Cmd: 5, Data: []byte("x")}); err != nil {
 		t.Fatalf("send: %v", err)
