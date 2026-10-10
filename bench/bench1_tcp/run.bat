@@ -7,7 +7,9 @@ setlocal
 :: 测试: 客户端→sgate→逻辑服 转发性能
 :: ============================================================
 
-set CONF=config\config.yaml
+:: 必须用 config_batch_off.yaml：config.yaml 开发配置已启用限流(100/s)，
+:: 100 连接同 IP 会超限被拒，违反 AGENTS.md「压测零鉴权失败」。
+set CONF=config\config_batch_off.yaml
 set DURATION=10s
 set PARALLEL=100
 

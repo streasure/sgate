@@ -61,6 +61,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 ### 测量条件（清单）
 
 - 100 连接、单轮 10s、64B 载荷；登录仅 LoginGate（`loginValidation.enabled: false`，禁 HTTP login / token 校验）
+- 压测网关统一用 `config_batch_off.yaml` / `config_batch_on.yaml`：`security.rateLimit.enabled: false`（限流关闭，热路径不计令牌桶）、`protection.benchMode: true`（关闭过载检查、WS 心跳清理、连接空闲检查等后台周期任务，避免与热路径抢调度）
 - 网关 `shardCount=96`、`connGroupCount=4`、`sendChannelSize=65536`、`disableTracer`、`disableMetricsLog`
 - 逻辑服 96 流（`NumCPU*8`）；logic2 `push-size=64`、`push-workers=12`、`expected-members=0`（登录即开推）
 - bench2 用 `run.bat on|off` / `run.sh [on|off]` 切换 `config_batch_on.yaml` / `config_batch_off.yaml`（`batchPush: true|false`）
@@ -69,19 +70,19 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 
 | 协议 | 总转发量(10s) | 平均速率 | 登录失败 | droppedAuth |
 | --- | ---: | ---: | ---: | ---: |
-| TCP | 4,260,438 | **423,989/s** | 0 | 0 |
-| WebSocket | 4,264,923 | **424,967/s** | 0 | 0 |
+| TCP | 4,565,055 | **456,501/s** | 0 | 0 |
+| WebSocket | 4,420,326 | **442,009/s** | 0 | 0 |
 
 ### bench2：logic→sgate→client 推送
 
-| 协议 | batchPush | 平均接收速率 | 连接失败 | droppedAuth |
-| --- | --- | ---: | ---: | ---: |
-| TCP | true | **1,424,357/s**（总接收 14,263,061） | 0 | 0 |
-| TCP | false | 888,463/s（2 轮中位） | 0 | 0 |
-| WebSocket | true | **1,372,644/s**（总接收 13,755,700） | 0 | 0 |
-| WebSocket | false | 855,332/s（2 轮中位） | 0 | 0 |
+| 协议 | batchPush | 平均接收速率 | 总接收(10s) | 连接失败 | droppedAuth |
+| --- | --- | ---: | ---: | ---: | ---: |
+| TCP | true | **1,330,690/s** | 13,330,558 | 0 | 0 |
+| TCP | false | 704,763/s | 7,445,618 | 0 | 0 |
+| WebSocket | true | **758,811/s** | 7,725,836 | 0 | 0 |
+| WebSocket | false | 548,545/s | 6,170,304 | 0 | 0 |
 
-- 测量日期 2026-10-09（本机后台有负载）；安静后台时段参考：bench1 TCP 498,490/s、WS 527,297/s，bench2 on TCP 1,934,329/s、WS 1,713,708/s
+- 测量日期 2026-10-10（限流关闭 + benchMode 后的口径）；绝对数值随后台负载波动，同配置多轮约 ±10%
 - 校验：各轮 `connections failed=0`、`droppedAuth=0`，日志无 401 / authfail / login-key 拒绝
 - etcd key 使用 protocol 枚举：`/services/{belong}/{ServerTypeName}:{zone}/{instanceId}`（如 `SGATE` / `LOGINSERVER` / `LOGICSERVER`）
 
