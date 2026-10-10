@@ -330,6 +330,10 @@ type ProtectionConfig struct {
 	ConnIdleTimeout     string  `yaml:"connIdleTimeout"`
 	VerifyInbound       bool    `yaml:"verifyInbound"`
 	PreAuthCommands     []int32 `yaml:"preAuthCommands"`
+	// BenchMode 压测模式：关闭与压测无关的后台周期任务（过载保护检查、
+	// 限流桶清理、WS 心跳清理、连接空闲检查），避免其与热路径争抢调度。
+	// 仅用于压测/性能测量，生产保持 false。
+	BenchMode bool `yaml:"benchMode"`
 }
 
 // Transport 网络传输配置

@@ -31,11 +31,12 @@ func main() {
 	duration := flag.Duration("duration", 10*time.Second, "benchmark duration")
 	parallel := flag.Int("parallel", 100, "number of parallel connections")
 	serverID := flag.String("server-id", "logic1-ws", "logic server instance ID to bind")
+	sendWorkers := flag.Int("send-workers-per-conn", 1, "send goroutines per connection (1 = single sender per conn; >1 stresses sgate forwarding, writes serialized by a per-conn mutex)")
 	flag.Parse()
 
-	fmt.Printf("bench1_ws: addr=%s duration=%s parallel=%d serverID=%s\n", *addr, *duration, *parallel, *serverID)
+	fmt.Printf("bench1_ws: addr=%s duration=%s parallel=%d serverID=%s sendWorkersPerConn=%d\n", *addr, *duration, *parallel, *serverID, *sendWorkers)
 
-	var totalForwarded atomic.Int64
+	var totalSent atomic.Int64 // 客户端实际写入成功的消息数（发出侧口径，非网关转发数）
 	var totalAck atomic.Int64
 	var connectionsFailed atomic.Int64
 
@@ -162,41 +163,54 @@ func main() {
 		}(c)
 	}
 
-	fmt.Printf("阶段2：向%d个连接发送数据，持续时间：%s...\n", len(conns), *duration)
+	// 阶段2：同时向所有连接发送大量数据。
+	// 每个连接可用多个发送 goroutine 来打满 sgate 的转发上限；同一连接的写必须串行，
+	// 否则多个 goroutine 交错写会把 WebSocket 帧打乱、导致网关解帧失败。
+	workers := *sendWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	fmt.Printf("阶段2：向%d个连接发送数据（每连接%d个发送协程），持续时间：%s...\n", len(conns), workers, *duration)
 
 	var floodWg sync.WaitGroup
+	start := time.Now()
+	deadline := start.Add(*duration)
 	for _, c := range conns {
-		floodWg.Add(1)
-		go func(conn net.Conn) {
-			defer floodWg.Done()
-			deadline := time.Now().Add(*duration)
-			heartbeatBody := []byte("bench")
-			var seqID int64 = 2
-			for time.Now().Before(deadline) {
-				msg := &protocol.MessageFrame{
-					Cmd:   cmdHeartbeatReq,
-					SeqId: seqID,
-					Body:  heartbeatBody,
+		var writeMu sync.Mutex
+		for w := 0; w < workers; w++ {
+			floodWg.Add(1)
+			go func(conn net.Conn) {
+				defer floodWg.Done()
+				heartbeatBody := []byte("bench")
+				var seqID int64 = 2
+				for time.Now().Before(deadline) {
+					msg := &protocol.MessageFrame{
+						Cmd:   cmdHeartbeatReq,
+						SeqId: seqID,
+						Body:  heartbeatBody,
+					}
+					writeMu.Lock()
+					err := sendWSBinary(conn, msg)
+					writeMu.Unlock()
+					if err != nil {
+						return
+					}
+					totalSent.Add(1)
+					seqID++
 				}
-				if err := sendWSBinary(conn, msg); err != nil {
-					return
-				}
-				totalForwarded.Add(1)
-				seqID++
-			}
-		}(c)
+			}(c)
+		}
 	}
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	start := time.Now()
 
 	go func() {
 		for range ticker.C {
 			elapsed := time.Since(start).Seconds()
-			fwd := totalForwarded.Load()
-			rate := float64(fwd) / elapsed
-			fmt.Printf("[%.0fs] forwarded=%d rate=%.0f msg/s\n", elapsed, fwd, rate)
+			sent := totalSent.Load()
+			rate := float64(sent) / elapsed
+			fmt.Printf("[%.0fs] sent=%d rate=%.0f msg/s\n", elapsed, sent, rate)
 		}
 	}()
 
@@ -204,13 +218,14 @@ func main() {
 	close(stopReaders)
 	readerWg.Wait()
 
-	total := totalForwarded.Load()
+	total := totalSent.Load()
 	elapsed := time.Since(start).Seconds()
 
 	fmt.Println("---")
 	fmt.Printf("connections logged in: %d\n", loggedIn)
 	fmt.Printf("connections failed: %d\n", failed)
-	fmt.Printf("total forwarded: %d\n", total)
+	fmt.Printf("send workers per conn: %d\n", workers)
+	fmt.Printf("total sent (client-side): %d\n", total)
 	fmt.Printf("elapsed: %.2fs\n", elapsed)
 	if elapsed > 0 {
 		fmt.Printf("avg rate: %.0f msg/s\n", float64(total)/elapsed)

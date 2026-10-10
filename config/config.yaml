@@ -65,8 +65,8 @@ protection:
 security:
   enabled: true
   rateLimit:
-    enabled: true
-    maxTokens: 1000000
+    enabled: true       # 开发环境保持开启：单 IP/route 每秒 100 次
+    maxTokens: 100
     tokenRefresh: "1s"
   circuitBreaker:
     enabled: false

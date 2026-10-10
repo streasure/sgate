@@ -44,6 +44,7 @@ stream:
   batchPush: false
 
 protection:
+  benchMode: true       # 压测模式：关闭过载检查/WS心跳/连接空闲检查等后台周期任务
   maxFrameSize: 4194304
   maxFrameBufSize: 4194304
   maxWSFrameSize: 4194304
@@ -60,8 +61,8 @@ protection:
 security:
   enabled: true
   rateLimit:
-    enabled: true
-    maxTokens: 1000000
+    enabled: false      # 压测关闭限流：避免热路径每消息做限流检查，干扰转发吞吐测量
+    maxTokens: 100
     tokenRefresh: "1s"
   circuitBreaker:
     enabled: false

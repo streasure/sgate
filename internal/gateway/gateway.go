@@ -271,9 +271,14 @@ func (g *Gateway) Destroy() { g.Close() }
 // 过载保护器、WebSocket心跳检测、配置文件监听
 func (g *Gateway) StartServices() {
 	cfg := g.cfg.Load()
+	protection := g.getProtection()
+	// 压测模式：跳过与压测无关的后台周期任务，避免与热路径争抢调度。
+	benchMode := protection.BenchMode
 
-	g.overloadProtector.Start()
-	go g.wsHeartbeatChecker()
+	if !benchMode {
+		g.overloadProtector.Start()
+		go g.wsHeartbeatChecker()
+	}
 	g.messageIntegrity = NewMessageIntegrity(30000)
 
 	if cfg.Pipeline.AsyncEnabled {
@@ -283,15 +288,17 @@ func (g *Gateway) StartServices() {
 	// 初始化分片写合并器（推送路径：logic → client）
 	g.shardedCoalescer = connection.NewShardedWriteCoalescer(g.connectionManager, 16)
 
-	connCheckInterval := gatewayutil.ParseDurationDefault(g.getProtection().ConnCheckInterval, 5*time.Minute)
-	if connCheckInterval <= 0 {
-		connCheckInterval = 5 * time.Minute
+	if !benchMode {
+		connCheckInterval := gatewayutil.ParseDurationDefault(protection.ConnCheckInterval, 5*time.Minute)
+		if connCheckInterval <= 0 {
+			connCheckInterval = 5 * time.Minute
+		}
+		connIdleTimeout := gatewayutil.ParseDurationDefault(protection.ConnIdleTimeout, 30*time.Second)
+		if connIdleTimeout <= 0 {
+			connIdleTimeout = 30 * time.Second
+		}
+		g.connectionManager.StartConnectionChecker(connIdleTimeout, connCheckInterval)
 	}
-	connIdleTimeout := gatewayutil.ParseDurationDefault(g.getProtection().ConnIdleTimeout, 30*time.Second)
-	if connIdleTimeout <= 0 {
-		connIdleTimeout = 30 * time.Second
-	}
-	g.connectionManager.StartConnectionChecker(connIdleTimeout, connCheckInterval)
 
 	if g.configCenter != nil {
 		g.startConfigCenterWatcher()
