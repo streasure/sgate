@@ -21,9 +21,11 @@ const (
 type RateLimiter struct {
 	shards [rateShardCount]rateShard
 
-	// globalShards 全局硬顶（每消息一次，按 spreadKey 分摊到各片，避免单桶 CAS 热点）。
-	// 兜底 overload 未启动（benchMode/未配 dropOnOverload）时的全局总量控制。
-	globalShards [rateShardCount]*TokenBucket
+	// globalBucket 全局硬顶（每消息一次 CAS；兜底 overload 未启动时的全局总量控制）。
+	// 不分片：分片按 key 哈希摊预算时，少数热点 key（如压测/NAT 单 IP）只能拿
+	// 1/N 预算，语义错误；单桶保证任意消费者可用满 globalMax。
+	// 成本：旧 globalBucket 每消息 2 次 CAS（ip+route 各一次），现减半为 1 次。
+	globalBucket atomic.Pointer[TokenBucket]
 
 	// cfgMu 保护配置字段，与分片锁分离：配置写极少（热更/初始化），
 	// 热路径只读一次即可拿到新桶参数，不与桶表锁交叉。
@@ -159,7 +161,7 @@ func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 	rl.cfgMu.Lock()
 	rl.resetConfigLocked(maxTokens, tokenRefresh)
 	rl.cfgMu.Unlock()
-	rl.initGlobalShards()
+	rl.initGlobalBucket()
 
 	go rl.cleanup()
 
@@ -176,12 +178,12 @@ func (rl *RateLimiter) SetRouteMaxTokens(n int) {
 	rl.refreshDimBuckets("route", cfg)
 }
 
-// SetGlobalMaxTokens 覆盖全局硬顶速率（0 恢复默认 maxTokens*10），分片全局桶立即生效。
+// SetGlobalMaxTokens 覆盖全局硬顶速率（0 恢复默认 maxTokens*10），全局桶立即生效。
 func (rl *RateLimiter) SetGlobalMaxTokens(n int) {
 	rl.cfgMu.Lock()
 	rl.globalMaxTokens = n
 	rl.cfgMu.Unlock()
-	rl.initGlobalShards()
+	rl.initGlobalBucket()
 }
 
 func (rl *RateLimiter) UpdateRate(maxTokens int, tokenRefresh time.Duration) {
@@ -195,7 +197,7 @@ func (rl *RateLimiter) UpdateRate(maxTokens int, tokenRefresh time.Duration) {
 	for dim, cfg := range snapshot {
 		rl.refreshDimBuckets(dim, cfg)
 	}
-	rl.initGlobalShards()
+	rl.initGlobalBucket()
 }
 
 // resetConfigLocked 重建默认维度配置；调用方须持有 cfgMu。
@@ -241,8 +243,8 @@ func (rl *RateLimiter) refreshDimBuckets(dimension string, cfg DimensionConfig) 
 	}
 }
 
-// initGlobalShards （重）建分片全局硬顶桶。每片速率 = 全局速率/片数（下限 1，避免小配置下整片饿死）。
-func (rl *RateLimiter) initGlobalShards() {
+// initGlobalBucket （重）建全局硬顶桶（整桶预算，任意消费者可用满 globalMax）。
+func (rl *RateLimiter) initGlobalBucket() {
 	rl.cfgMu.RLock()
 	globalMax := rl.globalMaxTokens
 	if globalMax <= 0 {
@@ -251,14 +253,7 @@ func (rl *RateLimiter) initGlobalShards() {
 	refresh := rl.tokenRefresh
 	rl.cfgMu.RUnlock()
 
-	perShard := max(1, globalMax/rateShardCount)
-	for i := range rl.globalShards {
-		if rl.globalShards[i] == nil {
-			rl.globalShards[i] = newTokenBucket(perShard, perShard*2, refresh)
-		} else {
-			rl.globalShards[i].updateParams(perShard, perShard*2, refresh)
-		}
-	}
+	rl.globalBucket.Store(newTokenBucket(globalMax, globalMax*2, refresh))
 }
 
 // shardKey 拼接分片键：dimension 与 key 用 \x00 分隔，避免跨界拼接碰撞
@@ -285,12 +280,15 @@ func (rl *RateLimiter) dimConfig(dimension string) DimensionConfig {
 	return config
 }
 
-// AllowGlobal 全局硬顶：每条消息只调一次（spreadKey 如 remoteIP 决定落到哪个全局分片）。
-// 与旧 globalBucket 的区别：按 spreadKey 分摊 64 个桶，消除单桶 CAS 热点；
-// overload 未运行（benchMode/未配 dropOnOverload）时兜住全局总量。
-func (rl *RateLimiter) AllowGlobal(spreadKey string) bool {
-	idx := maphash.String(rl.seed, "\x00global\x00"+spreadKey) & (rateShardCount - 1)
-	return rl.globalShards[idx].tryConsume()
+// AllowGlobal 全局硬顶：每条消息只调一次（整桶预算，任意消费者可用满 globalMax）。
+// 与旧 globalBucket 的区别：旧版在 ip+route 两次 Allow 里各消耗一次（每消息 2 CAS），
+// 现由调用方显式调一次（每消息 1 CAS）；overload 未运行时兜住全局总量。
+func (rl *RateLimiter) AllowGlobal() bool {
+	bucket := rl.globalBucket.Load()
+	if bucket == nil {
+		return true
+	}
+	return bucket.tryConsume()
 }
 
 // Allow 按维度+key 消耗令牌（per-IP/per-route/user 防滥用限速）。

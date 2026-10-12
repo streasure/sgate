@@ -387,8 +387,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			return ackErr
 		}
 		if g.rateLimiter != nil {
-			ip := netutil.AddrHost(wsConn.Conn.RemoteAddr())
-			if !g.rateLimiter.AllowGlobal(ip) || !g.rateLimiter.Allow("ip", ip) {
+			if !g.rateLimiter.AllowGlobal() || !g.rateLimiter.Allow("ip", netutil.AddrHost(wsConn.Conn.RemoteAddr())) {
 				g.messagesDroppedRateLimit.Add(1)
 				ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "rate limited", "")
 				routes.PutClientMessage(message)

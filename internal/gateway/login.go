@@ -121,8 +121,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		return gnet.None
 	}
 	if g.rateLimiter != nil {
-		ip := netutil.AddrHost(c.RemoteAddr())
-		if !g.rateLimiter.AllowGlobal(ip) || !g.rateLimiter.Allow("ip", ip) {
+		if !g.rateLimiter.AllowGlobal() || !g.rateLimiter.Allow("ip", netutil.AddrHost(c.RemoteAddr())) {
 			g.messagesDroppedRateLimit.Add(1)
 			ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
 			body, _ := proto.Marshal(ack)

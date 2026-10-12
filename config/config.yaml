@@ -70,7 +70,7 @@ security:
     maxTokens: 100
     tokenRefresh: "1s"
     # routeMaxTokens: 400   # route 维度每路由速率，默认 maxTokens*4；全局消息量≈该值×路由数
-    # globalMaxTokens: 1000 # 全局硬顶（分片令牌桶），默认 maxTokens*10；兜底 overload 未运行时的总量控制
+    # globalMaxTokens: 1000 # 全局硬顶（单令牌桶，每消息 1 次 CAS），默认 maxTokens*10；兜底 overload 未运行时的总量控制
   circuitBreaker:
     enabled: false
 

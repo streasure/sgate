@@ -211,8 +211,8 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			}
 		}
 		if g.rateLimiter != nil {
-			// 全局硬顶先判（分片桶，兜底 overload 未运行时的总量控制），再 per-IP/per-route。
-			if !g.rateLimiter.AllowGlobal(remoteIP) {
+			// 全局硬顶先判（兜底 overload 未运行时的总量控制），再 per-IP/per-route。
+			if !g.rateLimiter.AllowGlobal() {
 				g.messagesDroppedRateLimit.Add(1)
 				return PipelineResult{Action: gnet.None}
 			}

@@ -169,18 +169,21 @@ func TestRateLimiterAllowMultiNoPartialConsume(t *testing.T) {
 	}
 }
 
-// TestRateLimiterGlobalCeiling 回归：AllowGlobal 分片全局硬顶——同一
-// spreadKey 耗尽所在分片后被拒（overload 未运行时的兜底）。
+// TestRateLimiterGlobalCeiling 回归：AllowGlobal 全局硬顶——整桶预算耗尽后
+// 被拒（overload 未运行时的兜底），与 per-IP 维度互不影响。
 func TestRateLimiterGlobalCeiling(t *testing.T) {
 	rl := NewRateLimiter(1, time.Hour)
 	defer rl.Stop()
-	rl.SetGlobalMaxTokens(2) // 每片 max(1, 2/64)=1
+	rl.SetGlobalMaxTokens(2)
 
-	if !rl.AllowGlobal("spread") {
+	if !rl.AllowGlobal() {
 		t.Fatal("first global consume should pass")
 	}
-	if rl.AllowGlobal("spread") {
-		t.Fatal("global ceiling should reject same spread key after shard exhaustion")
+	if !rl.AllowGlobal() {
+		t.Fatal("second global consume should pass within globalMax=2")
+	}
+	if rl.AllowGlobal() {
+		t.Fatal("global ceiling should reject after globalMax exhausted")
 	}
 	// 全局硬顶独立于 per-dim：per-IP 桶仍可用。
 	if !rl.Allow("ip", "spread") {

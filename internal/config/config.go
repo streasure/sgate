@@ -220,7 +220,7 @@ type RateLimitConfig struct {
 	// RouteMaxTokens route 维度每路由速率；0 = maxTokens*4。全局消息量 ≈ 该值×路由数，
 	// 高吞吐生产需调大或关闭限流，否则 route 维度先成为天花板。
 	RouteMaxTokens int `yaml:"routeMaxTokens"`
-	// GlobalMaxTokens 全局硬顶（分片令牌桶，每消息一次）；0 = maxTokens*10。
+	// GlobalMaxTokens 全局硬顶（单令牌桶，每消息 1 次 CAS）；0 = maxTokens*10。
 	// 兜底 overload 未运行（benchMode/未配 dropOnOverload）时的全局总量控制。
 	GlobalMaxTokens int `yaml:"globalMaxTokens"`
 }
