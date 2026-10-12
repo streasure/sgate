@@ -18,8 +18,8 @@ import (
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/routes"
-	"github.com/streasure/util/hashutil"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uhash"
 )
 
 // PipelineResult 携带通过共享消息管道处理客户端消息的结果。
@@ -588,7 +588,7 @@ func (p *PipelineWorkerPool) SubmitWS(task *wsPipelineTaskData) bool {
 
 // getShard 根据 connectionID 计算分片索引。
 func (p *PipelineWorkerPool) getShard(connectionID string) uint32 {
-	return hashutil.FNV1a32(connectionID) % uint32(p.shards)
+	return uhash.FNV1a32(connectionID) % uint32(p.shards)
 }
 
 // Stats 返回工作池统计信息。

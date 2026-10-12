@@ -7,7 +7,7 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
-	"github.com/streasure/util/hashutil"
+	"github.com/streasure/util/uhash"
 )
 
 // CanaryFilter 灰度发布过滤器
@@ -65,7 +65,7 @@ func (f *CanaryFilter) Process(fc *types.FilterContext) (bool, error) {
 
 	// 3) 百分比灰度（按 connectionID 哈希，保证同一连接稳定分流）
 	if !hit && f.percent > 0 {
-		if int(hashutil.FNV1a32(fc.ConnectionID)%100) < f.percent {
+		if int(uhash.FNV1a32(fc.ConnectionID)%100) < f.percent {
 			hit = true
 		}
 	}

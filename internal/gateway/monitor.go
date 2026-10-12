@@ -11,8 +11,8 @@ import (
 	json "github.com/bytedance/sonic"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
-	"github.com/streasure/util/httputil"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uhttp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -351,7 +351,7 @@ func (g *Gateway) ServeHealthHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httputil.WriteJSON(w, statusCode, response)
+	uhttp.WriteJSON(w, statusCode, response)
 }
 
 // startConfigCenterWatcher 启动配置中心监听并桥接到现有 handleConfigUpdate

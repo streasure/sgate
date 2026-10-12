@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/util/hashutil"
+	"github.com/streasure/util/uhash"
 )
 
 // writeCoalescer 轻量 dirty-set 跟踪器。
@@ -116,7 +116,7 @@ func NewShardedWriteCoalescer(cm *ConnectionManager, shardCount int) *ShardedWri
 }
 
 func (sw *ShardedWriteCoalescer) getShard(connID string) *writeCoalescer {
-	return sw.shards[hashutil.FNV1a32(connID)%sw.shardN]
+	return sw.shards[uhash.FNV1a32(connID)%sw.shardN]
 }
 
 // AddMulti 将消息追加到连接的 coalescing buffer，并将连接标记为 dirty。

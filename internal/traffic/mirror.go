@@ -8,8 +8,8 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
-	"github.com/streasure/util/hashutil"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uhash"
 )
 
 // TrafficMirror 流量镜像器
@@ -75,7 +75,7 @@ func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
 		return
 	}
 	// 按 connectionID 哈希采样（实际可换成更精确的随机）
-	h := hashutil.FNV1a32(fc.ConnectionID) % 100
+	h := uhash.FNV1a32(fc.ConnectionID) % 100
 	if int(h) >= percent {
 		return
 	}

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/connection"
-	"github.com/streasure/util/hashutil"
+	"github.com/streasure/util/uhash"
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
@@ -73,7 +73,7 @@ func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Dura
 
 // GetShard 根据连接 ID 的哈希值获取对应的分片
 func (sm *StreamManager) GetShard(connectionID string) *StreamShard {
-	return sm.shards[hashutil.FNV1a32(connectionID)%uint32(len(sm.shards))]
+	return sm.shards[uhash.FNV1a32(connectionID)%uint32(len(sm.shards))]
 }
 
 // detach 从发送失败侧解除本分片与指定流的绑定（幂等）。

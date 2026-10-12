@@ -12,8 +12,8 @@ import (
 	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/routes"
-	"github.com/streasure/util/httputil"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uhttp"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -214,17 +214,17 @@ type maintenanceResponse struct {
 func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
 	var req maintenanceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
 		return
 	}
 	serverID := strings.TrimSpace(req.ServerID)
 	zone := strings.TrimSpace(req.Zone)
 	if (serverID == "") == (zone == "") {
-		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "serverId or zone required (exactly one)"})
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "serverId or zone required (exactly one)"})
 		return
 	}
 	if g.maintenance == nil {
-		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "maintenance not initialized"})
+		uhttp.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "maintenance not initialized"})
 		return
 	}
 
@@ -242,7 +242,7 @@ func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request)
 		g.kickConnectionsAsync(matched, reason)
 		tlog.Info(context.TODO(), "maintenance enabled action=enable serverId=%s zone=%s reason=%s matched=%d",
 			serverID, zone, reason, len(matched))
-		httputil.WriteJSON(w, http.StatusOK, maintenanceResponse{
+		uhttp.WriteJSON(w, http.StatusOK, maintenanceResponse{
 			OK: true, Action: "enable", ServerID: serverID, Zone: zone,
 			Reason: reason, Matched: len(matched), Accepted: true,
 		})
@@ -250,10 +250,10 @@ func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request)
 		removed := g.maintenance.disable(serverID, zone)
 		tlog.Info(context.TODO(), "maintenance disabled action=disable serverId=%s zone=%s removed=%v",
 			serverID, zone, removed)
-		httputil.WriteJSON(w, http.StatusOK, maintenanceResponse{
+		uhttp.WriteJSON(w, http.StatusOK, maintenanceResponse{
 			OK: true, Action: "disable", ServerID: serverID, Zone: zone, Removed: removed,
 		})
 	default:
-		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "action must be enable or disable"})
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "action must be enable or disable"})
 	}
 }

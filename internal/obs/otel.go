@@ -12,8 +12,8 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
-	"github.com/streasure/util/hashutil"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uhash"
 )
 
 // OTelSpan OpenTelemetry 风格 span
@@ -115,7 +115,7 @@ func (t *OTelTracer) shouldSample(traceID string) bool {
 		return true
 	}
 	// 简单采样：traceID 哈希取模
-	h := hashutil.FNV1a32(traceID)
+	h := uhash.FNV1a32(traceID)
 	return h%uint32(sr) == 0
 }
 

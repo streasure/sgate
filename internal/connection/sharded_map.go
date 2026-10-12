@@ -3,7 +3,7 @@ package connection
 import (
 	"sync"
 
-	"github.com/streasure/util/hashutil"
+	"github.com/streasure/util/uhash"
 )
 
 // ============================================================================
@@ -32,7 +32,7 @@ func newShardedMap[V any]() *shardedMap[V] {
 }
 
 func (m *shardedMap[V]) getShard(key string) *shard[V] {
-	return &m.shards[hashutil.FNV1a32(key)%shardCount]
+	return &m.shards[uhash.FNV1a32(key)%shardCount]
 }
 
 func (m *shardedMap[V]) Load(key string) (V, bool) {

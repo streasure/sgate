@@ -13,8 +13,8 @@ import (
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
-	"github.com/streasure/util/httputil"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/uhttp"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -64,11 +64,11 @@ func (g *Gateway) adminAuthed(r *http.Request) bool {
 func (g *Gateway) adminHandler(method string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != method {
-			httputil.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			uhttp.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
 		if !g.adminAuthed(r) {
-			httputil.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			uhttp.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 		h(w, r)
@@ -86,7 +86,7 @@ func (g *Gateway) registerAdminRoutes(mux *http.ServeMux) {
 func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {
 	var req banRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserUUID == "" {
-		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
 		return
 	}
 	var ttl time.Duration
@@ -105,21 +105,21 @@ func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {
 	offline := g.enforceBan(req.UserUUID, rec)
 	tlog.Info(context.TODO(), "admin ban user=%s reason=%s ttlSec=%d offline=%d",
 		req.UserUUID, req.Reason, req.TTLSec, offline)
-	httputil.WriteJSON(w, http.StatusOK, banResponse{OK: true, Banned: banStore.Len(), Record: &rec, Offline: offline})
+	uhttp.WriteJSON(w, http.StatusOK, banResponse{OK: true, Banned: banStore.Len(), Record: &rec, Offline: offline})
 }
 
 func (g *Gateway) handleAdminUnban(w http.ResponseWriter, r *http.Request) {
 	var req unbanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserUUID == "" {
-		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
 		return
 	}
 	removed := banStore.Remove(req.UserUUID)
-	httputil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "banned": banStore.Len()})
+	uhttp.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "banned": banStore.Len()})
 }
 
 func (g *Gateway) handleAdminBans(w http.ResponseWriter, r *http.Request) {
-	httputil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "bans": banStore.List()})
+	uhttp.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "bans": banStore.List()})
 }
 
 // enforceBan 对本实例上的在线连接执行封禁：撤销 JWT → 推送封禁通知 → 断开。
