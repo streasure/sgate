@@ -84,7 +84,6 @@ type Gateway struct {
 	// 企业级扩展组件
 	filterChain   *types.FilterChain          // SPI 过滤器链
 	jwtAuth       *security.JWTAuthFilter     // JWT 鉴权
-	balancer      *cluster.Balancer           // 负载均衡 + 故障节点摘除
 	degradation   *traffic.DegradationManager // 降级管理
 	configCenter  cluster.ConfigCenter        // etcd 配置中心
 	otelTracer    *obs.OTelTracer             // 分布式追踪导出
@@ -244,7 +243,6 @@ func (g *Gateway) Init() error {
 	g.degradation = component.Degradation()
 	g.gatewayDiscovery = component.GatewayDiscovery()
 	g.gatewayEvents = component.GatewayEvents()
-	g.balancer = component.Balancer()
 	g.configCenter = component.ConfigCenter()
 	g.cluster = component.ClusterNode()
 	g.alertWebhook = component.AlertWebhook()
@@ -256,7 +254,6 @@ func (g *Gateway) Start() error {
 	// ClusterComponent 在 Start 中创建 discovery，需在其后重新读取。
 	g.gatewayDiscovery = component.GatewayDiscovery()
 	g.gatewayEvents = component.GatewayEvents()
-	g.balancer = component.Balancer()
 	g.configCenter = component.ConfigCenter()
 	g.cluster = component.ClusterNode()
 	g.alertWebhook = component.AlertWebhook()
@@ -317,13 +314,6 @@ func (g *Gateway) StartServices() {
 
 	g.logicClient.SetGateway(g)
 	g.logicClientPool = backend.NewLogicClientPool(g)
-
-	if g.balancer != nil {
-		g.logicClientPool.SetBalancer(g.balancer)
-		g.balancer.SetHealthCheckFunc(func(id, addr string) bool {
-			return g.logicClientPool.IsClientConnected(id)
-		})
-	}
 
 	// 网关到网关客户端池仅在集群模式下创建
 	if g.gatewayDiscovery != nil {

@@ -26,7 +26,6 @@ type Config struct {
 	WAF             WAFConfig
 	TLS             TLSConfig
 	Cluster         ClusterConfig
-	Balancer        BalancerConfig
 	JWTAuth         JWTAuthConfig
 	Canary          CanaryConfig
 	TrafficMirror   TrafficMirrorConfig
@@ -80,13 +79,6 @@ type MonitoringConfig struct {
 	// 关闭后消息管道走超级快速路径（跳过安全链/过滤器链的追踪分支），热路径分配大幅下降。
 	// 仅需日志级排障时开启；压测与生产吞吐场景应为 true。默认 false=开启（兼容旧行为）。
 	DisableTracer bool `yaml:"disableTracer"`
-}
-
-// BalancerConfig 负载均衡配置
-type BalancerConfig struct {
-	Algorithm        string `yaml:"algorithm"`        // 支持 roundRobin、weighted、leastConn、consistent
-	FailureThreshold int    `yaml:"failureThreshold"` // 连续失败次数后摘除
-	RecoverInterval  string `yaml:"recoverInterval"`  // 恢复探测间隔
 }
 
 // JWTAuthConfig JWT 鉴权配置

@@ -33,7 +33,6 @@ var (
 	globalDegradation   *traffic.DegradationManager
 
 	// cluster（Order 400）Init/Start 写入。
-	globalBalancer         *cluster.Balancer
 	globalConfigCenter     cluster.ConfigCenter
 	globalAlertWebhook     *cluster.AlertWebhook
 	globalDiscovery        *uetcd.Component
@@ -81,9 +80,6 @@ func TrafficMirror() *traffic.TrafficMirror { return globalTrafficMirror }
 // Degradation 返回流量组件创建的降级管理器。
 func Degradation() *traffic.DegradationManager { return globalDegradation }
 
-// Balancer 返回集群组件创建的负载均衡器。
-func Balancer() *cluster.Balancer { return globalBalancer }
-
 // ConfigCenter 返回集群组件创建的配置中心。
 func ConfigCenter() cluster.ConfigCenter { return globalConfigCenter }
 
@@ -130,8 +126,7 @@ func setTrafficResources(canary *traffic.CanaryFilter, mirror *traffic.TrafficMi
 	globalDegradation = degradation
 }
 
-func setClusterInitResources(balancer *cluster.Balancer, configCenter cluster.ConfigCenter, alertWebhook *cluster.AlertWebhook) {
-	globalBalancer = balancer
+func setClusterInitResources(configCenter cluster.ConfigCenter, alertWebhook *cluster.AlertWebhook) {
 	globalConfigCenter = configCenter
 	globalAlertWebhook = alertWebhook
 }

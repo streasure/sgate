@@ -184,8 +184,8 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	var protoMsg *protoGw.StreamData
 	filterOK := true
 
-	if securityDisabled && g.tracer == nil && g.balancer == nil && g.degradation == nil {
-		// 超级快速路径：无安全检查、无追踪、无负载均衡
+	if securityDisabled && g.tracer == nil && g.degradation == nil {
+		// 超级快速路径：无安全检查、无追踪
 		remoteIP = ""
 		protoMsg = backend.GetStreamData()
 		protoMsg.SessionId = connectionID
@@ -318,9 +318,6 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 				breaker.RecordFailure()
 			}
 		}
-		if g.balancer != nil {
-			g.balancer.RecordFailure(routeKey)
-		}
 		if g.degradation != nil {
 			g.degradation.RecordResult(routeKey, true)
 		}
@@ -331,9 +328,6 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			if breaker := g.getOrCreateBreaker(routeKey); breaker != nil {
 				breaker.RecordSuccess()
 			}
-		}
-		if g.balancer != nil {
-			g.balancer.RecordSuccess(routeKey)
 		}
 		if g.degradation != nil {
 			g.degradation.RecordResult(routeKey, false)

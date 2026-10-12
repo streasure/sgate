@@ -27,7 +27,6 @@ type ClusterComponent struct {
 	Discovery        *uetcd.Component
 	GatewayDiscovery *uetcd.Component // 发现同一可用区内的其他网关。
 	LoginDiscovery   *uetcd.Component // 发现指定 zone 的 loginserver。
-	Balancer         *clusterPkg.Balancer
 	ConfigCenter     clusterPkg.ConfigCenter
 	Cluster          *clusterPkg.Cluster
 	AlertWebhook     *clusterPkg.AlertWebhook
@@ -45,7 +44,6 @@ func (c *ClusterComponent) Name() string { return "cluster" }
 func (c *ClusterComponent) Order() int   { return 400 }
 
 func (c *ClusterComponent) Init() error {
-	c.Balancer = clusterPkg.NewBalancer(c.cfg.Balancer)
 	if c.cfg.ConfigCenter.Enabled {
 		// 配置中心后端是 etcd；etcd 默认接入，直接创建
 		c.ConfigCenter = clusterPkg.NewConfigCenter(c.cfg.ConfigCenter, c.cfg.Etcd)
@@ -53,7 +51,7 @@ func (c *ClusterComponent) Init() error {
 	if c.cfg.Alert.Enabled {
 		c.AlertWebhook = clusterPkg.NewAlertWebhook(c.cfg.Alert)
 	}
-	setClusterInitResources(c.Balancer, c.ConfigCenter, c.AlertWebhook)
+	setClusterInitResources(c.ConfigCenter, c.AlertWebhook)
 	return nil
 }
 
@@ -193,9 +191,6 @@ func (c *ClusterComponent) Destroy() {
 	}
 	if c.Cluster != nil {
 		c.Cluster.Stop()
-	}
-	if c.Balancer != nil {
-		c.Balancer.Stop()
 	}
 	if c.ConfigCenter != nil {
 		c.ConfigCenter.Stop()

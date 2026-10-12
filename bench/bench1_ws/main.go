@@ -166,10 +166,7 @@ func main() {
 	// 阶段2：同时向所有连接发送大量数据。
 	// 每个连接可用多个发送 goroutine 来打满 sgate 的转发上限；同一连接的写必须串行，
 	// 否则多个 goroutine 交错写会把 WebSocket 帧打乱、导致网关解帧失败。
-	workers := *sendWorkers
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(*sendWorkers, 1)
 	fmt.Printf("阶段2：向%d个连接发送数据（每连接%d个发送协程），持续时间：%s...\n", len(conns), workers, *duration)
 
 	var floodWg sync.WaitGroup
@@ -177,7 +174,7 @@ func main() {
 	deadline := start.Add(*duration)
 	for _, c := range conns {
 		var writeMu sync.Mutex
-		for w := 0; w < workers; w++ {
+		for range workers {
 			floodWg.Add(1)
 			go func(conn net.Conn) {
 				defer floodWg.Done()

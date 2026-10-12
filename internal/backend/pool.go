@@ -9,7 +9,6 @@ import (
 	"github.com/streasure/sgate/internal/connection"
 
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 )
@@ -19,7 +18,6 @@ type LogicClientPool struct {
 	ordered    []string                    // 有序的服务 ID 列表，用于确定性轮询
 	mu         sync.RWMutex                // 读写锁
 	gateway    GatewayInterface            // 网关接口引用
-	balancer   *cluster.Balancer           // 负载均衡器
 	stopCh     chan struct{}               // 停止信号
 	wg         sync.WaitGroup              // 等待协程退出
 	rrIndex    atomic.Uint64               // 轮询索引（原子操作）
@@ -137,11 +135,6 @@ func (pool *LogicClientPool) Attach(meta routes.LogicStreamMeta, stream dataStre
 		return nil, nil, ErrNotConnected
 	}
 	return client, sm.shards[meta.ShardIdx], nil
-}
-
-// SetBalancer 设置负载均衡器
-func (pool *LogicClientPool) SetBalancer(balancer *cluster.Balancer) {
-	pool.balancer = balancer
 }
 
 // SendMessage 发送消息到逻辑服，优先使用快速路径

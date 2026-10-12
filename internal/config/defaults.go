@@ -154,16 +154,6 @@ const (
 	DefaultClusterLockTTL = "10s"
 )
 
-// --- 负载均衡 ---
-
-const (
-	// DefaultBalancerFailureThreshold 连续失败次数后摘除节点
-	DefaultBalancerFailureThreshold = 3
-
-	// DefaultBalancerRecoverInterval 故障节点恢复探测间隔
-	DefaultBalancerRecoverInterval = "30s"
-)
-
 // --- JWT 鉴权 ---
 
 const (
