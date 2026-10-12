@@ -1,23 +1,44 @@
 package security
 
 import (
+	"hash/maphash"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
+const (
+	// rateShardCount 桶表分片数（2 的幂，用 maphash 取模分片）。
+	// 10 万桶共享一把 RWMutex 会在高连接数下成为竞争热点；
+	// 分片后每个 key 只与同片竞争，写路径锁粒度降为 1/rateShardCount。
+	rateShardCount = 64
+	// maxBucketsPerDim 单维度全局限桶总数上限（分摊到各片）。
+	maxBucketsPerDim = 100000
+)
+
 type RateLimiter struct {
-	mu                sync.RWMutex
-	tokensByDimension map[string]map[string]*TokenBucket
-	globalBucket      *TokenBucket
-	tokenRefresh      time.Duration
-	maxTokens         int
-	burstTokens       int
-	cleanupInterval   time.Duration
-	dimensionConfigs  map[string]DimensionConfig
-	maxBucketsPerDim  int
-	stopCh            chan struct{}
-	stopOnce          sync.Once
+	shards [rateShardCount]rateShard
+
+	// cfgMu 保护配置字段，与分片锁分离：配置写极少（热更/初始化），
+	// 热路径只读一次即可拿到新桶参数，不与桶表锁交叉。
+	cfgMu            sync.RWMutex
+	tokenRefresh     time.Duration
+	maxTokens        int
+	burstTokens      int
+	dimensionConfigs map[string]DimensionConfig
+
+	maxBucketsPerShard int
+	cleanupInterval    time.Duration
+	stopCh             chan struct{}
+	stopOnce           sync.Once
+	seed               maphash.Seed
+}
+
+// rateShard 单分片桶表。key = dimension + "\x00" + key。
+type rateShard struct {
+	mu      sync.RWMutex
+	buckets map[string]*TokenBucket
 }
 
 type DimensionConfig struct {
@@ -75,14 +96,17 @@ func (tb *TokenBucket) tryConsume() bool {
 
 func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 	rl := &RateLimiter{
-		tokensByDimension: make(map[string]map[string]*TokenBucket),
-		tokenRefresh:      tokenRefresh,
-		maxTokens:         maxTokens,
-		burstTokens:       maxTokens * 2,
-		cleanupInterval:   5 * time.Minute,
-		dimensionConfigs:  make(map[string]DimensionConfig),
-		maxBucketsPerDim:  100000,
-		stopCh:            make(chan struct{}),
+		tokenRefresh:       tokenRefresh,
+		maxTokens:          maxTokens,
+		burstTokens:        maxTokens * 2,
+		cleanupInterval:    5 * time.Minute,
+		dimensionConfigs:   make(map[string]DimensionConfig),
+		maxBucketsPerShard: max(1, maxBucketsPerDim/rateShardCount),
+		stopCh:             make(chan struct{}),
+		seed:               maphash.MakeSeed(),
+	}
+	for i := range rl.shards {
+		rl.shards[i].buckets = make(map[string]*TokenBucket)
 	}
 
 	rl.resetConfig(maxTokens, tokenRefresh)
@@ -93,14 +117,13 @@ func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 }
 
 func (rl *RateLimiter) UpdateRate(maxTokens int, tokenRefresh time.Duration) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
+	rl.cfgMu.Lock()
+	defer rl.cfgMu.Unlock()
 	rl.resetConfig(maxTokens, tokenRefresh)
 }
 
 func (rl *RateLimiter) resetConfig(maxTokens int, tokenRefresh time.Duration) {
 	rl.tokenRefresh, rl.maxTokens, rl.burstTokens = tokenRefresh, maxTokens, maxTokens*2
-	rl.globalBucket = newTokenBucket(maxTokens*10, maxTokens*20, tokenRefresh)
 	rl.dimensionConfigs = map[string]DimensionConfig{
 		"ip": {MaxTokens: maxTokens, BurstTokens: maxTokens * 2, TokenRefresh: tokenRefresh},
 		// user 维度限速为总速一半，但不小于 1：maxTokens=1 时 maxTokens/2==0
@@ -120,35 +143,53 @@ func newTokenBucket(maxTokens, burstTokens int, tokenRefresh time.Duration) *Tok
 	return bucket
 }
 
-func (rl *RateLimiter) Allow(dimension, key string) bool {
-	if !rl.globalBucket.tryConsume() {
-		return false
-	}
+// shardKey 拼接分片键：dimension 与 key 用 \x00 分隔，避免跨界拼接碰撞
+// （dimension="ab", key="c" 与 dimension="a", key="bc"）。
+func shardKey(dimension, key string) string {
+	return dimension + "\x00" + key
+}
 
-	rl.mu.RLock()
-	bucket, exists := rl.tokensByDimension[dimension][key]
-	rl.mu.RUnlock()
+func (rl *RateLimiter) shardFor(sk string) *rateShard {
+	return &rl.shards[maphash.String(rl.seed, sk)&(rateShardCount-1)]
+}
+
+// dimConfig 读维度配置；无配置或零值时回退全局默认。
+func (rl *RateLimiter) dimConfig(dimension string) DimensionConfig {
+	rl.cfgMu.RLock()
+	config := rl.dimensionConfigs[dimension]
+	tokenRefresh, maxTokens, burstTokens := rl.tokenRefresh, rl.maxTokens, rl.burstTokens
+	rl.cfgMu.RUnlock()
+	if config.MaxTokens == 0 {
+		config.MaxTokens = maxTokens
+		config.BurstTokens = burstTokens
+		config.TokenRefresh = tokenRefresh
+	}
+	return config
+}
+
+// Allow 按维度+key 消耗令牌。
+// 全局过载判定不在这里：由 gateway 用 overload.IsOverloaded() 在消息入口统一丢弃，
+// 避免全局桶在每条消息上做两次共享 CAS（ip+route 各一次）的热点。
+func (rl *RateLimiter) Allow(dimension, key string) bool {
+	sk := shardKey(dimension, key)
+	sh := rl.shardFor(sk)
+
+	sh.mu.RLock()
+	bucket, exists := sh.buckets[sk]
+	sh.mu.RUnlock()
 
 	if !exists {
-		rl.mu.Lock()
-		if _, exists = rl.tokensByDimension[dimension]; !exists {
-			rl.tokensByDimension[dimension] = make(map[string]*TokenBucket)
-		}
-		if bucket, exists = rl.tokensByDimension[dimension][key]; !exists {
-			if len(rl.tokensByDimension[dimension]) >= rl.maxBucketsPerDim {
-				rl.mu.Unlock()
+		sh.mu.Lock()
+		if _, exists = sh.buckets[sk]; !exists {
+			if len(sh.buckets) >= rl.maxBucketsPerShard {
+				sh.mu.Unlock()
 				return false
 			}
-			config := rl.dimensionConfigs[dimension]
-			if config.MaxTokens == 0 {
-				config.MaxTokens = rl.maxTokens
-				config.BurstTokens = rl.burstTokens
-				config.TokenRefresh = rl.tokenRefresh
-			}
+			config := rl.dimConfig(dimension)
 			bucket = newTokenBucket(config.MaxTokens, config.BurstTokens, config.TokenRefresh)
-			rl.tokensByDimension[dimension][key] = bucket
+			sh.buckets[sk] = bucket
 		}
-		rl.mu.Unlock()
+		sh.mu.Unlock()
 		// 修复：新建 bucket 时也要消耗 token，否则换 IP 即可绕过限流
 		return bucket.tryConsume()
 	}
@@ -166,35 +207,33 @@ func (rl *RateLimiter) AllowMulti(dimensions map[string]string) bool {
 }
 
 func (rl *RateLimiter) GetTokens(dimension, key string) int {
-	rl.mu.RLock()
-	buckets, exists := rl.tokensByDimension[dimension]
-	if !exists {
-		rl.mu.RUnlock()
-		return rl.maxTokens
-	}
-	bucket, exists := buckets[key]
-	rl.mu.RUnlock()
+	sk := shardKey(dimension, key)
+	sh := rl.shardFor(sk)
+	sh.mu.RLock()
+	bucket, exists := sh.buckets[sk]
+	sh.mu.RUnlock()
 
 	if !exists {
-		config, exists := rl.dimensionConfigs[dimension]
-		if !exists {
-			return rl.maxTokens
+		rl.cfgMu.RLock()
+		defer rl.cfgMu.RUnlock()
+		if config, ok := rl.dimensionConfigs[dimension]; ok {
+			return config.MaxTokens
 		}
-		return config.MaxTokens
+		return rl.maxTokens
 	}
 
 	return int(bucket.tokens.Load())
 }
 
 func (rl *RateLimiter) SetDimensionConfig(dimension string, config DimensionConfig) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
+	rl.cfgMu.Lock()
+	defer rl.cfgMu.Unlock()
 	rl.dimensionConfigs[dimension] = config
 }
 
 func (rl *RateLimiter) GetDimensionConfig(dimension string) DimensionConfig {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
+	rl.cfgMu.RLock()
+	defer rl.cfgMu.RUnlock()
 	config, exists := rl.dimensionConfigs[dimension]
 	if !exists {
 		return DimensionConfig{
@@ -207,28 +246,38 @@ func (rl *RateLimiter) GetDimensionConfig(dimension string) DimensionConfig {
 }
 
 func (rl *RateLimiter) SetMaxTokens(maxTokens int) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
+	rl.cfgMu.Lock()
+	defer rl.cfgMu.Unlock()
 	rl.maxTokens = maxTokens
 	rl.burstTokens = maxTokens * 2
 }
 
 func (rl *RateLimiter) SetTokenRefresh(tokenRefresh time.Duration) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
+	rl.cfgMu.Lock()
+	defer rl.cfgMu.Unlock()
 	rl.tokenRefresh = tokenRefresh
 }
 
 func (rl *RateLimiter) Clear() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	rl.tokensByDimension = make(map[string]map[string]*TokenBucket)
+	for i := range rl.shards {
+		rl.shards[i].mu.Lock()
+		clear(rl.shards[i].buckets)
+		rl.shards[i].mu.Unlock()
+	}
 }
 
 func (rl *RateLimiter) ClearDimension(dimension string) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	delete(rl.tokensByDimension, dimension)
+	prefix := dimension + "\x00"
+	for i := range rl.shards {
+		sh := &rl.shards[i]
+		sh.mu.Lock()
+		for k := range sh.buckets {
+			if strings.HasPrefix(k, prefix) {
+				delete(sh.buckets, k)
+			}
+		}
+		sh.mu.Unlock()
+	}
 }
 
 func (rl *RateLimiter) cleanup() {
@@ -239,19 +288,17 @@ func (rl *RateLimiter) cleanup() {
 		case <-rl.stopCh:
 			return
 		case <-ticker.C:
-			rl.mu.Lock()
-			now := time.Now()
-			for dimension, buckets := range rl.tokensByDimension {
-				for key, bucket := range buckets {
-					if now.UnixNano()-bucket.lastUpdate.Load() > int64(30*time.Minute) {
-						delete(buckets, key)
+			now := time.Now().UnixNano()
+			for i := range rl.shards {
+				sh := &rl.shards[i]
+				sh.mu.Lock()
+				for k, bucket := range sh.buckets {
+					if now-bucket.lastUpdate.Load() > int64(30*time.Minute) {
+						delete(sh.buckets, k)
 					}
 				}
-				if len(buckets) == 0 {
-					delete(rl.tokensByDimension, dimension)
-				}
+				sh.mu.Unlock()
 			}
-			rl.mu.Unlock()
 		}
 	}
 }
@@ -263,11 +310,15 @@ func (rl *RateLimiter) Stop() {
 }
 
 func (rl *RateLimiter) GetStats() map[string]int {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
 	stats := make(map[string]int)
-	for dimension, buckets := range rl.tokensByDimension {
-		stats[dimension] = len(buckets)
+	for i := range rl.shards {
+		sh := &rl.shards[i]
+		sh.mu.RLock()
+		for k := range sh.buckets {
+			dimension, _, _ := strings.Cut(k, "\x00")
+			stats[dimension]++
+		}
+		sh.mu.RUnlock()
 	}
 	return stats
 }

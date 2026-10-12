@@ -51,3 +51,40 @@ func TestTokenBucketRefillNoLostUpdate(t *testing.T) {
 		t.Fatalf("tokens = %d, want >= 0 (refill Store raced with concurrent decrement)", got)
 	}
 }
+
+// TestRateLimiterShardedIsolation 回归：分片锁改造后各 key/维度桶互相隔离
+// （无全局桶），ClearDimension 只清目标维度。
+func TestRateLimiterShardedIsolation(t *testing.T) {
+	// tokenRefresh 拉长到测试期间不补充，便于确定性断言。
+	rl := NewRateLimiter(2, time.Hour)
+	defer rl.Stop()
+
+	if !rl.Allow("ip", "a") {
+		t.Fatal("ip a first request should pass")
+	}
+	if !rl.Allow("ip", "a") {
+		t.Fatal("ip a second request should pass")
+	}
+	if rl.Allow("ip", "a") {
+		t.Fatal("ip a should be exhausted")
+	}
+	if !rl.Allow("ip", "b") {
+		t.Fatal("ip b should have its own tokens (no shared global bucket)")
+	}
+	if !rl.Allow("route", "a") {
+		t.Fatal("route a should have its own tokens")
+	}
+
+	rl.ClearDimension("ip")
+	if !rl.Allow("ip", "a") {
+		t.Fatal("ip a should be reset after ClearDimension")
+	}
+
+	stats := rl.GetStats()
+	if stats["ip"] != 1 {
+		t.Fatalf("ip bucket count = %d, want 1 (recreated only ip a)", stats["ip"])
+	}
+	if stats["route"] != 1 {
+		t.Fatalf("route bucket count = %d, want 1 (route survives ClearDimension(\"ip\"))", stats["route"])
+	}
+}
