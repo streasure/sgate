@@ -528,10 +528,14 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		}
 		tokens := newCfg.Security.RateLimit.MaxTokens
 		if tokens <= 0 {
-			tokens = 10000
+			tokens = config.DefaultRateLimitMaxTokens
 		}
 		g.rateLimiter.UpdateRate(tokens, refresh)
-		tlog.Info(context.TODO(), "rate limiter updated maxTokens=%d refresh=%v", tokens, refresh)
+		// Set*(0) 恢复默认派生值，配置改回 0 也能热更生效。
+		g.rateLimiter.SetRouteMaxTokens(newCfg.Security.RateLimit.RouteMaxTokens)
+		g.rateLimiter.SetGlobalMaxTokens(newCfg.Security.RateLimit.GlobalMaxTokens)
+		tlog.Info(context.TODO(), "rate limiter updated maxTokens=%d refresh=%v routeMax=%d globalMax=%d",
+			tokens, refresh, newCfg.Security.RateLimit.RouteMaxTokens, newCfg.Security.RateLimit.GlobalMaxTokens)
 	}
 
 	// 动态更新白名单/黑名单（原子替换，避免清空-重填中间态）

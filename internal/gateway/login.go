@@ -120,13 +120,16 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		routes.PutClientMessage(message)
 		return gnet.None
 	}
-	if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", netutil.AddrHost(c.RemoteAddr())) {
-		g.messagesDroppedRateLimit.Add(1)
-		ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
-		body, _ := proto.Marshal(ack)
-		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
-		routes.PutClientMessage(message)
-		return gnet.None
+	if g.rateLimiter != nil {
+		ip := netutil.AddrHost(c.RemoteAddr())
+		if !g.rateLimiter.AllowGlobal(ip) || !g.rateLimiter.Allow("ip", ip) {
+			g.messagesDroppedRateLimit.Add(1)
+			ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
+			body, _ := proto.Marshal(ack)
+			writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+			routes.PutClientMessage(message)
+			return gnet.None
+		}
 	}
 
 	req := new(protoGw.LoginGateReq)

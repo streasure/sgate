@@ -426,7 +426,6 @@ loginValidation:
 | --- | --- | --- |
 | `waf` | `enabled` | Web 应用防火墙 |
 | `tls` | `enabled`, `certFile`, `keyFile` | TLS 配置（gnet v2 当前不支持 WSS） |
-| `balancer` | `algorithm` | 负载均衡：`roundRobin`、`weighted`、`leastConn`、`consistent` |
 | `jwtAuth` | `enabled`, `secret` | JWT 鉴权 |
 | `canary` | `enabled`, `percent` | 灰度流量 |
 | `trafficMirror` | `enabled`, `targetAddr` | 流量镜像 |

@@ -386,11 +386,14 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			routes.PutClientMessage(message)
 			return ackErr
 		}
-		if g.rateLimiter != nil && !g.rateLimiter.Allow("ip", netutil.AddrHost(wsConn.Conn.RemoteAddr())) {
-			g.messagesDroppedRateLimit.Add(1)
-			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "rate limited", "")
-			routes.PutClientMessage(message)
-			return ackErr
+		if g.rateLimiter != nil {
+			ip := netutil.AddrHost(wsConn.Conn.RemoteAddr())
+			if !g.rateLimiter.AllowGlobal(ip) || !g.rateLimiter.Allow("ip", ip) {
+				g.messagesDroppedRateLimit.Add(1)
+				ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "rate limited", "")
+				routes.PutClientMessage(message)
+				return ackErr
+			}
 		}
 		req := new(protoGw.LoginGateReq)
 		if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {

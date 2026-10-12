@@ -78,9 +78,15 @@ func (c *SecurityComponent) Init() error {
 		}
 		tokens := c.cfg.RateLimit.MaxTokens
 		if tokens <= 0 {
-			tokens = 10000
+			tokens = config.DefaultRateLimitMaxTokens
 		}
 		c.RateLimiter = security.NewRateLimiter(tokens, refresh)
+		if c.cfg.RateLimit.RouteMaxTokens > 0 {
+			c.RateLimiter.SetRouteMaxTokens(c.cfg.RateLimit.RouteMaxTokens)
+		}
+		if c.cfg.RateLimit.GlobalMaxTokens > 0 {
+			c.RateLimiter.SetGlobalMaxTokens(c.cfg.RateLimit.GlobalMaxTokens)
+		}
 	}
 
 	// Web 应用防火墙。

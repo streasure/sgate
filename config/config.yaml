@@ -64,10 +64,13 @@ protection:
 
 security:
   enabled: true
-  rateLimit:
     enabled: true       # 开发环境保持开启：单 IP/route 每秒 100 次
+    # 注意：出口 IP 后面有多台机器（NAT/CGNAT）时 per-IP 限额是共享的，
+    # 需按实际并发调大 maxTokens 或对可信网段配白名单（whitelist）。
     maxTokens: 100
     tokenRefresh: "1s"
+    # routeMaxTokens: 400   # route 维度每路由速率，默认 maxTokens*4；全局消息量≈该值×路由数
+    # globalMaxTokens: 1000 # 全局硬顶（分片令牌桶），默认 maxTokens*10；兜底 overload 未运行时的总量控制
   circuitBreaker:
     enabled: false
 
