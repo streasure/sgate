@@ -59,6 +59,7 @@ type WebSocketConnection struct {
 	Conn         gnet.Conn
 	State        atomic.Int32
 	Buffer       []byte
+	bufOff       int                    // Buffer 已消费前缀偏移（同 TCP ConnContext.FrameBuf，append 热路径零重分配）
 	connID       atomic.Pointer[string] // ConnectionID（事件循环写、心跳协程读，须原子）
 	lastPingUnix atomic.Int64           // 纳秒时间戳，避免 time.Time 字段跨协程读写竞态
 
@@ -253,22 +254,30 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 		if action == gnet.Close {
 			return action
 		}
-		// 握手成功后残留数据按帧继续处理
-		wsConn.Buffer = append([]byte(nil), rest...)
+		// 握手成功后残留数据按帧继续处理（复用底层数组容量）
+		wsConn.Buffer = append(wsConn.Buffer[:0], rest...)
+		wsConn.bufOff = 0
 		if len(wsConn.Buffer) == 0 {
-			wsConn.Buffer = nil
 			return gnet.None
 		}
 		// fall through 到帧解析
-	} else if len(wsConn.Buffer)+len(data) > g.getMaxWSBufferSize() {
-		wsConn.Buffer = nil
-		return gnet.Close
 	} else {
+		// 有已消费前缀时前移残留，回收底层数组头部容量（append 热路径零重分配）
+		if wsConn.bufOff > 0 {
+			logical := len(wsConn.Buffer) - wsConn.bufOff
+			copy(wsConn.Buffer, wsConn.Buffer[wsConn.bufOff:])
+			wsConn.Buffer = wsConn.Buffer[:logical]
+			wsConn.bufOff = 0
+		}
+		if len(wsConn.Buffer)+len(data) > g.getMaxWSBufferSize() {
+			wsConn.Buffer = nil
+			return gnet.Close
+		}
 		wsConn.Buffer = append(wsConn.Buffer, data...)
 	}
 
 	for {
-		opCode, payload, frameSize, fin, masked, err := parseWebSocketFrame(wsConn.Buffer, g.getMaxWSFrameSize())
+		opCode, payload, frameSize, fin, masked, err := parseWebSocketFrame(wsConn.Buffer[wsConn.bufOff:], g.getMaxWSFrameSize())
 		if err != nil {
 			return gnet.Close
 		}
@@ -294,7 +303,7 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 			if fin {
 				msg := wsConn.fragBuf
 				op := wsConn.fragOp
-				wsConn.fragBuf = nil
+				wsConn.fragBuf = wsConn.fragBuf[:0]
 				wsConn.fragging = false
 				if err := g.processWebSocketFrame(wsConn, op, msg); err != nil {
 					tlog.Error(context.TODO(), "WebSocket frame process failed error=%v", err)
@@ -305,7 +314,7 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 			// 首片分帧
 			wsConn.fragging = true
 			wsConn.fragOp = opCode
-			wsConn.fragBuf = append([]byte(nil), payload...)
+			wsConn.fragBuf = append(wsConn.fragBuf[:0], payload...)
 		} else {
 			if err := g.processWebSocketFrame(wsConn, opCode, payload); err != nil {
 				tlog.Error(context.TODO(), "WebSocket frame process failed error=%v", err)
@@ -313,17 +322,12 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 			}
 		}
 
-		remaining := len(wsConn.Buffer) - frameSize
-		if remaining > 0 && remaining < cap(wsConn.Buffer)/4 {
-			newBuf := make([]byte, remaining)
-			copy(newBuf, wsConn.Buffer[frameSize:])
-			wsConn.Buffer = newBuf
-		} else {
-			wsConn.Buffer = wsConn.Buffer[frameSize:]
-		}
+		wsConn.bufOff += frameSize
 
-		if len(wsConn.Buffer) == 0 {
-			wsConn.Buffer = nil
+		if wsConn.bufOff == len(wsConn.Buffer) {
+			// 全部帧消费完：保留底层数组容量（[:0] 而非 nil），下次读事件直接复用
+			wsConn.Buffer = wsConn.Buffer[:0]
+			wsConn.bufOff = 0
 			break
 		}
 	}

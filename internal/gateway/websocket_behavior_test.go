@@ -126,8 +126,34 @@ func TestWS_FragmentationReassembly(t *testing.T) {
 	if ws.fragging {
 		t.Fatal("fragmentation state not cleared after FIN")
 	}
-	if ws.fragBuf != nil {
-		t.Fatal("fragBuf not released")
+	if len(ws.fragBuf) != 0 {
+		t.Fatalf("fragBuf not released: len=%d (capacity may be retained)", len(ws.fragBuf))
+	}
+}
+
+// TestWS_BufferReuseExactBoundary 精确边界消费后 Buffer 容量必须保留
+// （防 nil 置零重分配回归，同 TCP FrameBuf）。
+func TestWS_BufferReuseExactBoundary(t *testing.T) {
+	gw := newGateway(minimalConfig())
+	defer gw.Close()
+
+	_, ws := newOpenWSConn()
+	frame := buildMaskedFrame(true, 0x2, []byte("x"))
+	if action := gw.handleWebSocketMessage(ws, frame); action == gnet.Close {
+		t.Fatal("first frame closed")
+	}
+	if cap(ws.Buffer) == 0 {
+		t.Fatal("Buffer capacity dropped after exact consumption (old nil-reset behavior)")
+	}
+	capBefore := cap(ws.Buffer)
+	if action := gw.handleWebSocketMessage(ws, frame); action == gnet.Close {
+		t.Fatal("second frame closed")
+	}
+	if cap(ws.Buffer) != capBefore {
+		t.Fatalf("cap grew %d -> %d, want reuse", capBefore, cap(ws.Buffer))
+	}
+	if len(ws.Buffer) != 0 || ws.bufOff != 0 {
+		t.Fatalf("buffer not reset: len=%d off=%d", len(ws.Buffer), ws.bufOff)
 	}
 }
 
