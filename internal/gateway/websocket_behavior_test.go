@@ -157,6 +157,64 @@ func TestWS_BufferReuseExactBoundary(t *testing.T) {
 	}
 }
 
+// TestWS_BufferLimitRejected 缓冲超限必须断连（同 TCP FrameBuf）。
+func TestWS_BufferLimitRejected(t *testing.T) {
+	gw := newGateway(minimalConfig())
+	defer gw.Close()
+	p := gw.getProtection()
+	p.MaxWSBufferSize = 64
+	gw.protection.Store(&p)
+
+	_, ws := newOpenWSConn()
+	// 单帧 payload 128 > maxWSBufferSize 64，append 后超限
+	big := buildMaskedFrame(true, 0x2, make([]byte, 128))
+	if action := gw.handleWebSocketMessage(ws, big); action != gnet.Close {
+		t.Fatalf("action=%v, want Close on oversized WS buffer", action)
+	}
+	if ws.Buffer != nil {
+		t.Fatalf("Buffer not cleared on limit reject: len=%d", len(ws.Buffer))
+	}
+}
+
+// TestWS_CoalescedMultiFrames 粘包：一次读事件多帧顺序交付（offset 复用回归）。
+func TestWS_CoalescedMultiFrames(t *testing.T) {
+	gw := newGateway(minimalConfig())
+	defer gw.Close()
+
+	_, ws := newOpenWSConn()
+	// 两帧粘包：每帧 payload "ab"（解码失败回写错误响应，不断连）
+	f1 := buildMaskedFrame(true, 0x2, []byte("ab"))
+	f2 := buildMaskedFrame(true, 0x2, []byte("cd"))
+	combined := append(append([]byte(nil), f1...), f2...)
+	if action := gw.handleWebSocketMessage(ws, combined); action == gnet.Close {
+		t.Fatal("coalesced frames closed connection")
+	}
+	if len(ws.Buffer) != 0 || ws.bufOff != 0 {
+		t.Fatalf("buffer not reset after coalesced consume: len=%d off=%d", len(ws.Buffer), ws.bufOff)
+	}
+}
+
+// TestWS_PartialFrameAcrossReads 跨读事件重组：半帧到达等待补全。
+func TestWS_PartialFrameAcrossReads(t *testing.T) {
+	gw := newGateway(minimalConfig())
+	defer gw.Close()
+
+	_, ws := newOpenWSConn()
+	full := buildMaskedFrame(true, 0x2, []byte("partial"))
+	if action := gw.handleWebSocketMessage(ws, full[:4]); action == gnet.Close {
+		t.Fatal("partial head closed connection")
+	}
+	if len(ws.Buffer) == 0 {
+		t.Fatal("partial frame must be buffered")
+	}
+	if action := gw.handleWebSocketMessage(ws, full[4:]); action == gnet.Close {
+		t.Fatal("partial tail closed connection")
+	}
+	if len(ws.Buffer) != 0 || ws.bufOff != 0 {
+		t.Fatalf("buffer not reset after partial reassembly: len=%d off=%d", len(ws.Buffer), ws.bufOff)
+	}
+}
+
 // TestWS_UnexpectedContinuationRejected 无前置分片的 continuation 帧应断连。
 func TestWS_UnexpectedContinuationRejected(t *testing.T) {
 	gw := newGateway(minimalConfig())

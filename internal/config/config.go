@@ -198,9 +198,12 @@ type FilterItemConfig struct {
 
 // SecurityConfig 安全防护配置（白名单/黑名单/限流/熔断）
 type SecurityConfig struct {
-	Enabled        bool                 `yaml:"enabled"`
-	Whitelist      []string             `yaml:"whitelist"`
-	Blacklist      []string             `yaml:"blacklist"`
+	Enabled   bool     `yaml:"enabled"`
+	Whitelist []string `yaml:"whitelist"`
+	Blacklist []string `yaml:"blacklist"`
+	// BanPersistPath 封禁快照 JSON 路径；空 = 仅内存（重启丢失）。
+	// 配置后 ban/unban 写快照，启动自动加载。多网关共享需后续接 MySQL/etcd。
+	BanPersistPath string               `yaml:"banPersistPath"`
 	RateLimit      RateLimitConfig      `yaml:"rateLimit"`
 	CircuitBreaker CircuitBreakerConfig `yaml:"circuitBreaker"`
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
@@ -75,12 +76,13 @@ func (g *Gateway) adminHandler(method string, h http.HandlerFunc) http.HandlerFu
 	}
 }
 
-// registerAdminRoutes 在 stats mux 上挂载管理端封禁接口。
+// registerAdminRoutes 在 stats mux 上挂载管理端封禁/限流接口。
 func (g *Gateway) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/ban", g.adminHandler(http.MethodPost, g.handleAdminBan))
 	mux.HandleFunc("/admin/unban", g.adminHandler(http.MethodPost, g.handleAdminUnban))
 	mux.HandleFunc("/admin/bans", g.adminHandler(http.MethodGet, g.handleAdminBans))
 	mux.HandleFunc("/admin/maintenance", g.adminHandler(http.MethodPost, g.handleAdminMaintenance))
+	mux.HandleFunc("/admin/ratelimit", g.adminHandler(http.MethodPost, g.handleAdminRateLimit))
 }
 
 func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +122,62 @@ func (g *Gateway) handleAdminUnban(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) handleAdminBans(w http.ResponseWriter, r *http.Request) {
 	uhttp.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "bans": banStore.List()})
+}
+
+type rateLimitAdminRequest struct {
+	MaxTokens       int    `json:"maxTokens"`
+	TokenRefresh    string `json:"tokenRefresh"`
+	RouteMaxTokens  int    `json:"routeMaxTokens"`
+	GlobalMaxTokens int    `json:"globalMaxTokens"`
+}
+
+// handleAdminRateLimit 热更限流参数（无需重启）。body 字段缺省 0/"" 表示恢复默认派生值。
+func (g *Gateway) handleAdminRateLimit(w http.ResponseWriter, r *http.Request) {
+	if g.rateLimiter == nil {
+		uhttp.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "rate limiter not enabled"})
+		return
+	}
+	var req rateLimitAdminRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	refresh := time.Second
+	if req.TokenRefresh != "" {
+		d, err := time.ParseDuration(req.TokenRefresh)
+		if err != nil || d <= 0 {
+			uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tokenRefresh"})
+			return
+		}
+		refresh = d
+	}
+	tokens := req.MaxTokens
+	if tokens <= 0 {
+		tokens = config.DefaultRateLimitMaxTokens
+	}
+	g.rateLimiter.UpdateRate(tokens, refresh)
+	g.rateLimiter.SetRouteMaxTokens(req.RouteMaxTokens)
+	g.rateLimiter.SetGlobalMaxTokens(req.GlobalMaxTokens)
+
+	// 同步现役配置，避免下次热更/快照回退旧值
+	if cur := g.cfg.Load(); cur != nil {
+		clone := *cur
+		clone.Security.RateLimit.MaxTokens = tokens
+		clone.Security.RateLimit.TokenRefresh = refresh.String()
+		clone.Security.RateLimit.RouteMaxTokens = req.RouteMaxTokens
+		clone.Security.RateLimit.GlobalMaxTokens = req.GlobalMaxTokens
+		g.cfg.Store(&clone)
+	}
+
+	tlog.Info(context.TODO(), "admin rate limit updated maxTokens=%d refresh=%v routeMaxTokens=%d globalMaxTokens=%d",
+		tokens, refresh, req.RouteMaxTokens, req.GlobalMaxTokens)
+	uhttp.WriteJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"maxTokens":       tokens,
+		"tokenRefresh":    refresh.String(),
+		"routeMaxTokens":  req.RouteMaxTokens,
+		"globalMaxTokens": req.GlobalMaxTokens,
+	})
 }
 
 // enforceBan 对本实例上的在线连接执行封禁：撤销 JWT → 推送封禁通知 → 断开。

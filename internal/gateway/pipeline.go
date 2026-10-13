@@ -94,7 +94,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	// 但 QPC 是 syscall（~1µs）：500K msg/s × 2 次/条会烧掉 ~1 核。
 	// 每 8 条采样 1 条：QPC 开销 ~1.4% 单核，62K 样本/s 对百分位统计足够
 	// （环形缓冲 10K，统计窗口 ~0.16s）。
-	sampled := atomic.AddInt64(&g.latencySeq, 1)&7 == 0
+	sampled := atomic.AddInt64(&g.latencySeq, 1)&15 == 0
 	var pipelineStart int64
 	if sampled {
 		pipelineStart = obs.MonoNowNs()

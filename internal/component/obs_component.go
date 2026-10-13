@@ -48,7 +48,9 @@ func (c *ObservabilityComponent) Init() error {
 	} else {
 		c.Tracer = obs.NewTracer(5 * time.Minute)
 	}
-	c.LatencyTracker = obs.NewLatencyTracker(10000)
+	// 32768 ≈ 1s 窗口（采样步长 16 下 500K msg/s ≈ 31K 样本/s）；
+	// 低速率时窗口覆盖更长时间，分位数更稳。内存 ~512KB 可忽略。
+	c.LatencyTracker = obs.NewLatencyTracker(32768)
 	c.LogSanitizer = obs.NewLogSanitizer()
 
 	// OpenTelemetry 分布式追踪。

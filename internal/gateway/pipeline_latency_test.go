@@ -33,10 +33,10 @@ func TestPipelineRecordsLatency(t *testing.T) {
 		}
 	}
 
-	// 每 8 条采样 1 条（QPC syscall 开销控制）：100 条 → 12 个样本
+	// 每 16 条采样 1 条（QPC syscall 开销控制）：100 条 → 6 个样本（16/32/48/64/80/96）
 	st := gw.latencyTracker.GetStats()
-	if st.Cnt != 12 {
-		t.Fatalf("latency samples = %d, want 12 (1 per 8 messages)", st.Cnt)
+	if st.Cnt != 6 {
+		t.Fatalf("latency samples = %d, want 6 (1 per 16 messages)", st.Cnt)
 	}
 	if st.P50 <= 0 {
 		t.Fatalf("P50 = %d ns, want > 0 (latency must not depend on tracer)", st.P50.Nanoseconds())

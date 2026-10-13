@@ -273,6 +273,14 @@ func (g *Gateway) StartServices() {
 	// 压测模式：跳过与压测无关的后台周期任务，避免与热路径争抢调度。
 	benchMode := protection.BenchMode
 
+	// 封禁快照持久化：配置路径后 ban/unban 写 JSON，启动自动加载。
+	if p := cfg.Security.BanPersistPath; p != "" {
+		banStore.SetPersistPath(p)
+		if n := banStore.Len(); n > 0 {
+			tlog.Info(context.TODO(), "ban store loaded path=%s entries=%d", p, n)
+		}
+	}
+
 	// 过载采样器始终启动：benchMode 下为 observe-only（见 OverloadProtector.observeOnly），
 	// 保证 /stats 的 cpuPercent/memPercent 有值；benchMode 仅跳过 WS 心跳检测。
 	g.overloadProtector.Start()
