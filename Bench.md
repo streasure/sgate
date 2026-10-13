@@ -82,13 +82,20 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 | WebSocket | true | **758,811/s** | 7,725,836 | 0 | 0 |
 | WebSocket | false | 548,545/s | 6,170,304 | 0 | 0 |
 
+### bench2 复验（2026-10-13，全量优化后，batch-on 30s）
+
+| 协议 | 平均接收速率 | 基线 | 变化 | 连接失败 |
+| --- | ---: | ---: | ---: | ---: |
+| TCP | **1,277,758/s** | 1,330,690/s | -4%（±10% 内） | 0 |
+| WebSocket | **1,174,324/s** | 758,811/s | **+55%**（WS 缓冲 offset 复用） | 0 |
+
 - 测量日期 2026-10-10（限流关闭 + benchMode 后的口径）；绝对数值随后台负载波动，同配置多轮约 ±10%
 - 校验：各轮 `connections failed=0`、`droppedAuth=0`，日志无 401 / authfail / login-key 拒绝
 - etcd key 使用 protocol 枚举：`/services/{belong}/{ServerTypeName}:{zone}/{instanceId}`（如 `SGATE` / `LOGINSERVER` / `LOGICSERVER`）
 
 ## 30 分钟混合 churn 压测（bench/churn30）
 
-工具：`bench/churn30`（常驻用户随机突发 + 每分钟 50 新用户波次登录后大突发、5min 生存期 churn 关闭，JSONL 逐 10s 结果）；配置 `config_batch_rl.yaml`（限流开 maxTokens=2M）+ `config/log_bench.yaml`。30 分钟基线（2026-10-13，bd0b96b）：1803s、4704 万条、26,091 msg/s 均值；dropped* 全 0；1650 登录全成功、1200 churn 零错误；RSS 平台期 516MB；goroutines 恒 750 无泄漏；GC 40 次/30min；CPU 0.31 核（13µs/条）。
+工具：`bench/churn30`（常驻用户随机突发 + 每分钟 50 新用户波次登录后大突发、5min 生存期 churn 关闭，JSONL 逐 10s 结果）；配置 `config_batch_rl.yaml`（限流开 maxTokens=2M）+ `config/log_bench.yaml`。**最终二进制复跑（2026-10-13 16:16，b21ed7c+全量优化）**：1802s、4702 万条、26,089 msg/s 均值；1650 登录全成功、1200 churn 零错误（write_err=0/read_closed=0）；dropped* 全 0、failed=0；forwarded 4750 万；CPU 空载归零；latency P50=1.3µs / P99=6.4µs。与 bd0b96b 基线（26,091/s）持平，优化无回归。
 
 ### 观测修复（e83f150）
 
