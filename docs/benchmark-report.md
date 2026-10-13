@@ -10,7 +10,6 @@
 | 网卡 | 1Gbps |
 | Go 版本 | go1.26 |
 | gnet 版本 | v2.9.7 |
-| 最近测量 | 2026-10-09（后台有负载）；安静时段参考见「压测结果」 |
 
 ## 测试限制
 
@@ -47,20 +46,20 @@
 
 100 连接、10 秒、64B 推送载荷、12 推送协程、`shardCount=96`、`connGroupCount=4`、`sendChannelSize=65536`、`expected-members=0`（登录即开推）、`loginValidation.enabled: false`。登录仅走 LoginGate（cmd 1000001），无 HTTP login、无 token 校验。bench2 通过 `config_batch_on.yaml` / `config_batch_off.yaml` 切换 `batchPush`。
 
-### 当前实测（2026-10-09，后台有负载）
+### 当前实测
 
-| 轮次 | 方向 | 协议 | 总消息量 | 平均速率 | 失败 | droppedAuth |
-|------|------|------|----------|----------|------|-------------|
-| bench1_tcp | client→sgate→logic | TCP | 4,260,438 | **423,989 msg/s** | 0 | 0 |
-| bench1_ws | client→sgate→logic | WebSocket | 4,264,923 | **424,967 msg/s** | 0 | 0 |
-| bench2_tcp（batch on） | logic→sgate→client | TCP | 14,263,061 | **1,424,357 msg/s** | 0 | 0 |
-| bench2_ws（batch on） | logic→sgate→client | WebSocket | 13,755,700 | **1,372,644 msg/s** | 0 | 0 |
-| bench2_tcp（batch off） | logic→sgate→client | TCP | — | 888,463 msg/s（2 轮中位） | 0 | 0 |
-| bench2_ws（batch off） | logic→sgate→client | WebSocket | — | 855,332 msg/s（2 轮中位） | 0 | 0 |
+| 轮次 | 方向 | 协议 | 平均速率 | 失败 | droppedAuth |
+|------|------|------|----------|------|-------------|
+| bench1_tcp | client→sgate→logic | TCP | **456,501 msg/s** | 0 | 0 |
+| bench1_ws | client→sgate→logic | WebSocket | **647,095 msg/s** | 0 | 0 |
+| bench2_tcp（batch on） | logic→sgate→client | TCP | **1,277,758 msg/s** | 0 | 0 |
+| bench2_ws（batch on） | logic→sgate→client | WebSocket | **1,174,324 msg/s** | 0 | 0 |
+| bench2_tcp（batch off） | logic→sgate→client | TCP | 428,333 ~ 485,659 msg/s | 0 | 0 |
+| bench2_ws（batch off） | logic→sgate→client | WebSocket | 381,512 msg/s | 0 | 0 |
 
-**校验**：各轮 `connections failed=0` / `droppedAuth=0`，日志无 401 / authfail / login-key 拒绝。原始结果（含逐秒明细与 `/stats` 快照）见 `bench/latest_results.json`；bench2 明细在 `logs/sgate.log`（tlog 只写文件，无 stdout）。
+**校验**：各轮 `connections failed=0` / `droppedAuth=0`，日志无 401 / authfail / login-key 拒绝。原始结果见 `bench/latest_results.json`；bench2 明细在 `logs/sgate_bench.log`。
 
-**负载说明**：绝对数值受本机后台应用（IM/游戏等占核）影响，同配置多轮约 ±10%。安静后台时段参考值：bench1 TCP 498,490/s、WS 527,297/s，bench2 on TCP 1,934,329/s、WS 1,713,708/s。对比吞吐时应以同批测量内部对比为准。
+**负载说明**：绝对数值受本机后台应用影响，同配置多轮约 ±10%。`batchPush=false` 为非合帧路径，数值低于 batch-on 属预期。对比吞吐时应以同批测量内部对比为准。限流下扫表与 30min churn 结果见 [`Bench.md`](../Bench.md)。
 
 ### 多 TCP 连接并行（connGroupCount）
 
@@ -115,9 +114,9 @@ sgate 所有监控数据通过以下方式输出（无标准输出）：
 |------|------|
 | 堆内存泄漏 | ✅ 无 |
 | 连接泄漏 | ✅ 无 |
-| goroutine 泄漏 | ✅ 无（热路径已无调试 I/O） |
-| 消息吞吐量（TCP，100 连接） | ✅ bench1 **423,989 msg/s** / bench2(batch on) **1,424,357 msg/s** |
-| 消息吞吐量（WS，100 连接） | ✅ bench1 **424,967 msg/s** / bench2(batch on) **1,372,644 msg/s** |
+| goroutine 泄漏 | ✅ 无（热路径无调试 I/O） |
+| 消息吞吐量（TCP，100 连接） | ✅ bench1 **456,501 msg/s** / bench2(batch on) **1,277,758 msg/s** |
+| 消息吞吐量（WS，100 连接） | ✅ bench1 **647,095 msg/s** / bench2(batch on) **1,174,324 msg/s** |
 | 多 TCP 连接并行 | ✅ `connGroupCount` 配置，默认 4 连接 |
 | 登录/鉴权 | ✅ 各轮 0 失败、droppedAuth=0、无 401/authfail |
 | 连接级流控 | ✅ 已实现 |

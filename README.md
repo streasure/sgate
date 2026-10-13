@@ -403,7 +403,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | 是否启用安全链（`config/config.yaml` 默认开启） |
 | `rateLimit.enabled` | bool | `false` | 令牌桶限流（`config/config.yaml` 默认开启） |
-| `rateLimit.maxTokens` | int | `10000` | 每秒令牌数（按 IP/路由）；下扫压测膝点 ~600K（见 Bench.md），默认覆盖 NAT 多客户端共享 IP 场景 |
+| `rateLimit.maxTokens` | int | `10000` | 每秒令牌数（按 IP/路由）；下扫压测膝点 ~600K（见 Bench.md），默认覆盖 NAT 多客户端共享 IP 场景。热更：`POST /admin/ratelimit` |
 | `circuitBreaker.enabled` | bool | `false` | 熔断器 |
 
 ### 6.9.1 `loginValidation` 登录校验开关
@@ -585,27 +585,25 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 - bench1 = client→sgate→logic 上行转发；bench2 = logic→sgate→client 下行推送（`run.bat on|off` 切换 `batchPush`）
 - 运行方式见 `Bench.md` 与 `bench/*/run.bat|run.sh`
 
-### 8.2 实测吞吐（2026-10-09，后台有负载）
+### 8.2 参考吞吐
 
 #### bench1 上行转发
 
 | 协议 | 总转发量(10s) | 平均速率 | 登录失败 | droppedAuth |
 | --- | ---: | ---: | ---: | ---: |
-| TCP | 426.0 万 | **423,989/s** | 0 | 0 |
-| WebSocket | 426.5 万 | **424,967/s** | 0 | 0 |
+| TCP | 4,565,055 | **456,501/s** | 0 | 0 |
+| WebSocket | 6,562,583 | **647,095/s** | 0 | 0 |
 
 #### bench2 下行推送
 
 | 协议 | batchPush | 平均接收速率 | 连接失败 | droppedAuth |
 | --- | --- | ---: | ---: | ---: |
-| TCP | true | **1,424,357/s** | 0 | 0 |
-| TCP | false | 888,463/s | 0 | 0 |
-| WebSocket | true | **1,372,644/s** | 0 | 0 |
-| WebSocket | false | 855,332/s | 0 | 0 |
+| TCP | true | **1,277,758/s** | 0 | 0 |
+| TCP | false | 428,333 ~ 485,659/s | 0 | 0 |
+| WebSocket | true | **1,174,324/s** | 0 | 0 |
+| WebSocket | false | 381,512/s | 0 | 0 |
 
-> `batchPush=false` 为 2 轮中位，其余为单轮值（见 `bench/latest_results.json`）。安静后台时段参考：bench1 TCP 498,490/s、WS 527,297/s，bench2 on TCP 1,934,329/s、WS 1,713,708/s。
-
-详细报告见 [`docs/benchmark-report.md`](docs/benchmark-report.md)。
+> `batchPush=false` 为非合帧逐条写出路径，数值低于合帧路径属预期；主路径以 batch-on 为准。详细测量条件、限流下扫表、churn 结果见 [`Bench.md`](Bench.md)。
 
 ---
 

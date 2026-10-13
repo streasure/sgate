@@ -119,8 +119,8 @@ const (
 
 const (
 	// DefaultRateLimitMaxTokens 每秒令牌数（按 IP/路由）
-	// 下扫压测（2026-10-13，bench1_tcp 100conn）：fwd/s 随 maxTokens 线性扩展，
-	// ~600K 膝点后满吞吐零丢弃。默认 10000 覆盖 NAT 后多客户端共享 IP 的
+	// 下扫压测：fwd/s 随 maxTokens 线性扩展至膝点 ~600K（单 IP 独占机器容量上限），
+	// 之后满吞吐零丢弃。默认 10000 覆盖 NAT 后多客户端共享 IP 的
 	// 合理突发（~100 连接 × 100 msg/s），同时硬顶异常单 IP；高吞吐部署按需上调。
 	// 全局硬顶 = maxTokens*10，路由上限 = routeMaxTokens（0=maxTokens*4）。
 	DefaultRateLimitMaxTokens = 10000
