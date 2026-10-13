@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 
 	comp "github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
@@ -29,6 +30,14 @@ func main() {
 		// CLI 版本输出：tlog 尚未初始化，属非日志输出（AGENTS 允许 fmt）
 		fmt.Fprintf(os.Stdout, "sgate gateway version: %s\n", gateway.Version)
 		return
+	}
+
+	// 分配采样率环境变量：压测归因时设 SGATE_MEM_PROFILE_RATE=4096 提高密度
+	// （Go 默认 512KB 会把每消息数百字节的分配几乎全部采样掉，profile 只剩启动期）。
+	if v := os.Getenv("SGATE_MEM_PROFILE_RATE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			runtime.MemProfileRate = n
+		}
 	}
 
 	logComp := tlog.NewLogComponent(*logConfig)

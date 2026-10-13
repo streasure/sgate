@@ -89,10 +89,16 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	g := p.gw
 	protection := g.getProtection()
 
-	// 延迟测量起点：与 tracer 解耦，每条消息无条件计时（tracing 关闭时指标也有效）。
-	// 用 MonoNowNs（裸 QPC，100ns 粒度）：time.Now 被 runtime 粗化至 ~1.2µs，
-	// 会把亚微秒级管道延迟截成 0，/stats 的 P50/P95/P99 恒 0。
-	pipelineStart := obs.MonoNowNs()
+	// 延迟测量：与 tracer 解耦，tracing 关闭时也计量。
+	// 裸 QPC 粒度 100ns（time.Now 被 runtime 粗化至 ~1.2µs，会把亚微秒延迟截成 0），
+	// 但 QPC 是 syscall（~1µs）：500K msg/s × 2 次/条会烧掉 ~1 核。
+	// 每 8 条采样 1 条：QPC 开销 ~1.4% 单核，62K 样本/s 对百分位统计足够
+	// （环形缓冲 10K，统计窗口 ~0.16s）。
+	sampled := atomic.AddInt64(&g.latencySeq, 1)&7 == 0
+	var pipelineStart int64
+	if sampled {
+		pipelineStart = obs.MonoNowNs()
+	}
 
 	// 阶段1：过载检查。过载丢弃静默（与黑名单/安全限流/登录宽限一致）：
 	// 此时逐条回错误帧会占用正被挤爆的事件循环与写带宽，等于放大负载；
@@ -349,8 +355,8 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		g.tracer.EndSpan(span)
 	}
 
-	// 无条件记录管道延迟（不依赖 span/tracer），见 pipelineStart 注释。
-	if g.latencyTracker != nil {
+	// 记录管道延迟（不依赖 span/tracer），见 pipelineStart 采样注释。
+	if sampled && g.latencyTracker != nil {
 		g.latencyTracker.Record(time.Duration(obs.MonoNowNs() - pipelineStart))
 	}
 

@@ -34,18 +34,24 @@ func GetConnContext() *ConnContext {
 	ctx := connContextPool.Get().(*ConnContext)
 	ctx.ConnectionID = ""
 	ctx.FrameBuf = nil
+	ctx.frameOff = 0
 	return ctx
 }
 
 func PutConnContext(ctx *ConnContext) {
 	ctx.ConnectionID = ""
 	ctx.FrameBuf = nil
+	ctx.frameOff = 0
 	connContextPool.Put(ctx)
 }
 
 type ConnContext struct {
 	ConnectionID string
-	FrameBuf     []byte
+	// FrameBuf 为底层数组（跨消息复用），有效数据 = FrameBuf[frameOff:]。
+	// frameOff 为已消费偏移：置 nil 会让下一次读事件重新分配（实测 ~6B/条），
+	// 中段切片 FrameBuf[n:] 又会丢失数组头部容量；offset 方案两者皆免。
+	FrameBuf []byte
+	frameOff int
 }
 
 func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
@@ -195,37 +201,48 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	}
 
 	maxFrameBuf := g.getProtection().MaxFrameBufSize
-	if len(ctx.FrameBuf)+len(data) > maxFrameBuf {
+	// 已收未消费的逻辑长度；超限断连（防 FrameBuf 无界增长）
+	if len(ctx.FrameBuf)-ctx.frameOff+len(data) > maxFrameBuf {
 		ctx.FrameBuf = nil
+		ctx.frameOff = 0
 		return gnet.Close
 	}
-
+	// 有已消费前缀时前移残留，回收底层数组头部容量（append 热路径零重分配）
+	if ctx.frameOff > 0 {
+		logical := len(ctx.FrameBuf) - ctx.frameOff
+		copy(ctx.FrameBuf, ctx.FrameBuf[ctx.frameOff:])
+		ctx.FrameBuf = ctx.FrameBuf[:logical]
+		ctx.frameOff = 0
+	}
 	ctx.FrameBuf = append(ctx.FrameBuf, data...)
 
 	// 使用正常协议路径处理每个完整帧。逻辑流携带每条消息的真实客户端命令；它不定义网关私有的批处理命令。
 	maxFrame := g.getProtection().MaxFrameSize
-	for len(ctx.FrameBuf) >= 4 {
-		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[:4])
+	for len(ctx.FrameBuf)-ctx.frameOff >= 4 {
+		hdr := ctx.FrameBuf[ctx.frameOff:]
+		frameLen := binary.BigEndian.Uint32(hdr[:4])
 		if frameLen == 0 || frameLen > uint32(maxFrame) {
 			ctx.FrameBuf = nil
+			ctx.frameOff = 0
 			return gnet.Close
 		}
 		totalLen := 4 + int(frameLen)
-		if len(ctx.FrameBuf) < totalLen {
+		if len(ctx.FrameBuf)-ctx.frameOff < totalLen {
+			// 帧未收全：等待下一次读事件（残留由下次调用前移）
 			return
 		}
 
-		frameData := ctx.FrameBuf[4:totalLen]
-
-		if len(ctx.FrameBuf) > totalLen {
-			ctx.FrameBuf = ctx.FrameBuf[totalLen:]
-		} else {
-			ctx.FrameBuf = nil
-		}
+		frameData := ctx.FrameBuf[ctx.frameOff+4 : ctx.frameOff+totalLen]
+		ctx.frameOff += totalLen
 
 		if ret := g.handleTCPRequest(c, frameData); ret == gnet.Close {
 			return gnet.Close
 		}
+	}
+	// 全部帧消费完：保留底层数组容量（[:0] 而非 nil），下次读事件直接复用
+	if ctx.frameOff == len(ctx.FrameBuf) {
+		ctx.FrameBuf = ctx.FrameBuf[:0]
+		ctx.frameOff = 0
 	}
 
 	return

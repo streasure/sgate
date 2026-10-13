@@ -15,26 +15,28 @@ import (
 // （连续读 99.99% 相同），而裸 QPC 粒度 100ns——亚微秒级管道延迟会被
 // time.Since 截成 0，/stats 的 P50/P95/P99 恒 0。
 // Windows 文档保证 QPC 跨处理器一致且单调。
-// 每次调用一次 syscall（~50ns），仅用于延迟测量等观测点。
+// 热路径零分配：预取函数地址 + SyscallN 直调（LazyProc.Call 每次构造
+// []uintptr 参数切片，实测 ~9.6B/条；SyscallN 的非逃逸变参由编译器栈上分配）。
 
 var (
-	monoOnce sync.Once
-	monoQPC  *syscall.LazyProc
-	monoFreq int64
-	monoOK   bool
+	monoOnce    sync.Once
+	monoFreq    int64
+	monoOK      bool
+	monoQPCAddr uintptr
 )
 
 func monoInit() {
 	k32 := syscall.NewLazyDLL("kernel32.dll")
-	monoQPC = k32.NewProc("QueryPerformanceCounter")
+	qpc := k32.NewProc("QueryPerformanceCounter")
 	qpf := k32.NewProc("QueryPerformanceFrequency")
 	var freq int64
 	r1, _, _ := qpf.Call(uintptr(unsafe.Pointer(&freq)))
 	if r1 != 0 && freq > 0 {
 		monoFreq = freq
 		var c int64
-		r2, _, _ := monoQPC.Call(uintptr(unsafe.Pointer(&c)))
+		r2, _, _ := qpc.Call(uintptr(unsafe.Pointer(&c)))
 		monoOK = r2 != 0
+		monoQPCAddr = qpc.Addr()
 	}
 }
 
@@ -43,7 +45,7 @@ func MonoNowNs() int64 {
 	monoOnce.Do(monoInit)
 	if monoOK {
 		var c int64
-		monoQPC.Call(uintptr(unsafe.Pointer(&c)))
+		syscall.SyscallN(monoQPCAddr, uintptr(unsafe.Pointer(&c)))
 		return qpcToNS(c)
 	}
 	return time.Now().UnixNano()

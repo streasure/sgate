@@ -77,6 +77,7 @@ type Gateway struct {
 	waf            *security.WAF
 	cluster        *cluster.Cluster
 	latencyTracker *obs.LatencyTracker
+	latencySeq     int64         // 延迟采样序号：每 8 条消息取 1 条计时（QPC 为 syscall，见 pipeline）
 	engines        []gnet.Engine // 所有 transport engine，关闭时逐个 Stop
 	enginesMu      sync.Mutex
 	grpcServerMu   sync.Mutex // 保护 grpcServer 赋值/读取（启动协程与 Close 竞态）
