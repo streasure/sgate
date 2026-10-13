@@ -86,3 +86,29 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 - 校验：各轮 `connections failed=0`、`droppedAuth=0`，日志无 401 / authfail / login-key 拒绝
 - etcd key 使用 protocol 枚举：`/services/{belong}/{ServerTypeName}:{zone}/{instanceId}`（如 `SGATE` / `LOGINSERVER` / `LOGICSERVER`）
 
+## 30 分钟混合 churn 压测（bench/churn30）
+
+工具：`bench/churn30`（常驻用户随机突发 + 每分钟 50 新用户波次登录后大突发、5min 生存期 churn 关闭，JSONL 逐 10s 结果）；配置 `config_batch_rl.yaml`（限流开 maxTokens=2M）+ `config/log_bench.yaml`。30 分钟基线（2026-10-13，bd0b96b）：1803s、4704 万条、26,091 msg/s 均值；dropped* 全 0；1650 登录全成功、1200 churn 零错误；RSS 平台期 516MB；goroutines 恒 750 无泄漏；GC 40 次/30min；CPU 0.31 核（13µs/条）。
+
+### 观测修复（e83f150）
+
+- **延迟 QPC 高精度**：Go `time.Now` 连续读 99.99% 相同（粒度 ~1.2µs），亚微秒管道延迟被截成 0，`/stats` P50/P95/P99 恒 0。改 `obs.MonoNowNs()` 裸 QPC（100ns 粒度，Windows 文档保证跨核单调，`SyscallN` 直调零分配）。负载下 P50=1.3µs / P95=4.5 / P99=7~9。
+- **CPU 量子混叠**：Windows 进程 CPU 时间 ~15.6ms 粒子，200ms 单点采样频繁 delta=0，`cpuPercent` 恒 0。改 EMA 平滑（~1s 时间常数），过载阈值用平滑值防毛刺误判。空闲时 0 是正确行为。
+- **observeOnly**：`BenchMode` 下 `check()` 只采样 cpu/mem 供 `/stats` 展示，不置过载标志，压测不因过载丢消息。
+- **droppedFull 语义**：转发失败只计 `messagesFailed`（`/stats` 新增 `failed` 字段），不再污染 `droppedTotal`（专指 overload 队列满）。
+
+### 热点优化（25609c2，-37% 每消息分配）
+
+- **QPC 零分配**：`MonoNowNs` 改 `SyscallN` 直调预取地址（原 `LazyProc.Call` 每次构造 `[]uintptr` = 9.6B/条）。
+- **延迟采样降频**：每 8 条采样 1 条（QPC 为 syscall ~1µs，500K msg/s × 2 次烧 ~1 核；采样后 ~1.4% 单核，62K 样本/s 对百分位足够）。
+- **TCP 帧缓冲复用**：`ConnContext.FrameBuf` 加 `frameOff` 偏移（旧实现消费完置 nil 每次读事件重分配 6.2B/条 = 34MB；全耗尽 `[:0]` 保容量、残留下次调用前移，append 热路径零重分配，-74%）。
+- **slog 空转消除**（treasure-slog `eb8be47`）：`rbShard` 加 cap=1 邮箱唤醒 worker，删 50µs~2ms 空转退避（原 15% CPU）；`Async` 198ns/op。
+- **profile 工具**：`SGATE_MEM_PROFILE_RATE=4096` 环境变量（Go 默认 512KB 采样率把每消息小分配全采样掉，profile 只剩启动期）。
+
+### 验收
+
+- bench1_tcp（`config_batch_off.yaml`，RL off，benchMode）暖轮 559K/561K msg/s（基线 456-509K 无回退）。
+- churn30 RL-on 75s 零丢弃零失败（856K 条）。
+- 同采样率 allocs profile 每消息分配 -37%+（>25% 目标）。
+- 全门禁：gofmt / build / vet / staticcheck / test / test -race 通过。
+
