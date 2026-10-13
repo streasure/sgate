@@ -201,11 +201,24 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	}
 
 	maxFrameBuf := g.getProtection().MaxFrameBufSize
+	maxFrame := g.getProtection().MaxFrameSize
+	if !ctx.feedFrames(data, maxFrameBuf, maxFrame, func(frame []byte) bool {
+		return g.handleTCPRequest(c, frame) != gnet.Close
+	}) {
+		return gnet.Close
+	}
+	return
+}
+
+// feedFrames 将新读取的数据并入帧缓冲（frameOff 偏移复用，见 ConnContext 注释），
+// 依次回调每个完整帧。fn 返回 false（业务断连）或帧非法（长度 0 / 超 maxFrame /
+// 缓冲超限）时返回 false，调用方应关闭连接；返回 true 表示正常（可能仍有残帧待后续读取）。
+func (ctx *ConnContext) feedFrames(data []byte, maxFrameBuf, maxFrame int, fn func(frame []byte) bool) bool {
 	// 已收未消费的逻辑长度；超限断连（防 FrameBuf 无界增长）
 	if len(ctx.FrameBuf)-ctx.frameOff+len(data) > maxFrameBuf {
 		ctx.FrameBuf = nil
 		ctx.frameOff = 0
-		return gnet.Close
+		return false
 	}
 	// 有已消费前缀时前移残留，回收底层数组头部容量（append 热路径零重分配）
 	if ctx.frameOff > 0 {
@@ -217,26 +230,24 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	ctx.FrameBuf = append(ctx.FrameBuf, data...)
 
 	// 使用正常协议路径处理每个完整帧。逻辑流携带每条消息的真实客户端命令；它不定义网关私有的批处理命令。
-	maxFrame := g.getProtection().MaxFrameSize
 	for len(ctx.FrameBuf)-ctx.frameOff >= 4 {
-		hdr := ctx.FrameBuf[ctx.frameOff:]
-		frameLen := binary.BigEndian.Uint32(hdr[:4])
+		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[ctx.frameOff:])
 		if frameLen == 0 || frameLen > uint32(maxFrame) {
 			ctx.FrameBuf = nil
 			ctx.frameOff = 0
-			return gnet.Close
+			return false
 		}
 		totalLen := 4 + int(frameLen)
 		if len(ctx.FrameBuf)-ctx.frameOff < totalLen {
 			// 帧未收全：等待下一次读事件（残留由下次调用前移）
-			return
+			return true
 		}
 
 		frameData := ctx.FrameBuf[ctx.frameOff+4 : ctx.frameOff+totalLen]
 		ctx.frameOff += totalLen
 
-		if ret := g.handleTCPRequest(c, frameData); ret == gnet.Close {
-			return gnet.Close
+		if !fn(frameData) {
+			return false
 		}
 	}
 	// 全部帧消费完：保留底层数组容量（[:0] 而非 nil），下次读事件直接复用
@@ -244,8 +255,7 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 		ctx.FrameBuf = ctx.FrameBuf[:0]
 		ctx.frameOff = 0
 	}
-
-	return
+	return true
 }
 
 func (g *Gateway) isLogicConnected() bool {

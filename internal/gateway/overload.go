@@ -153,10 +153,10 @@ func (op *OverloadProtector) check() {
 				// Windows 进程 CPU 时间量化为 ~15.6ms 粒子：200ms 单点样本中
 				// deltaCPU 频繁为 0，/stats 直读会显示 0%。EMA 平滑（时间常数
 				// ~1s）消除量子混叠；过载阈值用平滑值，顺带避免单点毛刺误判。
-				alpha := op.checkInterval.Seconds() / (op.checkInterval.Seconds() + 1.0)
+				alpha := emaAlpha(op.checkInterval)
 				smoothed := raw
 				if p := op.cpuPercent.Load(); p != nil {
-					smoothed = *p + alpha*(raw-*p)
+					smoothed = smoothEMA(*p, raw, alpha)
 				}
 				op.cpuPercent.Store(&smoothed)
 				if smoothed > op.cpuThreshold {
@@ -219,4 +219,22 @@ func init() {
 	if _, err := process.NewProcess(int32(os.Getpid())); err != nil {
 		tlog.Warn(context.TODO(), "gopsutil process monitor unavailable on this platform, CPU/RSS monitoring disabled error=%v", err)
 	}
+}
+
+// emaAlpha 返回以 checkInterval 为采样周期、时间常数 ~1s 的 EMA 平滑系数。
+func emaAlpha(interval time.Duration) float64 {
+	s := interval.Seconds()
+	if s <= 0 {
+		return 1
+	}
+	return s / (s + 1.0)
+}
+
+// smoothEMA 指数滑动平均：smoothed = prev + alpha*(raw-prev)。
+// 用于消除 Windows 进程 CPU 时间 ~15.6ms 量化导致的单点 0 值。
+func smoothEMA(prev, raw, alpha float64) float64 {
+	if alpha <= 0 {
+		return raw
+	}
+	return prev + alpha*(raw-prev)
 }

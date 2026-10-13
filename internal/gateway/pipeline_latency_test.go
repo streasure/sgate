@@ -25,7 +25,7 @@ func TestPipelineRecordsLatency(t *testing.T) {
 	// 生产中 tracker 由 obs 组件(200) 在 Gateway.Start(1000) 时注入；单测直接注入。
 	gw.latencyTracker = obs.NewLatencyTracker(10000)
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		msg := &protoGw.StreamData{Cmd: 1100010, Data: []byte("x"), SeqId: int64(i + 1)}
 		res := gw.pipeline.Process(&kickMockConn{}, msg.Data, msg, connID)
 		if res.ProtoMsg == nil {
