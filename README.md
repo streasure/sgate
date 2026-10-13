@@ -403,7 +403,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | 是否启用安全链（`config/config.yaml` 默认开启） |
 | `rateLimit.enabled` | bool | `false` | 令牌桶限流（`config/config.yaml` 默认开启） |
-| `rateLimit.maxTokens` | int | `1000000` | 最大令牌数 |
+| `rateLimit.maxTokens` | int | `10000` | 每秒令牌数（按 IP/路由）；下扫压测膝点 ~600K（见 Bench.md），默认覆盖 NAT 多客户端共享 IP 场景 |
 | `circuitBreaker.enabled` | bool | `false` | 熔断器 |
 
 ### 6.9.1 `loginValidation` 登录校验开关

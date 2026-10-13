@@ -111,4 +111,24 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 - churn30 RL-on 75s 零丢弃零失败（856K 条）。
 - 同采样率 allocs profile 每消息分配 -37%+（>25% 目标）。
 - 全门禁：gofmt / build / vet / staticcheck / test / test -race 通过。
+- **bench1_ws 暖轮 647K msg/s**（基线 442K，WS 缓冲 offset 复用后 +46%），零丢弃，P50=0.8µs / P99=2.6µs。
 
+## 限流 maxTokens 下扫（2026-10-13）
+
+bench1_tcp 100 连接 5s，`/stats.forwarded` 为准（客户端发送速率含被丢弃消息不可用）。per-IP 限额即 maxTokens（压测全走 127.0.0.1），全局硬顶 = maxTokens×10 不先触发。
+
+| maxTokens | fwd/s | droppedRateLimit |
+| ---: | ---: | ---: |
+| 100 | 120 | 2,980,686 |
+| 1,000 | 1,180 | 2,842,601 |
+| 10,000 | 11,980 | 2,862,674 |
+| 50,000 | 59,980 | 2,504,916 |
+| 100,000 | 123,231 | 2,552,061 |
+| 250,000 | 254,911 | 1,086,561 |
+| 400,000 | 430,481 | 503,449 |
+| 600,000 | 478,586 | **0** |
+| 800,000 | 437,947 | **0** |
+| 1,000,000 | 449,515 | **0** |
+| 2,000,000 | 432,515 | **0** |
+
+结论：fwd/s 随 maxTokens 线性扩展至膝点 ~600K（单 IP 独占场景机器容量上限），之后满吞吐零丢弃。**生产默认 `DefaultRateLimitMaxTokens` 100 → 10000**（覆盖 NAT 后 ~100 连接 × 100 msg/s 合理突发，硬顶异常单 IP；高吞吐部署按需上调，全局硬顶 = maxTokens×10）。`config/config.yaml` 同步 10000 并修复缺失的 `rateLimit:` 键（此前为无效 YAML 缩进）。
