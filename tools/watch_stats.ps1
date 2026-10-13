@@ -1,7 +1,7 @@
-# churn30 期间采样 sgate 系统指标 -> CSV（每 10s 一行）
+# churn30 期间采样 sgate 系统指标 -> CSV（每 10s 一行，含进程 CPU/RSS）
 # 用法: Start-Process powershell -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","tools\watch_stats.ps1" -WindowStyle Hidden
 $out = "E:\sgate\logs\churn30_monitor.csv"
-"ts,elapsed_s,conns,goroutines,alloc_mb,sys_mb,gc_count,msgps,cpu_pct,mem_pct,dropped_total,forwarded,rss_mb" | Out-File -FilePath $out -Encoding ascii
+"ts,elapsed_s,conns,goroutines,alloc_mb,sys_mb,gc_count,msgps,cpu_pct,mem_pct,dropped_total,forwarded,rss_mb,proc_cpu_s" | Out-File -FilePath $out -Encoding ascii
 $sw = [Diagnostics.Stopwatch]::StartNew()
 while ($true) {
     $ts = (Get-Date).ToString("o")
@@ -24,8 +24,8 @@ while ($true) {
         $drop = $s.droppedTotal
         $fwd = $s.forwarded
     } catch {}
-    $rss = ""
-    try { $rss = [math]::Round((Get-Process sgate -ErrorAction Stop).WorkingSet64 / 1MB, 1) } catch {}
-    "$ts,$el,$conns,$gr,$alloc,$sys,$gcc,$msgps,$cpu,$mpc,$drop,$fwd,$rss" | Out-File -FilePath $out -Append -Encoding ascii
+    $rss = ""; $pcpu = ""
+    try { $p = Get-Process sgate -ErrorAction Stop; $rss = [math]::Round($p.WorkingSet64 / 1MB, 1); $pcpu = [math]::Round($p.CPU, 1) } catch {}
+    "$ts,$el,$conns,$gr,$alloc,$sys,$gcc,$msgps,$cpu,$mpc,$drop,$fwd,$rss,$pcpu" | Out-File -FilePath $out -Append -Encoding ascii
     Start-Sleep -Seconds 10
 }

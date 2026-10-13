@@ -89,6 +89,11 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	g := p.gw
 	protection := g.getProtection()
 
+	// 延迟测量起点：与 tracer 解耦，每条消息无条件计时（tracing 关闭时指标也有效）。
+	// 用 MonoNowNs（裸 QPC，100ns 粒度）：time.Now 被 runtime 粗化至 ~1.2µs，
+	// 会把亚微秒级管道延迟截成 0，/stats 的 P50/P95/P99 恒 0。
+	pipelineStart := obs.MonoNowNs()
+
 	// 阶段1：过载检查。过载丢弃静默（与黑名单/安全限流/登录宽限一致）：
 	// 此时逐条回错误帧会占用正被挤爆的事件循环与写带宽，等于放大负载；
 	// 可见性由 messagesDroppedOverload / overloadProtector 计数提供。
@@ -317,7 +322,8 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	if sendErr != nil {
 		g.messagesFailed.Add(1)
 		tlog.Warn(context.TODO(), "client message forward failed sessionID=%s serverID=%s cmd=%d error=%v", connectionID, connObj.GetServerID(), cmd, sendErr)
-		g.messagesDroppedFull.Add(1)
+		// 转发失败 ≠ 队列满：droppedFull 语义限定 overload 队列满（阶段1），
+		// 此处失败由 messagesFailed / stats.failed 单独暴露，不再污染 droppedTotal。
 		if g.circuitBreakerMgr != nil {
 			if breaker := g.getOrCreateBreaker(routeKey); breaker != nil {
 				breaker.RecordFailure()
@@ -341,9 +347,11 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 
 	if span != nil && g.tracer != nil {
 		g.tracer.EndSpan(span)
-		if g.latencyTracker != nil {
-			g.latencyTracker.Record(span.Duration)
-		}
+	}
+
+	// 无条件记录管道延迟（不依赖 span/tracer），见 pipelineStart 注释。
+	if g.latencyTracker != nil {
+		g.latencyTracker.Record(time.Duration(obs.MonoNowNs() - pipelineStart))
 	}
 
 	if sendErr != nil {

@@ -96,13 +96,13 @@ func login(addr, serverID, userID string) (*session, error) {
 		return nil, fmt.Errorf("unexpected cmd %d", resp.Cmd)
 	}
 	ack := new(protocol.LoginGateAck)
-	if err := proto.Unmarshal(resp.Body, ack); err != nil || ack.Code != 0 {
+	if err := proto.Unmarshal(resp.Body, ack); err != nil {
 		conn.Close()
-		code := int32(-1)
-		if ack != nil {
-			code = ack.Code
-		}
-		return nil, fmt.Errorf("rejected code=%d msg=%s", code, ack.GetMessage())
+		return nil, fmt.Errorf("decode ack: %w", err)
+	}
+	if ack.Code != 0 {
+		conn.Close()
+		return nil, fmt.Errorf("rejected code=%d msg=%s", ack.Code, ack.Message)
 	}
 	conn.SetDeadline(time.Time{})
 	return &session{conn: conn, id: userID, stop: make(chan struct{})}, nil

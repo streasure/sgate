@@ -72,6 +72,7 @@ func (r *messageRateTracker) rate() float64 {
 type statsPayload struct {
 	Received              int64   `json:"received"`
 	Forwarded             int64   `json:"forwarded"`
+	MessagesFailed        int64   `json:"failed"`
 	DroppedOverload       int64   `json:"droppedOverload"`
 	DroppedFull           int64   `json:"droppedFull"`
 	DroppedNoLogic        int64   `json:"droppedNoLogic"`
@@ -94,10 +95,12 @@ type statsPayload struct {
 	WAFBlocked            int64   `json:"wafBlocked"`
 	IsLeader              bool    `json:"isLeader"`
 	NodeID                string  `json:"nodeID,omitempty"`
-	LatencyP50Us          int64   `json:"latencyP50Us"`
-	LatencyP95Us          int64   `json:"latencyP95Us"`
-	LatencyP99Us          int64   `json:"latencyP99Us"`
-	LatencyMaxUs          int64   `json:"latencyMaxUs"`
+	// 管道延迟：float 微秒（P50 常 <1µs，整数微秒会截断成 0）
+	LatencyP50Us float64 `json:"latencyP50Us"`
+	LatencyP95Us float64 `json:"latencyP95Us"`
+	LatencyP99Us float64 `json:"latencyP99Us"`
+	LatencyMaxUs float64 `json:"latencyMaxUs"`
+	LatencyCount int     `json:"latencyCount"`
 	// P1: 连接生命周期指标
 	AvgConnectionDurationMs float64 `json:"avgConnectionDurationMs"`     // 平均连接存活时长（毫秒）
 	ConnectionDurationP50Ms float64 `json:"connectionDurationP50Ms"`     // 连接存活时长 P50（毫秒）
@@ -127,6 +130,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 		stats := statsPayload{
 			Received:              g.messagesReceived.Load(),
 			Forwarded:             g.messagesForwarded.Load(),
+			MessagesFailed:        g.messagesFailed.Load(),
 			DroppedOverload:       dropOverload,
 			DroppedFull:           dropFull,
 			DroppedNoLogic:        dropNoLogic,
@@ -156,10 +160,11 @@ func (g *Gateway) StartStatsServer(addr string) {
 		}
 		if g.latencyTracker != nil {
 			latStats := g.latencyTracker.GetStats()
-			stats.LatencyP50Us = latStats.P50.Microseconds()
-			stats.LatencyP95Us = latStats.P95.Microseconds()
-			stats.LatencyP99Us = latStats.P99.Microseconds()
-			stats.LatencyMaxUs = latStats.Max.Microseconds()
+			stats.LatencyP50Us = float64(latStats.P50.Nanoseconds()) / 1000.0
+			stats.LatencyP95Us = float64(latStats.P95.Nanoseconds()) / 1000.0
+			stats.LatencyP99Us = float64(latStats.P99.Nanoseconds()) / 1000.0
+			stats.LatencyMaxUs = float64(latStats.Max.Nanoseconds()) / 1000.0
+			stats.LatencyCount = latStats.Cnt
 		}
 		// P1: 连接生命周期指标
 		if count := g.connectionDurationCount.Load(); count > 0 {

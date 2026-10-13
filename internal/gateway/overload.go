@@ -29,6 +29,7 @@ import (
 type OverloadProtector struct {
 	cpuThreshold   float64
 	dropOnOverload bool
+	observeOnly    bool // benchMode：只采样 CPU/内存供 /stats 展示，绝不置过载标志（不丢消息）
 	overloadFlag   atomic.Int32
 	checkInterval  time.Duration
 	stopChan       chan struct{}
@@ -82,6 +83,7 @@ func NewOverloadProtector(cfg config.ProtectionConfig) *OverloadProtector {
 	op := &OverloadProtector{
 		cpuThreshold:   cpuThreshold,
 		dropOnOverload: cfg.DropOnOverload,
+		observeOnly:    cfg.BenchMode,
 		checkInterval:  checkInterval,
 		stopChan:       make(chan struct{}),
 		proc:           proc,
@@ -142,21 +144,31 @@ func (op *OverloadProtector) check() {
 			op.lastCheckTime = now
 
 			if deltaWall > 0 {
-				cpuPct := (deltaCPU / deltaWall) / float64(runtime.NumCPU()) * 100.0
+				raw := (deltaCPU / deltaWall) / float64(runtime.NumCPU()) * 100.0
 				// 限制在合理范围 [0, 100*NumCPU]
 				maxCPU := float64(runtime.NumCPU()) * 100.0
-				if cpuPct > maxCPU {
-					cpuPct = maxCPU
+				if raw > maxCPU {
+					raw = maxCPU
 				}
-				if cpuPct > op.cpuThreshold {
+				// Windows 进程 CPU 时间量化为 ~15.6ms 粒子：200ms 单点样本中
+				// deltaCPU 频繁为 0，/stats 直读会显示 0%。EMA 平滑（时间常数
+				// ~1s）消除量子混叠；过载阈值用平滑值，顺带避免单点毛刺误判。
+				alpha := op.checkInterval.Seconds() / (op.checkInterval.Seconds() + 1.0)
+				smoothed := raw
+				if p := op.cpuPercent.Load(); p != nil {
+					smoothed = *p + alpha*(raw-*p)
+				}
+				op.cpuPercent.Store(&smoothed)
+				if smoothed > op.cpuThreshold {
 					overloaded = true
 				}
-				op.cpuPercent.Store(&cpuPct)
 			}
 		}
 	}
 
-	if overloaded && op.dropOnOverload {
+	// observeOnly（benchMode）时只采样不置标志：/stats 有 cpuPercent/memPercent，
+	// 但 IsOverloaded() 恒 false，压测不因过载丢消息。
+	if overloaded && op.dropOnOverload && !op.observeOnly {
 		op.overloadFlag.Store(1)
 		now := time.Now().UnixMilli()
 		lastLog := op.lastLogTime.Load()

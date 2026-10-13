@@ -4,39 +4,51 @@ import (
 	"math"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// LatencyTracker 滑动窗口延迟追踪器
-// 功能：记录最近 N 个请求的延迟，计算 P50/P95/P99/Max
-type LatencyTracker struct {
+const latencyShardCount = 16
+
+type latencyShard struct {
 	mu      sync.Mutex
 	samples []time.Duration
 	head    int
 	count   int
-	size    int
 }
 
-// NewLatencyTracker 创建延迟追踪器
+// LatencyTracker 滑动窗口延迟追踪器
+// 功能：记录最近 N 个请求的延迟，计算 P50/P95/P99/Max
+// 实现：16 分片 + 原子轮转分摊锁竞争（热路径每消息调用，全局锁在多事件循环下会争用）。
+type LatencyTracker struct {
+	shards [latencyShardCount]latencyShard
+	size   int
+	rr     atomic.Uint64
+}
+
+// NewLatencyTracker 创建延迟追踪器（size 为总窗口，均摊到各分片）
 func NewLatencyTracker(size int) *LatencyTracker {
 	if size <= 0 {
 		size = 10000
 	}
-	return &LatencyTracker{
-		samples: make([]time.Duration, size),
-		size:    size,
+	per := max(size/latencyShardCount, 1)
+	lt := &LatencyTracker{size: per}
+	for i := range lt.shards {
+		lt.shards[i].samples = make([]time.Duration, per)
 	}
+	return lt
 }
 
 // Record 记录一个延迟样本
 func (lt *LatencyTracker) Record(d time.Duration) {
-	lt.mu.Lock()
-	lt.samples[lt.head] = d
-	lt.head = (lt.head + 1) % lt.size
-	if lt.count < lt.size {
-		lt.count++
+	s := &lt.shards[lt.rr.Add(1)&(latencyShardCount-1)]
+	s.mu.Lock()
+	s.samples[s.head] = d
+	s.head = (s.head + 1) % lt.size
+	if s.count < lt.size {
+		s.count++
 	}
-	lt.mu.Unlock()
+	s.mu.Unlock()
 }
 
 // LatencyStats 延迟统计
@@ -50,19 +62,20 @@ type LatencyStats struct {
 
 // GetStats 计算延迟分位数
 func (lt *LatencyTracker) GetStats() LatencyStats {
-	lt.mu.Lock()
-	if lt.count == 0 {
-		lt.mu.Unlock()
+	buf := make([]time.Duration, 0, lt.size*latencyShardCount)
+	for i := range lt.shards {
+		s := &lt.shards[i]
+		s.mu.Lock()
+		if s.count < lt.size {
+			buf = append(buf, s.samples[:s.count]...)
+		} else {
+			buf = append(buf, s.samples...)
+		}
+		s.mu.Unlock()
+	}
+	if len(buf) == 0 {
 		return LatencyStats{}
 	}
-	// 复制有效样本
-	buf := make([]time.Duration, lt.count)
-	if lt.count < lt.size {
-		copy(buf, lt.samples[:lt.count])
-	} else {
-		copy(buf, lt.samples)
-	}
-	lt.mu.Unlock()
 
 	slices.Sort(buf)
 

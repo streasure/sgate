@@ -272,8 +272,10 @@ func (g *Gateway) StartServices() {
 	// 压测模式：跳过与压测无关的后台周期任务，避免与热路径争抢调度。
 	benchMode := protection.BenchMode
 
+	// 过载采样器始终启动：benchMode 下为 observe-only（见 OverloadProtector.observeOnly），
+	// 保证 /stats 的 cpuPercent/memPercent 有值；benchMode 仅跳过 WS 心跳检测。
+	g.overloadProtector.Start()
 	if !benchMode {
-		g.overloadProtector.Start()
 		go g.wsHeartbeatChecker()
 	}
 	g.messageIntegrity = NewMessageIntegrity(30000)
