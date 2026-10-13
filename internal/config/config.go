@@ -196,16 +196,36 @@ type FilterItemConfig struct {
 	Config map[string]any `yaml:"config"`
 }
 
-// SecurityConfig 安全防护配置（白名单/黑名单/限流/熔断）
+// SecurityConfig 安全防护配置（白名单/黑名单/限流/熔断/封禁）
 type SecurityConfig struct {
 	Enabled   bool     `yaml:"enabled"`
 	Whitelist []string `yaml:"whitelist"`
 	Blacklist []string `yaml:"blacklist"`
-	// BanPersistPath 封禁快照 JSON 路径；空 = 仅内存（重启丢失）。
-	// 配置后 ban/unban 写快照，启动自动加载。多网关共享需后续接 MySQL/etcd。
-	BanPersistPath string               `yaml:"banPersistPath"`
+	// BanRedis 封禁 Redis 共享存储（多网关实例共享封禁表）。
+	// enabled=false 时仅进程内存，重启丢失。
+	BanRedis       BanRedisConfig       `yaml:"banRedis"`
 	RateLimit      RateLimitConfig      `yaml:"rateLimit"`
 	CircuitBreaker CircuitBreakerConfig `yaml:"circuitBreaker"`
+}
+
+// BanRedisConfig 封禁 Redis 共享存储配置。
+// 多网关实例通过同一 Redis 共享封禁表；封禁判定仍在网关侧（loginserver 不做 ban 理论）。
+type BanRedisConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Address  string `yaml:"address"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
+	// KeyPrefix Redis key 前缀，默认 "sgate:ban:"。
+	KeyPrefix string `yaml:"keyPrefix"`
+	// DialTimeout 连接超时，默认 3s。
+	DialTimeout string `yaml:"dialTimeout"`
+	// ReadTimeout 读超时，默认 2s。
+	ReadTimeout string `yaml:"readTimeout"`
+	// WriteTimeout 写超时，默认 2s。
+	WriteTimeout string `yaml:"writeTimeout"`
+	// SyncInterval 全量同步间隔：从 Redis 拉全量刷新本地内存（吸收其他实例 ban/unban 与过期），默认 30s。
+	// 置 0 用默认；置负数关闭同步（仅启动加载 + 本实例写穿，不推荐多实例生产）。
+	SyncInterval string `yaml:"syncInterval"`
 }
 
 // LoginValidationConfig LoginGate loginKey 校验开关。

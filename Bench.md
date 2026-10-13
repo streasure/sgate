@@ -138,10 +138,11 @@ bench1_tcp 100 连接下扫（以 `/stats.forwarded` 为准，客户端发送速
 - `POST /admin/ratelimit`（Bearer 鉴权，token 来自 `admin.token`）：body `{"maxTokens":N,"tokenRefresh":"1s","routeMaxTokens":N,"globalMaxTokens":N}`，缺省 0/空表示恢复默认派生值。
 - 也可通过配置中心热更，走同一 `handleConfigUpdate` 路径。
 
-### 封禁持久化
+### 封禁共享存储（Redis）
 
-- `security.banPersistPath` 非空时：`/admin/ban`、`/admin/unban` 写 JSON 快照，启动自动加载（过滤已过期项）。空路径 = 仅内存，重启丢失。
-- 多网关实例共享需后续接 MySQL/etcd（见 PENDING.md）。
+- `security.banRedis.enabled: true` 时：`/admin/ban`、`/admin/unban` 写穿 Redis（key 前缀默认 `sgate:ban:`，有 TTL 的记录用 EXPIRE）；启动全量加载；后台 `syncInterval`（默认 30s）全量同步本地内存（吸收其他实例 ban/unban 与过期）。
+- 多网关实例配置同一 Redis 即共享封禁表；`enabled: false`（默认）仅进程内存，重启丢失。
+- 连接失败告警并回退内存模式，不阻塞启动。
 
 ## etcd key 约定
 

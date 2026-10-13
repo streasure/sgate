@@ -19,8 +19,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// banStore 进程内封禁表。
-// TODO: 迁移到 MySQL（多网关共享 + 持久化）。
+// banStore 进程内封禁表（本地内存缓存）。
+// 配置 security.banRedis 后写穿 Redis，多网关实例共享。
 var banStore = security.NewBanStore()
 
 // BanStore 返回全局封禁表（测试/管理接口共用）。

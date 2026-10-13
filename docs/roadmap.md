@@ -26,7 +26,7 @@
 | LogoutGate | `1000003/1000004`，断连无推送 + JWT Revoke |
 | Admin 封禁 HTTP | `/admin/ban|unban|bans`，先推 `CmdBanNtf` 再断，Bearer `admin.token` |
 | LoginGate 封禁拦截 | 403 |
-| BanStore | 进程内实现（**TODO: 迁 MySQL**，多网关共享） |
+| BanStore | 本地内存 + 可选 Redis 共享（`security.banRedis`）；默认关=仅内存 |
 | JWT | jti 持久化到 Connection，接入 logout/ban Revoke |
 | 登录校验开关 | `loginValidation.enabled`（压测恒为 false） |
 
@@ -60,9 +60,9 @@
    - 问题：当前 TCP 写失败直接丢弃。SLG 游戏对关键消息（战斗结果、资源变更）要求 at-least-once
    - 方案：消息 ACK + 重传机制，或逻辑服侧重试 + 幂等
 
-3. **封禁状态迁移 MySQL**
-   - 问题：`BanStore` 仅进程内存，重启丢失、多网关不共享
-   - 方案：MySQL 表 `user_bans(user_uuid PK, reason, jti, banned_at, expires_at)`；启动加载未过期记录；`/admin/ban` 双写内存+DB；定时清理过期行
+3. **封禁 Redis 共享（已实现，待生产验证）**
+   - 已有：`security.banRedis` 写穿 + 启动加载 + 周期全量同步；封禁判定在网关（loginserver 不做 ban 理论）
+   - 待做：多实例一致性压测（A ban 后 B 在 syncInterval 内生效）；Redis 故障时的降级策略确认
 
 ### P3：架构增强
 

@@ -393,7 +393,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | --- | --- | --- |
 | POST | `/admin/ban` | 封禁：`{"userUuid","reason","jti?","ttlSeconds?"}`；先推 `CmdBanNtf(1000005)` 再断连，并撤销 JWT |
 | POST | `/admin/unban` | 解封：`{"userUuid"}` |
-| GET | `/admin/bans` | 当前有效封禁列表（内存，TODO→MySQL） |
+| GET | `/admin/bans` | 当前有效封禁列表（本地内存；多实例见 `security.banRedis`） |
 
 客户端登出：`CmdLogoutGate(1000003)` → 撤销 JWT → 通知逻辑服 → 断连（无业务推送）；ack 为 `CmdLogoutGateAck(1000004)`。
 
@@ -402,6 +402,10 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | 是否启用安全链（`config/config.yaml` 默认开启） |
+| `banRedis.enabled` | bool | `false` | 封禁 Redis 共享存储（多网关实例共享封禁表） |
+| `banRedis.address` | string | `""` | Redis 地址，如 `127.0.0.1:6379` |
+| `banRedis.keyPrefix` | string | `sgate:ban:` | Redis key 前缀 |
+| `banRedis.syncInterval` | string | `30s` | 后台全量同步间隔；负数关闭 |
 | `rateLimit.enabled` | bool | `false` | 令牌桶限流（`config/config.yaml` 默认开启） |
 | `rateLimit.maxTokens` | int | `10000` | 每秒令牌数（按 IP/路由）；下扫压测膝点 ~600K（见 Bench.md），默认覆盖 NAT 多客户端共享 IP 场景。热更：`POST /admin/ratelimit` |
 | `circuitBreaker.enabled` | bool | `false` | 熔断器 |

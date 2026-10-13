@@ -64,6 +64,15 @@ protection:
 
 security:
   enabled: true
+  # 封禁共享存储：多网关实例通过 Redis 共享封禁表。
+  # enabled=false 时仅进程内存（重启丢失，单机可用）。
+  banRedis:
+    enabled: false
+    address: "127.0.0.1:6379"
+    password: ""
+    db: 0
+    # keyPrefix: "sgate:ban:"
+    # syncInterval: "30s"   # 后台全量同步间隔；负数关闭（不推荐多实例生产）
   rateLimit:
     enabled: true       # 开发环境保持开启：单 IP/route 每秒 10000 次（下扫压测膝点 ~600K，见 Bench.md）
     # 注意：出口 IP 后面有多台机器（NAT/CGNAT）时 per-IP 限额是共享的，

@@ -273,11 +273,12 @@ func (g *Gateway) StartServices() {
 	// 压测模式：跳过与压测无关的后台周期任务，避免与热路径争抢调度。
 	benchMode := protection.BenchMode
 
-	// 封禁快照持久化：配置路径后 ban/unban 写 JSON，启动自动加载。
-	if p := cfg.Security.BanPersistPath; p != "" {
-		banStore.SetPersistPath(p)
-		if n := banStore.Len(); n > 0 {
-			tlog.Info(context.TODO(), "ban store loaded path=%s entries=%d", p, n)
+	// 封禁 Redis 共享存储：多实例共享封禁表；失败仅告警继续内存模式。
+	if br := cfg.Security.BanRedis; br.Enabled {
+		if err := banStore.InitRedis(context.TODO(), br); err != nil {
+			tlog.Error(context.TODO(), "ban redis init failed addr=%s err=%v (fallback memory)", br.Address, err)
+		} else if n := banStore.Len(); n > 0 {
+			tlog.Info(context.TODO(), "ban redis loaded addr=%s entries=%d", br.Address, n)
 		}
 	}
 

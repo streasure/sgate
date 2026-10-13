@@ -3,9 +3,11 @@ module github.com/streasure/sgate
 go 1.26.5
 
 require (
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/bytedance/sonic v1.15.3
 	github.com/gobwas/ws v1.4.0
 	github.com/panjf2000/gnet/v2 v2.9.7
+	github.com/redis/go-redis/v9 v9.0.5
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/streasure/protocol v1.0.4
 	github.com/streasure/util v1.0.11
@@ -20,9 +22,11 @@ require (
 	github.com/armon/go-radix v1.0.0 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic/loader v0.5.2 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/coreos/go-semver v0.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.3.2 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/elastic/go-sysinfo v1.7.1 // indirect
 	github.com/elastic/go-windows v1.0.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.2 // indirect
@@ -60,6 +64,7 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.elastic.co/apm/module/apmgrpc/v2 v2.6.2 // indirect
 	go.elastic.co/apm/module/apmhttp/v2 v2.6.2 // indirect
