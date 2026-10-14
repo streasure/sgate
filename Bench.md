@@ -87,6 +87,24 @@ go build -o bench\churn30\churn30.exe .\bench\churn30
 - 配置：`config_batch_rl.yaml`（限流开）+ `config/log_bench.yaml`
 - 典型结果：1800s、约 4700 万条、**~26,000 msg/s** 均值；登录全成功、churn 零错误；`dropped*` 全 0；RSS 平台期 ~500MB；goroutines 恒定无泄漏；latency P50≈1.3µs / P99≈6µs
 
+### 4 小时混合 churn 稳定性（bench/churn30 -duration 4h）
+
+常驻 150 + 每分钟 50 波次、5min 生存期；配置 `config_batch_off.yaml` + `config/log_bench.yaml`；结果 `logs/churn4h.jsonl`（10s 采样 ×1441）。
+
+| 指标 | 值 |
+| --- | ---: |
+| 时长 | 4h（14,410s） |
+| 总发送 / 转发 | 399,193,835 条 |
+| 平均速率 | **27,721 msg/s**（min 9,997 / max 33,062，波次登录期波动） |
+| 登录成功 / 失败 | 8,832,150 / **0** |
+| churn 连接 | 8,248,592，write_err=0 / read_closed=0 |
+| `/stats` failed / droppedRateLimit | **0 / 0** |
+| latency | P50=1.2µs / P99=7.2µs |
+| sgate RSS | 平台期 ~520–526MB，结束后 GC 回落 159MB |
+| 进程 | 全程存活，无 OOM / 无 goroutine 泄漏迹象 |
+
+结论：4 小时混合负载下吞吐、内存、错误计数均平稳，可作为长稳参考基线。
+
 ## 限流 maxTokens 与吞吐关系
 
 per-IP 限额即 `maxTokens`（压测全走 127.0.0.1 时整机共享该额度）；全局硬顶 = `maxTokens×10`，路由上限 = `routeMaxTokens`（0 = `maxTokens×4`）。
