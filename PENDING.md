@@ -36,6 +36,9 @@
 
 ## 封禁共享存储（Redis）
 
-**已实现**：`security.banRedis` 启用后封禁表写穿 Redis（多网关实例共享），本地内存为热路径缓存 + 后台全量同步。默认关闭（仅内存）。
+**已实现**：`security.banRedis` 启用后封禁表写穿 Redis（多网关实例共享），本地内存为热路径缓存 + 后台全量同步。默认关闭（仅内存）。IP 封禁键为 `ip:<addr>`。
 
-**待做**：封禁判定的完整多实例一致性验证（A 实例 ban 后 B 实例登录是否在 syncInterval 内生效）；生产启用前需确认 Redis 可用性与 key 过期策略。
+**已知限制与方案**（不实施中）：
+- 跨实例**不踢**已在线连接（仅 admin 所在实例 enforce）；新登录靠 Get 回源 Redis 通常已秒级拒绝
+- 全量 SCAN 同步成本、NAT/CIDR、Redis 故障状态机等：见 `docs/ban-sharing-design.md`
+- 多实例测试用例与验收标准：见 `docs/multi-sgate-test.md`
