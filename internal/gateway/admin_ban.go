@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ func BanStore() *security.BanStore { return banStore }
 
 type banRequest struct {
 	UserUUID string `json:"userUuid"`
+	IP       string `json:"ip"` // 封禁远程 IP（踢该 IP 下全部连接并写 Redis）
 	Reason   string `json:"reason"`
 	Jti      string `json:"jti"`
 	TTLSec   int64  `json:"ttlSeconds"` // <=0 或缺省 = 永久
@@ -35,6 +37,7 @@ type banRequest struct {
 
 type unbanRequest struct {
 	UserUUID string `json:"userUuid"`
+	IP       string `json:"ip"`
 }
 
 type banResponse struct {
@@ -87,14 +90,33 @@ func (g *Gateway) registerAdminRoutes(mux *http.ServeMux) {
 
 func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {
 	var req banRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserUUID == "" {
-		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.UserUUID == "" && req.IP == "") {
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid or ip required"})
+		return
+	}
+	if req.UserUUID != "" && req.IP != "" {
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid and ip are mutually exclusive"})
 		return
 	}
 	var ttl time.Duration
 	if req.TTLSec > 0 {
 		ttl = time.Duration(req.TTLSec) * time.Second
 	}
+
+	if req.IP != "" {
+		ip := strings.TrimSpace(req.IP)
+		if net.ParseIP(ip) == nil {
+			uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ip"})
+			return
+		}
+		rec := banStore.Add("ip:"+ip, req.Reason, "", ttl)
+		offline := g.enforceBanIP(ip, rec)
+		tlog.Info(context.TODO(), "admin ban ip=%s reason=%s ttlSec=%d offline=%d",
+			ip, req.Reason, req.TTLSec, offline)
+		uhttp.WriteJSON(w, http.StatusOK, banResponse{OK: true, Banned: banStore.Len(), Record: &rec, Offline: offline})
+		return
+	}
+
 	rec := banStore.Add(req.UserUUID, req.Reason, req.Jti, ttl)
 	// 管理端携带 jti 时立即撤销
 	if rec.Jti != "" && g.jwtAuth != nil {
@@ -112,8 +134,14 @@ func (g *Gateway) handleAdminBan(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) handleAdminUnban(w http.ResponseWriter, r *http.Request) {
 	var req unbanRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserUUID == "" {
-		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid required"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.UserUUID == "" && req.IP == "") {
+		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "userUuid or ip required"})
+		return
+	}
+	if req.IP != "" {
+		ip := strings.TrimSpace(req.IP)
+		removed := banStore.Remove("ip:" + ip)
+		uhttp.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "banned": banStore.Len()})
 		return
 	}
 	removed := banStore.Remove(req.UserUUID)
@@ -201,6 +229,25 @@ func (g *Gateway) enforceBan(userUUID string, rec security.BanRecord) int {
 	return offline
 }
 
+// enforceBanIP 踢掉远程 IP 匹配的全部在线连接（封 IP 后立即断开该 IP 下账号）。
+func (g *Gateway) enforceBanIP(ip string, rec security.BanRecord) int {
+	offline := 0
+	g.connectionManager.ForEach(func(conn *connection.Connection) bool {
+		if conn.RemoteHost() != ip {
+			return true
+		}
+		g.revokeConnJWT(conn)
+		g.pushBanNotice(conn, rec)
+		g.notifyLogicOffline(conn)
+		if conn.Conn != nil {
+			_ = conn.Conn.Close()
+		}
+		offline++
+		return true
+	})
+	return offline
+}
+
 // banMatches 判断在线连接的 userUuid 是否命中封禁键。
 // 封禁键含 ":" 时仅精确匹配完整 serverId:userId；否则匹配裸 userId（精确或 : 后缀）。
 func banMatches(connUUID, banKey string) bool {
@@ -262,6 +309,9 @@ func findBan(userID string) *security.BanRecord {
 		return rec
 	}
 	for _, rec := range banStore.List() {
+		if rec.Kind == security.BanKindIP {
+			continue // IP 封禁不参与账号匹配
+		}
 		banKey := rec.UserUUID
 		if banKey == userID {
 			return &rec
@@ -278,8 +328,19 @@ func findBan(userID string) *security.BanRecord {
 	return nil
 }
 
-// rejectIfBanned 在 LoginGate 绑定前检查封禁；命中返回 true 并回调 403。
+// rejectIfBanned 在 LoginGate 绑定前检查封禁（账号 + 来源 IP）；命中返回 true 并回调 403。
 func (g *Gateway) rejectIfBanned(connectionID, userID string, send func(code int32, text string)) bool {
+	// 来源 IP 封禁优先（ip: 键在 BanStore 中）
+	if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
+		if ip := conn.RemoteHost(); ip != "" {
+			if rec := banStore.Get("ip:" + ip); rec != nil {
+				tlog.Warn(context.TODO(), "banned ip login rejected connectionID=%s ip=%s reason=%s",
+					connectionID, ip, rec.Reason)
+				send(403, "banned: "+rec.Reason)
+				return true
+			}
+		}
+	}
 	if userID == "" {
 		return false
 	}

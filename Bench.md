@@ -141,6 +141,7 @@ bench1_tcp 100 连接下扫（以 `/stats.forwarded` 为准，客户端发送速
 ### 封禁共享存储（Redis）
 
 - `security.banRedis.enabled: true` 时：`/admin/ban`、`/admin/unban` 写穿 Redis（key 前缀默认 `sgate:ban:`，有 TTL 的记录用 EXPIRE）；启动全量加载；后台 `syncInterval`（默认 30s）全量同步本地内存（吸收其他实例 ban/unban 与过期）。
+- 账号封禁 body `{"userUuid","reason","ttlSeconds?"}`；IP 封禁 `{"ip","reason","ttlSeconds?"}`（互斥），IP 封禁立即踢掉该 IP 下全部在线连接并落地 Redis；登录前按来源 IP 拒绝（403）。
 - 多网关实例配置同一 Redis 即共享封禁表；`enabled: false`（默认）仅进程内存，重启丢失。
 - 连接失败告警并回退内存模式，不阻塞启动。
 

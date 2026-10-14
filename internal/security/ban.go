@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,13 +13,29 @@ import (
 	"github.com/streasure/sgate/internal/config"
 )
 
-// BanRecord 单条用户封禁记录。
+// BanRecord 单条封禁记录。
+// Kind 为 "user"（默认，按 userUuid）或 "ip"（按远程 IP）。
 type BanRecord struct {
-	UserUUID  string    `json:"userUuid"`
+	UserUUID  string    `json:"userUuid"` // Kind=user 时为账号键；Kind=ip 时为 IP 字面量
+	Kind      string    `json:"kind,omitempty"`
 	Reason    string    `json:"reason"`
 	Jti       string    `json:"jti,omitempty"`
 	BannedAt  time.Time `json:"bannedAt"`
 	ExpiresAt time.Time `json:"expiresAt"` // 零值 = 永久封禁
+}
+
+// BanKindUser / BanKindIP 封禁维度。
+const (
+	BanKindUser = "user"
+	BanKindIP   = "ip"
+)
+
+// Key 返回封禁存储键：IP 封禁带 "ip:" 前缀，避免与账号键冲突。
+func (r *BanRecord) Key() string {
+	if r.Kind == BanKindIP {
+		return "ip:" + r.UserUUID
+	}
+	return r.UserUUID
 }
 
 // Expired 判断封禁是否已到期（永久封禁返回 false）。
@@ -172,7 +189,7 @@ func (s *BanStore) SyncFromRedis(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			for _, v := range vals {
+			for i, v := range vals {
 				sv, ok := v.(string)
 				if !ok || sv == "" {
 					continue
@@ -181,10 +198,22 @@ func (s *BanStore) SyncFromRedis(ctx context.Context) error {
 				if err := json.Unmarshal([]byte(sv), &rec); err != nil {
 					continue
 				}
-				if rec.UserUUID == "" || rec.Expired(time.Now()) {
+				if rec.Expired(time.Now()) {
 					continue
 				}
-				remote[rec.UserUUID] = rec
+				// map 键用 Redis key 去前缀（账号键原样；IP 为 "ip:addr"）
+				localKey := strings.TrimPrefix(keys[i], pfx)
+				if localKey == "" {
+					continue
+				}
+				if rec.Kind == "" {
+					if strings.HasPrefix(localKey, "ip:") {
+						rec.Kind = BanKindIP
+					} else {
+						rec.Kind = BanKindUser
+					}
+				}
+				remote[localKey] = rec
 			}
 		}
 		cursor = next
@@ -204,7 +233,7 @@ func (s *BanStore) SyncFromRedis(ctx context.Context) error {
 }
 
 // redisPut 写穿 Redis。ttl<=0 永久（无 EXPIRE）。
-func (s *BanStore) redisPut(ctx context.Context, rec BanRecord) error {
+func (s *BanStore) redisPut(ctx context.Context, key string, rec BanRecord) error {
 	s.mu.RLock()
 	rdb := s.rdb
 	s.mu.RUnlock()
@@ -215,15 +244,15 @@ func (s *BanStore) redisPut(ctx context.Context, rec BanRecord) error {
 	if err != nil {
 		return err
 	}
-	key := s.key(rec.UserUUID)
+	rkey := s.key(key)
 	if !rec.ExpiresAt.IsZero() {
 		ttl := time.Until(rec.ExpiresAt)
 		if ttl <= 0 {
-			return rdb.Del(ctx, key).Err()
+			return rdb.Del(ctx, rkey).Err()
 		}
-		return rdb.Set(ctx, key, data, ttl).Err()
+		return rdb.Set(ctx, rkey, data, ttl).Err()
 	}
-	return rdb.Set(ctx, key, data, 0).Err()
+	return rdb.Set(ctx, rkey, data, 0).Err()
 }
 
 // redisDel 删除 Redis 键。
@@ -263,22 +292,26 @@ func (s *BanStore) redisGet(ctx context.Context, userUUID string) *BanRecord {
 }
 
 // Add 写入或覆盖封禁记录。ttl<=0 表示永久。
-// Redis 启用时写穿共享存储；本地同步更新。
-func (s *BanStore) Add(userUUID, reason, jti string, ttl time.Duration) BanRecord {
+// key 为空时用 rec.Key()；IP 封禁应传 "ip:"+addr 且 rec.Kind=BanKindIP。
+func (s *BanStore) Add(key, reason, jti string, ttl time.Duration) BanRecord {
 	now := time.Now()
 	rec := BanRecord{
-		UserUUID: userUUID,
+		UserUUID: key,
 		Reason:   reason,
 		Jti:      jti,
 		BannedAt: now,
+	}
+	if strings.HasPrefix(key, "ip:") {
+		rec.Kind = BanKindIP
+		rec.UserUUID = strings.TrimPrefix(key, "ip:")
 	}
 	if ttl > 0 {
 		rec.ExpiresAt = now.Add(ttl)
 	}
 	s.mu.Lock()
-	s.items[userUUID] = rec
+	s.items[key] = rec
 	s.mu.Unlock()
-	_ = s.redisPut(context.Background(), rec)
+	_ = s.redisPut(context.Background(), key, rec)
 	return rec
 }
 

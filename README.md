@@ -391,8 +391,8 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/admin/ban` | 封禁：`{"userUuid","reason","jti?","ttlSeconds?"}`；先推 `CmdBanNtf(1000005)` 再断连，并撤销 JWT |
-| POST | `/admin/unban` | 解封：`{"userUuid"}` |
+| POST | `/admin/ban` | 封禁：`{"userUuid","reason","jti?","ttlSeconds?"}` 账号；或 `{"ip","reason","ttlSeconds?"}` 封 IP（踢该 IP 下全部连接并写 Redis）。二者互斥 |
+| POST | `/admin/unban` | 解封：`{"userUuid"}` 或 `{"ip"}` |
 | GET | `/admin/bans` | 当前有效封禁列表（本地内存；多实例见 `security.banRedis`） |
 
 客户端登出：`CmdLogoutGate(1000003)` → 撤销 JWT → 通知逻辑服 → 断连（无业务推送）；ack 为 `CmdLogoutGateAck(1000004)`。
