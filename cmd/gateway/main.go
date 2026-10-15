@@ -18,8 +18,8 @@ import (
 )
 
 var (
-	confFiles = flag.String("conf", "config/config.yaml", "config file path")
-	logConfig = flag.String("logger", "config/log.yaml", "log configuration file")
+	confFiles = flag.String("conf", "config/gateway.yaml", "config file path")
+	logConfig = flag.String("logger", "config/log/default.yaml", "log configuration file")
 	showVer   = flag.Bool("version", false, "show version")
 )
 

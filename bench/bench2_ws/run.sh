@@ -12,9 +12,9 @@ cd "$SCRIPT_DIR/../.."
 
 MODE="${1:-off}"
 if [ "$MODE" = "on" ]; then
-    CONF="config/config_batch_on.yaml"
+    CONF="config/bench/batch-on.yaml"
 else
-    CONF="config/config_batch_off.yaml"
+    CONF="config/bench/batch-off.yaml"
 fi
 
 DURATION="10s"

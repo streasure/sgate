@@ -44,7 +44,7 @@
 
 ### 测量条件
 
-100 连接、10 秒、64B 推送载荷、12 推送协程、`shardCount=96`、`connGroupCount=4`、`sendChannelSize=65536`、`expected-members=0`（登录即开推）、`loginValidation.enabled: false`。登录仅走 LoginGate（cmd 1000001），无 HTTP login、无 token 校验。bench2 通过 `config_batch_on.yaml` / `config_batch_off.yaml` 切换 `batchPush`。
+100 连接、10 秒、64B 推送载荷、12 推送协程、`shardCount=96`、`connGroupCount=4`、`sendChannelSize=65536`、`expected-members=0`（登录即开推）、`loginValidation.enabled: false`。登录仅走 LoginGate（cmd 1000001），无 HTTP login、无 token 校验。bench2 通过 `config/bench/batch-on.yaml` / `config/bench/batch-off.yaml` 切换 `batchPush`。
 
 ### 当前实测
 
@@ -57,7 +57,7 @@
 | bench2_tcp（batch off） | logic→sgate→client | TCP | 428,333 ~ 485,659 msg/s | 0 | 0 |
 | bench2_ws（batch off） | logic→sgate→client | WebSocket | 381,512 msg/s | 0 | 0 |
 
-**校验**：各轮 `connections failed=0` / `droppedAuth=0`，日志无 401 / authfail / login-key 拒绝。原始结果见 `bench/latest_results.json`；bench2 明细在 `logs/sgate_bench.log`。
+**校验**：各轮 `connections failed=0` / `droppedAuth=0`，日志无 401 / authfail / login-key 拒绝。原始结果见 `bench/latest_results.json`；bench2 明细在 `logs/bench.log`。
 
 **负载说明**：绝对数值受本机后台应用影响，同配置多轮约 ±10%。`batchPush=false` 为非合帧路径，数值低于 batch-on 属预期。对比吞吐时应以同批测量内部对比为准。限流下扫表与 30min churn 结果见 [`Bench.md`](../Bench.md)。
 

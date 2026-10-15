@@ -29,7 +29,7 @@ func main() {
 	duration := flag.Duration("duration", 30*time.Second, "benchmark duration")
 	parallel := flag.Int("parallel", 1, "number of parallel connections")
 	serverID := flag.String("server-id", "logic2-tcp", "logic server ID for login")
-	logConfig := flag.String("config", "config/tlog.yaml", "log config")
+	logConfig := flag.String("config", "config/log/bench.yaml", "log config")
 	loginBatch := flag.Int("login-batch", 100, "concurrent login batch size")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()

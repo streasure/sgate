@@ -25,8 +25,8 @@
 | --- | --- | --- |
 | etcd | 常驻 `127.0.0.1:2379` | 服务发现 |
 | redis | `127.0.0.1:6379` | `security.banRedis.enabled: true` |
-| sgate-1 | `config/sgate1.yaml`（可复制后改） | `serverId: gateway-1`，`cluster.mode: cluster`，`discovery.gatewayDiscovery: true` |
-| sgate-2 | `config/sgate2.yaml` | `serverId: gateway-2`，端口错开 |
+| sgate-1 | `config/cluster/gateway1.yaml`（可复制后改） | `serverId: gateway-1`，`cluster.mode: cluster`，`discovery.gatewayDiscovery: true` |
+| sgate-2 | `config/cluster/gateway2.yaml` | `serverId: gateway-2`，端口错开 |
 | logic1 | `bench/logic1_tcp` | 两台网关都要能发现并拨入 |
 
 **两实例共享**：同一 etcd、同一 Redis、同一 `security.banRedis.keyPrefix`（默认 `sgate:ban:`）、同一 `admin.token`。事件默认开（`eventsEnabled` 零值=true）；`required: true` 时 Redis 连不上拒绝启动。

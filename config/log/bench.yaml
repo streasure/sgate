@@ -11,12 +11,11 @@ log:
     enabled: false
   file:
     enabled: true
-    path: ./logs/sgate.log
+    path: ./logs/bench.log
     rotate:
       max_size: 100
       max_backups: 10
-      max_age: 30
-      interval: 0
+      max_age: 7
   stacktrace:
     enabled: true
     level: error

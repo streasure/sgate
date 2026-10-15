@@ -52,15 +52,15 @@ go build -o bench\churn30\churn30.exe .\bench\churn30
 ## 测量条件
 
 - 100 连接、单轮 10s、64B 载荷；登录仅 LoginGate（`loginValidation.enabled: false`）。
-- 压测网关用 `config_batch_off.yaml` / `config_batch_on.yaml`：`security.rateLimit.enabled: false`（限流关）、`protection.benchMode: true`（跳过 WS 心跳/连接空闲等后台任务，过载保护 observe-only）。
+- 压测网关用 `config/bench/batch-off.yaml` / `config/bench/batch-on.yaml`：`security.rateLimit.enabled: false`（限流关）、`protection.benchMode: true`（跳过 WS 心跳/连接空闲等后台任务，过载保护 observe-only）。
 - 网关：`shardCount=96`、`connGroupCount=4`、`sendChannelSize=65536`、`disableTracer`、`disableMetricsLog`。
 - 逻辑服 96 流（`NumCPU*8`）；logic2 `push-size=64`、`push-workers=12`、`expected-members=0`（登录即开推）。
-- bench2 用 `config_batch_on.yaml` / `config_batch_off.yaml` 切换 `batchPush: true|false`。
+- bench2 用 `config/bench/batch-on.yaml` / `config/bench/batch-off.yaml` 切换 `batchPush: true|false`。
 - 绝对数值随后台负载波动，同配置多轮约 ±10%；校验标准：`connections failed=0`、`droppedAuth=0`，日志无 401 / authfail / login-key 拒绝。
 
 ## 参考吞吐（本机实测）
 
-原始数据：`bench/latest_results.json`；bench2 逐秒明细见 `logs/sgate_bench.log`。
+原始数据：`bench/latest_results.json`；bench2 逐秒明细见 `logs/bench.log`。
 
 ### bench1 上行转发
 
@@ -84,12 +84,12 @@ go build -o bench\churn30\churn30.exe .\bench\churn30
 
 常驻 150 用户随机突发 + 每分钟 50 新用户波次登录后大突发、5 分钟生存期 churn 关闭；JSONL 逐 10s 结果。
 
-- 配置：`config_batch_rl.yaml`（限流开）+ `config/log_bench.yaml`
+- 配置：`config/bench/rate-limit.yaml`（限流开）+ `config/log/bench.yaml`
 - 典型结果：1800s、约 4700 万条、**~26,000 msg/s** 均值；登录全成功、churn 零错误；`dropped*` 全 0；RSS 平台期 ~500MB；goroutines 恒定无泄漏；latency P50≈1.3µs / P99≈6µs
 
 ### 4 小时混合 churn 稳定性（bench/churn30 -duration 4h）
 
-常驻 150 + 每分钟 50 波次、5min 生存期；配置 `config_batch_off.yaml` + `config/log_bench.yaml`；结果 `logs/churn4h.jsonl`（10s 采样 ×1441）。
+常驻 150 + 每分钟 50 波次、5min 生存期；配置 `config/bench/batch-off.yaml` + `config/log/bench.yaml`；结果 `logs/churn4h.jsonl`（10s 采样 ×1441）。
 
 | 指标 | 值 |
 | --- | ---: |

@@ -124,7 +124,7 @@ go build -o bench\bench1_tcp\bench1_tcp.exe .\bench\bench1_tcp
 .\start.bat
 
 # 或直接命令
-.\sgate.exe -conf config\config.yaml -logger config\log.yaml
+.\sgate.exe -conf config\gateway.yaml -logger config\log\default.yaml
 ```
 
 看到以下日志表示启动成功：
@@ -157,8 +157,8 @@ gRPC 服务器已启动 addr=:50051
 sgate.exe [选项]
 
 选项：
-  -conf string     网关配置文件路径（默认 "config/config.yaml"）
-  -logger string   日志配置文件路径（默认 "config/log.yaml"）
+  -conf string     网关配置文件路径（默认 "config/gateway.yaml"）
+  -logger string   日志配置文件路径（默认 "config/log/default.yaml"）
   -version         显示版本号
 ```
 
@@ -166,10 +166,10 @@ sgate.exe [选项]
 
 ```powershell
 # 使用默认配置（等价 start.bat）
-.\sgate.exe -conf config\config.yaml -logger config\log.yaml
+.\sgate.exe -conf config\gateway.yaml -logger config\log\default.yaml
 
 # 指定配置文件
-.\sgate.exe -conf config\config_batch_on.yaml -logger config\log_bench.yaml
+.\sgate.exe -conf config\bench\batch-on.yaml -logger config\log\bench.yaml
 
 # 查看版本
 .\sgate.exe -version
@@ -180,24 +180,24 @@ sgate.exe [选项]
 ```powershell
 # Windows
 .\start.bat
-$env:CONF="config\sgate1.yaml"; .\start.bat
+$env:CONF="config\cluster\gateway1.yaml"; .\start.bat
 
 # Linux
 ./start.sh
-CONF=config/sgate1.yaml ./start.sh
+CONF=config/cluster/gateway1.yaml ./start.sh
 ```
 
 ### 4.1.1 配置文件选择
 
 | 文件 | 用途 |
 | --- | --- |
-| `config/config.yaml` | 开发/单机默认（TCP 48080 / WS 48081 / HTTP 8081） |
-| `config/sgate1.yaml` / `sgate2.yaml` | 集群双实例（端口错开，`cluster.enabled: true`） |
-| `config/config_batch_off.yaml` / `config_batch_on.yaml` | 压测 batch 关/开（`benchMode`，关限流与登录校验） |
-| `config/config_batch_rl.yaml` | 限流下扫压测 |
-| `config/config_1m.yaml` | 百万连接压测 |
-| `config/log.yaml` | 常规日志（默认 `-logger`） |
-| `config/log_bench.yaml` / `config/tlog.yaml` | 压测/排障日志 |
+| `config/gateway.yaml` | 开发/单机默认（TCP 48080 / WS 48081 / HTTP 8081） |
+| `config/cluster/gateway1.yaml` / `config/cluster/gateway2.yaml` | 集群双实例（端口错开，`cluster.enabled: true`） |
+| `config/bench/batch-off.yaml` / `config/bench/batch-on.yaml` | 压测 batch 关/开（`benchMode`，关限流与登录校验） |
+| `config/bench/rate-limit.yaml` | 限流下扫压测 |
+| `config/bench/1m.yaml` | 百万连接压测 |
+| `config/log/default.yaml` | 常规日志（默认 `-logger`） |
+| `config/log/bench.yaml` | 压测/排障日志（含采样） |
 
 配置原则：**yaml 只写环境相关项**（身份、端口、etcd 地址、Redis 地址、特性开关、环境差异覆盖）；「基本不改」的数值（`shardCount`、帧尺寸、限流默认、GOGC、封禁 Redis 非环境字段等）在 `internal/config/defaults.go` + `ApplyRuntimeDefaults` 补齐，无需在 yaml 重复。详细字段见 [§6 配置详解](#六配置详解)。
 
@@ -218,8 +218,8 @@ CONF=config/sgate1.yaml ./start.sh
 1. 启动 etcd
 2. （可选）启动 Redis：security.banRedis.enabled=true 时多实例共享封禁
 3. 启动逻辑服
-4. 启动 sgate 实例 1（CONF=config\sgate1.yaml .\start.bat）
-5. 启动 sgate 实例 2（CONF=config\sgate2.yaml .\start.bat）
+4. 启动 sgate 实例 1（CONF=config\cluster\gateway1.yaml .\start.bat）
+5. 启动 sgate 实例 2（CONF=config\cluster\gateway2.yaml .\start.bat）
 6. 客户端连接任一网关实例
 ```
 
@@ -307,10 +307,10 @@ cluster:
 
 | 字段 | 类型 | 默认值 | 作用 |
 | --- | --- | --- | --- |
-| `httpPort` | int | 必填（`config/config.yaml` 为 `8081`） | stats/admin 等 HTTP 端口。实际客户端端口由 `transports` 指定 |
-| `serverId` | string | 必填（`config/config.yaml` 为 `gateway-1`） | 实例 ID，集群中必须唯一 |
-| `serverType` | string | 必填（`config/config.yaml` 为 `Gateway`） | 服务类型 |
-| `zone` | string | 必填（`config/config.yaml` 为 `default`） | 可用区名称 |
+| `httpPort` | int | 必填（`config/gateway.yaml` 为 `8081`） | stats/admin 等 HTTP 端口。实际客户端端口由 `transports` 指定 |
+| `serverId` | string | 必填（`config/gateway.yaml` 为 `gateway-1`） | 实例 ID，集群中必须唯一 |
+| `serverType` | string | 必填（`config/gateway.yaml` 为 `Gateway`） | 服务类型 |
+| `zone` | string | 必填（`config/gateway.yaml` 为 `default`） | 可用区名称 |
 
 ### 6.2 `transports` 客户端监听
 
@@ -343,11 +343,11 @@ etcd 默认接入（无启用开关），启动网关前必须先启动 etcd。
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | 是否启用逻辑服发现（`config/config.yaml` 默认 `true`） |
+| `enabled` | bool | `false` | 是否启用逻辑服发现（`config/gateway.yaml` 默认 `true`） |
 | `serviceName` | string | `logic` | 逻辑服服务名 |
 | `zone` | string | `default` | 优先选择的可用区 |
 | `gatewayDiscovery` | bool | `false` | 是否发现其他网关（集群模式下生效） |
-| `registerSelf` | bool | `false` | standalone 模式下是否向 etcd 注册网关自身连接信息（供 loginserver 发现；`config/config.yaml` 默认 `true`） |
+| `registerSelf` | bool | `false` | standalone 模式下是否向 etcd 注册网关自身连接信息（供 loginserver 发现；`config/gateway.yaml` 默认 `true`） |
 
 ### 6.4.1 etcd 注册地址格式
 
@@ -385,7 +385,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `port` | int | `50051` | gRPC 监听端口 |
-| `windowSize` | int | `512KiB`（零值回退；`config/config.yaml` 为 `64MiB`） | HTTP/2 流控窗口 |
+| `windowSize` | int | `512KiB`（零值回退；`config/gateway.yaml` 为 `64MiB`） | HTTP/2 流控窗口 |
 | `maxMessageSize` | int | `8MiB` | 单条消息最大字节数 |
 
 ### 6.7 `stream` 流分片和队列
@@ -409,7 +409,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | `maxConnections` | int | `0` | 网关最大总连接数，`0`=不限制。生产环境建议设置 |
 | `maxConnectionsPerIP` | int | `0` | 单 IP 最大连接数，`0`=不限制。防止单客户端耗尽连接 |
 | `cpuThreshold` | float | `90` | CPU 过载阈值（%） |
-| `dropOnOverload` | bool | `false` | 过载时丢弃新消息（`config/config.yaml` 默认 `true`） |
+| `dropOnOverload` | bool | `false` | 过载时丢弃新消息（`config/gateway.yaml` 默认 `true`） |
 | `wsHeartbeatTimeout` | int | `60` | WebSocket 心跳超时（秒） |
 | `connIdleTimeout` | string | `5m` | 连接空闲超时 |
 | `preAuthCommands` | []int | `[1000001]` | 认证前（未绑定 `serverId` 前）允许通过 pipeline 的命令。`CmdLoginGate` 本身走捷径不经 pipeline |
@@ -434,7 +434,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | 是否启用安全链（`config/config.yaml` 默认开启） |
+| `enabled` | bool | `false` | 是否启用安全链（`config/gateway.yaml` 默认开启） |
 | `banRedis.enabled` | bool | `false` | 封禁 Redis 共享存储（多网关实例共享封禁表） |
 | `banRedis.address` | string | `""` | Redis 地址，如 `127.0.0.1:6379` |
 | `banRedis.required` | bool | `false` | true=连不上拒绝启动（多实例生产建议）；false=降级内存并告警 |
@@ -442,7 +442,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | `banRedis.eventsEnabled` | bool | `true`（零值） | Pub/Sub 事件广播（多实例秒级踢人）；显式 `false` 才关 |
 | `banRedis.syncInterval` | string | 事件开 `10m` / 关 `30s` | 全量校准间隔；负数关闭 |
 | `banRedis.cacheNegativeTtl` | string | `10s` | 未封禁负缓存 TTL；`0`=关 |
-| `rateLimit.enabled` | bool | `false` | 令牌桶限流（`config/config.yaml` 默认开启） |
+| `rateLimit.enabled` | bool | `false` | 令牌桶限流（`config/gateway.yaml` 默认开启） |
 | `rateLimit.maxTokens` | int | `10000` | 每秒令牌数（按 IP/路由）；下扫压测膝点 ~600K（见 Bench.md），默认覆盖 NAT 多客户端共享 IP 场景。热更：`POST /admin/ratelimit` |
 | `circuitBreaker.enabled` | bool | `false` | 熔断器 |
 
@@ -521,7 +521,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 **终端 1 — 网关：**
 
 ```powershell
-.\sgate.exe -conf config\config.yaml -logger config\log.yaml
+.\sgate.exe -conf config\gateway.yaml -logger config\log\default.yaml
 ```
 
 **终端 2 — 逻辑服（只接收，不处理）：**
@@ -540,7 +540,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 
 ```powershell
 # 终端 1
-.\sgate.exe -conf config\config.yaml -logger config\log.yaml
+.\sgate.exe -conf config\gateway.yaml -logger config\log\default.yaml
 
 # 终端 2
 .\bench\logic1_tcp\logic1_tcp.exe -port 50050 -id logic1-tcp
@@ -557,7 +557,7 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 
 ```powershell
 # 终端 1：网关
-.\sgate.exe -conf config\config_batch_off.yaml -logger config\log.yaml
+.\sgate.exe -conf config\bench\batch-off.yaml -logger config\log\default.yaml
 
 # 终端 2：逻辑服（登录即开推）
 .\bench\logic2_ws\logic2_ws.exe -port 50061 -id logic2-ws -push-size 64 -expected-members 0 -push-workers 12 -config bench\logic2_ws\configs\logic2_ws_log.yaml
@@ -569,19 +569,19 @@ go build -o bench\bench2_ws\bench2_ws.exe .\bench\bench2_ws
 **batchPush 开启：** 只需替换网关配置：
 
 ```powershell
-.\sgate.exe -conf config\config_batch_on.yaml -logger config\log.yaml
+.\sgate.exe -conf config\bench\batch-on.yaml -logger config\log\default.yaml
 ```
 
 ### 7.6 bench2 TCP 压测
 
 ```powershell
 # batchPush 关闭
-.\sgate.exe -conf config\config_batch_off.yaml -logger config\log.yaml
+.\sgate.exe -conf config\bench\batch-off.yaml -logger config\log\default.yaml
 .\bench\logic2_tcp\logic2_tcp.exe -port 50060 -id logic2-tcp -push-size 64 -expected-members 0 -push-workers 12 -config bench\logic2_tcp\configs\logic2_tcp_log.yaml
 .\bench\bench2_tcp\bench2_tcp.exe -addr 127.0.0.1:48080 -duration 10s -parallel 100 -server-id logic2-tcp -config bench\bench2_tcp\configs\log.yaml
 
 # batchPush 开启：替换网关配置
-.\sgate.exe -conf config\config_batch_on.yaml -logger config\log.yaml
+.\sgate.exe -conf config\bench\batch-on.yaml -logger config\log\default.yaml
 ```
 
 ### 7.7 压测参数说明
@@ -737,7 +737,11 @@ internal/logic/           逻辑服 SDK（bench 用）
 internal/netutil/         网络工具
 
 bench/                    bench1、bench2 压测程序
-config/                   配置文件
+config/                   配置文件（按用途分子目录）
+  gateway.yaml            单机默认
+  cluster/                集群实例
+  bench/                  压测场景
+  log/                    日志配置
 docs/                     设计文档和压测报告
 ```
 
@@ -776,7 +780,7 @@ go vet ./...
 
 ### 日志配置
 
-日志配置文件 `config/log.yaml`：
+日志配置文件 `config/log/default.yaml`：
 
 ```yaml
 log:

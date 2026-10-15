@@ -28,7 +28,7 @@ func main() {
 	pushSize := flag.Int("push-size", 64, "payload size in bytes")
 	expectedMembers := flag.Int("expected-members", 0, "wait for members before pushing")
 	shardCount := flag.Int("shardCount", 0, "streams dialed into each gateway (0=NumCPU*8)")
-	logConfig := flag.String("config", "config/tlog.yaml", "log config")
+	logConfig := flag.String("config", "config/log/bench.yaml", "log config")
 	pprofAddr := flag.String("pprof", "", "pprof listen address (empty=off), e.g. 127.0.0.1:6064")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()

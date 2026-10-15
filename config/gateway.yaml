@@ -1,6 +1,7 @@
-# 环境相关配置：身份 / 端口 / etcd / 特性开关 / 环境差异覆盖。
-# 「基本不改」的数值（shardCount、帧尺寸、限流默认、gcPercent 等）见
+# 单机默认配置：只写环境项（身份/端口/etcd/特性开关/环境差异覆盖）。
+# 「基本不改」的数值（shardCount、帧尺寸、限流默认、GOGC 等）见
 # internal/config/defaults.go + ApplyRuntimeDefaults，勿在本文件重复。
+# 目录：cluster/ 集群实例 · bench/ 压测 · log/ 日志
 httpPort: 8081
 belong: "default"       # 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
 serverId: "gateway-1"

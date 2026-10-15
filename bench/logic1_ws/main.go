@@ -19,7 +19,7 @@ func main() {
 	port := flag.String("port", "50053", "gRPC listen port")
 	id := flag.String("id", "logic1-ws", "service instance ID")
 	shardCount := flag.Int("shardCount", 0, "streams dialed into each gateway (0=NumCPU*8)")
-	logConfig := flag.String("config", "config/tlog.yaml", "log configuration")
+	logConfig := flag.String("config", "config/log/bench.yaml", "log configuration")
 	pprofAddr := flag.String("pprof", "", "pprof listen address (empty=off), e.g. 127.0.0.1:6062")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()

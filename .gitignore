@@ -21,6 +21,13 @@ logic_noop.exe
 *.out
 logs/
 
+# 压测中间产物
+*.jsonl
+*.pprof
+*.pb.gz
+*.prof
+bench/latest_results.json
+
 # 临时文件
 *.tmp
 *.temp

@@ -12,9 +12,9 @@ set MODE=%1
 if "%MODE%"=="" set MODE=off
 
 if "%MODE%"=="on" (
-    set CONF=config\config_batch_on.yaml
+    set CONF=config\bench\batch-on.yaml
 ) else (
-    set CONF=config\config_batch_off.yaml
+    set CONF=config\bench\batch-off.yaml
 )
 
 set DURATION=10s
