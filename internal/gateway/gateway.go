@@ -259,7 +259,9 @@ func (g *Gateway) Start() error {
 	g.cluster = component.ClusterNode()
 	g.alertWebhook = component.AlertWebhook()
 	g.setLoginServerDiscovery(component.LoginDiscovery())
-	g.StartServices()
+	if err := g.StartServices(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -267,15 +269,23 @@ func (g *Gateway) Destroy() { g.Close() }
 
 // StartServices 启动网关特定服务：gRPC服务器、统计HTTP服务、
 // 过载保护器、WebSocket心跳检测、配置文件监听
-func (g *Gateway) StartServices() {
+func (g *Gateway) StartServices() error {
 	cfg := g.cfg.Load()
 	protection := g.getProtection()
 	// 压测模式：跳过与压测无关的后台周期任务，避免与热路径争抢调度。
 	benchMode := protection.BenchMode
 
-	// 封禁 Redis 共享存储：多实例共享封禁表；失败仅告警继续内存模式。
+	// 封禁 Redis 共享存储：多实例共享封禁表。
+	// required=false 失败降级内存并告警；required=true 拒绝启动。
 	if br := cfg.Security.BanRedis; br.Enabled {
-		if err := banStore.InitRedis(context.TODO(), br); err != nil {
+		origin := g.gatewayID
+		banStore.SetOrigin(origin)
+		banStore.SetEventHandler(g.onRemoteBanEvent)
+		if err := banStore.InitRedis(context.TODO(), br, origin); err != nil {
+			if br.Required {
+				tlog.Error(context.TODO(), "ban redis required init failed addr=%s err=%v", br.Address, err)
+				return fmt.Errorf("ban redis init failed (required): %w", err)
+			}
 			tlog.Error(context.TODO(), "ban redis init failed addr=%s err=%v (fallback memory)", br.Address, err)
 		} else if n := banStore.Len(); n > 0 {
 			tlog.Info(context.TODO(), "ban redis loaded addr=%s entries=%d", br.Address, n)
@@ -354,6 +364,55 @@ func (g *Gateway) StartServices() {
 
 	// 启动TCP/WebSocket传输层
 	g.startTransports(cfg)
+	return nil
+}
+
+// onRemoteBanEvent 处理来自其他实例的封禁 Pub/Sub 事件：踢本实例连接。
+// 本地表更新已在 BanStore.handleEventMessage 完成；此处仅执行副作用。
+func (g *Gateway) onRemoteBanEvent(ev security.BanEvent) {
+	if ev.Kind == security.BanKindIP {
+		ip := strings.TrimPrefix(ev.Key, "ip:")
+		if norm, ok := security.NormalizeIP(ip); ok {
+			ip = norm
+		}
+		rec := security.BanRecord{UserUUID: ip, Kind: security.BanKindIP, Reason: ev.Reason}
+		if ev.BannedAt != "" {
+			if t, err := time.Parse(time.RFC3339, ev.BannedAt); err == nil {
+				rec.BannedAt = t
+			}
+		}
+		if ev.ExpiresAt != "" {
+			if t, err := time.Parse(time.RFC3339, ev.ExpiresAt); err == nil {
+				rec.ExpiresAt = t
+			}
+		}
+		if n := g.enforceBanIP(ip, rec); n > 0 {
+			tlog.Info(context.TODO(), "remote ban event kicked ip=%s connections=%d", ip, n)
+		}
+		return
+	}
+	// 账号封禁：撤销 jti（如有）并踢连接
+	rec := security.BanRecord{UserUUID: ev.Key, Kind: security.BanKindUser, Reason: ev.Reason, Jti: ev.Jti}
+	if ev.BannedAt != "" {
+		if t, err := time.Parse(time.RFC3339, ev.BannedAt); err == nil {
+			rec.BannedAt = t
+		}
+	}
+	if ev.ExpiresAt != "" {
+		if t, err := time.Parse(time.RFC3339, ev.ExpiresAt); err == nil {
+			rec.ExpiresAt = t
+		}
+	}
+	if rec.Jti != "" && g.jwtAuth != nil {
+		exp := rec.ExpiresAt.Unix()
+		if rec.ExpiresAt.IsZero() {
+			exp = time.Now().Unix() + int64((24 * time.Hour).Seconds())
+		}
+		g.jwtAuth.Revoke(rec.Jti, exp)
+	}
+	if n := g.enforceBan(ev.Key, rec); n > 0 {
+		tlog.Info(context.TODO(), "remote ban event kicked user=%s connections=%d", ev.Key, n)
+	}
 }
 
 func (g *Gateway) startTransports(cfg *config.Config) {
@@ -801,6 +860,10 @@ func (g *Gateway) closeBody() {
 	}
 
 	g.connectionManager.CloseAllConnections()
+
+	if err := banStore.Close(); err != nil {
+		tlog.Warn(context.TODO(), "ban store close error=%v", err)
+	}
 
 	g.StopStatsServer()
 

@@ -1,3 +1,4 @@
+# 集群实例 1：环境项（身份/端口/集群开关）；数值默认见 defaults.go。
 httpPort: 8081
 belong: "default"
 serverId: "gateway-1"
@@ -6,13 +7,9 @@ zone: "default"
 
 etcd:
   endpoints: ["http://127.0.0.1:2379"]
-  servicePrefix: "/services"
-  leaseTTL: "10s"
 
 discovery:
   enabled: true
-  serviceName: "logic"
-  zone: "default"
   registerSelf: true
 
 transports:
@@ -30,37 +27,15 @@ monitoring:
   pprofAddr: "127.0.0.1:6060"
   disableMetricsLog: true   # 线上关闭每秒 metrics 日志
 
-configCenter:
-  enabled: false
-
 cluster:
   enabled: true
   mode: "cluster"
-
-stream:
-  shardCount: 96
-  sendChannelSize: 65536
-
-protection:
-  maxFrameSize: 4194304
-  maxFrameBufSize: 4194304
-  maxWSFrameSize: 4194304
-  maxWSBufferSize: 4194304
-  cpuThreshold: 92
-  dropOnOverload: true
-  checkIntervalMs: 200
-  wsHeartbeatTimeout: 60
-  wsCheckInterval: 30
-  connCheckInterval: "5m"
-  connIdleTimeout: "30s"
-  preAuthCommands: [1000001]
 
 security:
   enabled: true
   rateLimit:
     enabled: true
-    maxTokens: 1000000
-    tokenRefresh: "1s"
+    maxTokens: 1000000    # 集群联调：高限额避免干扰
   circuitBreaker:
     enabled: false
 

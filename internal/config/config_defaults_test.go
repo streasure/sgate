@@ -50,6 +50,12 @@ func TestApplyRuntimeDefaults_ZeroValuesGetDefaults(t *testing.T) {
 	if c.Stream.SendChannelSize != DefaultGatewayStreamSendChannelSize {
 		t.Errorf("Stream.SendChannelSize = %d, want %d", c.Stream.SendChannelSize, DefaultGatewayStreamSendChannelSize)
 	}
+	if c.Stream.ShardCount != DefaultStreamShardCount {
+		t.Errorf("Stream.ShardCount = %d, want %d", c.Stream.ShardCount, DefaultStreamShardCount)
+	}
+	if c.Stream.ConnGroupCount != DefaultStreamConnGroupCount {
+		t.Errorf("Stream.ConnGroupCount = %d, want %d", c.Stream.ConnGroupCount, DefaultStreamConnGroupCount)
+	}
 	if c.Pipeline.WorkerQueueSize != DefaultPipelineWorkerQueueSize {
 		t.Errorf("Pipeline.WorkerQueueSize = %d, want %d", c.Pipeline.WorkerQueueSize, DefaultPipelineWorkerQueueSize)
 	}
@@ -77,6 +83,45 @@ func TestApplyRuntimeDefaults_ZeroValuesGetDefaults(t *testing.T) {
 	}
 	if c.TrafficMirror.Workers != DefaultMirrorWorkers {
 		t.Errorf("TrafficMirror.Workers = %d, want %d", c.TrafficMirror.Workers, DefaultMirrorWorkers)
+	}
+	// 发现 / etcd / 集群 / perf
+	if c.Discovery.ServiceName != DefaultDiscoveryServiceName {
+		t.Errorf("Discovery.ServiceName = %q, want %q", c.Discovery.ServiceName, DefaultDiscoveryServiceName)
+	}
+	if c.Etcd.ServicePrefix != DefaultEtcdServicePrefix {
+		t.Errorf("Etcd.ServicePrefix = %q, want %q", c.Etcd.ServicePrefix, DefaultEtcdServicePrefix)
+	}
+	if c.Etcd.LeaseTTL != DefaultEtcdLeaseTTL {
+		t.Errorf("Etcd.LeaseTTL = %q, want %q", c.Etcd.LeaseTTL, DefaultEtcdLeaseTTL)
+	}
+	if c.Cluster.Mode != DefaultClusterMode {
+		t.Errorf("Cluster.Mode = %q, want %q", c.Cluster.Mode, DefaultClusterMode)
+	}
+	if c.Perf.GcPercent != DefaultPerfGcPercent {
+		t.Errorf("Perf.GcPercent = %d, want %d", c.Perf.GcPercent, DefaultPerfGcPercent)
+	}
+	if c.Perf.MemoryLimitPercent != DefaultPerfMemoryLimitPercent {
+		t.Errorf("Perf.MemoryLimitPercent = %d, want %d", c.Perf.MemoryLimitPercent, DefaultPerfMemoryLimitPercent)
+	}
+	// 封禁 Redis 非环境默认
+	br := c.Security.BanRedis
+	if br.KeyPrefix != DefaultBanRedisKeyPrefix {
+		t.Errorf("BanRedis.KeyPrefix = %q, want %q", br.KeyPrefix, DefaultBanRedisKeyPrefix)
+	}
+	if br.EventsChannel != DefaultBanRedisEventsChannel {
+		t.Errorf("BanRedis.EventsChannel = %q, want %q", br.EventsChannel, DefaultBanRedisEventsChannel)
+	}
+	if br.DialTimeout != DefaultBanRedisDialTimeout {
+		t.Errorf("BanRedis.DialTimeout = %q, want %q", br.DialTimeout, DefaultBanRedisDialTimeout)
+	}
+	if br.CacheNegativeTtl != DefaultBanNegativeCacheTtl {
+		t.Errorf("BanRedis.CacheNegativeTtl = %q, want %q", br.CacheNegativeTtl, DefaultBanNegativeCacheTtl)
+	}
+	if br.SyncInterval != DefaultBanRedisSyncIntervalWithEvents {
+		t.Errorf("BanRedis.SyncInterval = %q, want %q (events default)", br.SyncInterval, DefaultBanRedisSyncIntervalWithEvents)
+	}
+	if !br.EventsOn() {
+		t.Error("BanRedis.EventsOn should default true")
 	}
 	// pprof 空串 = 关闭，不可填默认
 	if c.Monitoring.PprofAddr != "" {

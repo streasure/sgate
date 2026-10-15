@@ -1,3 +1,6 @@
+# 环境相关配置：身份 / 端口 / etcd / 特性开关 / 环境差异覆盖。
+# 「基本不改」的数值（shardCount、帧尺寸、限流默认、gcPercent 等）见
+# internal/config/defaults.go + ApplyRuntimeDefaults，勿在本文件重复。
 httpPort: 8081
 belong: "default"       # 所属应用/团队标识，与 serverType+zone+serverId 唯一确定一个服务
 serverId: "gateway-1"
@@ -6,13 +9,9 @@ zone: "default"
 
 etcd:
   endpoints: ["http://127.0.0.1:2379"]
-  servicePrefix: "/services"
-  leaseTTL: "10s"
 
 discovery:
   enabled: true
-  serviceName: "logic"
-  zone: "default"
   registerSelf: true   # standalone模式下向etcd注册网关连接信息（供loginserver发现）
 
 transports:
@@ -24,7 +23,7 @@ transports:
 
 grpc:
   port: 50051
-  windowSize: 67108864
+  windowSize: 67108864   # 64MB 流控窗口（历史压测口径，覆盖默认 512KB）
 
 monitoring:
   pprofAddr: "127.0.0.1:6060"
@@ -35,52 +34,23 @@ configCenter:
 
 cluster:
   enabled: false
-  mode: "standalone"   # standalone: 单体模式（默认）, cluster: 集群协作模式
-
-stream:
-  shardCount: 96
-  connGroupCount: 4          # gateway→logic 独立 TCP 连接组数（默认 4），每个组承载 shardCount/N 个 stream
-  sendChannelSize: 65536    # 每分片发送队列；容量按 shardCount 预分配（96×1M×8B≈768MB，过大仅占内存）
-  batchPush: false
 
 protection:
-  maxFrameSize: 4194304
-  maxFrameBufSize: 4194304
-  maxWSFrameSize: 4194304
-  maxWSBufferSize: 4194304
-  maxConnections: 0            # 网关最大总连接数，0=不限制
-  maxConnectionsPerIP: 0       # 单 IP 最大连接数，0=不限制
-  maxMessagesPerConn: 0        # 单连接每秒最大消息数，0=不限制（防异常连接占满队列）
-  cpuThreshold: 92
-  dropOnOverload: true
-  checkIntervalMs: 200
-  wsHeartbeatTimeout: 60
-  wsCheckInterval: 30
-  connCheckInterval: "5m"
-  connIdleTimeout: "30s"
-  # Authentication is logic-owned. Only these command IDs are accepted until
-  # logic replies with a non-empty StreamData.user_key.
-  preAuthCommands: [1000001]
+  cpuThreshold: 92          # 覆盖默认 90
+  dropOnOverload: true      # bool 零值为 false，需显式开启
+  connIdleTimeout: "30s"    # 覆盖默认 5m
 
 security:
   enabled: true
-  # 封禁共享存储：多网关实例通过 Redis 共享封禁表。
-  # enabled=false 时仅进程内存（重启丢失，单机可用）。
+  # 封禁共享存储：多网关实例通过 Redis 共享封禁表；enabled=false 仅进程内存。
+  # keyPrefix/timeouts/syncInterval/events 等非环境项默认见 defaults.go。
   banRedis:
     enabled: false
     address: "127.0.0.1:6379"
-    password: ""
-    db: 0
-    # keyPrefix: "sgate:ban:"
-    # syncInterval: "30s"   # 后台全量同步间隔；负数关闭（不推荐多实例生产）
+    # required: true        # 多实例生产建议：连不上拒绝启动
+    # eventsEnabled: true   # 默认开（Pub/Sub 秒级踢人）；显式 false 才关
   rateLimit:
-    enabled: true       # 开发环境保持开启：单 IP/route 每秒 10000 次（下扫压测膝点 ~600K，见 Bench.md）
-    # 注意：出口 IP 后面有多台机器（NAT/CGNAT）时 per-IP 限额是共享的，
-    # 需按实际并发调大 maxTokens 或对可信网段配白名单（whitelist）。
-    maxTokens: 10000
-    tokenRefresh: "1s"
-    # routeMaxTokens: 400   # route 维度每路由速率，默认 maxTokens*4；全局消息量≈该值×路由数
-    # globalMaxTokens: 1000 # 全局硬顶（单令牌桶，每消息 1 次 CAS），默认 maxTokens*10；兜底 overload 未运行时的总量控制
+    enabled: true       # 出口 IP 后面有多台机器（NAT/CGNAT）时 per-IP 限额共享，按需调大 maxTokens 或配白名单
   circuitBreaker:
     enabled: false
 
@@ -91,14 +61,9 @@ loginValidation:
 waf:
   enabled: false
 
-perf:
-  gcPercent: 300           # GOGC：堆增长 300% 时触发 GC（默认 100），高吞吐场景调大减少 GC 频率
-  memoryLimitPercent: 80   # 软内存上限 = 机器总内存的 80%，防止单机 OOM
-
 pipeline:
   asyncEnabled: false      # A/B 实测：同步 498K > 异步 482K（异步另有 3% 队列丢弃），默认同步
-  workerShards: 48         # worker 分片数（默认 CPU×4=48），同一连接严格有序
-  workerQueueSize: 262144  # 任务队列总大小（全池共享按分片均分；仅 asyncEnabled=true 时生效）
+  workerQueueSize: 262144  # 覆盖默认 65536（高吞吐建议）；仅 asyncEnabled=true 时生效
 
 # 管理端 /admin/* Bearer token；空 = 关闭（fail-closed）
 admin:

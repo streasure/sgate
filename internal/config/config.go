@@ -210,11 +210,14 @@ type SecurityConfig struct {
 
 // BanRedisConfig 封禁 Redis 共享存储配置。
 // 多网关实例通过同一 Redis 共享封禁表；封禁判定仍在网关侧（loginserver 不做 ban 理论）。
+// 仅环境相关字段（enabled/address/password）需随环境改；其余为默认值。
 type BanRedisConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	Address  string `yaml:"address"`
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
+	// Required true=连不上拒绝启动（多实例生产建议）；false=降级内存并告警。
+	Required bool `yaml:"required"`
 	// KeyPrefix Redis key 前缀，默认 "sgate:ban:"。
 	KeyPrefix string `yaml:"keyPrefix"`
 	// DialTimeout 连接超时，默认 3s。
@@ -223,9 +226,23 @@ type BanRedisConfig struct {
 	ReadTimeout string `yaml:"readTimeout"`
 	// WriteTimeout 写超时，默认 2s。
 	WriteTimeout string `yaml:"writeTimeout"`
-	// SyncInterval 全量同步间隔：从 Redis 拉全量刷新本地内存（吸收其他实例 ban/unban 与过期），默认 30s。
-	// 置 0 用默认；置负数关闭同步（仅启动加载 + 本实例写穿，不推荐多实例生产）。
+	// SyncInterval 全量校准间隔（事件开启时默认 10m；事件关闭时默认 30s）。
+	// 置 0 用默认；负数关闭同步。
 	SyncInterval string `yaml:"syncInterval"`
+	// EventsEnabled Pub/Sub 事件广播（多实例秒级踢人）；enabled 时默认 true。
+	EventsEnabled *bool `yaml:"eventsEnabled"`
+	// EventsChannel 事件频道，默认 "sgate:ban:events"。
+	EventsChannel string `yaml:"eventsChannel"`
+	// CacheNegativeTtl 未封禁负缓存 TTL（防未命中反复回源），默认 10s；0=关。
+	CacheNegativeTtl string `yaml:"cacheNegativeTtl"`
+}
+
+// EventsOn 事件是否开启（零值=true，显式 false 才关）。
+func (c BanRedisConfig) EventsOn() bool {
+	if c.EventsEnabled == nil {
+		return true
+	}
+	return *c.EventsEnabled
 }
 
 // LoginValidationConfig LoginGate loginKey 校验开关。
@@ -424,6 +441,9 @@ func (c *Config) ApplyRuntimeDefaults() {
 	if p.ConnIdleTimeout == "" {
 		p.ConnIdleTimeout = DefaultConnIdleTimeout
 	}
+	if len(p.PreAuthCommands) == 0 {
+		p.PreAuthCommands = []int32{DefaultPreAuthCommands}
+	}
 
 	g := &c.GRPC
 	if g.Port <= 0 {
@@ -494,6 +514,81 @@ func (c *Config) ApplyRuntimeDefaults() {
 	if c.Protection.CPUThreshold <= 0 {
 		c.Protection.CPUThreshold = DefaultOverloadCPUThreshold
 	}
+
+	// 发现 / etcd / 集群 / stream / perf / 封禁 Redis 等「基本不改」项的零值默认
+	if !c.Discovery.Enabled && c.Discovery.ServiceName == "" && c.Discovery.Zone == "" {
+		// 未配置 discovery 段时补默认（enabled 仍为 false 需显式开）
+		c.Discovery.ServiceName = DefaultDiscoveryServiceName
+		if c.Zone != "" {
+			c.Discovery.Zone = c.Zone
+		} else {
+			c.Discovery.Zone = "default"
+		}
+	}
+	if c.Discovery.ServiceName == "" {
+		c.Discovery.ServiceName = DefaultDiscoveryServiceName
+	}
+	if c.Discovery.Zone == "" {
+		c.Discovery.Zone = c.Zone
+		if c.Discovery.Zone == "" {
+			c.Discovery.Zone = "default"
+		}
+	}
+	if c.Etcd.ServicePrefix == "" {
+		c.Etcd.ServicePrefix = DefaultEtcdServicePrefix
+	}
+	if c.Etcd.LeaseTTL == "" {
+		c.Etcd.LeaseTTL = DefaultEtcdLeaseTTL
+	}
+	if c.Cluster.Mode == "" {
+		c.Cluster.Mode = DefaultClusterMode
+	}
+	if c.Stream.ShardCount <= 0 {
+		c.Stream.ShardCount = DefaultStreamShardCount
+	}
+	if c.Stream.ConnGroupCount <= 0 {
+		c.Stream.ConnGroupCount = DefaultStreamConnGroupCount
+	}
+	if c.Perf.GcPercent <= 0 {
+		c.Perf.GcPercent = DefaultPerfGcPercent
+	}
+	if c.Perf.MemoryLimitPercent <= 0 {
+		c.Perf.MemoryLimitPercent = DefaultPerfMemoryLimitPercent
+	}
+	if c.Security.RateLimit.RouteMaxTokens < 0 {
+		c.Security.RateLimit.RouteMaxTokens = 0
+	}
+	if c.Security.RateLimit.GlobalMaxTokens < 0 {
+		c.Security.RateLimit.GlobalMaxTokens = 0
+	}
+	// 封禁 Redis：仅填「基本不改」的零值；enabled/address 等环境项保持 yaml
+	br := &c.Security.BanRedis
+	if br.KeyPrefix == "" {
+		br.KeyPrefix = DefaultBanRedisKeyPrefix
+	}
+	if br.EventsChannel == "" {
+		br.EventsChannel = DefaultBanRedisEventsChannel
+	}
+	if br.DialTimeout == "" {
+		br.DialTimeout = DefaultBanRedisDialTimeout
+	}
+	if br.ReadTimeout == "" {
+		br.ReadTimeout = DefaultBanRedisReadTimeout
+	}
+	if br.WriteTimeout == "" {
+		br.WriteTimeout = DefaultBanRedisWriteTimeout
+	}
+	if br.SyncInterval == "" {
+		if br.EventsOn() {
+			br.SyncInterval = DefaultBanRedisSyncIntervalWithEvents
+		} else {
+			br.SyncInterval = DefaultBanRedisSyncInterval
+		}
+	}
+	if br.CacheNegativeTtl == "" {
+		br.CacheNegativeTtl = DefaultBanNegativeCacheTtl
+	}
+
 	// Monitoring.PprofAddr 空串 = 关闭 pprof，不填默认值
 	if c.OTelTracer.ServiceName == "" {
 		c.OTelTracer.ServiceName = DefaultOTelServiceName

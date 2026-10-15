@@ -29,7 +29,7 @@
 | sgate-2 | `config/sgate2.yaml` | `serverId: gateway-2`，端口错开 |
 | logic1 | `bench/logic1_tcp` | 两台网关都要能发现并拨入 |
 
-**两实例共享**：同一 etcd、同一 Redis、同一 `security.banRedis.keyPrefix`（默认 `sgate:ban:`）、同一 `admin.token`。
+**两实例共享**：同一 etcd、同一 Redis、同一 `security.banRedis.keyPrefix`（默认 `sgate:ban:`）、同一 `admin.token`。事件默认开（`eventsEnabled` 零值=true）；`required: true` 时 Redis 连不上拒绝启动。
 
 ### 1.2 启动顺序
 
@@ -64,17 +64,17 @@
 **步骤**：
 1. 用户 `u-ban` 登录 **sgate-1**
 2. 在 **sgate-2** 调 `POST /admin/ban` `{"userUuid":"u-ban","reason":"t2"}`
-3. 等待 ≤ `syncInterval`（默认 30s；若测 Pub/Sub 应为秒级）
+3. 等待事件传播（默认 `eventsEnabled: true` 时应为秒级；若关事件则 ≤ `syncInterval`，事件关时默认 10m 量级可手动调小测）
 4. 从 **sgate-1** 再登录 `u-ban`（新连接）
 
 **通过标准**：
-| 项 | 理想 | 可接受（仅周期同步） |
+| 项 | 理想（事件默认开） | 可接受（仅周期同步） |
 | --- | --- | --- |
 | 新登录结果 | 403 `banned: t2` | 403（≤ syncInterval 内） |
-| 生效延迟 | Pub/Sub 时 < 1–2s | ≤ syncInterval |
-| 已在线旧连接 | 若实现跨实例踢：秒级 403 断开 | 未踢可接受，但须文档声明 |
+| 生效延迟 | < 1–2s | ≤ syncInterval |
+| 已在线旧连接 | 秒级 403 断开（跨实例踢） | 未踢可接受，但须文档声明 |
 
-### T3. 账号封禁：踢在线连接（若启用 Pub/Sub/广播）
+### T3. 账号封禁：踢在线连接（Pub/Sub 默认开）
 
 **步骤**：同 T2，但在 ban 后**不重连**，观察 `u-ban` 在 sgate-1 的旧连接。  
 **通过标准**：

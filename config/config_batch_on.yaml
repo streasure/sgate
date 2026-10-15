@@ -1,3 +1,5 @@
+# 压测（batch 开启）：环境项 + 压测差异；数值默认见 defaults.go。
+# Bench 规则见 AGENTS.md：loginValidation 必须 false，禁 login HTTP API。
 httpPort: 8081
 belong: "default"
 serverId: "gateway-1"
@@ -6,13 +8,9 @@ zone: "default"
 
 etcd:
   endpoints: ["http://127.0.0.1:2379"]
-  servicePrefix: "/services"
-  leaseTTL: "10s"
 
 discovery:
   enabled: true
-  serviceName: "logic"
-  zone: "default"
   registerSelf: true
 
 transports:
@@ -31,39 +29,21 @@ monitoring:
   disableTracer: true   # 压测关闭分布式追踪（避免每消息 Span 分配）
   disableMetricsLog: true   # 压测关闭每秒 metrics 日志
 
-configCenter:
-  enabled: false
-
 cluster:
   enabled: false
-  mode: "standalone"
 
 stream:
-  shardCount: 96
-  sendChannelSize: 65536
-  batchPush: true
+  batchPush: true       # 本组压测差异：开启 batch 推送
 
 protection:
   benchMode: true       # 压测模式：关闭过载检查/WS心跳/连接空闲检查等后台周期任务
-  maxFrameSize: 4194304
-  maxFrameBufSize: 4194304
-  maxWSFrameSize: 4194304
-  maxWSBufferSize: 4194304
   cpuThreshold: 92
   dropOnOverload: true
-  checkIntervalMs: 200
-  wsHeartbeatTimeout: 60
-  wsCheckInterval: 30
-  connCheckInterval: "5m"
-  connIdleTimeout: "30s"
-  preAuthCommands: [1000001]
 
 security:
   enabled: true
   rateLimit:
     enabled: false      # 压测关闭限流：避免热路径每消息做限流检查，干扰转发吞吐测量
-    maxTokens: 100
-    tokenRefresh: "1s"
   circuitBreaker:
     enabled: false
 
@@ -74,10 +54,6 @@ loginValidation:
 waf:
   enabled: false
 
-perf:
-  gcPercent: 300           # GOGC：堆增长 300% 时触发 GC（默认 100）
-  memoryLimitPercent: 80   # 软内存上限
-
 pipeline:
   asyncEnabled: false      # A/B 实测：同步 498K > 异步 482K；「全开」仅指 batch 系列开关
-  workerQueueSize: 262144  # 任务队列总大小（默认 65536 高吞吐下建议调大；仅异步模式生效）
+  workerQueueSize: 262144  # 覆盖默认 65536；仅异步模式生效

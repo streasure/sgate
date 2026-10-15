@@ -120,6 +120,10 @@ go build -o bench\bench1_tcp\bench1_tcp.exe .\bench\bench1_tcp
 ### 步骤 3：启动网关
 
 ```powershell
+# 推荐：启动脚本（自动编译）
+.\start.bat
+
+# 或直接命令
 .\sgate.exe -conf config\config.yaml -logger config\log.yaml
 ```
 
@@ -154,22 +158,48 @@ sgate.exe [选项]
 
 选项：
   -conf string     网关配置文件路径（默认 "config/config.yaml"）
-  -logger string  日志配置文件路径（默认 "config/log.yaml"）
+  -logger string   日志配置文件路径（默认 "config/log.yaml"）
   -version         显示版本号
 ```
 
 示例：
 
 ```powershell
-# 使用默认配置
-.\sgate.exe
+# 使用默认配置（等价 start.bat）
+.\sgate.exe -conf config\config.yaml -logger config\log.yaml
 
 # 指定配置文件
-.\sgate.exe -conf config\config_batch_on.yaml -logger config\log.yaml
+.\sgate.exe -conf config\config_batch_on.yaml -logger config\log_bench.yaml
 
 # 查看版本
 .\sgate.exe -version
 ```
+
+启动脚本（自动编译，支持环境变量覆盖）：
+
+```powershell
+# Windows
+.\start.bat
+$env:CONF="config\sgate1.yaml"; .\start.bat
+
+# Linux
+./start.sh
+CONF=config/sgate1.yaml ./start.sh
+```
+
+### 4.1.1 配置文件选择
+
+| 文件 | 用途 |
+| --- | --- |
+| `config/config.yaml` | 开发/单机默认（TCP 48080 / WS 48081 / HTTP 8081） |
+| `config/sgate1.yaml` / `sgate2.yaml` | 集群双实例（端口错开，`cluster.enabled: true`） |
+| `config/config_batch_off.yaml` / `config_batch_on.yaml` | 压测 batch 关/开（`benchMode`，关限流与登录校验） |
+| `config/config_batch_rl.yaml` | 限流下扫压测 |
+| `config/config_1m.yaml` | 百万连接压测 |
+| `config/log.yaml` | 常规日志（默认 `-logger`） |
+| `config/log_bench.yaml` / `config/tlog.yaml` | 压测/排障日志 |
+
+配置原则：**yaml 只写环境相关项**（身份、端口、etcd 地址、Redis 地址、特性开关、环境差异覆盖）；「基本不改」的数值（`shardCount`、帧尺寸、限流默认、GOGC、封禁 Redis 非环境字段等）在 `internal/config/defaults.go` + `ApplyRuntimeDefaults` 补齐，无需在 yaml 重复。详细字段见 [§6 配置详解](#六配置详解)。
 
 ### 4.2 启动顺序
 
@@ -178,7 +208,7 @@ sgate.exe [选项]
 ```
 1. 启动 etcd（可选，逻辑服发现需要）
 2. 启动逻辑服（在 etcd 注册 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}` 服务）
-3. 启动 sgate 网关
+3. 启动 sgate 网关（./start.bat 或 sgate.exe -conf ...）
 4. 客户端连接网关
 ```
 
@@ -186,10 +216,11 @@ sgate.exe [选项]
 
 ```
 1. 启动 etcd
-2. 启动逻辑服
-3. 启动 sgate 实例 1（-conf config/sgate1.yaml）
-4. 启动 sgate 实例 2（-conf config/sgate2.yaml）
-5. 客户端连接任一网关实例
+2. （可选）启动 Redis：security.banRedis.enabled=true 时多实例共享封禁
+3. 启动逻辑服
+4. 启动 sgate 实例 1（CONF=config\sgate1.yaml .\start.bat）
+5. 启动 sgate 实例 2（CONF=config\sgate2.yaml .\start.bat）
+6. 客户端连接任一网关实例
 ```
 
 ### 4.3 启动日志说明
@@ -268,7 +299,9 @@ cluster:
 
 ## 六、配置详解
 
-配置采用「默认值 + YAML 覆盖」语义。YAML 中未出现的字段保留代码默认值；显式填写的 `false`、`0` 或空字符串会覆盖默认值。
+配置采用「代码默认值 + YAML 覆盖」语义。加载后 `ApplyRuntimeDefaults` 为零值字段补齐默认（与压测/生产历史行为一致）。**yaml 应只写环境相关项**；未出现的字段保持代码默认。显式填写的 `false`、`0` 或空字符串会覆盖默认值（bool 的 `true` 默认无法用零值表达，需在 yaml 显式写出，如 `security.enabled: true`）。
+
+数值默认清单见 `internal/config/defaults.go`。
 
 ### 6.1 顶层配置
 
@@ -359,7 +392,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `shardCount` | int | 自动 | gRPC 流分片数，`0` 时按 CPU 数计算 |
+| `shardCount` | int | `96` | gRPC 流分片数（压测口径；零值补齐 96） |
 | `connGroupCount` | int | `4` | gateway→logic 独立 TCP 连接组数。每个组承载 `shardCount/N` 个 stream，各自拥有独立的 HTTP/2 写锁，实现并行写入 |
 | `sendChannelSize` | int | `65536`（零值回退） | 每个分片发送队列容量。按 `shardCount` 预分配，`1048576×96` 分片约占 768MB，除非极端突发不建议调大 |
 | `batchPush` | bool | `false` | 是否将推送按连接合并为 PushBatch |
@@ -404,8 +437,11 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | `enabled` | bool | `false` | 是否启用安全链（`config/config.yaml` 默认开启） |
 | `banRedis.enabled` | bool | `false` | 封禁 Redis 共享存储（多网关实例共享封禁表） |
 | `banRedis.address` | string | `""` | Redis 地址，如 `127.0.0.1:6379` |
+| `banRedis.required` | bool | `false` | true=连不上拒绝启动（多实例生产建议）；false=降级内存并告警 |
 | `banRedis.keyPrefix` | string | `sgate:ban:` | Redis key 前缀 |
-| `banRedis.syncInterval` | string | `30s` | 后台全量同步间隔；负数关闭 |
+| `banRedis.eventsEnabled` | bool | `true`（零值） | Pub/Sub 事件广播（多实例秒级踢人）；显式 `false` 才关 |
+| `banRedis.syncInterval` | string | 事件开 `10m` / 关 `30s` | 全量校准间隔；负数关闭 |
+| `banRedis.cacheNegativeTtl` | string | `10s` | 未封禁负缓存 TTL；`0`=关 |
 | `rateLimit.enabled` | bool | `false` | 令牌桶限流（`config/config.yaml` 默认开启） |
 | `rateLimit.maxTokens` | int | `10000` | 每秒令牌数（按 IP/路由）；下扫压测膝点 ~600K（见 Bench.md），默认覆盖 NAT 多客户端共享 IP 场景。热更：`POST /admin/ratelimit` |
 | `circuitBreaker.enabled` | bool | `false` | 熔断器 |
@@ -800,6 +836,14 @@ monitoring:
 ### Q: batchPush 模式需要客户端做什么
 
 客户端需要处理 `CmdPushBatch`（`9000002`）命令：解析 `MessageFrame.Body` 中的 `PushBatch`，遍历 `items` 逐条处理。
+
+### Q: 配置改了 shardCount / 限流阈值但不生效
+
+这些「基本不改」项已进代码默认（`internal/config/defaults.go` + `ApplyRuntimeDefaults`）。若 yaml 未显式覆盖，以代码默认为准；若显式写了字段则以 yaml 为准。bool 的 `true` 默认无法用零值表达，需在 yaml 显式写出。
+
+### Q: 开启 banRedis 后 Redis 挂了会怎样
+
+默认 `required: false`：启动失败或运行中断连会降级为本地内存并打 warn；恢复后全量拉回。多实例生产建议 `banRedis.required: true`（连不上拒绝启动），并保留 Pub/Sub 事件（默认开）做秒级跨实例踢人。
 
 ### Q: 如何在生产环境部署
 

@@ -61,8 +61,8 @@
    - 方案：消息 ACK + 重传机制，或逻辑服侧重试 + 幂等
 
 3. **封禁 Redis 共享（已实现，待生产验证）**
-   - 已有：`security.banRedis` 写穿 + 启动加载 + 周期全量同步；封禁判定在网关（loginserver 不做 ban 理论）
-   - 待做：多实例一致性压测（A ban 后 B 在 syncInterval 内生效）；Redis 故障时的降级策略确认
+   - 已有：`security.banRedis` 写穿 + 启动加载 + Pub/Sub 事件（默认开，秒级跨实例踢人）+ 周期全量校准；IP 归一化；负缓存；`required` fail-fast；封禁判定在网关（loginserver 不做 ban 理论）
+   - 待做：多实例一致性压测（见 `docs/multi-sgate-test.md`）；Redis 故障时的降级策略确认；NAT/CIDR 封禁
 
 ### P3：架构增强
 

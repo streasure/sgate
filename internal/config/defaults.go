@@ -122,7 +122,7 @@ const (
 	// 下扫压测：fwd/s 随 maxTokens 线性扩展至膝点 ~600K（单 IP 独占机器容量上限），
 	// 之后满吞吐零丢弃。默认 10000 覆盖 NAT 后多客户端共享 IP 的
 	// 合理突发（~100 连接 × 100 msg/s），同时硬顶异常单 IP；高吞吐部署按需上调。
-	// 全局硬顶 = maxTokens*10，路由上限 = routeMaxTokens（0=maxTokens*4）。
+	// 全局硬顶 = maxTokens*10；路由上限 = routeMaxTokens（0=maxTokens*4）。
 	DefaultRateLimitMaxTokens = 10000
 
 	// DefaultRateLimitTokenRefresh 令牌桶补充周期
@@ -142,6 +142,62 @@ const (
 
 	// DefaultWAFBlockAction WAF 命中后的动作（drop=断连，log=仅记录）
 	DefaultWAFBlockAction = "drop"
+)
+
+// --- 封禁 Redis 共享 ---
+
+const (
+	// DefaultBanRedisKeyPrefix 封禁 Redis key 前缀
+	DefaultBanRedisKeyPrefix = "sgate:ban:"
+
+	// DefaultBanRedisEventsChannel 封禁事件 Pub/Sub 频道
+	DefaultBanRedisEventsChannel = "sgate:ban:events"
+
+	// DefaultBanRedisDialTimeout Redis 连接超时
+	DefaultBanRedisDialTimeout = "3s"
+
+	// DefaultBanRedisReadTimeout Redis 读超时
+	DefaultBanRedisReadTimeout = "2s"
+
+	// DefaultBanRedisWriteTimeout Redis 写超时
+	DefaultBanRedisWriteTimeout = "2s"
+
+	// DefaultBanRedisSyncInterval 无事件时的全量校准间隔
+	DefaultBanRedisSyncInterval = "30s"
+
+	// DefaultBanRedisSyncIntervalWithEvents 事件模式下全量校准间隔（事件为主）
+	DefaultBanRedisSyncIntervalWithEvents = "10m"
+
+	// DefaultBanNegativeCacheTTL 未封禁负缓存 TTL
+	DefaultBanNegativeCacheTtl = "10s"
+)
+
+// --- 发现 / 集群 ---
+
+const (
+	// DefaultDiscoveryServiceName 逻辑服服务名（etcd 发现）
+	DefaultDiscoveryServiceName = "logic"
+
+	// DefaultEtcdServicePrefix etcd key 前缀
+	DefaultEtcdServicePrefix = "/services"
+
+	// DefaultEtcdLeaseTTL 注册 lease TTL
+	DefaultEtcdLeaseTTL = "10s"
+
+	// DefaultClusterMode standalone | cluster
+	DefaultClusterMode = "standalone"
+
+	// DefaultStreamShardCount 网关↔logic 流分片数（压测口径 96）
+	DefaultStreamShardCount = 96
+
+	// DefaultStreamConnGroupCount gateway→logic 独立 TCP 连接组数
+	DefaultStreamConnGroupCount = 4
+
+	// DefaultPerfGcPercent GOGC
+	DefaultPerfGcPercent = 300
+
+	// DefaultPerfMemoryLimitPercent GOMEMLIMIT 占总内存百分比
+	DefaultPerfMemoryLimitPercent = 80
 )
 
 // --- 集群 ---
@@ -211,4 +267,11 @@ const (
 const (
 	// DefaultCanaryPercent 灰度默认百分比（0 = 关闭）
 	DefaultCanaryPercent = 0
+)
+
+// --- 协议 / 预鉴权 ---
+
+const (
+	// DefaultPreAuthCommands 绑定 serverID 前放行的命令（LoginGate）
+	DefaultPreAuthCommands = 1000001
 )
