@@ -43,13 +43,9 @@ protection:
 
 security:
   enabled: true
-  # 封禁共享存储：多网关实例通过 Redis 共享封禁表；enabled=false 仅进程内存。
-  # keyPrefix/timeouts/syncInterval/events 等非环境项默认见 defaults.go。
-  banRedis:
-    enabled: false
-    address: "127.0.0.1:6379"
-    # required: true        # 多实例生产建议：连不上拒绝启动
-    # eventsEnabled: true   # 默认开（Pub/Sub 秒级踢人）；显式 false 才关
+  # KickService（loginserver→sgate 单向踢人 RPC）鉴权 token；空=拒绝全部 Kick RPC。
+  # 与 loginserver sgate.internalToken 保持一致。
+  kickInternalToken: "loginserver-sgate-internal"
   rateLimit:
     enabled: true       # 出口 IP 后面有多台机器（NAT/CGNAT）时 per-IP 限额共享，按需调大 maxTokens 或配白名单
   circuitBreaker:

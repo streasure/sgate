@@ -15,6 +15,7 @@ import (
 type ConnectionManager struct {
 	connections           *shardedMap[*Connection] // 分片 map，按 connectionID 索引
 	userConnections       *shardedMap[string]      // 分片 map，按 userUUID → connectionID
+	accountConnections    *shardedMap[string]      // 分片 map，按登录账号 accountId → connectionID（KickAccounts 用）
 	serverUserConnections sync.Map
 	serverConnections     sync.Map
 	groups                sync.Map
@@ -67,11 +68,12 @@ func GenerateConnectionID() string {
 // NewConnectionManager 创建新的连接管理器实例。
 func NewConnectionManager(maxConn, maxConnPerIP int) *ConnectionManager {
 	cm := &ConnectionManager{
-		connections:     newShardedMap[*Connection](),
-		userConnections: newShardedMap[string](),
-		ipConnections:   make(map[string]int32),
-		stopCh:          make(chan struct{}),
-		checkDone:       make(chan struct{}),
+		connections:        newShardedMap[*Connection](),
+		userConnections:    newShardedMap[string](),
+		accountConnections: newShardedMap[string](),
+		ipConnections:      make(map[string]int32),
+		stopCh:             make(chan struct{}),
+		checkDone:          make(chan struct{}),
 	}
 	cm.maxConnections.Store(int32(maxConn))
 	cm.maxConnectionsPerIP.Store(int32(maxConnPerIP))
@@ -188,6 +190,9 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 		return // 已被并发调用移除
 	}
 	cm.userConnections.DeleteIf(conn.GetUserUUID(), connectionID)
+	if accountID := conn.GetAccountID(); accountID != "" {
+		cm.accountConnections.DeleteIf(accountID, connectionID)
+	}
 	serverID := conn.GetServerID()
 	userUUID := conn.GetUserUUID()
 	cm.serverUserConnections.Delete(serverUserKey{serverID: serverID, userUUID: userUUID})
@@ -210,6 +215,22 @@ func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string
 		conn.SetServerID(serverID)
 		cm.serverConnections.Store(serverID, connectionID)
 	}
+}
+
+// SetConnectionAccountID 登录成功后写入账号索引（accountId → connectionID）。
+func (cm *ConnectionManager) SetConnectionAccountID(connectionID, accountID string) {
+	if accountID == "" {
+		return
+	}
+	if conn := cm.GetConnection(connectionID); conn != nil {
+		conn.SetAccountID(accountID)
+		cm.accountConnections.Store(accountID, connectionID)
+	}
+}
+
+// GetAccountConnection 根据登录账号获取连接ID（KickAccounts 本地索引）。
+func (cm *ConnectionManager) GetAccountConnection(accountID string) (string, bool) {
+	return cm.accountConnections.Load(accountID)
 }
 
 // UpdateConnectionUserUUID 更新连接关联的用户UUID，同步更新所有映射。

@@ -8,13 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	protoGw "github.com/streasure/protocol/gateway"
-	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/internal/connection"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhttp"
-	"google.golang.org/protobuf/proto"
 )
 
 // 切维护（maintenance）：通过 HTTP admin 接口按 serverId 或 zone 将目标服务器置入维护，
@@ -129,35 +125,9 @@ func (g *Gateway) snapshotMaintenanceTargets(serverID, zone string) []*connectio
 	return matched
 }
 
-// pushKickNotify 向客户端推送踢下线通知（CMD_KICK_NOTIFY + logic.KickNotify）。
-// Send 内部走 AsyncWrite，event loop 外安全。
-func (g *Gateway) pushKickNotify(conn *connection.Connection, reason string) {
-	body, err := proto.Marshal(&protoLogic.KickNotify{
-		Reason:  reason,
-		Code:    503,
-		Message: "server maintenance",
-	})
-	if err != nil {
-		return
-	}
-	data, err := routes.MarshalClientMessage(&protoGw.StreamData{
-		Cmd:  routes.CmdKickNotify,
-		Data: body,
-	})
-	if err != nil {
-		return
-	}
-	_ = conn.Send(data)
-}
-
-// kickForMaintenance 单连接踢下线：踢人通知 → 逻辑服下线（清会话/推送组） → 断开。
-// 断开后 OnClose 会 RemoveConnection 并从网关侧全部推送组移除该成员。
+// kickForMaintenance 单连接踢下线（维护语义的通知参数；共享 kickConn 路径）。
 func (g *Gateway) kickForMaintenance(conn *connection.Connection, reason string) {
-	g.pushKickNotify(conn, reason)
-	g.notifyLogicOffline(conn)
-	if conn.Conn != nil {
-		_ = conn.Conn.Close()
-	}
+	g.kickConn(conn, kickNotifyParams{reason: reason, code: 503, message: "server maintenance"})
 }
 
 // kickConnectionsAsync 分片并发踢人，完成后打点总耗时结果。

@@ -2,7 +2,9 @@ package backend
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,7 +17,10 @@ import (
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/ugrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -23,15 +28,18 @@ import (
 type GRPCServer struct {
 	protoGw.UnimplementedGatewayStreamServer
 	protoGw.UnimplementedGatewayServer
-	gateway GatewayInterface
-	pool    *LogicClientPool // flip 模式：logic 主动拨入时的附着池
+	protoGw.UnimplementedKickServiceServer
+	gateway   GatewayInterface
+	pool      *LogicClientPool // flip 模式：logic 主动拨入时的附着池
+	kickToken string           // KickService 鉴权 token（空=拒绝全部 Kick RPC）
 }
 
 // NewGRPCServer 创建 gRPC 服务端实例
-func NewGRPCServer(gateway GatewayInterface, pool *LogicClientPool) *GRPCServer {
+func NewGRPCServer(gateway GatewayInterface, pool *LogicClientPool, kickToken string) *GRPCServer {
 	return &GRPCServer{
-		gateway: gateway,
-		pool:    pool,
+		gateway:   gateway,
+		pool:      pool,
+		kickToken: kickToken,
 	}
 }
 
@@ -151,6 +159,28 @@ func (s *GRPCServer) KickSession(ctx context.Context, req *protoGw.KickSessionRe
 		return nil, err
 	}
 	return &protoGw.KickSessionAck{}, nil
+}
+
+// KickAccounts 按登录账号批量踢本地连接（loginserver 单向 Kick 模型）
+func (s *GRPCServer) KickAccounts(ctx context.Context, req *protoGw.KickAccountsRequest) (*protoGw.KickAccountsResponse, error) {
+	if !kickTokenOK(ctx, s.kickToken) {
+		return nil, errKickUnauthenticated
+	}
+	accountIDs := make([]string, 0, len(req.GetAccountIds()))
+	for _, id := range req.GetAccountIds() {
+		accountIDs = append(accountIDs, strconv.FormatInt(id, 10))
+	}
+	n := s.gateway.KickByAccounts(accountIDs, req.GetReason())
+	return &protoGw.KickAccountsResponse{KickedCount: int32(n)}, nil
+}
+
+// KickIP 按对端 IP 踢本地全部连接（反代场景的源 IP 由 loginserver 解析后下发）
+func (s *GRPCServer) KickIP(ctx context.Context, req *protoGw.KickIPRequest) (*protoGw.KickIPResponse, error) {
+	if !kickTokenOK(ctx, s.kickToken) {
+		return nil, errKickUnauthenticated
+	}
+	n := s.gateway.KickByIP(req.GetIp(), req.GetReason())
+	return &protoGw.KickIPResponse{KickedCount: int32(n)}, nil
 }
 
 // SendToClient 向指定会话推送消息
@@ -333,11 +363,24 @@ func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamD
 	callback(routes.NewErrorResponse("error", "Gateway does not handle commands locally, forward to logic server", "", ""))
 }
 
+// KickService 鉴权：x-internal-token metadata 常量时间比较；
+// 未配置 token 时拒绝全部 Kick RPC（默认关闭）。
+var errKickUnauthenticated = status.Error(codes.Unauthenticated, "token required")
+
+func kickTokenOK(ctx context.Context, expected string) bool {
+	if expected == "" {
+		return false
+	}
+	md, _ := metadata.FromIncomingContext(ctx)
+	got := md.Get("x-internal-token")
+	return len(got) > 0 && subtle.ConstantTimeCompare([]byte(got[0]), []byte(expected)) == 1
+}
+
 // StartGRPCServer 启动 gRPC 服务器，监听指定端口。
 // keepalive：logic 作为拨出侧以 30s 间隔发送 keepalive ping，
 // 服务端 EnforcementPolicy 必须放宽到 10s 以内，否则会被 GOAWAY 断开；
 // ServerParameters 让本侧也能主动探测拨出方失联。
-func StartGRPCServer(gw GatewayInterface, pool *LogicClientPool, port string, maxMsgSize int, windowSize int) (*ugrpc.Server, error) {
+func StartGRPCServer(gw GatewayInterface, pool *LogicClientPool, port string, maxMsgSize int, windowSize int, kickToken string) (*ugrpc.Server, error) {
 	if maxMsgSize <= 0 {
 		maxMsgSize = 4 * 1024 * 1024
 	}
@@ -363,9 +406,10 @@ func StartGRPCServer(gw GatewayInterface, pool *LogicClientPool, port string, ma
 		),
 	)
 	tlog.Info(context.TODO(), "registering GatewayService")
-	grpcService := NewGRPCServer(gw, pool)
+	grpcService := NewGRPCServer(gw, pool, kickToken)
 	protoGw.RegisterGatewayStreamServer(server, grpcService)
 	protoGw.RegisterGatewayServer(server, grpcService)
+	protoGw.RegisterKickServiceServer(server, grpcService)
 
 	if err := server.Start(); err != nil {
 		tlog.Error(context.TODO(), "gRPC server failed to start error=%v port=%s", err, port)

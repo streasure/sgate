@@ -33,6 +33,7 @@ type Connection struct {
 	// 原子字段，用于无锁并发访问
 	userUUID    atomic.Pointer[string] // 保存用户唯一标识。
 	serverID    atomic.Pointer[string] // 保存绑定的逻辑服标识。
+	accountID   atomic.Pointer[string] // 登录账号（=LoginGate userId；批量踢账号索引用）
 	isWS        atomic.Bool
 	logicClient atomic.Pointer[LogicClientProvider] // LogicClientProvider 缓存，避免每条消息查询连接池
 	jwtJti      atomic.Pointer[string]              // string：JWT jti（logout/封禁时撤销）
@@ -98,6 +99,15 @@ func (c *Connection) IsWebSocket() bool { return c.isWS.Load() }
 func (c *Connection) SetUserUUID(uuid string) { c.userUUID.Store(&uuid) }
 func (c *Connection) GetUserUUID() string {
 	if v := c.userUUID.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// SetAccountID / GetAccountID 登录账号（KickService KickAccounts 本地索引）
+func (c *Connection) SetAccountID(id string) { c.accountID.Store(&id) }
+func (c *Connection) GetAccountID() string {
+	if v := c.accountID.Load(); v != nil {
 		return *v
 	}
 	return ""

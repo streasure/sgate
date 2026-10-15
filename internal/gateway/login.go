@@ -86,7 +86,8 @@ func (g *Gateway) loginValidationEnabled() bool {
 // loginValidation.enabled=false：永远放行（压测/免登）。
 // loginValidation.enabled=true：必须走 loginserver；空 loginKey 也不能绕过；
 // 无 loginserver 连接或 gRPC 失败时一律拒绝（fail-closed）。
-func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
+// 会话上下文（sgate_id/conn_id/client_ip）随请求携带，loginserver 校验通过后写三键会话缓存。
+func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP string) bool {
 	if !g.loginValidationEnabled() {
 		return true
 	}
@@ -99,7 +100,13 @@ func (g *Gateway) validateLoginKey(userID, loginKey string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.TODO(), 3*time.Second)
 	defer cancel()
-	ack, err := client.ValidateLoginToken(ctx, &protoLogin.ValidateLoginTokenReq{AccountId: userID, LoginToken: loginKey})
+	ack, err := client.ValidateLoginToken(ctx, &protoLogin.ValidateLoginTokenReq{
+		AccountId:  userID,
+		LoginToken: loginKey,
+		SgateId:    g.GetServerID(),
+		ConnId:     connectionID,
+		ClientIp:   clientIP,
+	})
 	if err != nil {
 		tlog.Warn(context.TODO(), "validate login token failed accountId=%s error=%v", userID, err)
 		return false
@@ -143,16 +150,6 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		return gnet.None
 	}
 
-	// 登录前封禁检查（内存 BanStore；TODO 迁 MySQL）
-	if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
-		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: req.ServerId}
-		body, _ := proto.Marshal(ack)
-		writeMsgFrame(c, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
-	}) {
-		routes.PutClientMessage(message)
-		return gnet.Close
-	}
-
 	// 切维护检查：目标 serverId（或其所属 zone）在维护中 → 拒绝新登录
 	if g.isMaintenanceTarget(req.ServerId) {
 		ack := &protoGw.LoginGateAck{Code: 503, Message: "server in maintenance", SessionId: connectionID, ServerId: req.ServerId}
@@ -188,14 +185,8 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		writeFrameAsync(c, data)
 	}
-	if !g.validateLoginKey(req.UserId, req.LoginKey) {
+	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, netutil.AddrHost(c.RemoteAddr())) {
 		writeAck(401, "invalid login key", req.ServerId)
-		return
-	}
-	// 二次封禁检查（worker 路径，防竞态补写）
-	if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
-		writeAck(code, text, req.ServerId)
-	}) {
 		return
 	}
 	// 二次切维护检查（worker 路径，防标记在快照后置入的竞态）
@@ -226,6 +217,10 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 
 	// 保持选中的逻辑服在网关侧的身份标识中，以防止逻辑分片之间的会话索引冲突。
 	g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
+	// 登录账号索引（KickService KickAccounts 用；userConnections 键是 fullUUID 而非裸账号）
+	if req.UserId != "" {
+		g.connectionManager.SetConnectionAccountID(connectionID, req.UserId)
+	}
 	writeAck(0, "ok", req.ServerId)
 
 	// 异步转发登录 StreamData 给逻辑服。

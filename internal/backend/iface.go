@@ -20,6 +20,9 @@ type GatewayInterface interface {
 	GetLogicClient(serverID string) connection.LogicClientProvider
 	GetGatewayClient(serverID string) GatewayClientProvider
 	GetShardedCoalescer() *connection.ShardedWriteCoalescer
+	// KickByAccounts / KickByIP KickService 本地执行（单向 Kick 模型），返回踢中数
+	KickByAccounts(accountIDs []string, reason string) int
+	KickByIP(ip, reason string) int
 }
 
 // GatewayClientProvider 定义网关客户端的连接状态能力。

@@ -144,34 +144,6 @@ const (
 	DefaultWAFBlockAction = "drop"
 )
 
-// --- 封禁 Redis 共享 ---
-
-const (
-	// DefaultBanRedisKeyPrefix 封禁 Redis key 前缀
-	DefaultBanRedisKeyPrefix = "sgate:ban:"
-
-	// DefaultBanRedisEventsChannel 封禁事件 Pub/Sub 频道
-	DefaultBanRedisEventsChannel = "sgate:ban:events"
-
-	// DefaultBanRedisDialTimeout Redis 连接超时
-	DefaultBanRedisDialTimeout = "3s"
-
-	// DefaultBanRedisReadTimeout Redis 读超时
-	DefaultBanRedisReadTimeout = "2s"
-
-	// DefaultBanRedisWriteTimeout Redis 写超时
-	DefaultBanRedisWriteTimeout = "2s"
-
-	// DefaultBanRedisSyncInterval 无事件时的全量校准间隔
-	DefaultBanRedisSyncInterval = "30s"
-
-	// DefaultBanRedisSyncIntervalWithEvents 事件模式下全量校准间隔（事件为主）
-	DefaultBanRedisSyncIntervalWithEvents = "10m"
-
-	// DefaultBanNegativeCacheTTL 未封禁负缓存 TTL
-	DefaultBanNegativeCacheTtl = "10s"
-)
-
 // --- 发现 / 集群 ---
 
 const (

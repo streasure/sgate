@@ -404,17 +404,6 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			routes.PutClientMessage(message)
 			return ackErr
 		}
-		// 登录前封禁检查（与 TCP 路径一致；finishWSLoginGate 内二次校验防竞态）
-		if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
-			_ = g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, code, text, req.ServerId)
-		}) {
-			routes.PutClientMessage(message)
-			wsConn.State.Store(int32(WSStateClosing))
-			if wsConn.Conn != nil {
-				_ = wsConn.Conn.Close()
-			}
-			return nil
-		}
 		// 切维护检查：目标 serverId（或其所属 zone）在维护中 → 拒绝新登录
 		if g.isMaintenanceTarget(req.ServerId) {
 			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server in maintenance", req.ServerId)
@@ -515,13 +504,12 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		_ = g.sendWebSocketMessageAsync(wsConn, WSOpBinary, data)
 	}
-	if !g.validateLoginKey(req.UserId, req.LoginKey) {
-		ack(401, "invalid login key")
-		return
+	clientIP := ""
+	if wsConn.Conn != nil && wsConn.Conn.RemoteAddr() != nil {
+		clientIP = netutil.AddrHost(wsConn.Conn.RemoteAddr())
 	}
-	if g.rejectIfBanned(connectionID, req.UserId, func(code int32, text string) {
-		ack(code, text)
-	}) {
+	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, clientIP) {
+		ack(401, "invalid login key")
 		return
 	}
 	// 二次切维护检查（worker 路径，防标记在快照后置入的竞态）
@@ -549,6 +537,10 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 	}
 
 	g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
+	// 登录账号索引（KickService KickAccounts 用）
+	if req.UserId != "" {
+		g.connectionManager.SetConnectionAccountID(connectionID, req.UserId)
+	}
 
 	// 先回 ack（与 TCP 路径一致），再异步转发登录给逻辑层，避免逻辑服慢导致 ack 延迟。
 	ack(0, "ok")

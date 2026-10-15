@@ -196,53 +196,16 @@ type FilterItemConfig struct {
 	Config map[string]any `yaml:"config"`
 }
 
-// SecurityConfig 安全防护配置（白名单/黑名单/限流/熔断/封禁）
+// SecurityConfig 安全防护配置（白名单/黑名单/限流/熔断/Kick RPC 鉴权）
 type SecurityConfig struct {
 	Enabled   bool     `yaml:"enabled"`
 	Whitelist []string `yaml:"whitelist"`
 	Blacklist []string `yaml:"blacklist"`
-	// BanRedis 封禁 Redis 共享存储（多网关实例共享封禁表）。
-	// enabled=false 时仅进程内存，重启丢失。
-	BanRedis       BanRedisConfig       `yaml:"banRedis"`
-	RateLimit      RateLimitConfig      `yaml:"rateLimit"`
-	CircuitBreaker CircuitBreakerConfig `yaml:"circuitBreaker"`
-}
-
-// BanRedisConfig 封禁 Redis 共享存储配置。
-// 多网关实例通过同一 Redis 共享封禁表；封禁判定仍在网关侧（loginserver 不做 ban 理论）。
-// 仅环境相关字段（enabled/address/password）需随环境改；其余为默认值。
-type BanRedisConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Address  string `yaml:"address"`
-	Password string `yaml:"password"`
-	DB       int    `yaml:"db"`
-	// Required true=连不上拒绝启动（多实例生产建议）；false=降级内存并告警。
-	Required bool `yaml:"required"`
-	// KeyPrefix Redis key 前缀，默认 "sgate:ban:"。
-	KeyPrefix string `yaml:"keyPrefix"`
-	// DialTimeout 连接超时，默认 3s。
-	DialTimeout string `yaml:"dialTimeout"`
-	// ReadTimeout 读超时，默认 2s。
-	ReadTimeout string `yaml:"readTimeout"`
-	// WriteTimeout 写超时，默认 2s。
-	WriteTimeout string `yaml:"writeTimeout"`
-	// SyncInterval 全量校准间隔（事件开启时默认 10m；事件关闭时默认 30s）。
-	// 置 0 用默认；负数关闭同步。
-	SyncInterval string `yaml:"syncInterval"`
-	// EventsEnabled Pub/Sub 事件广播（多实例秒级踢人）；enabled 时默认 true。
-	EventsEnabled *bool `yaml:"eventsEnabled"`
-	// EventsChannel 事件频道，默认 "sgate:ban:events"。
-	EventsChannel string `yaml:"eventsChannel"`
-	// CacheNegativeTtl 未封禁负缓存 TTL（防未命中反复回源），默认 10s；0=关。
-	CacheNegativeTtl string `yaml:"cacheNegativeTtl"`
-}
-
-// EventsOn 事件是否开启（零值=true，显式 false 才关）。
-func (c BanRedisConfig) EventsOn() bool {
-	if c.EventsEnabled == nil {
-		return true
-	}
-	return *c.EventsEnabled
+	// KickInternalToken KickService（loginserver→sgate 单向踢人 RPC）鉴权 token；
+	// 空=拒绝全部 Kick RPC。与 loginserver sgate.internalToken 保持一致。
+	KickInternalToken string               `yaml:"kickInternalToken"`
+	RateLimit         RateLimitConfig      `yaml:"rateLimit"`
+	CircuitBreaker    CircuitBreakerConfig `yaml:"circuitBreaker"`
 }
 
 // LoginValidationConfig LoginGate loginKey 校验开关。
@@ -560,33 +523,6 @@ func (c *Config) ApplyRuntimeDefaults() {
 	}
 	if c.Security.RateLimit.GlobalMaxTokens < 0 {
 		c.Security.RateLimit.GlobalMaxTokens = 0
-	}
-	// 封禁 Redis：仅填「基本不改」的零值；enabled/address 等环境项保持 yaml
-	br := &c.Security.BanRedis
-	if br.KeyPrefix == "" {
-		br.KeyPrefix = DefaultBanRedisKeyPrefix
-	}
-	if br.EventsChannel == "" {
-		br.EventsChannel = DefaultBanRedisEventsChannel
-	}
-	if br.DialTimeout == "" {
-		br.DialTimeout = DefaultBanRedisDialTimeout
-	}
-	if br.ReadTimeout == "" {
-		br.ReadTimeout = DefaultBanRedisReadTimeout
-	}
-	if br.WriteTimeout == "" {
-		br.WriteTimeout = DefaultBanRedisWriteTimeout
-	}
-	if br.SyncInterval == "" {
-		if br.EventsOn() {
-			br.SyncInterval = DefaultBanRedisSyncIntervalWithEvents
-		} else {
-			br.SyncInterval = DefaultBanRedisSyncInterval
-		}
-	}
-	if br.CacheNegativeTtl == "" {
-		br.CacheNegativeTtl = DefaultBanNegativeCacheTtl
 	}
 
 	// Monitoring.PprofAddr 空串 = 关闭 pprof，不填默认值
