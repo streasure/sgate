@@ -34,6 +34,7 @@ type Connection struct {
 	userUUID    atomic.Pointer[string] // 保存用户唯一标识。
 	serverID    atomic.Pointer[string] // 保存绑定的逻辑服标识。
 	accountID   atomic.Pointer[string] // 登录账号（=LoginGate userId；批量踢账号索引用）
+	loginKey    atomic.Pointer[string] // LoginGate loginKey（校验通过后保存；周期 BatchValidate 安全网重校验用，不落盘不转发）
 	isWS        atomic.Bool
 	logicClient atomic.Pointer[LogicClientProvider] // LogicClientProvider 缓存，避免每条消息查询连接池
 	jwtJti      atomic.Pointer[string]              // string：JWT jti（logout/封禁时撤销）
@@ -108,6 +109,15 @@ func (c *Connection) GetUserUUID() string {
 func (c *Connection) SetAccountID(id string) { c.accountID.Store(&id) }
 func (c *Connection) GetAccountID() string {
 	if v := c.accountID.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// SetLoginKey / GetLoginKey LoginGate 校验通过后的 loginKey（周期 BatchValidate 安全网用）
+func (c *Connection) SetLoginKey(k string) { c.loginKey.Store(&k) }
+func (c *Connection) GetLoginKey() string {
+	if v := c.loginKey.Load(); v != nil {
 		return *v
 	}
 	return ""

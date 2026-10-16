@@ -221,6 +221,10 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 	if req.UserId != "" {
 		g.connectionManager.SetConnectionAccountID(connectionID, req.UserId)
 	}
+	// loginKey 留存（周期 BatchValidate 安全网重校验用）
+	if req.LoginKey != "" {
+		g.connectionManager.SetConnectionLoginKey(connectionID, req.LoginKey)
+	}
 	writeAck(0, "ok", req.ServerId)
 
 	// 异步转发登录 StreamData 给逻辑服。

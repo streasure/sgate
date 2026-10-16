@@ -53,4 +53,10 @@ func TestDocDefaults_MatchREADME(t *testing.T) {
 	if c.Security.RateLimit.MaxTokens != DefaultRateLimitMaxTokens {
 		t.Errorf("maxTokens=%d want %d", c.Security.RateLimit.MaxTokens, DefaultRateLimitMaxTokens)
 	}
+	if c.LoginValidation.BatchInterval != DefaultLoginValidationBatchInterval {
+		t.Errorf("loginValidation.batchInterval=%q want %q", c.LoginValidation.BatchInterval, DefaultLoginValidationBatchInterval)
+	}
+	if c.LoginValidation.BatchSize != DefaultLoginValidationBatchSize {
+		t.Errorf("loginValidation.batchSize=%d want %d", c.LoginValidation.BatchSize, DefaultLoginValidationBatchSize)
+	}
 }

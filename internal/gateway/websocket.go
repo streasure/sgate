@@ -541,6 +541,10 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 	if req.UserId != "" {
 		g.connectionManager.SetConnectionAccountID(connectionID, req.UserId)
 	}
+	// loginKey 留存（周期 BatchValidate 安全网重校验用）
+	if req.LoginKey != "" {
+		g.connectionManager.SetConnectionLoginKey(connectionID, req.LoginKey)
+	}
 
 	// 先回 ack（与 TCP 路径一致），再异步转发登录给逻辑层，避免逻辑服慢导致 ack 延迟。
 	ack(0, "ok")

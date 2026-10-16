@@ -52,8 +52,11 @@ security:
     enabled: false
 
 # LoginGate loginKey 校验：true=必须过 loginserver（空 key 也不能绕过）；false=永远放行（压测）
+# batchInterval/batchSize：周期 BatchValidate 安全网（enabled=false 或 interval 空/0 时不跑）
 loginValidation:
   enabled: false
+  batchInterval: "60s"
+  batchSize: 200
 
 waf:
   enabled: false

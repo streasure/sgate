@@ -208,11 +208,15 @@ type SecurityConfig struct {
 	CircuitBreaker    CircuitBreakerConfig `yaml:"circuitBreaker"`
 }
 
-// LoginValidationConfig LoginGate loginKey 校验开关。
-// enabled=false：永远放行（压测/本地免登）。
+// LoginValidationConfig LoginGate loginKey 校验开关与周期安全网。
+// enabled=false：永远放行（压测/本地免登），周期安全网不跑。
 // enabled=true：必须经 loginserver ValidateLoginToken；空 loginKey 也不能绕过。
+// batchInterval>0：周期调 BatchValidateLoginTokens 重校验全部在线会话，
+// 失效/被封禁的本地踢下线（收口 mid-login 竞态与会话缓存 TTL 过期踢不中）。
 type LoginValidationConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled       bool   `yaml:"enabled"`
+	BatchInterval string `yaml:"batchInterval"` // 周期安全网间隔；空/0=关闭
+	BatchSize     int    `yaml:"batchSize"`     // 单次批量校验上限；0=默认 200（loginserver 硬上限 500）
 }
 
 // RateLimitConfig 限流配置
@@ -458,6 +462,12 @@ func (c *Config) ApplyRuntimeDefaults() {
 	}
 	if c.JWTAuth.HeaderField == "" {
 		c.JWTAuth.HeaderField = DefaultJWTHeaderField
+	}
+	if c.LoginValidation.BatchInterval == "" {
+		c.LoginValidation.BatchInterval = DefaultLoginValidationBatchInterval
+	}
+	if c.LoginValidation.BatchSize <= 0 {
+		c.LoginValidation.BatchSize = DefaultLoginValidationBatchSize
 	}
 	if c.WAF.MaxPayloadSize <= 0 {
 		c.WAF.MaxPayloadSize = DefaultWAFMaxPayloadSize

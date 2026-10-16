@@ -228,6 +228,16 @@ func (cm *ConnectionManager) SetConnectionAccountID(connectionID, accountID stri
 	}
 }
 
+// SetConnectionLoginKey 登录成功后留存 loginKey（周期 BatchValidate 安全网用，无反向索引）。
+func (cm *ConnectionManager) SetConnectionLoginKey(connectionID, loginKey string) {
+	if loginKey == "" {
+		return
+	}
+	if conn := cm.GetConnection(connectionID); conn != nil {
+		conn.SetLoginKey(loginKey)
+	}
+}
+
 // GetAccountConnection 根据登录账号获取连接ID（KickAccounts 本地索引）。
 func (cm *ConnectionManager) GetAccountConnection(accountID string) (string, bool) {
 	return cm.accountConnections.Load(accountID)

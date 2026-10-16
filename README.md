@@ -450,15 +450,24 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | `true`：LoginGate 必须经 loginserver `ValidateLoginToken`（**空 `loginKey` 也不能绕过**；未连上 loginserver 或 gRPC 失败 → 401）。`false`：永远放行（压测/本地免登） |
+| `enabled` | bool | `false` | `true`：LoginGate 必须经 loginserver `ValidateLoginToken`（**空 `loginKey` 也不能绕过**；未连上 loginserver 或 gRPC 失败 → 401）。`false`：永远放行（压测/本地免登），周期安全网不跑 |
+| `batchInterval` | string | `"60s"` | 周期 `BatchValidateLoginTokens` 安全网间隔（封禁收敛 P2）。收口 mid-login 竞态与会话缓存 TTL 过期踢不中：周期重校验全部在线会话，失效/被封禁的本地踢下线。空/`0`=关闭 |
+| `batchSize` | int | `200` | 单次批量校验条数（loginserver 硬上限 500，留余量）。超过则分片多次 RPC |
 
 ```yaml
 loginValidation:
-  enabled: true   # 生产开启
+  enabled: true       # 生产开启
+  batchInterval: "60s"
+  batchSize: 200
 # 压测配置必须为 false（见 AGENTS.md Benchmarks）
 ```
 
 不以「是否传了 `loginKey`」决定是否校验——否则不传 key 即可绕过。是否校验只看本开关。
+
+周期安全网：登录成功后 sgate 留存 `accountId+loginKey`（仅用于校验，不转发不落盘）；
+每 `batchInterval` 收集全部在线会话分片调 loginserver `BatchValidateLoginTokens`
+（不带 sgate 上下文 → loginserver 跳过会话写入，纯校验），`valid=false` 的踢下线
+（`KICK_NOTIFY reason=ban` + 逻辑服下线 + 断连）。校验期间 token 已换（重登）的跳过不踢。
 
 ### 6.10 其他可选组件
 

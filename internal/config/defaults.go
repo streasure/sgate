@@ -191,6 +191,17 @@ const (
 	DefaultJWTHeaderField = "X-Auth-Token"
 )
 
+// --- 登录校验周期安全网 ---
+
+const (
+	// DefaultLoginValidationBatchInterval BatchValidate 周期安全网间隔
+	// 收口 mid-login 竞态与会话缓存 TTL 过期踢不中；60s 兼顾及时性与 loginserver 压力
+	DefaultLoginValidationBatchInterval = "60s"
+
+	// DefaultLoginValidationBatchSize 单次批量校验条数（loginserver 硬上限 500，留余量）
+	DefaultLoginValidationBatchSize = 200
+)
+
 // --- 流量镜像 ---
 
 const (

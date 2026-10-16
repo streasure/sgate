@@ -75,6 +75,12 @@ func TestApplyRuntimeDefaults_ZeroValuesGetDefaults(t *testing.T) {
 	if c.JWTAuth.HeaderField != DefaultJWTHeaderField {
 		t.Errorf("JWTAuth.HeaderField = %q, want %q", c.JWTAuth.HeaderField, DefaultJWTHeaderField)
 	}
+	if c.LoginValidation.BatchInterval != DefaultLoginValidationBatchInterval {
+		t.Errorf("LoginValidation.BatchInterval = %q, want %q", c.LoginValidation.BatchInterval, DefaultLoginValidationBatchInterval)
+	}
+	if c.LoginValidation.BatchSize != DefaultLoginValidationBatchSize {
+		t.Errorf("LoginValidation.BatchSize = %d, want %d", c.LoginValidation.BatchSize, DefaultLoginValidationBatchSize)
+	}
 	if c.WAF.MaxPayloadSize != DefaultWAFMaxPayloadSize {
 		t.Errorf("WAF.MaxPayloadSize = %d, want %d", c.WAF.MaxPayloadSize, DefaultWAFMaxPayloadSize)
 	}
@@ -119,6 +125,8 @@ func TestApplyRuntimeDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 	c.Stream.SendChannelSize = 77
 	c.Security.RateLimit.MaxTokens = 42
 	c.JWTAuth.HeaderField = "X-Custom"
+	c.LoginValidation.BatchInterval = "30s"
+	c.LoginValidation.BatchSize = 100
 	c.Monitoring.PprofAddr = "" // explicit disable
 	c.ApplyRuntimeDefaults()
 
@@ -145,6 +153,12 @@ func TestApplyRuntimeDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 	}
 	if c.JWTAuth.HeaderField != "X-Custom" {
 		t.Errorf("JWTAuth.HeaderField overwritten to %q", c.JWTAuth.HeaderField)
+	}
+	if c.LoginValidation.BatchInterval != "30s" {
+		t.Errorf("LoginValidation.BatchInterval overwritten to %q", c.LoginValidation.BatchInterval)
+	}
+	if c.LoginValidation.BatchSize != 100 {
+		t.Errorf("LoginValidation.BatchSize overwritten to %d", c.LoginValidation.BatchSize)
 	}
 	if c.Monitoring.PprofAddr != "" {
 		t.Errorf("Monitoring.PprofAddr became %q", c.Monitoring.PprofAddr)

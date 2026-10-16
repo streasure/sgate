@@ -280,6 +280,8 @@ func (g *Gateway) StartServices() error {
 	g.overloadProtector.Start()
 	if !benchMode {
 		go g.wsHeartbeatChecker()
+		// 封禁收敛 P2：BatchValidate 周期安全网（enabled=false/batchInterval<=0 时内部自停）
+		g.startBatchValidateSweep()
 	}
 	g.messageIntegrity = NewMessageIntegrity(30000)
 
