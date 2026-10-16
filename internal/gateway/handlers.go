@@ -52,6 +52,8 @@ type ConnContext struct {
 	// 中段切片 FrameBuf[n:] 又会丢失数组头部容量；offset 方案两者皆免。
 	FrameBuf []byte
 	frameOff int
+	// proxyHeaderParsed PROXY protocol 头已消费标记（每连接只解析一次首包）
+	proxyHeaderParsed bool
 }
 
 func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
@@ -145,6 +147,9 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 			g.connectionDurationCount.Add(1)
 			g.connectionDurationTracker.Record(time.Duration(duration) * time.Millisecond)
 			g.notifyLogicOffline(conn)
+			// Session Unbind：异步通知 loginserver 清理会话缓存（best-effort，
+			// 失败靠 TTL 24h 兜底；仅已登录连接有 sgate/conn 上下文）
+			g.removeSessionAsync(conn)
 		}
 		g.connectionManager.RemoveConnection(connectionID)
 		tlog.Debug(context.TODO(), "connection closed connectionID=%s error=%v", connectionID, err)
@@ -198,6 +203,23 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 			return g.handleWebSocketMessage(wsConn, data)
 		}
 		return gnet.Close
+	}
+
+	// PROXY protocol v1：首包以 "PROXY " 开头时解析并取真实客户端 IP。
+	// 仅 TCP 路径（WS 分支已在上方返回）；每连接只处理一次。
+	if cfg := g.cfg.Load(); cfg != nil && cfg.Security.ProxyProtocol && !ctx.proxyHeaderParsed {
+		ctx.proxyHeaderParsed = true
+		if clientIP, headerLen, ok := parseProxyProtocolV1(data); ok {
+			if clientIP != "" && clientIP != netutil.AddrHost(c.RemoteAddr()) {
+				g.connectionManager.UpdateConnectionIP(ctx.ConnectionID, clientIP)
+				tlog.Debug(context.TODO(), "proxy protocol resolved real IP conn=%s realIP=%s", ctx.ConnectionID, clientIP)
+			}
+			data = data[headerLen:]
+			if len(data) == 0 {
+				return // 头已消费完，等后续数据
+			}
+		}
+		// 解析失败（非 PROXY 头）：按普通首包继续（不重试）
 	}
 
 	maxFrameBuf := g.getProtection().MaxFrameBufSize

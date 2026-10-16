@@ -31,6 +31,8 @@ func loginReqFrameFor(t *testing.T, serverID string) *protoGw.StreamData {
 
 // kickMockConn 捕获踢人通知帧（Connection.Send → AsyncWritev）并记录关闭。
 // 踢人流程异步执行（kickConnectionsAsync），读写均需加锁避免 test -race。
+// AsyncWritev 会立即执行回调（模拟 gnet 写完成），使 SendThenClose 的
+// 回调式 Close 在测试中同步生效。
 type kickMockConn struct {
 	gnet.Conn
 	mu      sync.Mutex
@@ -38,11 +40,26 @@ type kickMockConn struct {
 	closed  bool
 }
 
-func (c *kickMockConn) AsyncWritev(chunks [][]byte, _ gnet.AsyncCallback) error {
+func (c *kickMockConn) AsyncWritev(chunks [][]byte, cb gnet.AsyncCallback) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for _, ch := range chunks {
 		c.written = append(c.written, ch...)
+	}
+	c.mu.Unlock()
+	if cb != nil {
+		// 模拟 gnet 写完成后在 event loop 内触发回调；传 nil Conn/error
+		_ = cb(c, nil)
+	}
+	return nil
+}
+
+// AsyncWrite 同上：触发回调（WS 路径 SendThenClose 用）。
+func (c *kickMockConn) AsyncWrite(b []byte, cb gnet.AsyncCallback) error {
+	c.mu.Lock()
+	c.written = append(c.written, b...)
+	c.mu.Unlock()
+	if cb != nil {
+		_ = cb(c, nil)
 	}
 	return nil
 }

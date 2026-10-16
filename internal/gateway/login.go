@@ -114,6 +114,37 @@ func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP stri
 	return ack.Valid
 }
 
+// removeSessionAsync 连接关闭时异步通知 loginserver 清理会话缓存（Session Unbind）。
+// best-effort：loginValidation 未启用或无 loginserver 连接时直接跳过；
+// 失败仅 debug 日志（TTL 24h 兜底，无需重试）。
+func (g *Gateway) removeSessionAsync(conn *connection.Connection) {
+	if !g.loginValidationEnabled() {
+		return
+	}
+	g.loginServerMu.RLock()
+	client := g.loginServerClient
+	g.loginServerMu.RUnlock()
+	if client == nil {
+		return
+	}
+	// 未登录连接（无 accountID）无会话缓存，跳过
+	if conn.GetAccountID() == "" {
+		return
+	}
+	sgateID := g.GetServerID()
+	connID := conn.ID()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := client.RemoveSession(ctx, &protoLogin.RemoveSessionReq{
+			SgateId: sgateID,
+			ConnId:  connID,
+		}); err != nil {
+			tlog.Debug(context.TODO(), "remove session best-effort failed sgate=%s conn=%s err=%v", sgateID, connID, err)
+		}
+	}()
+}
+
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
 	// LoginGate 走捷径不经 pipeline，此处补齐过载/IP 限流检查。
 	// 成功路径由 finishLoginGate 异步持有 message（不归还解码池）；

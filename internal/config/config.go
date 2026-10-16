@@ -214,6 +214,11 @@ type SecurityConfig struct {
 	// 无法传递真实 IP，反代场景请用 WS 或在代理层终止后直连。
 	// 空（默认）= 不信任任何代理头，防 XFF 伪造。
 	TrustedProxies []string `yaml:"trustedProxies"`
+	// ProxyProtocol 启用 PROXY protocol v1 解析（HAProxy/Nginx `proxy_protocol on`）。
+	// TCP 连接首包若以 "PROXY " 开头则解析并取真实客户端 IP（更新 RemoteHost
+	// 与 per-IP 计数）。仅对 TCP 生效；与 TrustedProxies（WS XFF）互补。
+	// 未启用时首包 "PROXY " 会被误判为非法帧长而断连。
+	ProxyProtocol bool `yaml:"proxyProtocol"`
 }
 
 // LoginValidationConfig LoginGate loginKey 校验开关与周期安全网。

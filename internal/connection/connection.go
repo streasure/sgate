@@ -278,6 +278,27 @@ func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
 	})
 }
 
+// SendThenClose 发送数据并在写入完成后关闭连接（踢人通知专用）。
+// 保证客户端在连接关闭前收到通知帧：AsyncWritev 回调在 write 完成（成功或
+// 失败）后于 event loop 内触发，此时再执行 Close，避免 fire-and-forget Send
+// 后立即 Close 导致通知丢失（尤其 Windows 无 outbound flush）。
+func (c *Connection) SendThenClose(data []byte) error {
+	if c.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	c.touch()
+	closeAfterWrite := func(_ gnet.Conn, _ error) error {
+		_ = c.Conn.Close()
+		return nil
+	}
+	if c.IsWebSocket() {
+		return c.Conn.AsyncWrite(EncodeWSFrame(0x82, data), closeAfterWrite)
+	}
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
+	return c.Conn.AsyncWritev([][]byte{header[:], data}, closeAfterWrite)
+}
+
 // sendWSFrame 将数据封装为WebSocket帧并发送，支持不同长度的载荷。
 func (c *Connection) sendWSFrame(data []byte) error {
 	frame := EncodeWSFrame(0x82, data)

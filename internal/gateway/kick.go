@@ -45,7 +45,29 @@ func (g *Gateway) pushKickNotify(conn *connection.Connection, p kickNotifyParams
 
 // kickConn 单连接踢下线：踢人通知 → 逻辑服下线（清会话/推送组） → 断开。
 // 断开后 OnClose 会 RemoveConnection 并从网关侧全部推送组移除该成员。
+//
+// 通知可靠性：优先 SendThenClose（写完成后在回调内 Close，保证客户端收到
+// KickNotify 后再断连）；SendThenClose 不可用（连接已空）时回退同步 Close。
 func (g *Gateway) kickConn(conn *connection.Connection, p kickNotifyParams) {
+	body, err := proto.Marshal(&protoLogic.KickNotify{
+		Reason:  p.reason,
+		Code:    p.code,
+		Message: p.message,
+	})
+	if err == nil {
+		if data, err := routes.MarshalClientMessage(&protoGw.StreamData{
+			Cmd:  routes.CmdKickNotify,
+			Data: body,
+		}); err == nil {
+			// SendThenClose 内部已注册写完成回调，回调里 Close；
+			// 此处不再重复 Close，避免通知未发出就断连。
+			if sendErr := conn.SendThenClose(data); sendErr == nil {
+				g.notifyLogicOffline(conn)
+				return
+			}
+		}
+	}
+	// 回退：通知组装/发送失败，直接下线+断连（不丢逻辑服清理）
 	g.pushKickNotify(conn, p)
 	g.notifyLogicOffline(conn)
 	if conn.Conn != nil {
