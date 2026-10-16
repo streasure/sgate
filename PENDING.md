@@ -34,10 +34,13 @@
 
 **优先级**：低（部署形态需求，非性能）
 
-## 封禁共享存储（Redis）
+## 封禁收敛（已迁移 loginserver）
 
-**已实现**：`security.banRedis` 启用后封禁表写穿 Redis（多网关实例共享）。本地内存为热路径缓存；可选 Pub/Sub 事件增量同步（默认开，秒级踢跨实例在线连接）+ 周期全量校准（事件开时 10m，关时 30s）；未封禁负缓存默认 10s。IP 归一化（IPv4-mapped → v4）。默认关闭（仅内存）。IP 封禁键为 `ip:<addr>`。`required: true` 时 Redis 连不上拒绝启动。
+**已实现（P1+P2，2026-10）**：sgate 不再存封禁（BanStore/banRedis/admin 端点已删，commit `eb4b21c`）。
+- P1 单向 Kick 模型：loginserver 权威库（MySQL ACL）落库后 best-effort 下发 KickAccounts/KickIP；
+  sgate KickService 纯执行器（x-internal-token 鉴权）按本地 accountID/RemoteHost 索引踢人。
+- P2 BatchValidate 周期安全网：sgate 登录后留存 loginKey，每 `loginValidation.batchInterval`
+  批量重校验在线会话，踢 mid-login 竞态与会话缓存 TTL 过期的失效会话。
 
-**已知限制与方案**（不实施中）：
-- NAT/CIDR 封禁、Redis 故障状态机指标导出：见 `docs/ban-sharing-design.md`
-- 多实例测试用例与验收标准：见 `docs/multi-sgate-test.md`
+**待做**：反代场景 `trustedProxies`（IP 踢人口径）；多实例一致性压测；NAT/CIDR 封禁。
+新方案见 `E:\loginserver\docs\ban-convergence-design.md`。

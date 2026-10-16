@@ -55,7 +55,7 @@ Gateway 结构体承载全部接入侧状态：
 | 生命周期 | gateway.go | `NewGateway()`, `Init/Start/Destroy`, `StartServices` |
 | gnet 事件 | handlers.go | `OnOpen/OnTraffic/OnClose`（原 conn.go） |
 | 登录 | login.go | `handleLoginGate`, session 绑定 |
-| 登出/封禁 | admin_ban.go | `handleLogoutGate`（断连无推送）、`/admin/ban`（先推 `CmdBanNtf` 再断）、`BanStore`（本地内存 + 可选 `security.banRedis` 多实例共享） |
+| 登出/限流热更 | admin_ban.go | `handleLogoutGate`（断连无推送+JWT Revoke）、`POST /admin/ratelimit`（Bearer）；封禁已迁 loginserver（KickService 单向执行器） |
 | WebSocket | websocket.go | 握手升级、帧编解码 |
 | 消息管道 | pipeline.go | 认证→安全→过滤→转发 |
 | 过滤器 | filter.go | SPI 加载、`types.GetFilterChain()` |

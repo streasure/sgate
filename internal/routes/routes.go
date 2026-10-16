@@ -51,7 +51,7 @@ const (
 	CmdLoginGateAck  int32 = 1000002 // 网关登录响应
 	CmdLogoutGate    int32 = 1000003 // 网关登出请求（断开当前连接，无业务推送）
 	CmdLogoutGateAck int32 = 1000004 // 网关登出响应
-	CmdBanNtf        int32 = 1000005 // 封禁通知推送（先推后断）
+	CmdBanNtf        int32 = 1000005 // （已废弃，封禁通知改用 CmdKickNotify 1100009）
 	CmdLogicLoginReq int32 = 1100001 // 逻辑层登录请求
 	CmdLogicLoginAck int32 = 1100002 // 逻辑层登录响应
 	CmdKickNotify    int32 = 1100009 // 踢下线通知推送（先推后断，body 为 logic.KickNotify）

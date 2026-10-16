@@ -24,10 +24,10 @@
 | 能力 | 说明 |
 | --- | --- |
 | LogoutGate | `1000003/1000004`，断连无推送 + JWT Revoke |
-| Admin 封禁 HTTP | `/admin/ban|unban|bans`，先推 `CmdBanNtf` 再断，Bearer `admin.token` |
-| LoginGate 封禁拦截 | 403 |
-| BanStore | 本地内存 + 可选 Redis 共享（`security.banRedis`）；默认关=仅内存 |
-| JWT | jti 持久化到 Connection，接入 logout/ban Revoke |
+| KickService 执行器 | loginserver 单向下发 KickAccounts/KickIP（x-internal-token 鉴权），sgate 无封禁存储 |
+| LoginGate 封禁拦截 | 经 loginserver ValidateLoginToken（ACL 快照含 ban 表），失败 401 |
+| BatchValidate 周期安全网 | `loginValidation.batchInterval`（默认 60s）批量重校验在线会话，踢 mid-login 竞态/TTL 过期失效会话 |
+| JWT | jti 持久化到 Connection，接入 logout Revoke |
 | 登录校验开关 | `loginValidation.enabled`（压测恒为 false） |
 
 ### 运维与配置
@@ -60,9 +60,9 @@
    - 问题：当前 TCP 写失败直接丢弃。SLG 游戏对关键消息（战斗结果、资源变更）要求 at-least-once
    - 方案：消息 ACK + 重传机制，或逻辑服侧重试 + 幂等
 
-3. **封禁 Redis 共享（已实现，待生产验证）**
-   - 已有：`security.banRedis` 写穿 + 启动加载 + Pub/Sub 事件（默认开，秒级跨实例踢人）+ 周期全量校准；IP 归一化；负缓存；`required` fail-fast；封禁判定在网关（loginserver 不做 ban 理论）
-   - 待做：多实例一致性压测（见 `docs/multi-sgate-test.md`）；Redis 故障时的降级策略确认；NAT/CIDR 封禁
+3. **封禁收敛遗留**
+   - 已完成：P1 单向 Kick 模型（loginserver 权威库 + KickService）+ P2 BatchValidate 周期安全网
+   - 待做：反代场景 `trustedProxies`（IP 踢人口径当前用 sgate 本地 RemoteHost）；多实例一致性压测（见 `docs/multi-sgate-test.md`）；NAT/CIDR 封禁
 
 ### P3：架构增强
 

@@ -1,4 +1,13 @@
-# 封禁共享问题方案
+# 封禁共享问题方案（已废弃 2026-10-16）
+
+> **本文档描述的 BanStore/banRedis/Pub/Sub 封禁模型已在封禁收敛 P1 整体删除**
+> （commit `eb4b21c`）。sgate 不再存封禁；封禁权威库在 loginserver（MySQL ACL 快照），
+> sgate 仅作 KickService 纯执行器（loginserver 单向下发 KickAccounts/KickIP），
+> 另有 BatchValidateLoginTokens 周期安全网（P2）收口 mid-login 竞态与会话缓存 TTL 过期。
+>
+> 新方案见 `E:\loginserver\docs\ban-convergence-design.md`（单向 Kick 模型 v2）。
+>
+> 以下内容仅作历史设计参考，不再反映代码现状。
 
 针对单/多实例、大/中/小规模给出建议路径。默认**不改现有行为**，按阶段启用。
 

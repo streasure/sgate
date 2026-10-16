@@ -488,7 +488,7 @@ func (c *Config) ApplyRuntimeDefaults() {
 		c.Protection.CPUThreshold = DefaultOverloadCPUThreshold
 	}
 
-	// 发现 / etcd / 集群 / stream / perf / 封禁 Redis 等「基本不改」项的零值默认
+	// 发现 / etcd / 集群 / stream / perf 等「基本不改」项的零值默认
 	if !c.Discovery.Enabled && c.Discovery.ServiceName == "" && c.Discovery.Zone == "" {
 		// 未配置 discovery 段时补默认（enabled 仍为 false 需显式开）
 		c.Discovery.ServiceName = DefaultDiscoveryServiceName

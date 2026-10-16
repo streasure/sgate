@@ -156,12 +156,12 @@ bench1_tcp 100 连接下扫（以 `/stats.forwarded` 为准，客户端发送速
 - `POST /admin/ratelimit`（Bearer 鉴权，token 来自 `admin.token`）：body `{"maxTokens":N,"tokenRefresh":"1s","routeMaxTokens":N,"globalMaxTokens":N}`，缺省 0/空表示恢复默认派生值。
 - 也可通过配置中心热更，走同一 `handleConfigUpdate` 路径。
 
-### 封禁共享存储（Redis）
+### 封禁（已迁移 loginserver）
 
-- `security.banRedis.enabled: true` 时：`/admin/ban`、`/admin/unban` 写穿 Redis（key 前缀默认 `sgate:ban:`，有 TTL 的记录用 EXPIRE）；启动全量加载；可选 Pub/Sub 事件（`eventsEnabled` 默认 true，写后 PUBLISH，订阅端增量应用并踢本实例连接）；后台周期全量校准（事件开时默认 `10m`，关时 `30s`）；未封禁负缓存默认 `10s`。`required: true` 时连不上拒绝启动，否则降级内存并告警。
-- 账号封禁 body `{"userUuid","reason","ttlSeconds?"}`；IP 封禁 `{"ip","reason","ttlSeconds?"}`（互斥），IP 封禁立即踢掉该 IP 下全部在线连接并落地 Redis；登录前按来源 IP 拒绝（403）。
-- 多网关实例配置同一 Redis 即共享封禁表；`enabled: false`（默认）仅进程内存，重启丢失。
-- 连接失败告警并回退内存模式，不阻塞启动。
+- sgate 不再存封禁（BanStore/banRedis 已删）。封禁权威库在 loginserver（MySQL ACL），
+  落库后 best-effort 下发 KickAccounts/KickIP 至各 sgate；sgate 按本地索引踢人。
+- P2 BatchValidate 周期安全网（`loginValidation.batchInterval`）批量重校验在线会话，
+  兜底 mid-login 竞态与会话缓存 TTL 过期。压测配置必须 `loginValidation.enabled: false`。
 
 ## etcd key 约定
 

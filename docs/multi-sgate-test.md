@@ -1,4 +1,13 @@
-# 多 Sgate 协作测试说明
+# 多 Sgate 协作测试说明（已过时 2026-10-16）
+
+> **本文档基于已删除的 BanStore/banRedis/Pub-Sub 模型编写**（封禁收敛 P1 `eb4b21c` 删除），
+> `/admin/ban|unban|bans` 端点、`security.banRedis`、事件同步等均已不存在。
+>
+> 现行模型：loginserver 权威库 + 单向 KickService + BatchValidate 周期安全网，
+> 见 `E:\loginserver\docs\ban-convergence-design.md`。多实例封禁一致性由 loginserver
+> 的 SessionSgatesByAccount 路由 + sgate 本地 ForEach 兜底覆盖，无需 Redis 共享封禁。
+>
+> 以下用例仅作连接/登录基线（T1）与架构演进参考，封禁相关步骤（T2–T7）已不适用。
 
 覆盖多网关实例下的封禁一致性、登录/踢线、基础连通。实现与验收标准见文末；本文档**只定义怎么测**，不改代码。
 

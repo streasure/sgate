@@ -216,7 +216,7 @@ CONF=config/cluster/gateway1.yaml ./start.sh
 
 ```
 1. 启动 etcd
-2. （可选）启动 Redis：security.banRedis.enabled=true 时多实例共享封禁
+2. 启动 loginserver（封禁权威库 + Kick 下发 + ValidateLoginToken）
 3. 启动逻辑服
 4. 启动 sgate 实例 1（CONF=config\cluster\gateway1.yaml .\start.bat）
 5. 启动 sgate 实例 2（CONF=config\cluster\gateway2.yaml .\start.bat）
@@ -420,13 +420,10 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `admin.token` | string | `""` | 管理接口 Bearer token |
+| `admin.token` | string | `""` | 管理接口 Bearer token（限流热更等；封禁管理已迁至 loginserver ACL API） |
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/admin/ban` | 封禁：`{"userUuid","reason","jti?","ttlSeconds?"}` 账号；或 `{"ip","reason","ttlSeconds?"}` 封 IP（踢该 IP 下全部连接并写 Redis）。二者互斥 |
-| POST | `/admin/unban` | 解封：`{"userUuid"}` 或 `{"ip"}` |
-| GET | `/admin/bans` | 当前有效封禁列表（本地内存；多实例见 `security.banRedis`） |
+封禁管理已在封禁收敛 P1 迁至 loginserver（`POST/DELETE /api/v1/acl/blacklist`、`/api/v1/acl/banned-role`，
+X-Admin-Token 鉴权）；sgate 不再存封禁，仅通过 KickService 接收 loginserver 单向踢人指令。
 
 客户端登出：`CmdLogoutGate(1000003)` → 撤销 JWT → 通知逻辑服 → 断连（无业务推送）；ack 为 `CmdLogoutGateAck(1000004)`。
 
@@ -435,13 +432,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | 是否启用安全链（`config/gateway.yaml` 默认开启） |
-| `banRedis.enabled` | bool | `false` | 封禁 Redis 共享存储（多网关实例共享封禁表） |
-| `banRedis.address` | string | `""` | Redis 地址，如 `127.0.0.1:6379` |
-| `banRedis.required` | bool | `false` | true=连不上拒绝启动（多实例生产建议）；false=降级内存并告警 |
-| `banRedis.keyPrefix` | string | `sgate:ban:` | Redis key 前缀 |
-| `banRedis.eventsEnabled` | bool | `true`（零值） | Pub/Sub 事件广播（多实例秒级踢人）；显式 `false` 才关 |
-| `banRedis.syncInterval` | string | 事件开 `10m` / 关 `30s` | 全量校准间隔；负数关闭 |
-| `banRedis.cacheNegativeTtl` | string | `10s` | 未封禁负缓存 TTL；`0`=关 |
+| `kickInternalToken` | string | `""` | KickService（loginserver→sgate）鉴权 token；空=拒绝全部 Kick RPC。与 loginserver `sgate.internalToken` 一致 |
 | `rateLimit.enabled` | bool | `false` | 令牌桶限流（`config/gateway.yaml` 默认开启） |
 | `rateLimit.maxTokens` | int | `10000` | 每秒令牌数（按 IP/路由）；下扫压测膝点 ~600K（见 Bench.md），默认覆盖 NAT 多客户端共享 IP 场景。热更：`POST /admin/ratelimit` |
 | `circuitBreaker.enabled` | bool | `false` | 熔断器 |
@@ -674,7 +665,7 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 | `CmdLoginGateAck` | `1000002` | 登录应答 |
 | `CmdLogoutGate` | `1000003` | 客户端登出请求（断连前连接，业务推送停止） |
 | `CmdLogoutGateAck` | `1000004` | 登出应答 |
-| `CmdBanNtf` | `1000005` | 封禁通知（主动断连） |
+| `CmdKickNotify` | `1100009` | 踢下线通知（reason/code/message；封禁/IP/维护/会话失效共用） |
 | `CmdHeartbeatReq` | `1100010` | 心跳请求 |
 | `CmdHeartbeatAck` | `1100011` | 心跳应答 |
 | `CmdUserOffline` | `1100012` | 用户下线通知 |
@@ -854,9 +845,10 @@ monitoring:
 
 这些「基本不改」项已进代码默认（`internal/config/defaults.go` + `ApplyRuntimeDefaults`）。若 yaml 未显式覆盖，以代码默认为准；若显式写了字段则以 yaml 为准。bool 的 `true` 默认无法用零值表达，需在 yaml 显式写出。
 
-### Q: 开启 banRedis 后 Redis 挂了会怎样
+### Q: Redis 挂了会怎样（封禁/会话）
 
-默认 `required: false`：启动失败或运行中断连会降级为本地内存并打 warn；恢复后全量拉回。多实例生产建议 `banRedis.required: true`（连不上拒绝启动），并保留 Pub/Sub 事件（默认开）做秒级跨实例踢人。
+封禁权威库在 loginserver（MySQL ACL），sgate 不直接连 Redis；loginserver 的 Redis 用于 token 缓存与会话索引，
+故障时 loginserver 降级回源 MySQL 并告警，sgate 不受影响（ValidateLoginToken gRPC 失败时 fail-closed 拒绝新登录）。
 
 ### Q: 如何在生产环境部署
 
