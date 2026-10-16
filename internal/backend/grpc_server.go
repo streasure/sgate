@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
@@ -166,11 +165,7 @@ func (s *GRPCServer) KickAccounts(ctx context.Context, req *protoGw.KickAccounts
 	if !kickTokenOK(ctx, s.kickToken) {
 		return nil, errKickUnauthenticated
 	}
-	accountIDs := make([]string, 0, len(req.GetAccountIds()))
-	for _, id := range req.GetAccountIds() {
-		accountIDs = append(accountIDs, strconv.FormatInt(id, 10))
-	}
-	n := s.gateway.KickByAccounts(accountIDs, req.GetReason())
+	n := s.gateway.KickByAccounts(req.GetAccountIds(), req.GetReason())
 	return &protoGw.KickAccountsResponse{KickedCount: int32(n)}, nil
 }
 
