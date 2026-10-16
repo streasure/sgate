@@ -60,9 +60,14 @@
 
 ## 2. 测试用例
 
-### T1. 登录可达（基线）
+### T1. 登录可达（基线）✅ 2026-10-16 验证通过
 
 **步骤**：N 个客户端均匀连 A/B，LoginGate 登录，发心跳/数据。  
+**实测**（2 sgate + logic1_tcp + bench1_tcp，loginValidation.enabled=false）：
+- sgate-1 :48080：10/10 登录成功，3s 转发 1.76M 消息，0 失败
+- sgate-2 :48090：10/10 登录成功，3s 转发 1.28M 消息，0 失败
+- 两台均注册 etcd SGATE:default，logic 通过 etcd 发现并拨入
+
 **通过标准**：
 - 两侧 `loginFail=0`、`/stats.failed=0`
 - A/B 的 `forwarded` 都在涨
