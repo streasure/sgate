@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -93,6 +94,10 @@ type Gateway struct {
 	trafficMirror *traffic.TrafficMirror      // 流量镜像
 	logSanitizer  *obs.LogSanitizer           // 日志脱敏
 
+	// trustedProxies 反向代理信任前缀（IP/CIDR）：仅 WS 握手解析 XFF/X-Real-IP 时用。
+	// Init 时从 config.Security.TrustedProxies 解析一次；空列表=不信任任何代理头。
+	trustedProxies []netip.Prefix
+
 	// 转发统计计数器（用于极限压测时观测 sgate 转发能力）
 	pipeline                           *MessagePipeline
 	loginSlots                         chan struct{} // 并发登录协程上限（finishLoginGate）
@@ -177,6 +182,24 @@ func (g *Gateway) AddPushedToClient(n int64) {
 	g.messagesPushedToClient.Add(n)
 }
 
+// IsTrustedProxy 判断对端 IP 是否在反代信任列表（IP 或 CIDR）。
+// 仅 WS 握手解析 XFF 时调用；TCP 无 HTTP 头不走此路径。
+func (g *Gateway) IsTrustedProxy(host string) bool {
+	if len(g.trustedProxies) == 0 {
+		return false
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	for _, p := range g.trustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
 // AddPushDroppedNoConn 增加因无连接而丢弃的推送计数
 func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
@@ -247,6 +270,20 @@ func (g *Gateway) Init() error {
 	g.configCenter = component.ConfigCenter()
 	g.cluster = component.ClusterNode()
 	g.alertWebhook = component.AlertWebhook()
+	// 反代信任列表（仅 WS XFF 用；配置已 Validate，此处静默跳过非法项）
+	if cfg := config.Get(); cfg != nil {
+		for _, s := range cfg.Security.TrustedProxies {
+			if p, err := netip.ParsePrefix(s); err == nil {
+				g.trustedProxies = append(g.trustedProxies, p)
+			} else if a, err := netip.ParseAddr(s); err == nil {
+				bits := 32
+				if a.Is6() {
+					bits = 128
+				}
+				g.trustedProxies = append(g.trustedProxies, netip.PrefixFrom(a, bits))
+			}
+		}
+	}
 	// 管理器主动移除连接（空闲超时/关闭全部）时先发离线通知
 	g.connectionManager.SetOnRemoveClose(g.notifyLogicOffline)
 	return nil

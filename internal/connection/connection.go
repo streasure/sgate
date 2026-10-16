@@ -159,6 +159,21 @@ func (c *Connection) RemoteHost() string {
 	return host
 }
 
+// SetRemoteHost 覆盖缓存的对端 IP（反代场景：WS 握手解析 X-Real-IP/X-Forwarded-For
+// 后用真实客户端 IP 替换代理 IP）。同时更新 RemoteAddr 使日志口径一致。
+// 调用方需保证在此之前未并发调用过 RemoteHost()（热路径消息处理前完成），
+// 否则 per-IP 计数与缓存会短暂不一致——WS 握手在首帧之前，满足此约束。
+func (c *Connection) SetRemoteHost(host string) {
+	c.remoteHost.Store(&host)
+	if c.RemoteAddr != "" {
+		if _, port, ok := strings.Cut(c.RemoteAddr, ":"); ok {
+			c.RemoteAddr = host + ":" + port
+		} else {
+			c.RemoteAddr = host
+		}
+	}
+}
+
 // SetWS 设置连接是否使用 WebSocket 传输。
 func (c *Connection) SetWS(v bool) { c.isWS.Store(v) }
 

@@ -46,6 +46,13 @@ security:
   # KickService（loginserver→sgate 单向踢人 RPC）鉴权 token；空=拒绝全部 Kick RPC。
   # 与 loginserver sgate.internalToken 保持一致。
   kickInternalToken: "loginserver-sgate-internal"
+  # 反向代理信任列表（IP 或 CIDR）。仅对 WebSocket 生效：握手时直连对端命中
+  # 则从 X-Real-IP / X-Forwarded-For 解析真实客户端 IP（更新 RemoteHost 与
+  # per-IP 计数）。TCP 无 HTTP 头无法传递，反代场景请用 WS。
+  # 空（默认）= 不信任任何代理头，防 XFF 伪造。
+  # trustedProxies:
+  #   - "10.0.0.0/8"      # 内网代理段
+  #   - "192.168.1.100"   # 单台 Nginx
   rateLimit:
     enabled: true       # 出口 IP 后面有多台机器（NAT/CGNAT）时 per-IP 限额共享，按需调大 maxTokens 或配白名单
   circuitBreaker:

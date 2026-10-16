@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -171,6 +172,17 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		wsConn.SetConnectionID(connectionID)
 	}
 
+	// 反代场景：直连对端是可信代理时，从 X-Real-IP / X-Forwarded-For 解析真实
+	// 客户端 IP，覆盖 RemoteHost 缓存并重键 per-IP 计数。须在首帧（pipeline 安全链
+	// 首次读 RemoteHost）之前完成——握手在首帧之前，满足约束。
+	if g.IsTrustedProxy(netutil.AddrHost(wsConn.Conn.RemoteAddr())) {
+		if realIP := resolveRealClientIP(headers); realIP != "" && realIP != netutil.AddrHost(wsConn.Conn.RemoteAddr()) {
+			if g.connectionManager.UpdateConnectionIP(wsConn.ConnectionID(), realIP) {
+				tlog.Debug(context.TODO(), "ws trusted proxy resolved real IP connectionID=%s realIP=%s", wsConn.ConnectionID(), realIP)
+			}
+		}
+	}
+
 	if conn := g.connectionManager.GetConnection(wsConn.ConnectionID()); conn != nil && !conn.IsWebSocket() {
 		conn.SetWS(true)
 	}
@@ -178,6 +190,26 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	tlog.Debug(context.TODO(), "WebSocket handshake success connectionID=%s", wsConn.ConnectionID())
 
 	return gnet.None
+}
+
+// resolveRealClientIP 从 WS 握手头解析真实客户端 IP：
+// 优先 X-Real-IP（Nginx proxy_set_header）；否则取 X-Forwarded-For 最左项
+// （客户端首个添加的 = 真实源，后续是逐级代理追加）。均无或非法返回空串。
+func resolveRealClientIP(headers map[string]string) string {
+	if v := strings.TrimSpace(headers["x-real-ip"]); v != "" {
+		if _, err := netip.ParseAddr(v); err == nil {
+			return v
+		}
+	}
+	if xff := strings.TrimSpace(headers["x-forwarded-for"]); xff != "" {
+		first, _, _ := strings.Cut(xff, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			if _, err := netip.ParseAddr(first); err == nil {
+				return first
+			}
+		}
+	}
+	return ""
 }
 
 // parseWebSocketFrame 从缓冲区解析WebSocket帧，提取操作码、载荷、FIN 与 mask 位。

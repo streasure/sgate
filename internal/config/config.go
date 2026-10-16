@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"github.com/streasure/util/uconfig"
@@ -196,7 +198,7 @@ type FilterItemConfig struct {
 	Config map[string]any `yaml:"config"`
 }
 
-// SecurityConfig 安全防护配置（白名单/黑名单/限流/熔断/Kick RPC 鉴权）
+// SecurityConfig 安全防护配置（白名单/黑名单/限流/熔断/Kick RPC 鉴权/反代信任）
 type SecurityConfig struct {
 	Enabled   bool     `yaml:"enabled"`
 	Whitelist []string `yaml:"whitelist"`
@@ -206,6 +208,12 @@ type SecurityConfig struct {
 	KickInternalToken string               `yaml:"kickInternalToken"`
 	RateLimit         RateLimitConfig      `yaml:"rateLimit"`
 	CircuitBreaker    CircuitBreakerConfig `yaml:"circuitBreaker"`
+	// TrustedProxies 反向代理信任列表（IP 或 CIDR）。仅对 WebSocket 生效：
+	// 握手时若直连对端命中此列表，则从 X-Real-IP / X-Forwarded-For 解析真实
+	// 客户端 IP 并更新连接（RemoteHost + per-IP 计数重键）。TCP 无 HTTP 头
+	// 无法传递真实 IP，反代场景请用 WS 或在代理层终止后直连。
+	// 空（默认）= 不信任任何代理头，防 XFF 伪造。
+	TrustedProxies []string `yaml:"trustedProxies"`
 }
 
 // LoginValidationConfig LoginGate loginKey 校验开关与周期安全网。
@@ -374,6 +382,25 @@ func (c *Config) Validate() error {
 	if c.JWTAuth.Enabled && c.JWTAuth.Secret == "" {
 		// 空 secret时 HS256 用空键验签，任何知道此事实的人都能伪造任意用户令牌
 		return fmt.Errorf("jwtAuth.secret is required when jwtAuth.enabled=true")
+	}
+	for _, p := range c.Security.TrustedProxies {
+		if err := validateIPOrCIDR(p); err != nil {
+			return fmt.Errorf("security.trustedProxies %q: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// validateIPOrCIDR 校验字符串为合法 IP 或 CIDR 前缀
+func validateIPOrCIDR(s string) error {
+	if strings.Contains(s, "/") {
+		if _, err := netip.ParsePrefix(s); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := netip.ParseAddr(s); err != nil {
+		return err
 	}
 	return nil
 }

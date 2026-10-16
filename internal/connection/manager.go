@@ -165,6 +165,24 @@ func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) stri
 	return connectionID
 }
 
+// UpdateConnectionIP 更换连接的对端 IP 并重键 per-IP 计数（反代 WS 握手解析
+// XFF 后调用：decrement 代理 IP、increment 真实客户端 IP、覆盖 RemoteHost 缓存）。
+// 连接不存在时 no-op。返回是否发生了实际变更。
+func (cm *ConnectionManager) UpdateConnectionIP(connectionID, newIP string) bool {
+	conn, ok := cm.connections.Load(connectionID)
+	if !ok || newIP == "" {
+		return false
+	}
+	oldIP := conn.RemoteHost()
+	if oldIP == newIP {
+		return false
+	}
+	cm.decrementIP(oldIP)
+	cm.incrementIP(newIP)
+	conn.SetRemoteHost(newIP)
+	return true
+}
+
 // GetConnection 根据连接ID获取连接对象。
 func (cm *ConnectionManager) GetConnection(connectionID string) *Connection {
 	v, ok := cm.connections.Load(connectionID)
