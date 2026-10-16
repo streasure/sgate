@@ -51,3 +51,35 @@ func TestKickByIPMatchesRemoteHost(t *testing.T) {
 		t.Fatal("both conns should be closed")
 	}
 }
+
+func TestKickByIPCIDRMatchesSubnet(t *testing.T) {
+	g := newKickTestGateway()
+	inSubnet := &kickMockConn{}
+	outSubnet := &kickMockConn{}
+	g.connectionManager.AddConnection(inSubnet, "u-in")
+	g.connectionManager.AddConnection(outSubnet, "u-out")
+
+	// inSubnet/outSubnet RemoteHost 均为 127.0.0.1（mock 固定）
+	// 10.0.0.0/8 不含 127.0.0.1 → 0
+	if n := g.KickByIP("10.0.0.0/8", "blacklist"); n != 0 {
+		t.Fatalf("cidr 10.0.0.0/8 kicked=%d, want 0", n)
+	}
+	// 127.0.0.0/8 含 127.0.0.1 → 2
+	if n := g.KickByIP("127.0.0.0/8", "blacklist"); n != 2 {
+		t.Fatalf("cidr 127.0.0.0/8 kicked=%d, want 2", n)
+	}
+	if !inSubnet.isClosed() || !outSubnet.isClosed() {
+		t.Fatal("both conns should be closed by 127.0.0.0/8")
+	}
+}
+
+func TestKickByIPInvalidTarget(t *testing.T) {
+	g := newKickTestGateway()
+	g.connectionManager.AddConnection(&kickMockConn{}, "u1")
+	if n := g.KickByIP("not-an-ip", "blacklist"); n != 0 {
+		t.Fatalf("invalid target kicked=%d, want 0", n)
+	}
+	if n := g.KickByIP("10.0.0.0/33", "blacklist"); n != 0 {
+		t.Fatalf("invalid cidr kicked=%d, want 0", n)
+	}
+}

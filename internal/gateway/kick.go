@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"net/netip"
 
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
@@ -72,14 +73,26 @@ func (g *Gateway) KickByAccounts(accountIDs []string, reason string) int {
 }
 
 // KickByIP 按对端 IP 踢本地全部连接，返回踢中数。
+// 目标支持两种形态：
+//   - 纯 IP（如 "1.2.3.4"）→ 规范化为 /32 或 /128 前缀，精确匹配
+//   - CIDR（如 "10.0.0.0/8"）→ 前缀 Contains 匹配（NAT/网段封禁）
 func (g *Gateway) KickByIP(ip, reason string) int {
 	if ip == "" {
+		return 0
+	}
+	prefix, ok := parseKickPrefix(ip)
+	if !ok {
+		tlog.Warn(context.TODO(), "kick by ip invalid target ip=%s", ip)
 		return 0
 	}
 	p := kickNotifyParams{reason: reason, code: 403, message: "ip banned"}
 	var matched []*connection.Connection
 	g.connectionManager.ForEach(func(conn *connection.Connection) bool {
-		if conn.RemoteHost() == ip {
+		addr, err := netip.ParseAddr(conn.RemoteHost())
+		if err != nil {
+			return true
+		}
+		if prefix.Contains(addr) {
 			matched = append(matched, conn)
 		}
 		return true
@@ -87,6 +100,22 @@ func (g *Gateway) KickByIP(ip, reason string) int {
 	for _, conn := range matched {
 		g.kickConn(conn, p)
 	}
-	tlog.Info(context.TODO(), "kick by ip done ip=%s matched=%d reason=%s", ip, len(matched), reason)
+	tlog.Info(context.TODO(), "kick by ip done ip=%s prefix=%s matched=%d reason=%s", ip, prefix, len(matched), reason)
 	return len(matched)
+}
+
+// parseKickPrefix 解析踢人目标为 netip.Prefix：CIDR 原样解析；纯 IP 转 /32 或 /128。
+func parseKickPrefix(s string) (netip.Prefix, bool) {
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p, true
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	bits := 32
+	if addr.Is6() {
+		bits = 128
+	}
+	return netip.PrefixFrom(addr, bits), true
 }

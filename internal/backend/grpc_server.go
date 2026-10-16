@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/streasure/sgate/internal/routes"
@@ -212,23 +213,58 @@ func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*p
 	return &protoGw.BroadcastAck{}, nil
 }
 
-// BroadcastAll 向所有客户端广播消息
+// BroadcastAll 向所有客户端广播消息。
+// 百万连接时同步遍历会阻塞 gRPC handler 数秒：先快照再分片并发 Send
+// （Send 内部走 AsyncWrite，真正写盘在 gnet loop；并发只加速遍历与入队）。
+// 返回时仅保证「已分发」，不等待全部写盘完成（与 SendToClient 语义一致）。
 func (s *GRPCServer) BroadcastAll(_ context.Context, req *protoGw.BroadcastAllReq) (*protoGw.BroadcastAllAck, error) {
 	data, err := encodePushMessage(req.GetCmd(), req.GetData())
 	if err != nil {
 		return nil, err
 	}
-	var firstErr error
+	// 快照：避免长时间持有分片锁
+	var matched []*connection.Connection
 	s.gateway.GetConnectionManager().ForEach(func(conn *connection.Connection) bool {
-		if err := conn.Send(data); err != nil && firstErr == nil {
-			firstErr = err
-		} else if err == nil {
-			s.gateway.AddPushedToClient(1)
+		if conn.GetState() == connection.StateForward {
+			matched = append(matched, conn)
 		}
 		return true
 	})
-	if firstErr != nil {
-		return nil, firstErr
+	if len(matched) == 0 {
+		return &protoGw.BroadcastAllAck{}, nil
+	}
+	// 分片并发入队（pattern 同 maintenance.kickConnectionsAsync）
+	var sent, failed atomic.Int64
+	var firstErr atomic.Pointer[error]
+	var wg sync.WaitGroup
+	const workers = 32
+	total := len(matched)
+	chunkSize := (total + workers - 1) / workers
+	for w := range workers {
+		lo := w * chunkSize
+		if lo >= total {
+			break
+		}
+		hi := min(lo+chunkSize, total)
+		chunk := matched[lo:hi]
+		wg.Go(func() {
+			for _, conn := range chunk {
+				if err := conn.Send(data); err != nil {
+					failed.Add(1)
+					firstErr.CompareAndSwap(nil, &err)
+				} else {
+					sent.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	s.gateway.AddPushedToClient(sent.Load())
+	if failed.Load() > 0 {
+		tlog.Warn(context.TODO(), "broadcast all partial sent=%d failed=%d total=%d", sent.Load(), failed.Load(), total)
+		if e := firstErr.Load(); e != nil {
+			return nil, *e
+		}
 	}
 	return &protoGw.BroadcastAllAck{}, nil
 }
