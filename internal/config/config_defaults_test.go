@@ -100,9 +100,6 @@ func TestApplyRuntimeDefaults_ZeroValuesGetDefaults(t *testing.T) {
 	if c.Etcd.LeaseTTL != DefaultEtcdLeaseTTL {
 		t.Errorf("Etcd.LeaseTTL = %q, want %q", c.Etcd.LeaseTTL, DefaultEtcdLeaseTTL)
 	}
-	if c.Cluster.Mode != DefaultClusterMode {
-		t.Errorf("Cluster.Mode = %q, want %q", c.Cluster.Mode, DefaultClusterMode)
-	}
 	if c.Perf.GcPercent != DefaultPerfGcPercent {
 		t.Errorf("Perf.GcPercent = %d, want %d", c.Perf.GcPercent, DefaultPerfGcPercent)
 	}

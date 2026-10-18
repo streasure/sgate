@@ -156,9 +156,6 @@ const (
 	// DefaultEtcdLeaseTTL 注册 lease TTL
 	DefaultEtcdLeaseTTL = "10s"
 
-	// DefaultClusterMode standalone | cluster
-	DefaultClusterMode = "standalone"
-
 	// DefaultStreamShardCount 网关↔logic 流分片数（压测口径 96）
 	DefaultStreamShardCount = 96
 

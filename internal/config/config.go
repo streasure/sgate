@@ -270,10 +270,9 @@ type TLSConfig struct {
 	MinVersion string `yaml:"minVersion"`
 }
 
-// ClusterConfig 集群配置
+// ClusterConfig 实例身份配置（无网关间协同；多实例靠 loginserver 权威 + Kick 广播）
 type ClusterConfig struct {
-	Mode   string `yaml:"mode"` // standalone: 单机模式（默认），cluster: 集群协同模式
-	NodeID string `yaml:"nodeID"`
+	NodeID string `yaml:"nodeID"` // 实例节点 ID（默认取 hostname-pid）
 }
 
 // DiscoveryConfig 服务发现配置
@@ -540,9 +539,6 @@ func (c *Config) ApplyRuntimeDefaults() {
 	}
 	if c.Etcd.LeaseTTL == "" {
 		c.Etcd.LeaseTTL = DefaultEtcdLeaseTTL
-	}
-	if c.Cluster.Mode == "" {
-		c.Cluster.Mode = DefaultClusterMode
 	}
 	if c.Stream.ShardCount <= 0 {
 		c.Stream.ShardCount = DefaultStreamShardCount

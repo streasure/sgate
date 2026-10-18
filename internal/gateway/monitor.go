@@ -182,6 +182,11 @@ func (g *Gateway) StartStatsServer(addr string) {
 	srv := &http.Server{Addr: addr, Handler: mux}
 	g.statsServer = srv
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(context.TODO(), "stats server panic recovered error=%v", r)
+			}
+		}()
 		tlog.Info(context.TODO(), "starting stats server addr=%s", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			tlog.Error(context.TODO(), "stats server failed error=%v", err)
@@ -361,6 +366,11 @@ func (g *Gateway) startConfigCenterWatcher() {
 		return
 	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(context.TODO(), "config center watcher panic recovered error=%v", r)
+			}
+		}()
 		for yamlBytes := range ch {
 			if len(yamlBytes) == 0 {
 				continue

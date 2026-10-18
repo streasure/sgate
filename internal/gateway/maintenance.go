@@ -137,6 +137,11 @@ func (g *Gateway) kickConnectionsAsync(matched []*connection.Connection, reason 
 	}
 	total := len(matched)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(context.TODO(), "kickConnectionsAsync panic recovered error=%v", r)
+			}
+		}()
 		var kicked atomic.Int64
 		var wg sync.WaitGroup
 		const workers = 32

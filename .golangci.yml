@@ -3,7 +3,7 @@ run:
   timeout: 3m
   tests: false
   allow-parallel-runners: true
-  go: "1.22"
+  go: "1.26"
 
 issues:
   exclude-dirs:

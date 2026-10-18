@@ -21,7 +21,7 @@
 ┌────────────────────────▼────────────────────────────────┐
 │              internal/backend (后端层)                    │
 │  LogicClient · LogicClientPool · StreamManager           │
-│  GRPCServer · GatewayClientPool · GatewayInterface       │
+│  GRPCServer · GatewayInterface                            │
 └────────────────────────┬────────────────────────────────┘
                          │ 依赖
 ┌────────────────────────▼────────────────────────────────┐
@@ -70,12 +70,11 @@ Gateway 结构体承载全部接入侧状态：
 
 | 类型 | 文件 | 职责 |
 | --- | --- | --- |
-| `LogicClient` | client.go | 单逻辑服连接：流分片、发送、健康检查、重连 |
-| `LogicClientPool` | pool.go | 多逻辑服管理：etcd 发现、负载均衡、地址缓存 |
-| `StreamManager` / `StreamShard` | stream.go | gRPC 流分片：按 session 分片降低锁竞争 |
-| `LogicConnectionState` 等 | state.go | 连接状态机、`Err*` 错误、重连/健康检查配置 |
-| `GRPCServer` | grpc_server.go | 逻辑服推送入口、RPC（Kick/Broadcast/Group） |
-| `GatewayClientPool` | gateway_client.go | 网关间 gRPC 客户端池（cluster 模式） |
+| `LogicClient` | client.go | 单逻辑服连接：流分片、发送、断线缓存 |
+| `LogicClientPool` | pool.go | 多逻辑服管理：接入、负载均衡、地址缓存 |
+| `StreamManager` / `StreamShard` | stream.go | gRPC 流分片：按 session 分片降低锁竞争，StreamBatch 合帧 |
+| `LogicConnectionState` 等 | state.go | 连接状态机、`Err*` 错误定义 |
+| `GRPCServer` | grpc_server.go | 逻辑服 flip 流入口、Gateway/Kick unary RPC |
 | `GatewayInterface` | iface.go | backend 对 gateway 的能力依赖（消费方定义接口） |
 
 ### 2.3 internal/connection
@@ -205,11 +204,11 @@ types.GetFilterChain().AddFilter(myFilter)
 
 ```text
 Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pipeline）
-  → 过载检查 → IP 限流 → 请求解析 → 封禁检查 (rejectIfBanned)
+  → 过载检查 → IP 限流 → 请求解析
   → 并发登录槽 (loginSlots，满则 429)
   → worker 协程 finishLoginGate（避免阻塞 event loop）
       ├─ loginValidation.enabled=true 时经 loginserver ValidateLoginToken（失败 401，fail-closed）
-      ├─ 二次封禁检查、绑定 userUUID = {serverId}:{userId}、踢旧连接
+      ├─ 绑定 userUUID = {serverId}:{userId}、踢旧连接
       ├─ Client ← CmdLoginGateAck(1000002)（code=0 成功）
       └─ 原始 LoginGate StreamData 带 SessionId/UserKey 异步转发 logic
          （logic 直接读取原始 LoginGateReq，无 CmdLogicLoginReq/Ack 转换）
@@ -253,7 +252,6 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
 | --- | --- | --- | --- |
 | `GatewayInterface` | backend/iface.go | `*gateway.Gateway` | LogicClient、GRPCServer、Pools |
 | `LogicClientProvider` | connection/iface.go | `*backend.LogicClient` | pipeline、Connection 缓存 |
-| `GatewayClientProvider` | backend/iface.go | `*backend.GatewayClient` | 跨网关推送 |
 
 **好处**：backend 不 import gateway，避免循环依赖；测试时可 mock。
 

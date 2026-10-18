@@ -402,6 +402,11 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 // 每轮热读 protection 配置（热更生效）；单轮 panic 恢复后继续下一轮，
 // 不像旧实现 recover 即退出——那会让 WS 心跳清理永久失效。
 func (g *Gateway) wsHeartbeatChecker() {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error(context.TODO(), "wsHeartbeatChecker panic recovered error=%v", r)
+		}
+	}()
 	for {
 		interval := time.Duration(g.getProtection().WSCheckInterval) * time.Second
 		if interval <= 0 {
@@ -482,10 +487,10 @@ func (g *Gateway) configWatcher() {
 		g.configPath = p
 	}
 	if g.configPath == "" {
-		g.configPath = "config/config.yaml"
+		g.configPath = "config/gateway.yaml"
 	}
 	if _, err := os.Stat(g.configPath); errors.Is(err, fs.ErrNotExist) {
-		altPaths := []string{"config/config.yaml", "../config/config.yaml", "../../config/config.yaml"}
+		altPaths := []string{"config/gateway.yaml", "../config/gateway.yaml", "../../config/gateway.yaml"}
 		found := false
 		for _, path := range altPaths {
 			if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
@@ -506,14 +511,16 @@ func (g *Gateway) configWatcher() {
 
 	lastModTime := fileInfo.ModTime()
 
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-g.stopChan:
 			return
-		default:
+		case <-ticker.C:
 			fileInfo, err := os.Stat(g.configPath)
 			if err != nil {
-				time.Sleep(5 * time.Second)
 				continue
 			}
 
@@ -522,13 +529,10 @@ func (g *Gateway) configWatcher() {
 				newCfg, err := config.Load(g.configPath)
 				if err != nil {
 					tlog.Error(context.TODO(), "config reload failed path=%s error=%v", g.configPath, err)
-					time.Sleep(5 * time.Second)
 					continue
 				}
 				g.tryEnqueueConfig(newCfg)
 			}
-
-			time.Sleep(5 * time.Second)
 		}
 	}
 }

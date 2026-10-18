@@ -130,9 +130,6 @@ monitoring:
   pprofAddr: "127.0.0.1:6060"
   disableMetricsLog: true   # 百万连接压测关闭每秒 metrics 日志
 
-cluster:
-  mode: "standalone"
-
 stream:
   shardCount: 128
   sendChannelSize: 1048576

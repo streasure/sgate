@@ -202,6 +202,11 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	// 校验与绑定在 worker 中执行，避免同步 gRPC 阻塞 event loop。
 	// 成功后在 worker 中回写 LoginGateAck（writeFrame 在 worker 中改用 AsyncWrite）。
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(context.TODO(), "finishLoginGate panic recovered conn=%s error=%v", connectionID, r)
+			}
+		}()
 		defer g.releaseLoginSlot()
 		g.finishLoginGate(c, connectionID, message, req)
 	}()
@@ -279,6 +284,11 @@ var errLogicClientUnavailable = errors.New("logic client unavailable")
 // 全部失败时按 warnFormat（唯一参数 serverID）打点。TCP/WS 登录共用。
 func (g *Gateway) forwardLoginAsync(serverID string, msg *protoGw.StreamData, warnFormat string) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(context.TODO(), "forwardLoginAsync panic recovered serverID=%s error=%v", serverID, r)
+			}
+		}()
 		err := retry.Do(context.TODO(), 20, 100*time.Millisecond, func() error {
 			lc := g.GetLogicClient(serverID)
 			if lc == nil {

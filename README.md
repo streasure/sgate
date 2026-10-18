@@ -192,14 +192,14 @@ CONF=config/cluster/gateway1.yaml ./start.sh
 | 文件 | 用途 |
 | --- | --- |
 | `config/gateway.yaml` | 开发/单机默认（TCP 48080 / WS 48081 / HTTP 8081） |
-| `config/cluster/gateway1.yaml` / `config/cluster/gateway2.yaml` | 集群双实例（端口错开，`cluster.mode: cluster`） |
+| `config/cluster/gateway1.yaml` / `config/cluster/gateway2.yaml` | 多实例对等部署（端口/NodeID 错开） |
 | `config/bench/batch-off.yaml` / `config/bench/batch-on.yaml` | 压测 batch 关/开（`benchMode`，关限流与登录校验） |
 | `config/bench/rate-limit.yaml` | 限流下扫压测 |
 | `config/bench/1m.yaml` | 百万连接压测 |
 | `config/log/default.yaml` | 常规日志（默认 `-logger`） |
 | `config/log/bench.yaml` | 压测/排障日志（含采样） |
 
-配置原则：**yaml 只写环境相关项**（身份、端口、etcd 地址、Redis 地址、特性开关、环境差异覆盖）；「基本不改」的数值（`shardCount`、帧尺寸、限流默认、GOGC、封禁 Redis 非环境字段等）在 `internal/config/defaults.go` + `ApplyRuntimeDefaults` 补齐，无需在 yaml 重复。详细字段见 [§6 配置详解](#六配置详解)。
+配置原则：**yaml 只写环境相关项**（身份、端口、etcd 地址、特性开关、环境差异覆盖）；「基本不改」的数值（`shardCount`、帧尺寸、限流默认、GOGC 等）在 `internal/config/defaults.go` + `ApplyRuntimeDefaults` 补齐，无需在 yaml 重复。详细字段见 [§6 配置详解](#六配置详解)。
 
 ### 4.2 启动顺序
 
@@ -250,50 +250,32 @@ Get-Process -Name sgate -ErrorAction SilentlyContinue | Stop-Process -Force
 
 ## 五、运行模式
 
-sgate 支持两种运行模式，通过 `cluster.mode` 配置切换：
+sgate 无网关间协同模式；多实例为对等部署。
 
-### 5.1 单体模式（默认）
+### 5.1 部署形态
+
+sgate 实例之间**无直接协作**（无网关间发现、无 Leader 选举、无互踢 RPC）。多实例部署时每个实例对等：
+
+- 向 etcd 自注册（供 loginserver 发现并下发 Kick/对账会话）
+- 逻辑服发现并拨入各实例
+- 跨实例一致性由 loginserver 权威库 + `KickService` 广播覆盖
 
 ```yaml
-cluster:
-  enabled: false
-  mode: "standalone"
+discovery:
+  enabled: true        # 逻辑服发现
+  registerSelf: true   # 向 etcd 注册网关自身（loginserver 需要）
 ```
 
 **行为：**
-- 在 etcd 注册网关自身连接信息（`/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`），供 loginserver 等服务发现
-- 保留：逻辑服发现（etcd）、负载均衡
-- 跳过网关间发现（GatewayClientPool 不创建）
-- 跳过 Leader 选举
+- 在 etcd 注册网关自身连接信息（`/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`），供 loginserver 发现
+- 逻辑服发现（etcd）、负载均衡
+- 不做网关间发现、不做 Leader 选举
 
-**适用场景：** 单实例部署，不需要网关间协作，但需要向 loginserver 暴露连接地址。
+**适用场景：** 单实例或多实例对等部署。
 
-### 5.2 集群模式
+### 5.2 多实例
 
-```yaml
-cluster:
-  enabled: true
-  mode: "cluster"
-```
-
-**行为：**
-- 在 etcd 注册网关自身（`/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`）
-- 发现同一 zone 的其他网关实例
-- 启用 Leader 选举
-- 创建网关间 gRPC 客户端池
-
-**适用场景：** 多实例部署，需要网关间通信。
-
-### 5.3 模式对比
-
-| 特性 | standalone | cluster |
-| --- | --- | --- |
-| 逻辑服发现 | ✅ | ✅ |
-| 负载均衡 | ✅ | ✅ |
-| 网关自注册 | ✅ (registerSelf) | ✅ |
-| 网关间发现 | ❌ | ✅ |
-| Leader 选举 | ❌ | ✅ |
-| GatewayClientPool | ❌ | ✅ |
+复制 `config/cluster/gateway1.yaml` / `gateway2.yaml`，改 `serverId` 与端口即可。loginserver 通过 etcd 发现全部实例；踢人走 `KickService`（loginserver → 各 sgate 单向广播）。
 
 ---
 
@@ -346,7 +328,7 @@ etcd 默认接入（无启用开关），启动网关前必须先启动 etcd。
 | `enabled` | bool | `false` | 是否启用逻辑服发现（`config/gateway.yaml` 默认 `true`） |
 | `serviceName` | string | `logic` | 逻辑服服务名 |
 | `zone` | string | `default` | 优先选择的可用区 |
-| `registerSelf` | bool | `false` | standalone 模式下是否向 etcd 注册网关自身连接信息（供 loginserver 发现；`config/gateway.yaml` 默认 `true`） |
+| `registerSelf` | bool | `false` | 是否向 etcd 注册网关自身连接信息（供 loginserver 发现；`config/gateway.yaml` 默认 `true`） |
 
 ### 6.4.1 etcd 注册地址格式
 
@@ -370,12 +352,11 @@ etcd 默认接入（无启用开关），启动网关前必须先启动 etcd。
 
 loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` 前缀获取网关连接地址。
 
-### 6.5 `cluster` 集群配置
+### 6.5 `cluster` 实例身份配置
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `mode` | string | `standalone` | `standalone` 单体模式；`cluster` 集群模式 |
-| `nodeID` | string | 自动生成 | 节点 ID |
+| `nodeID` | string | 自动生成（hostname-pid） | 节点 ID |
 
 ### 6.6 `grpc` gRPC 服务
 
@@ -702,13 +683,12 @@ internal/gateway/         接入层（package gateway）
   version.go                版本信息
 
 internal/backend/         后端层（package backend）
-  client.go                 LogicClient、HealthChecker、ReconnectManager
-  pool.go                   LogicClientPool（etcd 发现、负载均衡）
-  stream.go                 StreamManager、StreamShard（gRPC 流分片）
-  state.go                  连接状态、错误定义、重连/健康检查配置
-  grpc_server.go            GRPCServer（逻辑服推送、RPC 接口）
-  gateway_client.go         GatewayClientPool（网关间通信）
-  iface.go                  GatewayInterface、GatewayClientProvider
+  client.go                 LogicClient（状态机、断线缓存、SendMessage）
+  pool.go                   LogicClientPool（logic 接入、负载均衡）
+  stream.go                 StreamManager、StreamShard（gRPC 流分片、StreamBatch 合帧）
+  state.go                  连接状态、错误定义
+  grpc_server.go            GRPCServer（OnData flip 流、Gateway/Kick unary RPC）
+  iface.go                  GatewayInterface
 
 internal/connection/      连接层（package connection）
   connection.go             客户端连接对象
@@ -727,7 +707,7 @@ internal/component/       组件容器（Security/Obs/Traffic/Cluster）
 internal/config/          配置结构、默认值、校验
 internal/security/        白名单、限流、熔断、WAF、JWT
 internal/traffic/         灰度、镜像、降级
-internal/cluster/         集群、负载均衡、Leader 选举
+internal/cluster/         配置中心、告警 webhook（无 Leader 选举）
 internal/obs/             监控、追踪、pprof
 internal/types/           过滤器链、公共类型
 internal/logic/           逻辑服 SDK（bench 用）
@@ -851,7 +831,7 @@ monitoring:
 
 1. 使用 Linux 服务器
 2. 启动 etcd 集群（3 节点）
-3. 配置 `cluster.mode: "cluster"` 启用多实例
+3. 多实例对等部署（`discovery.registerSelf: true`，各自独立 `serverId`/端口）
 4. 前置 Nginx/HAProxy 做 TLS 终止和负载均衡
 5. 配置 `monitoring.pprofAddr`
 6. 配置告警 Webhook

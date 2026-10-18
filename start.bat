@@ -26,9 +26,15 @@ setlocal
 if "%CONF%"=="" set CONF=config\gateway.yaml
 if "%LOG_CONF%"=="" set LOG_CONF=config\log\default.yaml
 
+:: 版本号：优先 GIT_TAG，否则取短 commit
+if "%GIT_TAG%"=="" (
+    for /f "delims=" %%i in ('git rev-parse --short HEAD 2^>nul') do set GIT_TAG=%%i
+)
+if "%GIT_TAG%"=="" set GIT_TAG=dev
+
 :: 编译
-echo [%date% %time%] 编译 sgate...
-go build -o sgate.exe .\cmd\gateway
+echo [%date% %time%] 编译 sgate version=%GIT_TAG%...
+go build -ldflags "-X github.com/streasure/sgate/internal/gateway.BuildVersion=%GIT_TAG%" -o sgate.exe .\cmd\gateway
 if %ERRORLEVEL% neq 0 (
     echo [%date% %time%] 编译失败
     exit /b 1

@@ -27,9 +27,6 @@ monitoring:
   pprofAddr: "127.0.0.1:6061"
   disableMetricsLog: true   # 线上关闭每秒 metrics 日志
 
-cluster:
-  mode: "cluster"
-
 security:
   enabled: true
   rateLimit:

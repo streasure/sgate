@@ -81,25 +81,19 @@ func buildRegisterAddress(cfg config.Config, grpcPort int) string {
 }
 
 func (c *ClusterComponent) Start() error {
-	clusterMode := c.cfg.Cluster.Mode
-	if clusterMode == "" {
-		clusterMode = "standalone"
-	}
-
 	etcdCfg := uetcd.Config{Endpoints: c.cfg.Etcd.Endpoints, Endpoint: c.cfg.Etcd.Endpoint, Username: c.cfg.Etcd.Username, Password: c.cfg.Etcd.Password, ServicePrefix: c.cfg.Etcd.ServicePrefix}
 	compCfg := uetcd.ComponentConfig{Etcd: etcdCfg}
 
-	// 逻辑服务发现（单体和集群模式均需要）
+	// 逻辑服务发现
 	if c.cfg.Discovery.Enabled {
 		logicType := serverTypeName(enums.ServerType_SERVER_TYPE_LOGICSERVER)
 		compCfg.Discovery = uetcd.DiscoveryConfig{ServiceID: c.cfg.Belong + "/" + logicType + ":" + c.cfg.Zone}
 	}
 
-	// 注册网关自身，供 loginserver 等服务发现连接地址
-	// cluster 模式始终注册；standalone 模式由 RegisterSelf 控制
+	// 注册网关自身，供 loginserver 发现连接地址（registerSelf 控制）
 	// ServiceID 使用 protocol enums 的 SERVER_TYPE_SGATE 名称
 	sgateType := serverTypeName(enums.ServerType_SERVER_TYPE_SGATE)
-	if clusterMode == "cluster" || c.cfg.Discovery.RegisterSelf {
+	if c.cfg.Discovery.RegisterSelf {
 		advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
 		// ServiceID 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
 		serviceID := c.cfg.Belong + "/" + sgateType + ":" + c.cfg.Zone
@@ -118,11 +112,10 @@ func (c *ClusterComponent) Start() error {
 
 	if compCfg.Registration.ServiceID != "" {
 		advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
-		tlog.Info(context.TODO(), "etcd 注册成功 serviceID=%s instanceID=%s address=%s mode=%s",
+		tlog.Info(context.TODO(), "etcd 注册成功 serviceID=%s instanceID=%s address=%s",
 			compCfg.Registration.ServiceID,
 			c.cfg.ServerID,
-			advertiseAddr,
-			clusterMode)
+			advertiseAddr)
 	} else {
 		tlog.Info(context.TODO(), "etcd 逻辑服务发现已启动（网关自身不注册） serviceID=%s", compCfg.Discovery.ServiceID)
 	}
@@ -142,12 +135,9 @@ func (c *ClusterComponent) Start() error {
 	}
 	tlog.Info(context.TODO(), "loginserver discovery started serviceID=%s", loginServiceID)
 
-	// Leader 选举已移除（原 Cluster stub 恒为 leader，无实际语义）
-
 	setClusterStartResources(c.Discovery, c.LoginDiscovery)
 
-	tlog.Info(context.TODO(), "集群组件已启动 mode=%s serverType=%s serverID=%s zone=%s",
-		clusterMode,
+	tlog.Info(context.TODO(), "cluster component started serverType=%s serverID=%s zone=%s",
 		c.cfg.ServerType,
 		c.cfg.ServerID,
 		c.cfg.Zone)

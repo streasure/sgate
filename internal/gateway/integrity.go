@@ -1,12 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"sync"
 	"time"
 
 	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/util/tlog"
 )
 
 type MessageIntegrity struct {
@@ -28,6 +30,11 @@ func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 }
 
 func (mi *MessageIntegrity) cleanupCache() {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error(context.TODO(), "message integrity cleanup panic recovered error=%v", r)
+		}
+	}()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
