@@ -28,11 +28,9 @@ func TestDocDefaults_MatchREADME(t *testing.T) {
 		{"circuitBreaker.enabled", c.Security.CircuitBreaker.Enabled, false},
 		{"dropOnOverload", c.Protection.DropOnOverload, false},
 		{"discovery.enabled", c.Discovery.Enabled, false},
-		{"gatewayDiscovery", c.Discovery.GatewayDiscovery, false},
 		{"registerSelf", c.Discovery.RegisterSelf, false},
 		{"stream.batchPush", c.Stream.BatchPush, false},
 		{"loginValidation.enabled", c.LoginValidation.Enabled, false},
-		{"cluster.enabled", c.Cluster.Enabled, false},
 		{"waf.enabled", c.WAF.Enabled, false},
 	}
 	for _, ch := range checks {

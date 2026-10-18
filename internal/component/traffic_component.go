@@ -12,7 +12,7 @@ import (
 	"github.com/streasure/util/tlog"
 )
 
-// TrafficComponent 管理灰度、流量镜像、降级、eBPF 和 Wasm 等流量组件的生命周期。
+// TrafficComponent 管理灰度、流量镜像、降级和 Wasm 等流量组件的生命周期。
 type TrafficComponent struct {
 	component.BaseComponent
 

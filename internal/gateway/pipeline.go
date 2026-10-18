@@ -563,11 +563,8 @@ func writeFrameAsync(conn gnet.Conn, data []byte) {
 	buf := make([]byte, 4+len(data))
 	copy(buf, header[:])
 	copy(buf[4:], data)
-	_ = conn.AsyncWrite(buf, noopAsyncCallback)
+	_ = conn.AsyncWrite(buf, connection.NoopAsyncCallback)
 }
-
-// noopAsyncCallback AsyncWrite 完成回调，忽略错误。
-func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
 
 // Submit 将 TCP pipeline 任务提交到对应分片的 worker。
 // 提交失败（队列满）时返回 false，调用方负责归还任务与其缓冲。

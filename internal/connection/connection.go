@@ -227,8 +227,8 @@ func (c *Connection) CheckAndIncrementMsgRate(maxPerConn int) bool {
 	return true
 }
 
-// noopAsyncCallback 是异步写入完成时使用的空回调。
-func noopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
+// NoopAsyncCallback 是异步写入完成时使用的空回调。
+func NoopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
 
 // touch 更新连接的最后活跃时间，每64次调用才实际更新一次以减少原子操作开销。
 func (c *Connection) touch() {
@@ -250,7 +250,7 @@ func (c *Connection) Send(data []byte) error {
 	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
-	return c.Conn.AsyncWritev([][]byte{header[:], data}, noopAsyncCallback)
+	return c.Conn.AsyncWritev([][]byte{header[:], data}, NoopAsyncCallback)
 }
 
 // SendMulti 发送已组装好的合并数据。
@@ -259,7 +259,7 @@ func (c *Connection) SendMulti(combined []byte) error {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	return c.Conn.AsyncWrite(combined, noopAsyncCallback)
+	return c.Conn.AsyncWrite(combined, NoopAsyncCallback)
 }
 
 // SendMultiWithCallback 发送合并数据，写入完成后执行回调函数。
@@ -302,7 +302,7 @@ func (c *Connection) SendThenClose(data []byte) error {
 // sendWSFrame 将数据封装为WebSocket帧并发送，支持不同长度的载荷。
 func (c *Connection) sendWSFrame(data []byte) error {
 	frame := EncodeWSFrame(0x82, data)
-	return c.Conn.AsyncWrite(frame, noopAsyncCallback)
+	return c.Conn.AsyncWrite(frame, NoopAsyncCallback)
 }
 
 func (c *Connection) Close() error {

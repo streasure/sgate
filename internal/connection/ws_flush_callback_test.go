@@ -32,7 +32,7 @@ func (c *cbCapturingConn) takeCallback() gnet.AsyncCallback {
 	return c.cb
 }
 
-// TestSendMultiWithCallbackWSCarriesCallback 回归：WS 连接曾走 noopAsyncCallback
+// TestSendMultiWithCallbackWSCarriesCallback 回归：WS 连接曾走 NoopAsyncCallback
 // 分支丢弃回调，导致 FlushCoalesced 的池化缓冲永不归还（coalescerBufPool 只出不进）。
 func TestSendMultiWithCallbackWSCarriesCallback(t *testing.T) {
 	gc := &cbCapturingConn{}

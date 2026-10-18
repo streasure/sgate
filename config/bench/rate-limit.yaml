@@ -29,8 +29,6 @@ monitoring:
   disableTracer: true   # 压测关闭分布式追踪（避免每消息 Span 分配）
   disableMetricsLog: true   # 压测关闭每秒 metrics 日志
 
-cluster:
-  enabled: false
 
 stream:
   batchPush: false

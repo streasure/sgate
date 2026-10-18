@@ -306,13 +306,6 @@ func (g *Gateway) GetLogicClient(serverID string) connection.LogicClientProvider
 	return g.logicClientPool.GetClient(serverID)
 }
 
-func (g *Gateway) GetGatewayClient(serverID string) backend.GatewayClientProvider {
-	if g.gatewayClientPool == nil {
-		return nil
-	}
-	return g.gatewayClientPool.GetClient(serverID)
-}
-
 func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
 	if len(data) == 0 {
 		return

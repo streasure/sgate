@@ -18,16 +18,10 @@ type GatewayInterface interface {
 	AddPushedToClient(n int64)
 	AddPushDroppedNoConn(n int64)
 	GetLogicClient(serverID string) connection.LogicClientProvider
-	GetGatewayClient(serverID string) GatewayClientProvider
 	GetShardedCoalescer() *connection.ShardedWriteCoalescer
 	// KickByAccounts / KickByIP KickService 本地执行（单向 Kick 模型），返回踢中数
 	KickByAccounts(accountIDs []string, reason string) int
 	KickByIP(ip, reason string) int
-}
-
-// GatewayClientProvider 定义网关客户端的连接状态能力。
-type GatewayClientProvider interface {
-	IsConnected() bool
 }
 
 var streamDataPool = sync.Pool{

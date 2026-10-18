@@ -172,18 +172,6 @@ const (
 	DefaultPerfMemoryLimitPercent = 80
 )
 
-// --- 集群 ---
-
-const (
-	// DefaultClusterServiceName 是网关服务身份标识前缀。
-	// 集群 Leader 选举基于该服务的实例列表：同 zone 内按 ip:port 字典序排序，排名第一者为 Leader。
-	DefaultClusterServiceName = "sgate-gateway"
-
-	// DefaultClusterLockTTL 集群心跳/选举 TTL
-	// 必须 > renewInterval（TTL/3），否则续期不及时丢主
-	DefaultClusterLockTTL = "10s"
-)
-
 // --- JWT 鉴权 ---
 
 const (

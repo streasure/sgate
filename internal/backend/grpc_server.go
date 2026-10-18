@@ -12,7 +12,6 @@ import (
 
 	"github.com/streasure/sgate/internal/connection"
 
-	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/ugrpc"
@@ -44,13 +43,14 @@ func NewGRPCServer(gateway GatewayInterface, pool *LogicClientPool, kickToken st
 }
 
 // OnData 处理来自逻辑服的流式数据。
-// 带逻辑服握手元数据（logic 主动拨入，flip 模式）时附着到连接池；
-// 否则回落到旧版握手（sgate 主动拨入的命令流）。
+// logic 主动拨入（flip 模式）必须携带握手元数据；缺失即拒绝（旧版
+// sgate 主动拨入的命令流已移除，唯一 dialer 恒附 metadata）。
 func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
-	if meta, ok := routes.LogicStreamMetadataFromContext(stream.Context()); ok {
-		return s.handleLogicStream(meta, stream)
+	meta, ok := routes.LogicStreamMetadataFromContext(stream.Context())
+	if !ok {
+		return status.Error(codes.InvalidArgument, "logic stream metadata required")
 	}
-	return s.handleLegacyStream(stream)
+	return s.handleLogicStream(meta, stream)
 }
 
 // handleLogicStream flip 模式接收循环：附着分片后由本 handler 驱动
@@ -72,57 +72,6 @@ func (s *GRPCServer) handleLogicStream(meta routes.LogicStreamMeta, stream proto
 
 	shard.receiveMessages(client, meta.ShardIdx)
 	return nil
-}
-
-// sendLegacyFrame 向旧版握手流发送单条消息（StreamBatch 为固定线格式，
-// 接收端固定按 StreamBatch 解码，绝不能混发裸帧）。
-func sendLegacyFrame(stream interface {
-	SendMsg(m any) error
-}, msg *protoGw.StreamData) error {
-	return stream.SendMsg(&protoGw.StreamBatch{Items: []*protoGw.StreamData{msg}})
-}
-
-// handleLegacyStream 旧版握手：sgate 主动拨入时的命令流处理。
-func (s *GRPCServer) handleLegacyStream(stream protoGw.GatewayStream_OnDataServer) error {
-	connectionID := connection.GenerateConnectionID()
-
-	ctx := map[string]any{
-		"connection_id": connectionID,
-		"stream":        stream,
-	}
-
-	process := func(msg *protoGw.StreamData) {
-		s.handleGRPCMessage(connectionID, msg, func(response any) {
-			if protoMsg, ok := response.(*protoGw.StreamData); ok {
-				if err := sendLegacyFrame(stream, protoMsg); err != nil {
-					tlog.Warn(context.TODO(), "OnData: stream.Send failed error=%v", err)
-				}
-			} else if errorMsg, ok := response.(*commonstruct.ErrorResponse); ok {
-				responseMsg := &protoGw.StreamData{
-					Data: []byte(errorMsg.Error.Message),
-				}
-				if err := sendLegacyFrame(stream, responseMsg); err != nil {
-					tlog.Warn(context.TODO(), "OnData: stream.Send error response failed error=%v", err)
-				}
-			}
-		}, ctx)
-	}
-
-	// 合帧接收缓冲：循环外复用，避免每帧分配 StreamBatch。
-	sb := &protoGw.StreamBatch{}
-
-	for {
-		sb.Reset()
-		if err := stream.RecvMsg(sb); err != nil {
-			return err
-		}
-		for _, m := range sb.Items {
-			if m == nil {
-				continue
-			}
-			process(m)
-		}
-	}
 }
 
 // connection 根据会话 ID 获取客户端连接
@@ -352,46 +301,6 @@ func encodePushMessage(cmd int32, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("marshal push message: %w", err)
 	}
 	return msg, nil
-}
-
-// SendMessage 处理来自逻辑服的单条消息请求（Unary RPC）
-func (s *GRPCServer) SendMessage(ctx context.Context, msg *protoGw.StreamData) (*protoGw.StreamData, error) {
-	connectionID := connection.GenerateConnectionID()
-
-	grpcCtx := map[string]any{
-		"connection_id": connectionID,
-		"context":       ctx,
-	}
-
-	var response *protoGw.StreamData
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	s.handleGRPCMessage(connectionID, msg, func(resp any) {
-		defer wg.Done()
-		if protoMsg, ok := resp.(*protoGw.StreamData); ok {
-			response = protoMsg
-		} else if errorMsg, ok := resp.(*commonstruct.ErrorResponse); ok {
-			response = &protoGw.StreamData{
-				Data: []byte(errorMsg.Error.Message),
-			}
-		}
-	}, grpcCtx)
-
-	wg.Wait()
-	if response == nil {
-		return nil, fmt.Errorf("no response from message handler")
-	}
-	return response, nil
-}
-
-// handleGRPCMessage 处理 gRPC 消息，返回错误提示（网关不直接处理命令）
-func (s *GRPCServer) handleGRPCMessage(connectionID string, msg *protoGw.StreamData, callback func(any), ctx map[string]any) {
-	if msg.Cmd == 0 {
-		callback(routes.NewErrorResponse("error", "Missing cmd", "", ""))
-		return
-	}
-	callback(routes.NewErrorResponse("error", "Gateway does not handle commands locally, forward to logic server", "", ""))
 }
 
 // KickService 鉴权：x-internal-token metadata 常量时间比较；

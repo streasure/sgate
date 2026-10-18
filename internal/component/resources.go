@@ -1,8 +1,6 @@
 package component
 
 import (
-	"sync"
-
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/security"
@@ -33,15 +31,10 @@ var (
 	globalDegradation   *traffic.DegradationManager
 
 	// cluster（Order 400）Init/Start 写入。
-	globalConfigCenter     cluster.ConfigCenter
-	globalAlertWebhook     *cluster.AlertWebhook
-	globalDiscovery        *uetcd.Component
-	globalGatewayDiscovery *uetcd.Component
-	globalLoginDiscovery   *uetcd.Component
-	globalCluster          *cluster.Cluster
-
-	globalGatewayEventsMu sync.RWMutex
-	globalGatewayEvents   []uetcd.ServiceEvent
+	globalConfigCenter   cluster.ConfigCenter
+	globalAlertWebhook   *cluster.AlertWebhook
+	globalDiscovery      *uetcd.Component
+	globalLoginDiscovery *uetcd.Component
 )
 
 // WhitelistBlacklist 返回安全组件创建的白黑名单。
@@ -89,21 +82,8 @@ func AlertWebhook() *cluster.AlertWebhook { return globalAlertWebhook }
 // Discovery 返回集群组件创建的逻辑服务发现。
 func Discovery() *uetcd.Component { return globalDiscovery }
 
-// GatewayDiscovery 返回集群组件创建的网关间发现。
-func GatewayDiscovery() *uetcd.Component { return globalGatewayDiscovery }
-
 // LoginDiscovery 返回集群组件创建的 loginserver 发现。
 func LoginDiscovery() *uetcd.Component { return globalLoginDiscovery }
-
-// ClusterNode 返回集群组件创建的 Leader 选举节点。
-func ClusterNode() *cluster.Cluster { return globalCluster }
-
-// GatewayEvents 返回网关间发现已收到的事件快照。
-func GatewayEvents() []uetcd.ServiceEvent {
-	globalGatewayEventsMu.RLock()
-	defer globalGatewayEventsMu.RUnlock()
-	return append([]uetcd.ServiceEvent(nil), globalGatewayEvents...)
-}
 
 func setSecurityResources(wb *security.WhitelistBlacklist, waf *security.WAF, rl *security.RateLimiter, jwt *security.JWTAuthFilter, cb *security.CircuitBreakerManager) {
 	globalWhitelistBlacklist = wb
@@ -131,24 +111,7 @@ func setClusterInitResources(configCenter cluster.ConfigCenter, alertWebhook *cl
 	globalAlertWebhook = alertWebhook
 }
 
-func setClusterStartResources(discovery, gatewayDiscovery, loginDiscovery *uetcd.Component, clusterNode *cluster.Cluster) {
+func setClusterStartResources(discovery, loginDiscovery *uetcd.Component) {
 	globalDiscovery = discovery
-	globalGatewayDiscovery = gatewayDiscovery
 	globalLoginDiscovery = loginDiscovery
-	globalCluster = clusterNode
-}
-
-// appendGatewayEvent 记录网关发现事件（供启动时 LoadEvents 顺序回放）。
-// 按 InstanceID 去重只保留最新一条：回放只关心各实例最终状态，语义等价
-// 且内存有界（否则反复注册/etcd 抖动会无界增长）。
-func appendGatewayEvent(event uetcd.ServiceEvent) {
-	globalGatewayEventsMu.Lock()
-	defer globalGatewayEventsMu.Unlock()
-	for i := range globalGatewayEvents {
-		if globalGatewayEvents[i].InstanceID == event.InstanceID {
-			globalGatewayEvents[i] = event
-			return
-		}
-	}
-	globalGatewayEvents = append(globalGatewayEvents, event)
 }

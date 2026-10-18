@@ -75,7 +75,6 @@ type statsPayload struct {
 	MessagesFailed        int64   `json:"failed"`
 	DroppedOverload       int64   `json:"droppedOverload"`
 	DroppedFull           int64   `json:"droppedFull"`
-	DroppedNoLogic        int64   `json:"droppedNoLogic"`
 	DroppedNoLogicNotConn int64   `json:"droppedNoLogicNotConnected"`
 	DroppedBlacklist      int64   `json:"droppedBlacklist"`
 	DroppedRateLimit      int64   `json:"droppedRateLimit"`
@@ -93,8 +92,6 @@ type statsPayload struct {
 	OverloadDropped       int64   `json:"overloadDropped"`
 	ActiveConnections     int64   `json:"activeConnections"`
 	WAFBlocked            int64   `json:"wafBlocked"`
-	IsLeader              bool    `json:"isLeader"`
-	NodeID                string  `json:"nodeID,omitempty"`
 	// 管道延迟：float 微秒（P50 常 <1µs，整数微秒会截断成 0）
 	LatencyP50Us float64 `json:"latencyP50Us"`
 	LatencyP95Us float64 `json:"latencyP95Us"`
@@ -118,7 +115,6 @@ func (g *Gateway) StartStatsServer(addr string) {
 		cpuPct, memPct, overloaded, dropped := g.overloadProtector.Stats()
 		dropOverload := g.messagesDroppedOverload.Load()
 		dropFull := g.messagesDroppedFull.Load()
-		dropNoLogic := g.messagesDroppedNoLogic.Load()
 		dropNoLogicNotConn := g.messagesDroppedNoLogicNotConnected.Load()
 		dropBlacklist := g.messagesDroppedBlacklist.Load()
 		dropRateLimit := g.messagesDroppedRateLimit.Load()
@@ -133,7 +129,6 @@ func (g *Gateway) StartStatsServer(addr string) {
 			MessagesFailed:        g.messagesFailed.Load(),
 			DroppedOverload:       dropOverload,
 			DroppedFull:           dropFull,
-			DroppedNoLogic:        dropNoLogic,
 			DroppedNoLogicNotConn: dropNoLogicNotConn,
 			DroppedBlacklist:      dropBlacklist,
 			DroppedRateLimit:      dropRateLimit,
@@ -142,7 +137,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 			DroppedIntegrity:      dropIntegrity,
 			DroppedFilterChain:    dropFilterChain,
 			DroppedAuth:           dropAuth,
-			DroppedTotal:          dropOverload + dropFull + dropNoLogic + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth,
+			DroppedTotal:          dropOverload + dropFull + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth,
 			PushedToClient:        g.messagesPushedToClient.Load(),
 			PushDroppedNoConn:     g.messagesPushDroppedNoConn.Load(),
 			Overloaded:            overloaded,
@@ -153,10 +148,6 @@ func (g *Gateway) StartStatsServer(addr string) {
 		}
 		if g.waf != nil {
 			stats.WAFBlocked = g.waf.GetBlockedCount()
-		}
-		if g.cluster != nil {
-			stats.IsLeader = g.cluster.IsLeader()
-			stats.NodeID = g.cluster.GetNodeID()
 		}
 		if g.latencyTracker != nil {
 			latStats := g.latencyTracker.GetStats()

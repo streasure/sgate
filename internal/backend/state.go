@@ -2,7 +2,6 @@ package backend
 
 import (
 	"errors"
-	"time"
 )
 
 type LogicConnectionState int32
@@ -37,23 +36,5 @@ var (
 	ErrSendTimeout       = errors.New("发送超时")
 	ErrBackpressure      = errors.New("背压已激活")
 )
-
-// HealthCheckConfig 健康检查配置
-type HealthCheckConfig struct {
-	Interval    time.Duration // 检查间隔
-	Timeout     time.Duration // 超时时间
-	MaxFailures int           // 最大失败次数，超过则触发重连
-	// Enabled 控制是否对逻辑服做主动健康检查（ping）。
-	// 默认 true：主动 ping 并在连续失败超阈值后重连，保障容灾切换。
-	Enabled bool
-}
-
-// DefaultHealthCheckConfig 默认健康检查配置
-var DefaultHealthCheckConfig = HealthCheckConfig{
-	Interval:    5 * time.Second,
-	Timeout:     3 * time.Second,
-	MaxFailures: 3,
-	Enabled:     true,
-}
 
 // StreamShard 单个流分片，封装一个 gRPC 流连接及其发送通道

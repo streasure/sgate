@@ -272,20 +272,16 @@ type TLSConfig struct {
 
 // ClusterConfig 集群配置
 type ClusterConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	Mode           string `yaml:"mode"` // standalone: 单体模式（默认）, cluster: 集群协作模式
-	NodeID         string `yaml:"nodeID"`
-	LeaderElection bool   `yaml:"leaderElection"`
-	LockTTL        string `yaml:"lockTTL"`
+	Mode   string `yaml:"mode"` // standalone: 单机模式（默认），cluster: 集群协同模式
+	NodeID string `yaml:"nodeID"`
 }
 
 // DiscoveryConfig 服务发现配置
 type DiscoveryConfig struct {
-	Enabled          bool   `yaml:"enabled"`
-	ServiceName      string `yaml:"serviceName"`
-	Zone             string `yaml:"zone"`
-	GatewayDiscovery bool   `yaml:"gatewayDiscovery"` // 启用网关间服务发现
-	RegisterSelf     bool   `yaml:"registerSelf"`     // standalone模式下是否向etcd注册网关自身连接信息
+	Enabled      bool   `yaml:"enabled"`
+	ServiceName  string `yaml:"serviceName"`
+	Zone         string `yaml:"zone"`
+	RegisterSelf bool   `yaml:"registerSelf"` // standalone模式下是否注册到etcd提供发现服务
 }
 
 // GRPCConfig gRPC 服务端配置

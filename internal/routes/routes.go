@@ -45,49 +45,17 @@ func RegisterGatewayStreamServer(s grpc.ServiceRegistrar, srv GatewayStreamServe
 
 // 系统命令码常量
 const (
-	CmdLogin         int32 = 2       // 登录命令
 	CmdError         int32 = 3       // 错误命令
 	CmdLoginGate     int32 = 1000001 // 网关登录请求
 	CmdLoginGateAck  int32 = 1000002 // 网关登录响应
 	CmdLogoutGate    int32 = 1000003 // 网关登出请求（断开当前连接，无业务推送）
 	CmdLogoutGateAck int32 = 1000004 // 网关登出响应
-	CmdBanNtf        int32 = 1000005 // （已废弃，封禁通知改用 CmdKickNotify 1100009）
 	CmdLogicLoginReq int32 = 1100001 // 逻辑层登录请求
 	CmdLogicLoginAck int32 = 1100002 // 逻辑层登录响应
 	CmdKickNotify    int32 = 1100009 // 踢下线通知推送（先推后断，body 为 logic.KickNotify）
 	CmdHeartbeatReq  int32 = 1100010 // 心跳请求
-	CmdHeartbeatAck  int32 = 1100011 // 心跳响应
 	CmdUserOffline   int32 = 1100012 // 用户下线通知
 	CmdPushBatch     int32 = 9000002 // 批量推送命令
-)
-
-// 路由常量定义
-const (
-	RouteLogin       = "login"        // 登录路由
-	RouteLoginGate   = "login_gate"   // 网关登录路由
-	RouteUserOffline = "user_offline" // 用户下线路由
-	RouteHeartbeat   = "heartbeat"    // 心跳路由
-	RouteError       = "error"        // 错误路由
-
-	RouteServerKick             = "server.kick"                // 踢下线命令
-	RouteServerJoinGroup        = "server.join_group"          // 加入组
-	RouteServerLeaveGroup       = "server.leave_group"         // 离开组
-	RouteServerJoinGroupByUser  = "server.join_group_by_user"  // 按用户加入组
-	RouteServerLeaveGroupByUser = "server.leave_group_by_user" // 按用户离开组
-	RouteServerCreateGroup      = "server.create_group"        // 创建组
-	RouteServerDeleteGroup      = "server.delete_group"        // 删除组
-	RouteServerSendToGroup      = "server.send_to_group"       // 向组发送消息
-	RouteServerGetGroupInfo     = "server.get_group_info"      // 获取组信息
-	RouteServerBroadcast        = "server.broadcast"           // 广播消息
-	RouteServerSendToUser       = "server.send_to_user"        // 向用户发送消息
-
-	RoutePing       = "ping"       // 心跳探测
-	RoutePong       = "pong"       // 心跳响应
-	RouteTest       = "test"       // 测试路由
-	RouteTestResult = "testResult" // 测试结果
-	RouteEcho       = "echo"       // 回显路由
-
-	RouteBatch = "_batch" // 批量路由后缀
 )
 
 // ExtractMessageFrame 从 protobuf 编码的数据中提取消息帧（命令码、序列号、消息体）

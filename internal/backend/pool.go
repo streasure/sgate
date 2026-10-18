@@ -8,19 +8,17 @@ import (
 
 	"github.com/streasure/sgate/internal/connection"
 
-	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 )
 
 type LogicClientPool struct {
 	clients    map[string]*LogicClient     // 逻辑服客户端映射（serverID -> client）
-	ordered    []string                    // 有序的服务 ID 列表，用于确定性轮询
+	ordered    []string                    // 有序的服务 ID 列表
 	mu         sync.RWMutex                // 读写锁
 	gateway    GatewayInterface            // 网关接口引用
 	stopCh     chan struct{}               // 停止信号
 	wg         sync.WaitGroup              // 等待协程退出
-	rrIndex    atomic.Uint64               // 轮询索引（原子操作）
 	fastClient atomic.Pointer[LogicClient] // 快速路径：单客户端时的原子指针
 	zoneMap    map[string]string           // zone 映射（serverID -> zone，来自 logic 拨入握手）
 	closed     bool                        // 池已关闭（Close 后拒绝新接入）
@@ -137,51 +135,6 @@ func (pool *LogicClientPool) Attach(meta routes.LogicStreamMeta, stream dataStre
 	return client, sm.shards[meta.ShardIdx], nil
 }
 
-// SendMessage 发送消息到逻辑服，优先使用快速路径
-func (pool *LogicClientPool) SendMessage(msg *protoGw.StreamData) error {
-	// 快速路径：只有一个客户端，无需加锁。
-	// 快速路径：单客户端时无需加锁
-	if c := pool.fastClient.Load(); c != nil {
-		return c.SendMessage(msg)
-	}
-	return pool.RoundRobinSendMessage(msg)
-}
-
-// SendMessageTo 向指定逻辑服发送会话绑定消息
-// 不会回退到轮询，因为那样可能跨服务器分片
-func (pool *LogicClientPool) SendMessageTo(serverID string, msg *protoGw.StreamData) error {
-	if serverID == "" {
-		return ErrNotConnected
-	}
-	pool.mu.RLock()
-	client := pool.clients[serverID]
-	pool.mu.RUnlock()
-	if client == nil || !client.IsConnected() {
-		return ErrNotConnected
-	}
-	return client.SendMessage(msg)
-}
-
-// RoundRobinSendMessage 使用轮询方式发送消息到逻辑服
-func (pool *LogicClientPool) RoundRobinSendMessage(msg *protoGw.StreamData) error {
-	pool.mu.RLock()
-	n := len(pool.ordered)
-	if n == 0 {
-		pool.mu.RUnlock()
-		return ErrNotConnected
-	}
-
-	idx := pool.rrIndex.Add(1) % uint64(n)
-	serviceID := pool.ordered[idx]
-	client := pool.clients[serviceID]
-	pool.mu.RUnlock()
-
-	if client == nil || !client.IsConnected() {
-		return ErrNotConnected
-	}
-	return client.SendMessage(msg)
-}
-
 // Close 关闭客户端池中所有连接；关闭后拒绝新的 logic 接入。
 func (pool *LogicClientPool) Close() {
 	close(pool.stopCh)
@@ -208,8 +161,7 @@ func (pool *LogicClientPool) ClientCount() int {
 
 // IsConnected 检查池中是否有已连接的客户端
 func (pool *LogicClientPool) IsConnected() bool {
-	// 快速路径：只有一个客户端，无需加锁。
-	// 快速路径：单客户端时无需加锁
+	// 快速路径：只有一个客户端，无需加锁
 	if c := pool.fastClient.Load(); c != nil {
 		return c.IsConnected()
 	}

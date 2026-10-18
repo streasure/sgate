@@ -33,8 +33,6 @@ monitoring:
 configCenter:
   enabled: false
 
-cluster:
-  enabled: false
 
 protection:
   cpuThreshold: 92          # 覆盖默认 90

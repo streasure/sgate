@@ -8,7 +8,6 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
@@ -274,93 +273,6 @@ func (lc *LogicClient) IsConnected() bool {
 
 func (lc *LogicClient) GetState() LogicConnectionState {
 	return lc.getState()
-}
-
-// HealthChecker 健康检查器，定期向逻辑服发送心跳探测
-type HealthChecker struct {
-	lc          *LogicClient   // 逻辑服客户端引用
-	interval    time.Duration  // 检查间隔
-	timeout     time.Duration  // 超时时间
-	maxFailures int            // 最大允许失败次数
-	failCount   int            // 当前连续失败次数
-	enabled     bool           // 是否启用主动健康检查
-	stopOnce    sync.Once      // 保护 stopCh 只 close 一次
-	stopCh      chan struct{}  // 停止信号
-	wg          sync.WaitGroup // 等待检查循环退出
-}
-
-// NewHealthChecker 创建健康检查器实例
-func NewHealthChecker(lc *LogicClient, config HealthCheckConfig) *HealthChecker {
-	interval := config.Interval
-	if interval <= 0 {
-		interval = 10 * time.Second // 防 time.NewTicker(0) panic
-	}
-	return &HealthChecker{
-		lc:          lc,
-		interval:    interval,
-		timeout:     config.Timeout,
-		maxFailures: config.MaxFailures,
-		enabled:     config.Enabled,
-		stopCh:      make(chan struct{}),
-	}
-}
-
-// Start 启动健康检查循环
-func (hc *HealthChecker) Start() {
-	hc.wg.Go(hc.checkLoop)
-}
-
-// Stop 停止健康检查循环并等待退出（幂等）
-func (hc *HealthChecker) Stop() {
-	hc.stopOnce.Do(func() { close(hc.stopCh) })
-	hc.wg.Wait()
-}
-
-// checkLoop 健康检查定时循环
-func (hc *HealthChecker) checkLoop() {
-	ticker := time.NewTicker(hc.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-hc.stopCh:
-			return
-		case <-ticker.C:
-			hc.doCheck()
-		}
-	}
-}
-
-// doCheck 执行一次健康检查，发送心跳包
-func (hc *HealthChecker) doCheck() {
-	hc.lc.mu.RLock()
-	state := hc.lc.getState()
-	closing := hc.lc.closing
-	hc.lc.mu.RUnlock()
-
-	if closing || state != LogicStateConnected {
-		return
-	}
-
-	// enabled=false 时跳过主动健康检查（可选关闭）。
-	if !hc.enabled {
-		return
-	}
-
-	pingMsg := &protoGw.StreamData{
-		Cmd: int32(routes.CmdHeartbeatReq),
-	}
-
-	err := hc.lc.SendMessageDirect(pingMsg)
-	if err != nil {
-		hc.failCount++
-		tlog.Warn(context.TODO(), "health check failed failCount=%d maxFailures=%d error=%v", hc.failCount, hc.maxFailures, err)
-		if hc.failCount >= hc.maxFailures {
-			tlog.Error(context.TODO(), "too many health check failures, marking disconnected failCount=%d", hc.failCount)
-			hc.lc.setState(LogicStateDisconnected)
-		}
-	} else {
-		hc.failCount = 0
-	}
 }
 
 // StreamMessageQueue 流消息队列，断线期间缓存消息，重连后冲刷

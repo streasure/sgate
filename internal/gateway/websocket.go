@@ -654,7 +654,7 @@ func (g *Gateway) sendWebSocketMessageAsync(wsConn *WebSocketConnection, opCode 
 		return fmt.Errorf("websocket connection not open")
 	}
 	frame := connection.EncodeWSFrame(byte(opCode|0x80), payload)
-	return wsConn.Conn.AsyncWrite(frame, noopAsyncCallback)
+	return wsConn.Conn.AsyncWrite(frame, connection.NoopAsyncCallback)
 }
 
 // sendHTTPResponse 发送HTTP响应，用于WebSocket握手失败时返回错误响应。

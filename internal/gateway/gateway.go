@@ -29,7 +29,6 @@ import (
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
-	"github.com/streasure/util/uetcd"
 	"github.com/streasure/util/ugrpc"
 	"google.golang.org/grpc"
 )
@@ -43,9 +42,7 @@ type Gateway struct {
 	transportType     sync.Map
 	ctx               context.Context
 	tlsConfig         *tls.Config
-	clusterID         string
 	gatewayID         string
-	isLeader          bool
 	cfg               atomic.Pointer[config.Config]
 	wsConnections     sync.Map
 	configPath        string
@@ -54,10 +51,7 @@ type Gateway struct {
 	tracer            *obs.Tracer
 	logicClient       *backend.LogicClient
 	logicClientPool   *backend.LogicClientPool
-	gatewayClientPool *backend.GatewayClientPool
 	serverID          string
-	gatewayDiscovery  *uetcd.Component // 发现其他网关（Gateway:{zone}）
-	gatewayEvents     []uetcd.ServiceEvent
 	overloadProtector *OverloadProtector
 	grpcServer        *ugrpc.Server
 	statsServer       *http.Server
@@ -76,7 +70,6 @@ type Gateway struct {
 	breakerParams  atomic.Pointer[breakerParams]
 	rateLimiter    *security.RateLimiter
 	waf            *security.WAF
-	cluster        *cluster.Cluster
 	latencyTracker *obs.LatencyTracker
 	latencySeq     int64         // 延迟采样序号：每 8 条消息取 1 条计时（QPC 为 syscall，见 pipeline）
 	engines        []gnet.Engine // 所有 transport engine，关闭时逐个 Stop
@@ -106,7 +99,6 @@ type Gateway struct {
 	messagesForwarded                  atomic.Int64
 	messagesDroppedOverload            atomic.Int64
 	messagesDroppedFull                atomic.Int64
-	messagesDroppedNoLogic             atomic.Int64
 	messagesDroppedNoLogicNotConnected atomic.Int64
 	messagesReceived                   atomic.Int64
 	messagesPushedToClient             atomic.Int64
@@ -265,10 +257,7 @@ func (g *Gateway) Init() error {
 	g.canaryFilter = component.CanaryFilter()
 	g.trafficMirror = component.TrafficMirror()
 	g.degradation = component.Degradation()
-	g.gatewayDiscovery = component.GatewayDiscovery()
-	g.gatewayEvents = component.GatewayEvents()
 	g.configCenter = component.ConfigCenter()
-	g.cluster = component.ClusterNode()
 	g.alertWebhook = component.AlertWebhook()
 	// 反代信任列表（仅 WS XFF 用；配置已 Validate，此处静默跳过非法项）
 	if cfg := config.Get(); cfg != nil {
@@ -290,10 +279,7 @@ func (g *Gateway) Init() error {
 }
 func (g *Gateway) Start() error {
 	// ClusterComponent 在 Start 中创建 discovery，需在其后重新读取。
-	g.gatewayDiscovery = component.GatewayDiscovery()
-	g.gatewayEvents = component.GatewayEvents()
 	g.configCenter = component.ConfigCenter()
-	g.cluster = component.ClusterNode()
 	g.alertWebhook = component.AlertWebhook()
 	g.setLoginServerDiscovery(component.LoginDiscovery())
 	if err := g.StartServices(); err != nil {
@@ -358,13 +344,6 @@ func (g *Gateway) StartServices() error {
 
 	g.logicClient.SetGateway(g)
 	g.logicClientPool = backend.NewLogicClientPool(g)
-
-	// 网关到网关客户端池仅在集群模式下创建
-	if g.gatewayDiscovery != nil {
-		g.gatewayClientPool = backend.NewGatewayClientPool(g)
-		g.gatewayClientPool.SetDiscovery(g.gatewayDiscovery)
-		g.gatewayClientPool.LoadEvents(g.gatewayEvents)
-	}
 
 	// gRPC服务器
 	grpcCfg := g.GetGRPCConfig()
@@ -801,9 +780,6 @@ func (g *Gateway) closeBody() {
 	if g.logicClientPool != nil {
 		g.logicClientPool.Close()
 	}
-	if g.gatewayClientPool != nil {
-		g.gatewayClientPool.Close()
-	}
 	if g.logicClient != nil {
 		g.logicClient.Close()
 	}
@@ -873,9 +849,7 @@ func newGateway(cfg *config.Config) *Gateway {
 		overloadProtector:         NewOverloadProtector(cfg.Protection),
 		logicClient:               backend.NewLogicClient(nil),
 		msgRate:                   newMessageRateTracker(60 * time.Second),
-		clusterID:                 "sgate-cluster",
 		gatewayID:                 gatewayInstanceID(*cfg),
-		isLeader:                  false,
 		connectionDurationTracker: obs.NewLatencyTracker(10000),
 		tlsConfig:                 buildTLSConfig(cfg),
 	}

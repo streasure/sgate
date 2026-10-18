@@ -28,7 +28,6 @@ monitoring:
   disableMetricsLog: true   # 线上关闭每秒 metrics 日志
 
 cluster:
-  enabled: true
   mode: "cluster"
 
 security:

@@ -22,14 +22,12 @@ func serverTypeName(t enums.ServerType) string {
 
 type ClusterComponent struct {
 	component.BaseComponent
-	cfg              config.Config
-	grpcPort         int
-	Discovery        *uetcd.Component
-	GatewayDiscovery *uetcd.Component // 发现同一可用区内的其他网关。
-	LoginDiscovery   *uetcd.Component // 发现指定 zone 的 loginserver。
-	ConfigCenter     clusterPkg.ConfigCenter
-	Cluster          *clusterPkg.Cluster
-	AlertWebhook     *clusterPkg.AlertWebhook
+	cfg            config.Config
+	grpcPort       int
+	Discovery      *uetcd.Component
+	LoginDiscovery *uetcd.Component // 发现指定 zone 的 loginserver
+	ConfigCenter   clusterPkg.ConfigCenter
+	AlertWebhook   *clusterPkg.AlertWebhook
 }
 
 // NewClusterComponent 创建集群组件，配置从 config.Get() 读取。
@@ -129,25 +127,6 @@ func (c *ClusterComponent) Start() error {
 		tlog.Info(context.TODO(), "etcd 逻辑服务发现已启动（网关自身不注册） serviceID=%s", compCfg.Discovery.ServiceID)
 	}
 
-	// 网关间发现仅在集群模式下启用（与自身注册同一 ServerType 枚举名）
-	if clusterMode == "cluster" && c.cfg.Discovery.GatewayDiscovery {
-		gwServiceID := c.cfg.Belong + "/" + sgateType + ":" + c.cfg.Zone
-		gwCompCfg := uetcd.ComponentConfig{
-			Etcd: etcdCfg,
-			Discovery: uetcd.DiscoveryConfig{
-				ServiceID: gwServiceID,
-			},
-		}
-		c.GatewayDiscovery = uetcd.New(gwCompCfg)
-		c.GatewayDiscovery.OnServiceChange(appendGatewayEvent)
-		if err := c.GatewayDiscovery.Start(); err != nil {
-			tlog.Warn(context.TODO(), "网关间发现启动失败，网关间协作已禁用 error=%v", err)
-			c.GatewayDiscovery = nil
-		} else {
-			tlog.Info(context.TODO(), "网关间发现已启动 serviceID=%s", gwServiceID)
-		}
-	}
-
 	// loginserver 发现固定使用 protocol enums 的 SERVER_TYPE_LOGINSERVER，zone 与网关一致
 	loginType := serverTypeName(enums.ServerType_SERVER_TYPE_LOGINSERVER)
 	loginServiceID := c.cfg.Belong + "/" + loginType + ":" + c.cfg.Zone
@@ -163,13 +142,9 @@ func (c *ClusterComponent) Start() error {
 	}
 	tlog.Info(context.TODO(), "loginserver discovery started serviceID=%s", loginServiceID)
 
-	// Leader 选举仅在集群模式下启用
-	if clusterMode == "cluster" {
-		c.Cluster = clusterPkg.NewCluster(c.cfg.Cluster, c.cfg.ServerID, c.cfg.ServerType, c.cfg.Zone)
-		c.Cluster.Start()
-	}
+	// Leader 选举已移除（原 Cluster stub 恒为 leader，无实际语义）
 
-	setClusterStartResources(c.Discovery, c.GatewayDiscovery, c.LoginDiscovery, c.Cluster)
+	setClusterStartResources(c.Discovery, c.LoginDiscovery)
 
 	tlog.Info(context.TODO(), "集群组件已启动 mode=%s serverType=%s serverID=%s zone=%s",
 		clusterMode,
@@ -183,14 +158,8 @@ func (c *ClusterComponent) Destroy() {
 	if c.Discovery != nil {
 		c.Discovery.Destroy()
 	}
-	if c.GatewayDiscovery != nil {
-		c.GatewayDiscovery.Destroy()
-	}
 	if c.LoginDiscovery != nil {
 		c.LoginDiscovery.Destroy()
-	}
-	if c.Cluster != nil {
-		c.Cluster.Stop()
 	}
 	if c.ConfigCenter != nil {
 		c.ConfigCenter.Stop()

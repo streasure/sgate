@@ -192,7 +192,7 @@ CONF=config/cluster/gateway1.yaml ./start.sh
 | 文件 | 用途 |
 | --- | --- |
 | `config/gateway.yaml` | 开发/单机默认（TCP 48080 / WS 48081 / HTTP 8081） |
-| `config/cluster/gateway1.yaml` / `config/cluster/gateway2.yaml` | 集群双实例（端口错开，`cluster.enabled: true`） |
+| `config/cluster/gateway1.yaml` / `config/cluster/gateway2.yaml` | 集群双实例（端口错开，`cluster.mode: cluster`） |
 | `config/bench/batch-off.yaml` / `config/bench/batch-on.yaml` | 压测 batch 关/开（`benchMode`，关限流与登录校验） |
 | `config/bench/rate-limit.yaml` | 限流下扫压测 |
 | `config/bench/1m.yaml` | 百万连接压测 |
@@ -346,7 +346,6 @@ etcd 默认接入（无启用开关），启动网关前必须先启动 etcd。
 | `enabled` | bool | `false` | 是否启用逻辑服发现（`config/gateway.yaml` 默认 `true`） |
 | `serviceName` | string | `logic` | 逻辑服服务名 |
 | `zone` | string | `default` | 优先选择的可用区 |
-| `gatewayDiscovery` | bool | `false` | 是否发现其他网关（集群模式下生效） |
 | `registerSelf` | bool | `false` | standalone 模式下是否向 etcd 注册网关自身连接信息（供 loginserver 发现；`config/gateway.yaml` 默认 `true`） |
 
 ### 6.4.1 etcd 注册地址格式
@@ -375,10 +374,8 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | 是否启用集群功能 |
 | `mode` | string | `standalone` | `standalone` 单体模式；`cluster` 集群模式 |
 | `nodeID` | string | 自动生成 | 节点 ID |
-| `leaderElection` | bool | `false` | 是否启用 Leader 选举 |
 
 ### 6.6 `grpc` gRPC 服务
 

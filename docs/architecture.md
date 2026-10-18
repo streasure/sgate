@@ -104,8 +104,8 @@ routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免�
 | `component` | 组件容器、扁平生命周期、全局资源（`resources.go`） |
 | `config` | 配置结构、默认值、`config.Get()` 热读取 |
 | `security` | 限流、熔断、WAF、JWT、黑白名单 |
-| `traffic` | 灰度、镜像、降级、eBPF/WASM |
-| `cluster` | 集群模式、负载均衡、Leader 选举 |
+| `traffic` | 灰度、镜像、降级、WASM |
+| `cluster` | etcd 注册/发现、配置中心、告警 webhook |
 | `obs` | 追踪、pprof、健康检查、延迟分位数 |
 | `types` | 过滤器链、公共类型定义 |
 
