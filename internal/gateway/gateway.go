@@ -392,11 +392,11 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 			options = append(options, gnet.WithTCPNoDelay(gnet.TCPNoDelay))
 		}
 		tlog.Info(g.ctx, "starting gateway transport addr=%s type=%s", addr, transportType)
-		go func(addr, transportType string) {
+		panicutil.Go(g.ctx, fmt.Sprintf("gateway.transportRun addr=%s", addr), func() {
 			if err := gnet.Run(g, addr, options...); err != nil {
 				tlog.Error(g.ctx, "gateway transport stopped addr=%s error=%v", addr, err)
 			}
-		}(addr, transportType)
+		})
 	}
 }
 
@@ -707,10 +707,10 @@ func (g *Gateway) OnShutdown(engine gnet.Engine) {
 	if g.closing.CompareAndSwap(false, true) {
 		// 首触发（engine 自行关闭、无人调用过 Close）：在独立协程执行，
 		// 本回调立即返回，让 gnet 完成 inShutdown 置位。
-		go func() {
+		panicutil.Go(g.ctx, "gateway.closeAsync", func() {
 			defer close(g.closeDone)
 			g.closeBody()
-		}()
+		})
 	}
 }
 
