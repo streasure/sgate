@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -102,7 +101,7 @@ func (g *Gateway) handleAdminRateLimit(w http.ResponseWriter, r *http.Request) {
 		g.cfg.Store(&clone)
 	}
 
-	tlog.Info(context.TODO(), "admin rate limit updated maxTokens=%d refresh=%v routeMaxTokens=%d globalMaxTokens=%d",
+	tlog.Info(g.ctx, "admin rate limit updated maxTokens=%d refresh=%v routeMaxTokens=%d globalMaxTokens=%d",
 		tokens, refresh, req.RouteMaxTokens, req.GlobalMaxTokens)
 	uhttp.WriteJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,

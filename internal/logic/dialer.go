@@ -80,6 +80,7 @@ type Dialer struct {
 	shardCount     int
 	connGroupCount int
 	discovery      *uetcd.Component
+	ctx            context.Context
 
 	mu       sync.Mutex
 	gates    map[string]*gateLink // key = 网关 gRPC 地址 (ip:port)
@@ -103,6 +104,7 @@ func NewDialer(server *Server, cfg ServiceConfig) *Dialer {
 		cfg:            cfg,
 		shardCount:     shardCount,
 		connGroupCount: connGroupCount,
+		ctx:            context.Background(),
 		gates:          make(map[string]*gateLink),
 		stopCh:         make(chan struct{}),
 	}
@@ -127,7 +129,7 @@ func (d *Dialer) startDiscovery() {
 		endpoints = []string{d.cfg.EtcdEndpoint}
 	}
 	if len(endpoints) == 0 {
-		tlog.Warn(context.TODO(), "gateway discovery disabled (no etcd), dialing static gateways only count=%d", len(d.cfg.Gateways))
+		tlog.Warn(d.ctx, "gateway discovery disabled (no etcd), dialing static gateways only count=%d", len(d.cfg.Gateways))
 		return
 	}
 	belong := d.cfg.Belong
@@ -153,7 +155,7 @@ func (d *Dialer) startDiscovery() {
 	})
 	comp.OnServiceChange(d.handleGateEvent)
 	if err := comp.Start(); err != nil {
-		tlog.Warn(context.TODO(), "gateway discovery start failed, static gateways only serviceID=%s error=%v", serviceID, err)
+		tlog.Warn(d.ctx, "gateway discovery start failed, static gateways only serviceID=%s error=%v", serviceID, err)
 		return
 	}
 
@@ -167,7 +169,7 @@ func (d *Dialer) startDiscovery() {
 		d.handleGateEvent(uetcd.ServiceEvent{Type: uetcd.EventRegister, ServiceID: serviceID, Address: address})
 		knownGateways++
 	}
-	tlog.Info(context.TODO(), "gateway discovery started serviceID=%s knownGateways=%d", serviceID, knownGateways)
+	tlog.Info(d.ctx, "gateway discovery started serviceID=%s knownGateways=%d", serviceID, knownGateways)
 }
 
 // handleGateEvent 处理网关注册/注销事件。
@@ -175,7 +177,7 @@ func (d *Dialer) startDiscovery() {
 func (d *Dialer) handleGateEvent(event uetcd.ServiceEvent) {
 	addr, ok := parseGatewayAddress(event.Address)
 	if !ok {
-		tlog.Warn(context.TODO(), "ignoring unparsable gateway address value=%s", event.Address)
+		tlog.Warn(d.ctx, "ignoring unparsable gateway address value=%s", event.Address)
 		return
 	}
 	switch event.Type {
@@ -228,7 +230,7 @@ func (d *Dialer) markGateStale(addr string) {
 		return
 	}
 	g.markStale()
-	tlog.Warn(context.TODO(), "gateway deregistered, will stop reconnecting after current session ends addr=%s", addr)
+	tlog.Warn(d.ctx, "gateway deregistered, will stop reconnecting after current session ends addr=%s", addr)
 }
 
 // runGate 单网关的会话循环：拨入 → 运行流 → 断开退避 → 重拨。
@@ -243,7 +245,7 @@ func (d *Dialer) runGate(g *gateLink) {
 		default:
 		}
 		if g.isStale() {
-			tlog.Info(context.TODO(), "gateway link removed (deregistered) addr=%s", g.addr)
+			tlog.Info(d.ctx, "gateway link removed (deregistered) addr=%s", g.addr)
 			return
 		}
 
@@ -263,7 +265,7 @@ func (d *Dialer) runGate(g *gateLink) {
 		if time.Since(started) > time.Minute {
 			interval = time.Second
 		}
-		tlog.Warn(context.TODO(), "gateway session ended, redialing addr=%s nextRetry=%s error=%v", g.addr, interval, err)
+		tlog.Warn(d.ctx, "gateway session ended, redialing addr=%s nextRetry=%s error=%v", g.addr, interval, err)
 
 		select {
 		case <-d.stopCh:
@@ -358,7 +360,7 @@ func (d *Dialer) runSession(g *gateLink) error {
 		}
 		return firstErr
 	}
-	tlog.Info(context.TODO(), "gateway dial session established addr=%s shards=%d connGroups=%d",
+	tlog.Info(d.ctx, "gateway dial session established addr=%s shards=%d connGroups=%d",
 		g.addr, d.shardCount, d.connGroupCount)
 
 	// 运行各流的收发循环；任一流退出即结束整个会话。
@@ -369,7 +371,7 @@ func (d *Dialer) runSession(g *gateLink) error {
 		handlers.Go(func() {
 			defer func() { exitCh <- struct{}{} }()
 			if err := d.server.handleStream(streams[idx], g.addr); err != nil {
-				tlog.Info(context.TODO(), "gateway stream exited addr=%s shard=%d error=%v", g.addr, idx, err)
+				tlog.Info(d.ctx, "gateway stream exited addr=%s shard=%d error=%v", g.addr, idx, err)
 			}
 		})
 	}

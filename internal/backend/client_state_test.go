@@ -82,6 +82,36 @@ func TestLogicClientStateTransitions(t *testing.T) {
 	}
 }
 
+// TestAttachDetachEdges：越界/关闭时 attach 拒绝；Close 幂等。
+func TestAttachDetachEdges(t *testing.T) {
+	lc := NewLogicClient(nil)
+	lc.initAccepted(2)
+
+	// 越界分片
+	if err := lc.attachShard(-1, &fakeShardStream{}); err != ErrNotConnected {
+		t.Fatalf("idx -1 = %v, want ErrNotConnected", err)
+	}
+	if err := lc.attachShard(2, &fakeShardStream{}); err != ErrNotConnected {
+		t.Fatalf("idx 2 = %v, want ErrNotConnected", err)
+	}
+	if err := lc.attachShard(0, nil); err != nil {
+		t.Fatalf("nil stream attach: %v", err)
+	}
+
+	// Close 后 attach 拒绝
+	lc.Close()
+	if err := lc.attachShard(1, &fakeShardStream{}); err != ErrConnectionClosing {
+		t.Fatalf("attach after close = %v, want ErrConnectionClosing", err)
+	}
+	// Close 幂等（二次调用不 panic）
+	lc.Close()
+
+	// SendMessage after close → ErrConnectionClosing
+	if err := lc.SendMessage(&protoGw.StreamData{Cmd: 1}); err != ErrConnectionClosing {
+		t.Fatalf("SendMessage after close = %v, want ErrConnectionClosing", err)
+	}
+}
+
 // TestSendMessageDisconnectedEnqueues：断线时 SendMessage 入缓存队列。
 func TestSendMessageDisconnectedEnqueues(t *testing.T) {
 	lc := NewLogicClient(fakeGateway{})

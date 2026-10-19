@@ -15,6 +15,7 @@ import (
 // TrafficMirror 流量镜像器
 // 把生产流量按比例复制一份到测试环境，不影响主流程
 type TrafficMirror struct {
+	ctx        context.Context
 	mu         sync.RWMutex
 	percent    int    // 镜像比例 0-100
 	targetAddr string // 镜像目标地址（逻辑服务）
@@ -30,6 +31,7 @@ type TrafficMirror struct {
 // NewTrafficMirror 创建流量镜像器
 func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 	tm := &TrafficMirror{
+		ctx:        context.Background(),
 		percent:    cfg.Percent,
 		targetAddr: cfg.TargetAddr,
 		queue:      make(chan *types.FilterContext, max(cfg.QueueSize, 1024)),
@@ -106,7 +108,7 @@ func (tm *TrafficMirror) worker() {
 		case fc := <-tm.queue:
 			// 此处接入镜像目标（实现简化：仅日志记录）
 			// 实际生产可调用 mirror 专用 LogicClient
-			tlog.Debug(context.TODO(), "traffic mirror route=%s conn=%s target=%s",
+			tlog.Debug(tm.ctx, "traffic mirror route=%s conn=%s target=%s",
 				fc.Route,
 				fc.ConnectionID,
 				tm.targetAddr)

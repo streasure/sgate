@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"testing"
 
 	"github.com/streasure/sgate/internal/config"
@@ -109,7 +110,7 @@ func TestNewGatewayBuildsTLSConfig(t *testing.T) {
 
 func TestBuildTLSConfigDisabled(t *testing.T) {
 	cfg := minimalConfig()
-	c := buildTLSConfig(cfg)
+	c := buildTLSConfig(context.Background(), cfg)
 	if c == nil {
 		t.Fatal("buildTLSConfig returned nil")
 	}

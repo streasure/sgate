@@ -45,7 +45,7 @@ func (g *Gateway) handleLoginServerChange(event uetcd.ServiceEvent) {
 		return
 	}
 	if _, err := netip.ParseAddrPort(event.Address); err != nil {
-		tlog.Warn(context.TODO(), "invalid loginserver address instanceID=%s address=%s error=%v", event.InstanceID, event.Address, err)
+		tlog.Warn(g.ctx, "invalid loginserver address instanceID=%s address=%s error=%v", event.InstanceID, event.Address, err)
 		return
 	}
 	g.loginServerMu.Lock()
@@ -58,7 +58,7 @@ func (g *Gateway) handleLoginServerChange(event uetcd.ServiceEvent) {
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 30 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true}),
 	)
 	if err != nil {
-		tlog.Error(context.TODO(), "connect loginserver failed address=%s error=%v", event.Address, err)
+		tlog.Error(g.ctx, "connect loginserver failed address=%s error=%v", event.Address, err)
 		return
 	}
 	oldConn := g.loginServerConn
@@ -68,7 +68,7 @@ func (g *Gateway) handleLoginServerChange(event uetcd.ServiceEvent) {
 	if oldConn != nil {
 		_ = oldConn.Close()
 	}
-	tlog.Info(context.TODO(), "loginserver connected instanceID=%s address=%s", event.InstanceID, event.Address)
+	tlog.Info(g.ctx, "loginserver connected instanceID=%s address=%s", event.InstanceID, event.Address)
 }
 
 // loginValidationEnabled 读取热更新后的登录校验开关。
@@ -95,10 +95,10 @@ func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP stri
 	client := g.loginServerClient
 	g.loginServerMu.RUnlock()
 	if client == nil {
-		tlog.Warn(context.TODO(), "login validation enabled but loginserver not connected accountId=%s", userID)
+		tlog.Warn(g.ctx, "login validation enabled but loginserver not connected accountId=%s", userID)
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.TODO(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(g.ctx, 3*time.Second)
 	defer cancel()
 	ack, err := client.ValidateLoginToken(ctx, &protoLogin.ValidateLoginTokenReq{
 		AccountId:  userID,
@@ -108,7 +108,7 @@ func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP stri
 		ClientIp:   clientIP,
 	})
 	if err != nil {
-		tlog.Warn(context.TODO(), "validate login token failed accountId=%s error=%v", userID, err)
+		tlog.Warn(g.ctx, "validate login token failed accountId=%s error=%v", userID, err)
 		return false
 	}
 	return ack.Valid
@@ -134,13 +134,18 @@ func (g *Gateway) removeSessionAsync(conn *connection.Connection) {
 	sgateID := g.GetServerID()
 	connID := conn.ID()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(g.ctx, "removeSessionAsync panic recovered conn=%s error=%v", connID, r)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(g.ctx, 2*time.Second)
 		defer cancel()
 		if _, err := client.RemoveSession(ctx, &protoLogin.RemoveSessionReq{
 			SgateId: sgateID,
 			ConnId:  connID,
 		}); err != nil {
-			tlog.Debug(context.TODO(), "remove session best-effort failed sgate=%s conn=%s err=%v", sgateID, connID, err)
+			tlog.Debug(g.ctx, "remove session best-effort failed sgate=%s conn=%s err=%v", sgateID, connID, err)
 		}
 	}()
 }
@@ -204,7 +209,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				tlog.Error(context.TODO(), "finishLoginGate panic recovered conn=%s error=%v", connectionID, r)
+				tlog.Error(g.ctx, "finishLoginGate panic recovered conn=%s error=%v", connectionID, r)
 			}
 		}()
 		defer g.releaseLoginSlot()
@@ -240,7 +245,7 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 	// P1: 主动关闭同用户的旧连接（重连场景），防止资源泄漏
 	if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
 		if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
-			tlog.Info(context.TODO(), "检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
+			tlog.Info(g.ctx, "检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
 				oldConnID,
 				connectionID,
 				fullUUID)
@@ -286,10 +291,10 @@ func (g *Gateway) forwardLoginAsync(serverID string, msg *protoGw.StreamData, wa
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				tlog.Error(context.TODO(), "forwardLoginAsync panic recovered serverID=%s error=%v", serverID, r)
+				tlog.Error(g.ctx, "forwardLoginAsync panic recovered serverID=%s error=%v", serverID, r)
 			}
 		}()
-		err := retry.Do(context.TODO(), 20, 100*time.Millisecond, func() error {
+		err := retry.Do(g.ctx, 20, 100*time.Millisecond, func() error {
 			lc := g.GetLogicClient(serverID)
 			if lc == nil {
 				return errLogicClientUnavailable
@@ -297,7 +302,7 @@ func (g *Gateway) forwardLoginAsync(serverID string, msg *protoGw.StreamData, wa
 			return lc.SendMessage(msg)
 		})
 		if err != nil {
-			tlog.Warn(context.TODO(), warnFormat, serverID)
+			tlog.Warn(g.ctx, warnFormat, serverID)
 		}
 	}()
 }

@@ -31,7 +31,7 @@ func NewConfigCenter(cfg config.ConfigCenterConfig, etcdCfg config.EtcdConfig) C
 	})
 	if err := component.Start(); err != nil {
 		// 配置中心不可用不阻断网关启动，但必须留下错误日志（否则静默失效难排查）。
-		tlog.Error(context.TODO(), "config center start failed, dynamic config disabled endpoints=%v error=%v", etcdCfg.Endpoints, err)
+		tlog.Error(context.Background(), "config center start failed, dynamic config disabled endpoints=%v error=%v", etcdCfg.Endpoints, err)
 		return nil
 	}
 	return &etcdConfigCenter{component: component}

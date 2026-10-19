@@ -13,6 +13,7 @@ import (
 )
 
 type ConnectionManager struct {
+	ctx                   context.Context
 	connections           *shardedMap[*Connection] // 分片 map，按 connectionID 索引
 	userConnections       *shardedMap[string]      // 分片 map，按 userUUID → connectionID
 	accountConnections    *shardedMap[string]      // 分片 map，按登录账号 accountId → connectionID（KickAccounts 用）
@@ -68,6 +69,7 @@ func GenerateConnectionID() string {
 // NewConnectionManager 创建新的连接管理器实例。
 func NewConnectionManager(maxConn, maxConnPerIP int) *ConnectionManager {
 	cm := &ConnectionManager{
+		ctx:                context.Background(),
 		connections:        newShardedMap[*Connection](),
 		userConnections:    newShardedMap[string](),
 		accountConnections: newShardedMap[string](),
@@ -88,7 +90,7 @@ func (cm *ConnectionManager) UpdateLimits(maxConn, maxConnPerIP int) {
 	if maxConnPerIP >= 0 {
 		cm.maxConnectionsPerIP.Store(int32(maxConnPerIP))
 	}
-	tlog.Info(context.TODO(), "connection manager limits updated maxConnections=%d maxConnectionsPerIP=%d",
+	tlog.Info(cm.ctx, "connection manager limits updated maxConnections=%d maxConnectionsPerIP=%d",
 		cm.maxConnections.Load(),
 		cm.maxConnectionsPerIP.Load())
 }
@@ -451,6 +453,11 @@ func (cm *ConnectionManager) StartConnectionChecker(connIdleTimeout, connCheckIn
 		return // 已启动
 	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(cm.ctx, "connection checker panic recovered error=%v", r)
+			}
+		}()
 		defer close(cm.checkDone)
 		ticker := time.NewTicker(connCheckInterval)
 		defer ticker.Stop()
@@ -476,7 +483,7 @@ func (cm *ConnectionManager) checkIdleConnections(timeout time.Duration) {
 	cm.connections.Range(func(key string, conn *Connection) bool {
 		lastActive := conn.LastActive.Load()
 		if now-lastActive > timeout.Milliseconds() {
-			tlog.Debug(context.TODO(), "closing idle connection connectionID=%s", conn.ID())
+			tlog.Debug(cm.ctx, "closing idle connection connectionID=%s", conn.ID())
 			// 先回调（如离线通知）再关 socket/移除：OnClose 触发时 conn 可能已
 			// 不在 map，跳过回调会造成离线通知丢失
 			if cm.onRemoveClose != nil {

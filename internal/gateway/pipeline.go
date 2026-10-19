@@ -327,7 +327,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	// 阶段7：指标记录
 	if sendErr != nil {
 		g.messagesFailed.Add(1)
-		tlog.Warn(context.TODO(), "client message forward failed sessionID=%s serverID=%s cmd=%d error=%v", connectionID, connObj.GetServerID(), cmd, sendErr)
+		tlog.Warn(g.ctx, "client message forward failed sessionID=%s serverID=%s cmd=%d error=%v", connectionID, connObj.GetServerID(), cmd, sendErr)
 		// 转发失败 ≠ 队列满：droppedFull 语义限定 overload 队列满（阶段1），
 		// 此处失败由 messagesFailed / stats.failed 单独暴露，不再污染 droppedTotal。
 		if g.circuitBreakerMgr != nil {
@@ -380,7 +380,7 @@ func (p *MessagePipeline) ProcessForWS(conn gnet.Conn, data []byte, message *pro
 	if message.UserKey != "" {
 		oldUserUUID := "temp_" + connectionID
 		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserKey)
-		tlog.Debug(context.TODO(), "received user UUID connectionID=%s userUUID=%s", connectionID, message.UserKey)
+		tlog.Debug(g.ctx, "received user UUID connectionID=%s userUUID=%s", connectionID, message.UserKey)
 	}
 
 	result := p.Process(conn, data, message, connectionID)
@@ -491,8 +491,17 @@ func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWork
 		p.wg.Go(func() { p.runWorker(i) })
 	}
 
-	tlog.Info(context.TODO(), "pipeline worker pool started shards=%d queueSize=%d perShard=%d", shards, queueSize, perShard)
+	tlog.Info(p.logContext(), "pipeline worker pool started shards=%d queueSize=%d perShard=%d", shards, queueSize, perShard)
 	return p
+}
+
+// logContext 返回日志用 context：优先网关生命周期 ctx；
+// gw 缺失（测试直建 pool）或 ctx 未初始化时回退 Background。
+func (p *PipelineWorkerPool) logContext() context.Context {
+	if p.gw != nil && p.gw.ctx != nil {
+		return p.gw.ctx
+	}
+	return context.Background()
 }
 
 // runWorker 是单个 worker goroutine 的主循环。
@@ -579,7 +588,7 @@ func (p *PipelineWorkerPool) Submit(task *pipelineTaskData) bool {
 		if p.gw != nil {
 			p.gw.messagesDroppedFull.Add(1)
 		}
-		tlog.Warn(context.TODO(), "pipeline worker queue full, task dropped shard=%d connectionID=%s", shard, task.connectionID)
+		tlog.Warn(p.logContext(), "pipeline worker queue full, task dropped shard=%d connectionID=%s", shard, task.connectionID)
 		return false
 	}
 }
@@ -597,7 +606,7 @@ func (p *PipelineWorkerPool) SubmitWS(task *wsPipelineTaskData) bool {
 		if p.gw != nil {
 			p.gw.messagesDroppedFull.Add(1)
 		}
-		tlog.Warn(context.TODO(), "pipeline worker queue full, WS task dropped shard=%d connectionID=%s", shard, task.connectionID)
+		tlog.Warn(p.logContext(), "pipeline worker queue full, WS task dropped shard=%d connectionID=%s", shard, task.connectionID)
 		return false
 	}
 }

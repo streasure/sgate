@@ -22,6 +22,7 @@ func serverTypeName(t enums.ServerType) string {
 
 type ClusterComponent struct {
 	component.BaseComponent
+	ctx            context.Context
 	cfg            config.Config
 	grpcPort       int
 	Discovery      *uetcd.Component
@@ -34,6 +35,7 @@ type ClusterComponent struct {
 func NewClusterComponent() *ClusterComponent {
 	cfg := config.Get()
 	return &ClusterComponent{
+		ctx:      context.Background(),
 		cfg:      *cfg,
 		grpcPort: cfg.GRPC.Port,
 	}
@@ -112,12 +114,12 @@ func (c *ClusterComponent) Start() error {
 
 	if compCfg.Registration.ServiceID != "" {
 		advertiseAddr := buildRegisterAddress(c.cfg, c.grpcPort)
-		tlog.Info(context.TODO(), "etcd 注册成功 serviceID=%s instanceID=%s address=%s",
+		tlog.Info(c.ctx, "etcd 注册成功 serviceID=%s instanceID=%s address=%s",
 			compCfg.Registration.ServiceID,
 			c.cfg.ServerID,
 			advertiseAddr)
 	} else {
-		tlog.Info(context.TODO(), "etcd 逻辑服务发现已启动（网关自身不注册） serviceID=%s", compCfg.Discovery.ServiceID)
+		tlog.Info(c.ctx, "etcd 逻辑服务发现已启动（网关自身不注册） serviceID=%s", compCfg.Discovery.ServiceID)
 	}
 
 	// loginserver 发现固定使用 protocol enums 的 SERVER_TYPE_LOGINSERVER，zone 与网关一致
@@ -133,11 +135,11 @@ func (c *ClusterComponent) Start() error {
 	if err := c.LoginDiscovery.Start(); err != nil {
 		return fmt.Errorf("start loginserver discovery: %w", err)
 	}
-	tlog.Info(context.TODO(), "loginserver discovery started serviceID=%s", loginServiceID)
+	tlog.Info(c.ctx, "loginserver discovery started serviceID=%s", loginServiceID)
 
 	setClusterStartResources(c.Discovery, c.LoginDiscovery)
 
-	tlog.Info(context.TODO(), "cluster component started serverType=%s serverID=%s zone=%s",
+	tlog.Info(c.ctx, "cluster component started serverType=%s serverID=%s zone=%s",
 		c.cfg.ServerType,
 		c.cfg.ServerID,
 		c.cfg.Zone)

@@ -54,6 +54,13 @@ func newStreamConn(stream dataStream, size int, gatewayID string, sendTimeout ti
 	}
 	go func() {
 		defer c.shutdown()
+		defer func() {
+			if r := recover(); r != nil {
+				// send loop panic：shutdown 仍由上一个 defer 执行
+				// 记录后吞掉，避免拖垮整个 logic 进程
+				tlog.Error(context.Background(), "streamConn send loop panic recovered gatewayID=%s error=%v", gatewayID, r)
+			}
+		}()
 		const maxBatch = 256
 		batch := make([]*protocol.StreamData, 0, maxBatch)
 		for {
@@ -182,6 +189,8 @@ type Server struct {
 	protocol.UnimplementedGatewayStreamServer
 	handlers sync.Map // 命令码 -> *protoEntry，已注册的协议处理器
 
+	ctx context.Context // 服务端生命周期上下文
+
 	streams  sync.Map // 流 ID -> *streamConn，所有活跃的网关流连接
 	sessions sync.Map // 会话 ID -> *streamConn，会话到流的映射
 
@@ -222,6 +231,7 @@ func WithStreamSendTimeout(d time.Duration) ServerOption {
 // NewServer 创建逻辑层服务端实例
 func NewServer(opts ...ServerOption) *Server {
 	s := &Server{
+		ctx:           context.Background(),
 		groups:        make(map[string]*pushGroup),
 		sessionGroups: make(map[string]map[string]struct{}),
 		streamChSize:  1024,
@@ -280,7 +290,7 @@ func (s *Server) handleStream(stream dataStream, gatewayID string) error {
 		}
 		s.dispatchMessage(msg, func(response *protocol.StreamData) {
 			if err := conn.Send(response); err != nil {
-				tlog.Warn(context.TODO(), "failed to queue response cmd=%d sessionID=%s error=%v", response.Cmd, response.SessionId, err)
+				tlog.Warn(s.ctx, "failed to queue response cmd=%d sessionID=%s error=%v", response.Cmd, response.SessionId, err)
 			}
 		})
 	}
@@ -601,6 +611,11 @@ func (s *Server) ScheduleGroupPush(groupID string, cmd int32, data []byte, inter
 // run 定时推送任务的执行循环
 func (sp *ScheduledPush) run() {
 	defer close(sp.done)
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error(context.Background(), "ScheduledPush panic recovered group=%s error=%v", sp.GroupID, r)
+		}
+	}()
 	ticker := time.NewTicker(sp.Interval)
 	defer ticker.Stop()
 	count := 0

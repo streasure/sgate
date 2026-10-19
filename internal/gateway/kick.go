@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"context"
 	"net/netip"
 
 	protoGw "github.com/streasure/protocol/gateway"
@@ -104,7 +103,7 @@ func (g *Gateway) KickByIP(ip, reason string) int {
 	}
 	prefix, ok := parseKickPrefix(ip)
 	if !ok {
-		tlog.Warn(context.TODO(), "kick by ip invalid target ip=%s", ip)
+		tlog.Warn(g.ctx, "kick by ip invalid target ip=%s", ip)
 		return 0
 	}
 	p := kickNotifyParams{reason: reason, code: 403, message: "ip banned"}
@@ -122,7 +121,7 @@ func (g *Gateway) KickByIP(ip, reason string) int {
 	for _, conn := range matched {
 		g.kickConn(conn, p)
 	}
-	tlog.Info(context.TODO(), "kick by ip done ip=%s prefix=%s matched=%d reason=%s", ip, prefix, len(matched), reason)
+	tlog.Info(g.ctx, "kick by ip done ip=%s prefix=%s matched=%d reason=%s", ip, prefix, len(matched), reason)
 	return len(matched)
 }
 

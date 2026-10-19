@@ -32,7 +32,7 @@ func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 func (mi *MessageIntegrity) cleanupCache() {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "message integrity cleanup panic recovered error=%v", r)
+			tlog.Error(context.Background(), "message integrity cleanup panic recovered error=%v", r)
 		}
 	}()
 	ticker := time.NewTicker(30 * time.Second)

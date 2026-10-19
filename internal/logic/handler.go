@@ -1,8 +1,6 @@
 package logic
 
 import (
-	"context"
-
 	"reflect"
 	"sync"
 
@@ -50,7 +48,7 @@ func (s *Server) RegisterProto(cmd int32, reqProto proto.Message, respCmd int32,
 		respCmd: respCmd,
 		reqPool: sync.Pool{New: func() any { return reflect.New(rt).Interface() }},
 	})
-	tlog.Info(context.TODO(), "proto handler registered cmd=%d reqType=%s", cmd, rt.Name())
+	tlog.Info(s.ctx, "proto handler registered cmd=%d reqType=%s", cmd, rt.Name())
 }
 
 // dispatchMessage 根据命令码分发消息到注册的处理器
@@ -61,7 +59,7 @@ func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protoc
 		if s.builtinCommand(msg) {
 			return
 		}
-		tlog.Warn(context.TODO(), "received unregistered cmd cmd=%d sessionID=%s", msg.Cmd, msg.SessionId)
+		tlog.Warn(s.ctx, "received unregistered cmd cmd=%d sessionID=%s", msg.Cmd, msg.SessionId)
 		return
 	}
 
@@ -71,7 +69,7 @@ func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protoc
 	proto.Reset(req)
 	if len(msg.Data) > 0 {
 		if err := proto.Unmarshal(msg.Data, req); err != nil {
-			tlog.Warn(context.TODO(), "failed to decode request cmd=%d sessionID=%s error=%v", msg.Cmd, msg.SessionId, err)
+			tlog.Warn(s.ctx, "failed to decode request cmd=%d sessionID=%s error=%v", msg.Cmd, msg.SessionId, err)
 			return
 		}
 	}
@@ -87,7 +85,7 @@ func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protoc
 	}
 	data, err := proto.Marshal(resp)
 	if err != nil {
-		tlog.Error(context.TODO(), "failed to encode response cmd=%d sessionID=%s error=%v", msg.Cmd, msg.SessionId, err)
+		tlog.Error(s.ctx, "failed to encode response cmd=%d sessionID=%s error=%v", msg.Cmd, msg.SessionId, err)
 		return
 	}
 

@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
@@ -160,7 +159,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	buf.WriteString("\r\n")
 
 	if _, err := wsConn.Conn.Write(buf.Bytes()); err != nil {
-		tlog.Error(context.TODO(), "WebSocket handshake write failed error=%v", err)
+		tlog.Error(g.ctx, "WebSocket handshake write failed error=%v", err)
 		return gnet.Close
 	}
 
@@ -178,7 +177,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	if g.IsTrustedProxy(netutil.AddrHost(wsConn.Conn.RemoteAddr())) {
 		if realIP := resolveRealClientIP(headers); realIP != "" && realIP != netutil.AddrHost(wsConn.Conn.RemoteAddr()) {
 			if g.connectionManager.UpdateConnectionIP(wsConn.ConnectionID(), realIP) {
-				tlog.Debug(context.TODO(), "ws trusted proxy resolved real IP connectionID=%s realIP=%s", wsConn.ConnectionID(), realIP)
+				tlog.Debug(g.ctx, "ws trusted proxy resolved real IP connectionID=%s realIP=%s", wsConn.ConnectionID(), realIP)
 			}
 		}
 	}
@@ -187,7 +186,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		conn.SetWS(true)
 	}
 
-	tlog.Debug(context.TODO(), "WebSocket handshake success connectionID=%s", wsConn.ConnectionID())
+	tlog.Debug(g.ctx, "WebSocket handshake success connectionID=%s", wsConn.ConnectionID())
 
 	return gnet.None
 }
@@ -318,14 +317,14 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 		}
 		// RFC6455：客户端帧必须 mask
 		if !masked {
-			tlog.Warn(context.TODO(), "unmasked client frame rejected connectionID=%s", wsConn.ConnectionID())
+			tlog.Warn(g.ctx, "unmasked client frame rejected connectionID=%s", wsConn.ConnectionID())
 			return gnet.Close
 		}
 
 		// 分片重组
 		if opCode == 0x0 { // continuation
 			if !wsConn.fragging {
-				tlog.Warn(context.TODO(), "unexpected continuation frame connectionID=%s", wsConn.ConnectionID())
+				tlog.Warn(g.ctx, "unexpected continuation frame connectionID=%s", wsConn.ConnectionID())
 				return gnet.Close
 			}
 			if len(wsConn.fragBuf)+len(payload) > g.getMaxWSFrameSize() {
@@ -338,7 +337,7 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 				wsConn.fragBuf = wsConn.fragBuf[:0]
 				wsConn.fragging = false
 				if err := g.processWebSocketFrame(wsConn, op, msg); err != nil {
-					tlog.Error(context.TODO(), "WebSocket frame process failed error=%v", err)
+					tlog.Error(g.ctx, "WebSocket frame process failed error=%v", err)
 					return gnet.Close
 				}
 			}
@@ -349,7 +348,7 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 			wsConn.fragBuf = append(wsConn.fragBuf[:0], payload...)
 		} else {
 			if err := g.processWebSocketFrame(wsConn, opCode, payload); err != nil {
-				tlog.Error(context.TODO(), "WebSocket frame process failed error=%v", err)
+				tlog.Error(g.ctx, "WebSocket frame process failed error=%v", err)
 				return gnet.Close
 			}
 		}
@@ -379,7 +378,7 @@ func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOp
 	case WSOpText, WSOpBinary:
 		return g.handleWebSocketDataFrame(wsConn, payload)
 	default:
-		tlog.Warn(context.TODO(), "unknown WebSocket opcode opCode=%d", opCode)
+		tlog.Warn(g.ctx, "unknown WebSocket opcode opCode=%d", opCode)
 	}
 	return nil
 }
@@ -390,7 +389,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 
 	message, ok := routes.DecodeClientMessage(payload)
 	if !ok {
-		tlog.Error(context.TODO(), "WebSocket message unmarshal failed")
+		tlog.Error(g.ctx, "WebSocket message unmarshal failed")
 		return g.sendWebSocketMessage(wsConn, WSOpBinary, routes.NewErrorFrame("error", "Invalid message format", "invalid message frame", string(payload)))
 	}
 
@@ -456,6 +455,11 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		}
 		routes.PutClientMessage(message)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					tlog.Error(g.ctx, "finishWSLoginGate panic recovered conn=%s error=%v", connectionID, r)
+				}
+			}()
 			defer g.releaseLoginSlot()
 			g.finishWSLoginGate(wsConn, connectionID, msgCopy, req)
 		}()
@@ -559,7 +563,7 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 	// 关闭同用户的旧连接（重连场景），防止资源泄漏
 	if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
 		if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
-			tlog.Info(context.TODO(), "WS检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
+			tlog.Info(g.ctx, "WS检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
 				oldConnID, connectionID, fullUUID)
 			g.notifyLogicOffline(oldConn)
 			if oldConn.Conn != nil {
@@ -600,7 +604,7 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 	closeFrame := []byte{0x88, 0x02, 0x03, 0xE8}
 	if _, err := wsConn.Conn.Write(closeFrame); err != nil {
-		tlog.Debug(context.TODO(), "ws close frame write failed error=%v", err)
+		tlog.Debug(g.ctx, "ws close frame write failed error=%v", err)
 	}
 
 	wsConn.State.Store(int32(WSStateClosed))
@@ -688,6 +692,6 @@ func (g *Gateway) sendHTTPResponse(conn gnet.Conn, statusCode int, statusText st
 	buf.WriteString("\r\n")
 
 	if _, err := conn.Write(buf.Bytes()); err != nil {
-		tlog.Debug(context.TODO(), "write HTTP response failed error=%v", err)
+		tlog.Debug(g.ctx, "write HTTP response failed error=%v", err)
 	}
 }

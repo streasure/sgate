@@ -15,6 +15,7 @@ import (
 // DegradationManager 降级管理器
 // 功能：当后端不可用或错误率飙升时，按规则返回兜底响应而非透传，避免雪崩
 type DegradationManager struct {
+	ctx            context.Context
 	mu             sync.RWMutex
 	rules          map[string]*degradeRule // key = route
 	enabled        atomic.Int32
@@ -58,7 +59,7 @@ func newDegradationRule(rc config.DegradationRuleConfig) *degradeRule {
 
 // NewDegradationManager 创建降级管理器
 func NewDegradationManager(rules []config.DegradationRuleConfig) *DegradationManager {
-	m := &DegradationManager{rules: make(map[string]*degradeRule)}
+	m := &DegradationManager{ctx: context.Background(), rules: make(map[string]*degradeRule)}
 	m.enabled.Store(1)
 	for _, rc := range rules {
 		m.rules[rc.Route] = newDegradationRule(rc)
@@ -126,7 +127,7 @@ func (m *DegradationManager) RecordResult(route string, isError bool) {
 			if r.degraded.CompareAndSwap(0, 1) {
 				r.lastDegrade.Store(time.Now().Unix())
 				m.triggeredCount.Add(1)
-				tlog.Warn(context.TODO(), "degradation triggered route=%s errorRate=%v threshold=%v",
+				tlog.Warn(m.ctx, "degradation triggered route=%s errorRate=%v threshold=%v",
 					route,
 					rate,
 					r.errorThreshold)

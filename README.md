@@ -99,8 +99,6 @@ sgate 是一个基于 gnet v2 的高性能长连接网关。它承载 TCP 和 We
 ### 步骤 1：编译
 
 ```powershell
-cd E:\sgate
-
 # 编译网关
 go build -o sgate.exe .\cmd\gateway
 
@@ -479,8 +477,6 @@ loginValidation:
 ### 7.2 编译所有程序
 
 ```powershell
-cd E:\sgate
-
 go build -o sgate.exe .\cmd\gateway
 go build -o bench\logic1_tcp\logic1_tcp.exe .\bench\logic1_tcp
 go build -o bench\logic1_ws\logic1_ws.exe .\bench\logic1_ws
@@ -627,7 +623,7 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 
 ## 九、协议说明
 
-协议定义位于 `github.com/streasure/protocol`（`E:\protocol\gateway\gateway.proto`）。
+协议定义位于 `github.com/streasure/protocol`（go.mod replace 指向本地协议仓）。
 
 | 通信方向 | 消息 | 编码方式 |
 | --- | --- | --- |
@@ -749,10 +745,10 @@ go vet ./...
 
 ### 修改协议
 
-协议定义在外部模块 `E:\protocol\gateway\gateway.proto`。修改后需：
+协议定义在外部模块 `github.com/streasure/protocol`。修改后需：
 
-1. 在 `E:\protocol` 执行 `generate_proto.bat` 重新生成 Go 代码
-2. 回到 `E:\sgate` 执行 `go mod tidy` 更新依赖
+1. 在本地协议仓执行 `generate_proto.bat` 重新生成 Go 代码
+2. 回到本仓执行 `go mod tidy` 更新依赖
 3. 重新编译
 
 ### 日志配置

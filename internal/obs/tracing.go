@@ -122,7 +122,7 @@ func (t *Tracer) EndSpan(span *TraceSpan) {
 		span.Duration = now.Sub(span.StartTime)
 	}
 
-	tlog.Debug(context.TODO(), "Span completed traceID=%s spanID=%s name=%s duration=%v",
+	tlog.Debug(context.Background(), "Span completed traceID=%s spanID=%s name=%s duration=%v",
 		span.TraceID,
 		span.SpanID,
 		span.Name,
@@ -236,7 +236,7 @@ func (t *Tracer) cleanupExpiredTraces() {
 		}
 
 		if !allEnded && now.Sub(oldestSpan) > t.maxTraceAge {
-			tlog.Warn(context.TODO(), "force cleaning stale trace with unfinished spans traceID=%s age=%v", traceID, now.Sub(oldestSpan))
+			tlog.Warn(context.Background(), "force cleaning stale trace with unfinished spans traceID=%s age=%v", traceID, now.Sub(oldestSpan))
 			delete(t.traces, traceID)
 		}
 	}

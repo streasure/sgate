@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -139,7 +138,7 @@ func (g *Gateway) kickConnectionsAsync(matched []*connection.Connection, reason 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				tlog.Error(context.TODO(), "kickConnectionsAsync panic recovered error=%v", r)
+				tlog.Error(g.ctx, "kickConnectionsAsync panic recovered error=%v", r)
 			}
 		}()
 		var kicked atomic.Int64
@@ -161,7 +160,7 @@ func (g *Gateway) kickConnectionsAsync(matched []*connection.Connection, reason 
 			})
 		}
 		wg.Wait()
-		tlog.Info(context.TODO(), "maintenance kick done matched=%d kicked=%d reason=%s", total, kicked.Load(), reason)
+		tlog.Info(g.ctx, "maintenance kick done matched=%d kicked=%d reason=%s", total, kicked.Load(), reason)
 	}()
 }
 
@@ -215,7 +214,7 @@ func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request)
 		matched := g.snapshotMaintenanceTargets(serverID, zone)
 		// 3) 异步并发踢人：通知 → 退推送组 → 断连
 		g.kickConnectionsAsync(matched, reason)
-		tlog.Info(context.TODO(), "maintenance enabled action=enable serverId=%s zone=%s reason=%s matched=%d",
+		tlog.Info(g.ctx, "maintenance enabled action=enable serverId=%s zone=%s reason=%s matched=%d",
 			serverID, zone, reason, len(matched))
 		uhttp.WriteJSON(w, http.StatusOK, maintenanceResponse{
 			OK: true, Action: "enable", ServerID: serverID, Zone: zone,
@@ -223,7 +222,7 @@ func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request)
 		})
 	case "disable":
 		removed := g.maintenance.disable(serverID, zone)
-		tlog.Info(context.TODO(), "maintenance disabled action=disable serverId=%s zone=%s removed=%v",
+		tlog.Info(g.ctx, "maintenance disabled action=disable serverId=%s zone=%s removed=%v",
 			serverID, zone, removed)
 		uhttp.WriteJSON(w, http.StatusOK, maintenanceResponse{
 			OK: true, Action: "disable", ServerID: serverID, Zone: zone, Removed: removed,

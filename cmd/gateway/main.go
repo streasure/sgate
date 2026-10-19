@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"strconv"
+	"syscall"
 
 	comp "github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
@@ -25,6 +27,9 @@ var (
 
 // main 启动网关服务，初始化日志、加载配置、启动所有组件并等待信号退出
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	flag.Parse()
 	if *showVer {
 		// CLI 版本输出：tlog 尚未初始化，属非日志输出（AGENTS 允许 fmt）
@@ -50,13 +55,13 @@ func main() {
 
 	cfg, err := config.Load(*confFiles)
 	if err != nil {
-		tlog.Error(context.TODO(), "load config failed error=%v", err)
+		tlog.Error(ctx, "load config failed error=%v", err)
 		// 配置加载失败必须非零退出，避免进程管理器误判为正常退出
 		logComp.Destroy()
 		os.Exit(1)
 	}
 
-	tlog.Info(context.TODO(), "gateway starting http port:%d version=%s cpu=%d GOMAXPROCS=%d",
+	tlog.Info(ctx, "gateway starting http port:%d version=%s cpu=%d GOMAXPROCS=%d",
 		cfg.HttpPort, gateway.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
 
@@ -64,7 +69,7 @@ func main() {
 	fc := types.InitFilterChain()
 	for _, fi := range cfg.FilterChain.Filters {
 		if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
-			tlog.Warn(context.TODO(), "failed to load filter from config name=%s error=%v", fi.Name, err)
+			tlog.Warn(ctx, "failed to load filter from config name=%s error=%v", fi.Name, err)
 		}
 	}
 
@@ -82,7 +87,7 @@ func main() {
 	container.Add(gateway.NewGateway())
 	if err := container.Serve(); err != nil {
 		// Init/Start 失败必须非零退出，避免容器/进程管理器误判为正常退出
-		tlog.Error(context.TODO(), "gateway serve failed error=%v", err)
+		tlog.Error(ctx, "gateway serve failed error=%v", err)
 		os.Exit(1)
 	}
 }

@@ -184,12 +184,12 @@ func (g *Gateway) StartStatsServer(addr string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				tlog.Error(context.TODO(), "stats server panic recovered error=%v", r)
+				tlog.Error(g.ctx, "stats server panic recovered error=%v", r)
 			}
 		}()
-		tlog.Info(context.TODO(), "starting stats server addr=%s", addr)
+		tlog.Info(g.ctx, "starting stats server addr=%s", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			tlog.Error(context.TODO(), "stats server failed error=%v", err)
+			tlog.Error(g.ctx, "stats server failed error=%v", err)
 		}
 	}()
 }
@@ -362,13 +362,13 @@ func (g *Gateway) startConfigCenterWatcher() {
 	}
 	ch, err := g.configCenter.Watch(g.ctx)
 	if err != nil {
-		tlog.Error(context.TODO(), "config center watch failed error=%v", err)
+		tlog.Error(g.ctx, "config center watch failed error=%v", err)
 		return
 	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				tlog.Error(context.TODO(), "config center watcher panic recovered error=%v", r)
+				tlog.Error(g.ctx, "config center watcher panic recovered error=%v", r)
 			}
 		}()
 		for yamlBytes := range ch {
@@ -381,16 +381,16 @@ func (g *Gateway) startConfigCenterWatcher() {
 			currentCfg := g.cfg.Load()
 			base, err := yaml.Marshal(currentCfg)
 			if err != nil {
-				tlog.Warn(context.TODO(), "config center snapshot marshal failed error=%v", err)
+				tlog.Warn(g.ctx, "config center snapshot marshal failed error=%v", err)
 				continue
 			}
 			newCfg := config.Config{}
 			if err := yaml.Unmarshal(base, &newCfg); err != nil {
-				tlog.Warn(context.TODO(), "config center snapshot parse failed error=%v", err)
+				tlog.Warn(g.ctx, "config center snapshot parse failed error=%v", err)
 				continue
 			}
 			if err := yaml.Unmarshal(yamlBytes, &newCfg); err != nil {
-				tlog.Warn(context.TODO(), "config center content parse failed error=%v", err)
+				tlog.Warn(g.ctx, "config center content parse failed error=%v", err)
 				continue
 			}
 			select {
@@ -398,7 +398,7 @@ func (g *Gateway) startConfigCenterWatcher() {
 			case <-g.stopChan:
 				return
 			}
-			tlog.Info(context.TODO(), "config updated from config center type=%s",
+			tlog.Info(g.ctx, "config updated from config center type=%s",
 				g.configCenter.Type())
 		}
 	}()

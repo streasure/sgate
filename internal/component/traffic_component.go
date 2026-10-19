@@ -16,6 +16,8 @@ import (
 type TrafficComponent struct {
 	component.BaseComponent
 
+	ctx context.Context
+
 	canaryCfg      config.CanaryConfig
 	mirrorCfg      config.TrafficMirrorConfig
 	degradationCfg config.DegradationConfig
@@ -30,6 +32,7 @@ type TrafficComponent struct {
 func NewTrafficComponent() *TrafficComponent {
 	cfg := config.Get()
 	return &TrafficComponent{
+		ctx:            context.Background(),
 		canaryCfg:      cfg.Canary,
 		mirrorCfg:      cfg.TrafficMirror,
 		degradationCfg: cfg.Degradation,
@@ -41,7 +44,7 @@ func (c *TrafficComponent) Name() string { return "traffic" }
 func (c *TrafficComponent) Order() int   { return 300 }
 
 func (c *TrafficComponent) Init() error {
-	tlog.Info(context.TODO(), "traffic component init")
+	tlog.Info(c.ctx, "traffic component init")
 
 	// 灰度过滤器。
 	if c.canaryCfg.Enabled {
@@ -90,13 +93,13 @@ func (c *TrafficComponent) loadWasmModules() error {
 		if err := rt.LoadModule(m.Name, bytes); err != nil {
 			return fmt.Errorf("load wasm module %q: %w", m.Name, err)
 		}
-		tlog.Info(context.TODO(), "wasm module loaded name=%s path=%s runtime=%s", m.Name, m.Path, rt.Type())
+		tlog.Info(c.ctx, "wasm module loaded name=%s path=%s runtime=%s", m.Name, m.Path, rt.Type())
 	}
 	return nil
 }
 
 func (c *TrafficComponent) Start() error {
-	tlog.Info(context.TODO(), "traffic component started canary=%v mirror=%v degradation=%v",
+	tlog.Info(c.ctx, "traffic component started canary=%v mirror=%v degradation=%v",
 		c.canaryCfg.Enabled,
 		c.mirrorCfg.Enabled,
 		c.degradationCfg.Enabled)
@@ -104,7 +107,7 @@ func (c *TrafficComponent) Start() error {
 }
 
 func (c *TrafficComponent) Destroy() {
-	tlog.Info(context.TODO(), "traffic component destroying")
+	tlog.Info(c.ctx, "traffic component destroying")
 	if c.TrafficMirror != nil {
 		c.TrafficMirror.Stop()
 	}
@@ -112,7 +115,7 @@ func (c *TrafficComponent) Destroy() {
 		if rt := traffic.GetWasmRuntime(); rt != nil {
 			for _, m := range c.wasmCfg.Modules {
 				if err := rt.UnloadModule(m.Name); err != nil {
-					tlog.Warn(context.TODO(), "unload wasm module failed name=%s error=%v", m.Name, err)
+					tlog.Warn(c.ctx, "unload wasm module failed name=%s error=%v", m.Name, err)
 				}
 			}
 		}

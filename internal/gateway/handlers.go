@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"slices"
@@ -59,7 +58,7 @@ type ConnContext struct {
 func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "OnOpen panic recovered error=%v", r)
+			tlog.Error(g.ctx, "OnOpen panic recovered error=%v", r)
 			action = gnet.Close
 		}
 	}()
@@ -67,7 +66,7 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	// 连接数限制检查（P0: 防止 OOM 和连接耗尽）
 	remoteIP := netutil.AddrHost(c.RemoteAddr())
 	if !g.connectionManager.CanAccept(remoteIP) {
-		tlog.Warn(context.TODO(), "连接数限制，拒绝新连接 remoteIP=%s activeConnections=%d maxConnections=%d ipConnections=%d maxPerIP=%d",
+		tlog.Warn(g.ctx, "连接数限制，拒绝新连接 remoteIP=%s activeConnections=%d maxConnections=%d ipConnections=%d maxPerIP=%d",
 			remoteIP,
 			g.connectionManager.GetConnectionCount(),
 			g.connectionManager.MaxConnections(),
@@ -109,14 +108,14 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	g.connectionsTotal.Add(1)
 	g.connectionsActive.Add(1)
 
-	tlog.Debug(context.TODO(), "new connection localAddr=%s isWS=%v", localAddr, isWS)
+	tlog.Debug(g.ctx, "new connection localAddr=%s isWS=%v", localAddr, isWS)
 	return
 }
 
 func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "OnClose panic recovered error=%v", r)
+			tlog.Error(g.ctx, "OnClose panic recovered error=%v", r)
 		}
 	}()
 
@@ -152,7 +151,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 			g.removeSessionAsync(conn)
 		}
 		g.connectionManager.RemoveConnection(connectionID)
-		tlog.Debug(context.TODO(), "connection closed connectionID=%s error=%v", connectionID, err)
+		tlog.Debug(g.ctx, "connection closed connectionID=%s error=%v", connectionID, err)
 	}
 	if counted {
 		g.connectionsActive.Add(-1)
@@ -164,7 +163,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "OnTraffic panic recovered error=%v", fmt.Sprintf("%v", r))
+			tlog.Error(g.ctx, "OnTraffic panic recovered error=%v", fmt.Sprintf("%v", r))
 			action = gnet.Close
 		}
 	}()
@@ -175,7 +174,7 @@ func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
 func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "handleNormalTraffic panic recovered error=%v", r)
+			tlog.Error(g.ctx, "handleNormalTraffic panic recovered error=%v", r)
 			action = gnet.Close
 		}
 	}()
@@ -212,7 +211,7 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 		if clientIP, headerLen, ok := parseProxyProtocolV1(data); ok {
 			if clientIP != "" && clientIP != netutil.AddrHost(c.RemoteAddr()) {
 				g.connectionManager.UpdateConnectionIP(ctx.ConnectionID, clientIP)
-				tlog.Debug(context.TODO(), "proxy protocol resolved real IP conn=%s realIP=%s", ctx.ConnectionID, clientIP)
+				tlog.Debug(g.ctx, "proxy protocol resolved real IP conn=%s realIP=%s", ctx.ConnectionID, clientIP)
 			}
 			data = data[headerLen:]
 			if len(data) == 0 {

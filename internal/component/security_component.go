@@ -17,6 +17,8 @@ import (
 type SecurityComponent struct {
 	component.BaseComponent
 
+	ctx context.Context
+
 	cfg config.SecurityConfig
 	waf config.WAFConfig
 	jwt config.JWTAuthConfig
@@ -32,6 +34,7 @@ type SecurityComponent struct {
 func NewSecurityComponent() *SecurityComponent {
 	cfg := config.Get()
 	return &SecurityComponent{
+		ctx: context.Background(),
 		cfg: cfg.Security,
 		waf: cfg.WAF,
 		jwt: cfg.JWTAuth,
@@ -42,7 +45,7 @@ func (c *SecurityComponent) Name() string { return "security" }
 func (c *SecurityComponent) Order() int   { return 100 }
 
 func (c *SecurityComponent) Init() error {
-	tlog.Info(context.TODO(), "security component init")
+	tlog.Info(c.ctx, "security component init")
 
 	// 白名单/黑名单与熔断器按启动配置创建（与 WAF/JWT/限流一致：
 	// 组件创建与否由 Enabled 决定，热更新仅调整已创建组件的参数）。
@@ -99,7 +102,7 @@ func (c *SecurityComponent) Init() error {
 }
 
 func (c *SecurityComponent) Start() error {
-	tlog.Info(context.TODO(), "security component started whitelist=%d blacklist=%d rateLimit=%v waf=%v jwt=%v",
+	tlog.Info(c.ctx, "security component started whitelist=%d blacklist=%d rateLimit=%v waf=%v jwt=%v",
 		len(c.cfg.Whitelist),
 		len(c.cfg.Blacklist),
 		c.cfg.RateLimit.Enabled,
@@ -109,7 +112,7 @@ func (c *SecurityComponent) Start() error {
 }
 
 func (c *SecurityComponent) Destroy() {
-	tlog.Info(context.TODO(), "security component destroying")
+	tlog.Info(c.ctx, "security component destroying")
 	if c.RateLimiter != nil {
 		c.RateLimiter.Stop()
 	}

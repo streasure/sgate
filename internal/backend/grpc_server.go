@@ -56,18 +56,19 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 // handleLogicStream flip 模式接收循环：附着分片后由本 handler 驱动
 // 消息路由，流结束即返回，由 gRPC 框架回收；返回前统一解绑分片。
 func (s *GRPCServer) handleLogicStream(meta routes.LogicStreamMeta, stream protoGw.GatewayStream_OnDataServer) error {
+	ctx := stream.Context()
 	if s.pool == nil {
 		return fmt.Errorf("logic stream rejected: pool not initialized")
 	}
 	client, shard, err := s.pool.Attach(meta, stream)
 	if err != nil {
-		tlog.Warn(context.TODO(), "logic stream attach failed serviceID=%s shard=%d/%d error=%v",
+		tlog.Warn(ctx, "logic stream attach failed serviceID=%s shard=%d/%d error=%v",
 			meta.LogicID, meta.ShardIdx, meta.ShardCount, err)
 		return err
 	}
 	defer client.detachShard(shard, stream)
 
-	tlog.Info(context.TODO(), "logic stream attached serviceID=%s zone=%s shard=%d/%d",
+	tlog.Info(ctx, "logic stream attached serviceID=%s zone=%s shard=%d/%d",
 		meta.LogicID, meta.Zone, meta.ShardIdx, meta.ShardCount)
 
 	shard.receiveMessages(client, meta.ShardIdx)
@@ -146,10 +147,10 @@ func (s *GRPCServer) SendToClient(_ context.Context, req *protoGw.SendToClientRe
 }
 
 // Broadcast 向指定分组广播消息
-func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*protoGw.BroadcastAck, error) {
+func (s *GRPCServer) Broadcast(ctx context.Context, req *protoGw.BroadcastReq) (*protoGw.BroadcastAck, error) {
 	var totalSent, totalFailed int
 	for _, groupID := range req.GetGroupId() {
-		sent, failed := s.broadcastGroup(groupID, req.GetCmd(), req.GetData())
+		sent, failed := s.broadcastGroup(ctx, groupID, req.GetCmd(), req.GetData())
 		totalSent += sent
 		totalFailed += failed
 	}
@@ -157,7 +158,7 @@ func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*p
 		return nil, fmt.Errorf("broadcast failed: all %d sessions unreachable", totalFailed)
 	}
 	if totalFailed > 0 {
-		tlog.Warn(context.TODO(), "broadcast partial success sent=%d failed=%d", totalSent, totalFailed)
+		tlog.Warn(ctx, "broadcast partial success sent=%d failed=%d", totalSent, totalFailed)
 	}
 	return &protoGw.BroadcastAck{}, nil
 }
@@ -166,7 +167,7 @@ func (s *GRPCServer) Broadcast(_ context.Context, req *protoGw.BroadcastReq) (*p
 // 百万连接时同步遍历会阻塞 gRPC handler 数秒：先快照再分片并发 Send
 // （Send 内部走 AsyncWrite，真正写盘在 gnet loop；并发只加速遍历与入队）。
 // 返回时仅保证「已分发」，不等待全部写盘完成（与 SendToClient 语义一致）。
-func (s *GRPCServer) BroadcastAll(_ context.Context, req *protoGw.BroadcastAllReq) (*protoGw.BroadcastAllAck, error) {
+func (s *GRPCServer) BroadcastAll(ctx context.Context, req *protoGw.BroadcastAllReq) (*protoGw.BroadcastAllAck, error) {
 	data, err := encodePushMessage(req.GetCmd(), req.GetData())
 	if err != nil {
 		return nil, err
@@ -210,7 +211,7 @@ func (s *GRPCServer) BroadcastAll(_ context.Context, req *protoGw.BroadcastAllRe
 	wg.Wait()
 	s.gateway.AddPushedToClient(sent.Load())
 	if failed.Load() > 0 {
-		tlog.Warn(context.TODO(), "broadcast all partial sent=%d failed=%d total=%d", sent.Load(), failed.Load(), total)
+		tlog.Warn(ctx, "broadcast all partial sent=%d failed=%d total=%d", sent.Load(), failed.Load(), total)
 		if e := firstErr.Load(); e != nil {
 			return nil, *e
 		}
@@ -261,7 +262,7 @@ func (s *GRPCServer) GetGroupInfo(_ context.Context, req *protoGw.GetGroupInfoRe
 }
 
 // broadcastGroup 向指定分组的所有成员推送消息
-func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sent int, failed int) {
+func (s *GRPCServer) broadcastGroup(ctx context.Context, groupID string, cmd int32, data []byte) (sent int, failed int) {
 	if groupID == "" {
 		return 0, 1
 	}
@@ -270,26 +271,26 @@ func (s *GRPCServer) broadcastGroup(groupID string, cmd int32, data []byte) (sen
 	// 编码提到循环外：cmd/data 全组相同，逐成员重复 Marshal 是 O(组员数) 次冗余编码。
 	msg, encodeErr := encodePushMessage(cmd, data)
 	if encodeErr != nil {
-		tlog.Warn(context.TODO(), "group push: encode failed groupID=%s error=%v", groupID, encodeErr)
+		tlog.Warn(ctx, "group push: encode failed groupID=%s error=%v", groupID, encodeErr)
 		return 0, len(sessions)
 	}
 	for _, sessionID := range sessions {
 		conn := cm.GetConnection(sessionID)
 		if conn == nil {
 			failed++
-			tlog.Warn(context.TODO(), "group push: session disappeared groupID=%s sessionID=%s", groupID, sessionID)
+			tlog.Warn(ctx, "group push: session disappeared groupID=%s sessionID=%s", groupID, sessionID)
 			continue
 		}
 		if err := conn.Send(msg); err != nil {
 			failed++
-			tlog.Warn(context.TODO(), "group push: send failed groupID=%s sessionID=%s error=%v", groupID, sessionID, err)
+			tlog.Warn(ctx, "group push: send failed groupID=%s sessionID=%s error=%v", groupID, sessionID, err)
 			continue
 		}
 		sent++
 		s.gateway.AddPushedToClient(1)
 	}
 	if failed > 0 {
-		tlog.Warn(context.TODO(), "group push completed with failures groupID=%s total=%d sent=%d failed=%d", groupID, len(sessions), sent, failed)
+		tlog.Warn(ctx, "group push completed with failures groupID=%s total=%d sent=%d failed=%d", groupID, len(sessions), sent, failed)
 	}
 	return sent, failed
 }
@@ -327,7 +328,7 @@ func StartGRPCServer(gw GatewayInterface, pool *LogicClientPool, port string, ma
 	if windowSize <= 0 {
 		windowSize = 524288
 	}
-	tlog.Info(context.TODO(), "creating gRPC server")
+	tlog.Info(context.Background(), "creating gRPC server")
 	server := ugrpc.NewServer(
 		ugrpc.WithAddr(port),
 		ugrpc.WithMaxRecvMsgSize(maxMsgSize),
@@ -345,14 +346,14 @@ func StartGRPCServer(gw GatewayInterface, pool *LogicClientPool, port string, ma
 			}),
 		),
 	)
-	tlog.Info(context.TODO(), "registering GatewayService")
+	tlog.Info(context.Background(), "registering GatewayService")
 	grpcService := NewGRPCServer(gw, pool, kickToken)
 	protoGw.RegisterGatewayStreamServer(server, grpcService)
 	protoGw.RegisterGatewayServer(server, grpcService)
 	protoGw.RegisterKickServiceServer(server, grpcService)
 
 	if err := server.Start(); err != nil {
-		tlog.Error(context.TODO(), "gRPC server failed to start error=%v port=%s", err, port)
+		tlog.Error(context.Background(), "gRPC server failed to start error=%v port=%s", err, port)
 		return nil, err
 	}
 

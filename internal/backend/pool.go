@@ -116,13 +116,20 @@ func (pool *LogicClientPool) Attach(meta routes.LogicStreamMeta, stream dataStre
 			pool.ordered = append(pool.ordered, meta.LogicID)
 		}
 		pool.updateFastClient()
-		tlog.Info(context.TODO(), "logic client attached to pool serviceID=%s zone=%s address=%s shards=%d totalClients=%d",
+		tlog.Info(client.ctx, "logic client attached to pool serviceID=%s zone=%s address=%s shards=%d totalClients=%d",
 			meta.LogicID, meta.Zone, meta.Addr, meta.ShardCount, len(pool.clients))
 	}
 	pool.mu.Unlock()
 
 	if stale != nil {
-		go stale.Close()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					tlog.Error(context.Background(), "stale client close panic recovered error=%v", r)
+				}
+			}()
+			stale.Close()
+		}()
 	}
 
 	if err := client.attachShard(meta.ShardIdx, stream); err != nil {

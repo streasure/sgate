@@ -26,6 +26,11 @@ import (
 //   - 踢人复用 kickConn：KICK_NOTIFY + 逻辑服下线 + 断连
 func (g *Gateway) startBatchValidateSweep() {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(g.ctx, "batchValidate sweep panic recovered error=%v", r)
+			}
+		}()
 		for {
 			interval := g.batchValidateInterval()
 			if interval <= 0 {
@@ -83,7 +88,7 @@ type batchSweepItem struct {
 func (g *Gateway) runBatchValidateSweep() {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "batch validate sweep panic recovered error=%v", r)
+			tlog.Error(g.ctx, "batch validate sweep panic recovered error=%v", r)
 		}
 	}()
 
@@ -129,14 +134,14 @@ func (g *Gateway) runBatchValidateSweep() {
 		cancel()
 		if err != nil {
 			rpcFailed += len(batch)
-			tlog.Warn(context.TODO(), "batch validate RPC failed batch=%d/%d size=%d error=%v",
+			tlog.Warn(g.ctx, "batch validate RPC failed batch=%d/%d size=%d error=%v",
 				start/size+1, (len(items)+size-1)/size, len(batch), err)
 			continue
 		}
 		valids := ack.GetValid()
 		if len(valids) != len(batch) {
 			rpcFailed += len(batch)
-			tlog.Warn(context.TODO(), "batch validate ack length mismatch want=%d got=%d",
+			tlog.Warn(g.ctx, "batch validate ack length mismatch want=%d got=%d",
 				len(batch), len(valids))
 			continue
 		}
@@ -156,13 +161,13 @@ func (g *Gateway) runBatchValidateSweep() {
 				message: "session revoked",
 			})
 			kicked++
-			tlog.Info(context.TODO(), "batch validate kick accountId=%s conn=%s reason=ban",
+			tlog.Info(g.ctx, "batch validate kick accountId=%s conn=%s reason=ban",
 				batch[i].accountID, cur.ID())
 		}
 	}
 
 	if checked > 0 || kicked > 0 || rpcFailed > 0 {
-		tlog.Info(context.TODO(), "batch validate sweep done online=%d checked=%d kicked=%d rpcFailed=%d",
+		tlog.Info(g.ctx, "batch validate sweep done online=%d checked=%d kicked=%d rpcFailed=%d",
 			len(items), checked, kicked, rpcFailed)
 	}
 }

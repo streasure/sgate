@@ -28,6 +28,7 @@ type Service struct {
 	listener   net.Listener     // TCP 监听器
 	grpcServer *grpc.Server     // gRPC 服务器
 	cfg        ServiceConfig    // 服务配置
+	ctx        context.Context  // 服务生命周期上下文
 	stopOnce   sync.Once        // 确保只停止一次
 }
 
@@ -45,7 +46,7 @@ func NewService(opts ...ServiceOption) *Service {
 		WithStreamChSize(cfg.StreamSendChSize),
 		WithStreamSendTimeout(cfg.StreamSendTimeout),
 	}
-	return &Service{server: NewServer(serverOpts...), cfg: cfg}
+	return &Service{server: NewServer(serverOpts...), cfg: cfg, ctx: context.Background()}
 }
 
 // Server 获取底层逻辑层服务端实例
@@ -89,8 +90,13 @@ func (s *Service) Start() error {
 	)
 	protocol.RegisterGatewayStreamServer(s.grpcServer, s.server)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(s.ctx, "gRPC Serve panic recovered error=%v", r)
+			}
+		}()
 		if err := s.grpcServer.Serve(listener); err != nil {
-			tlog.Error(context.TODO(), "gRPC server stopped error=%v", err)
+			tlog.Error(s.ctx, "gRPC server stopped error=%v", err)
 		}
 	}()
 	// 等待 gRPC 服务就绪后再注册 etcd，避免 sgate 连接时服务端还没 accept
@@ -99,9 +105,9 @@ func (s *Service) Start() error {
 	// flip：主动拨入同 zone 网关（etcd 发现 + 静态地址），连接责任在本侧。
 	s.dialer = NewDialer(s.server, s.cfg)
 	if err := s.dialer.Start(); err != nil {
-		tlog.Error(context.TODO(), "gateway dialer start failed error=%v", err)
+		tlog.Error(s.ctx, "gateway dialer start failed error=%v", err)
 	}
-	tlog.Info(context.TODO(), "logic service started serviceID=%s address=%s shards=%d connGroups=%d",
+	tlog.Info(s.ctx, "logic service started serviceID=%s address=%s shards=%d connGroups=%d",
 		s.cfg.ServiceID, s.cfg.AdvertiseAddr, s.dialer.shardCount, s.dialer.connGroupCount)
 	return nil
 }
@@ -132,7 +138,7 @@ func (s *Service) initRegistry() {
 		Registration: uetcd.RegistrationConfig{ServiceID: serviceID, InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},
 	})
 	if err := s.registry.Start(); err != nil {
-		tlog.Error(context.TODO(), "service registration failed error=%v", err)
+		tlog.Error(s.ctx, "service registration failed error=%v", err)
 	}
 }
 
@@ -152,13 +158,18 @@ func (s *Service) Stop() {
 		if s.grpcServer != nil {
 			done := make(chan struct{})
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						tlog.Error(s.ctx, "grpc GracefulStop panic recovered error=%v", r)
+					}
+				}()
 				s.grpcServer.GracefulStop()
 				close(done)
 			}()
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
-				tlog.Warn(context.TODO(), "grpc graceful stop timed out, forcing stop")
+				tlog.Warn(s.ctx, "grpc graceful stop timed out, forcing stop")
 				s.grpcServer.Stop()
 			}
 		}

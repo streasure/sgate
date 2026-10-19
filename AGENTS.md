@@ -21,6 +21,7 @@
 
 ## Benchmarks
 
+- Bench package layout is intentional: each scenario is a standalone `main` under `bench/*` for isolated binaries and fair profiling. Do NOT merge bench mains into a single multi-command binary.
 - Bench configs MUST set `loginValidation.enabled: false` (login validation fully off).
 - Benchmarks MUST NOT call the login HTTP API (no `/api/v1/login`); use only LoginGate (cmd 1000001).
 - A successful bench must show no auth failures: no 401 / authfail / login-key rejects.

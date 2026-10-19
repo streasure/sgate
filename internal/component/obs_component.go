@@ -16,6 +16,8 @@ import (
 type ObservabilityComponent struct {
 	component.BaseComponent
 
+	ctx context.Context
+
 	otelCfg       config.OTelTracerConfig
 	pprofAddr     string
 	disableTracer bool
@@ -30,6 +32,7 @@ type ObservabilityComponent struct {
 func NewObservabilityComponent() *ObservabilityComponent {
 	cfg := config.Get()
 	return &ObservabilityComponent{
+		ctx:           context.Background(),
 		otelCfg:       cfg.OTelTracer,
 		pprofAddr:     cfg.Monitoring.PprofAddr,
 		disableTracer: cfg.Monitoring.DisableTracer,
@@ -40,11 +43,11 @@ func (c *ObservabilityComponent) Name() string { return "observability" }
 func (c *ObservabilityComponent) Order() int   { return 200 }
 
 func (c *ObservabilityComponent) Init() error {
-	tlog.Info(context.TODO(), "observability component init")
+	tlog.Info(c.ctx, "observability component init")
 
 	if c.disableTracer {
 		// 关闭后 component.Tracer() 返回 nil，消息管道走超级快速路径。
-		tlog.Info(context.TODO(), "internal tracer disabled (monitoring.disableTracer=true)")
+		tlog.Info(c.ctx, "internal tracer disabled (monitoring.disableTracer=true)")
 	} else {
 		c.Tracer = obs.NewTracer(5 * time.Minute)
 	}
@@ -69,14 +72,14 @@ func (c *ObservabilityComponent) Start() error {
 		obs.StartPProfServer(c.pprofAddr)
 	}
 
-	tlog.Info(context.TODO(), "observability component started otel=%v pprof=%s",
+	tlog.Info(c.ctx, "observability component started otel=%v pprof=%s",
 		c.otelCfg.Enabled,
 		c.pprofAddr)
 	return nil
 }
 
 func (c *ObservabilityComponent) Destroy() {
-	tlog.Info(context.TODO(), "observability component destroying")
+	tlog.Info(c.ctx, "observability component destroying")
 	if c.Tracer != nil {
 		c.Tracer.Stop()
 	}

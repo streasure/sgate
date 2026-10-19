@@ -41,6 +41,7 @@ type Gateway struct {
 	closeDone         chan struct{} // 关闭流程完成信号（Close 等待者挂在此）
 	transportType     sync.Map
 	ctx               context.Context
+	ctxCancel         context.CancelFunc // 关闭 g.ctx（closeBody 调用）
 	tlsConfig         *tls.Config
 	gatewayID         string
 	cfg               atomic.Pointer[config.Config]
@@ -209,7 +210,7 @@ func NewGateway() *Gateway {
 }
 
 // buildTLSConfig 根据配置构建 TLS 配置；证书加载失败时保持无证书（仅记录错误）。
-func buildTLSConfig(cfg *config.Config) *tls.Config {
+func buildTLSConfig(ctx context.Context, cfg *config.Config) *tls.Config {
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		MaxVersion: tls.VersionTLS13,
@@ -229,7 +230,7 @@ func buildTLSConfig(cfg *config.Config) *tls.Config {
 	}
 	cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 	if err != nil {
-		tlog.Error(context.TODO(), "failed to load TLS certificate error=%v", err)
+		tlog.Error(ctx, "failed to load TLS certificate error=%v", err)
 		return tlsConfig
 	}
 	tlsConfig.Certificates = []tls.Certificate{cert}
@@ -332,6 +333,11 @@ func (g *Gateway) StartServices() error {
 	}
 	go g.configWatcher()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(g.ctx, "config update loop panic recovered error=%v", r)
+			}
+		}()
 		for {
 			select {
 			case <-g.stopChan:
@@ -348,15 +354,20 @@ func (g *Gateway) StartServices() error {
 	// gRPC服务器
 	grpcCfg := g.GetGRPCConfig()
 	grpcPort := fmt.Sprintf(":%d", grpcCfg.Port)
-	tlog.Info(context.TODO(), "starting gRPC server port=%s", grpcPort)
+	tlog.Info(g.ctx, "starting gRPC server port=%s", grpcPort)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(g.ctx, "gRPC server bootstrap panic recovered error=%v", r)
+			}
+		}()
 		if server, err := backend.StartGRPCServer(g, g.logicClientPool, grpcPort, grpcCfg.MaxMessageSize, grpcCfg.WindowSize, cfg.Security.KickInternalToken); err != nil {
-			tlog.Error(context.TODO(), "failed to start gRPC server error=%v", err)
+			tlog.Error(g.ctx, "failed to start gRPC server error=%v", err)
 		} else {
 			g.grpcServerMu.Lock()
 			g.grpcServer = server
 			g.grpcServerMu.Unlock()
-			tlog.Info(context.TODO(), "gRPC server started port=%s", grpcPort)
+			tlog.Info(g.ctx, "gRPC server started port=%s", grpcPort)
 		}
 	}()
 
@@ -389,10 +400,10 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 		if transportType == "" || transportType == "websocket" {
 			options = append(options, gnet.WithTCPNoDelay(gnet.TCPNoDelay))
 		}
-		tlog.Info(context.TODO(), "starting gateway transport addr=%s type=%s", addr, transportType)
+		tlog.Info(g.ctx, "starting gateway transport addr=%s type=%s", addr, transportType)
 		go func(addr, transportType string) {
 			if err := gnet.Run(g, addr, options...); err != nil {
-				tlog.Error(context.TODO(), "gateway transport stopped addr=%s error=%v", addr, err)
+				tlog.Error(g.ctx, "gateway transport stopped addr=%s error=%v", addr, err)
 			}
 		}(addr, transportType)
 	}
@@ -404,7 +415,7 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 func (g *Gateway) wsHeartbeatChecker() {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "wsHeartbeatChecker panic recovered error=%v", r)
+			tlog.Error(g.ctx, "wsHeartbeatChecker panic recovered error=%v", r)
 		}
 	}()
 	for {
@@ -430,7 +441,7 @@ func (g *Gateway) wsHeartbeatChecker() {
 func (g *Gateway) runWSHeartbeatCheck(timeout time.Duration) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "wsHeartbeatCheck panic recovered error=%v", r)
+			tlog.Error(g.ctx, "wsHeartbeatCheck panic recovered error=%v", r)
 		}
 	}()
 	g.checkWebSocketConnections(timeout)
@@ -443,7 +454,7 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 			return true
 		}
 		if time.Since(conn.getLastPingTime()) > timeout {
-			tlog.Warn(context.TODO(), "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID())
+			tlog.Warn(g.ctx, "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID())
 			if connID := conn.ConnectionID(); connID != "" {
 				// 先通知逻辑服离线再关闭/移除，避免 OnClose 时 conn 已查不到而漏发
 				if connObj := g.connectionManager.GetConnection(connID); connObj != nil {
@@ -479,7 +490,7 @@ func (g *Gateway) tryEnqueueConfig(newCfg *config.Config) {
 func (g *Gateway) configWatcher() {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "configWatcher panic recovered error=%v", r)
+			tlog.Error(g.ctx, "configWatcher panic recovered error=%v", r)
 		}
 	}()
 	// 优先使用 config.Load 记录的真实路径，避免 -conf 与默认路径不一致导致热更新失效
@@ -528,7 +539,7 @@ func (g *Gateway) configWatcher() {
 				lastModTime = fileInfo.ModTime()
 				newCfg, err := config.Load(g.configPath)
 				if err != nil {
-					tlog.Error(context.TODO(), "config reload failed path=%s error=%v", g.configPath, err)
+					tlog.Error(g.ctx, "config reload failed path=%s error=%v", g.configPath, err)
 					continue
 				}
 				g.tryEnqueueConfig(newCfg)
@@ -543,7 +554,7 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 必填项校验（启动 Load 会走 Validate，热更路径此前缺失）：
 	// 非法配置整体拒绝，保留当前配置继续运行。
 	if err := newCfg.Validate(); err != nil {
-		tlog.Error(context.TODO(), "config update rejected, keeping current config error=%v", err)
+		tlog.Error(g.ctx, "config update rejected, keeping current config error=%v", err)
 		return
 	}
 	g.cfg.Store(newCfg)
@@ -562,7 +573,7 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		// Set*(0) 恢复默认派生值，配置改回 0 也能热更生效。
 		g.rateLimiter.SetRouteMaxTokens(newCfg.Security.RateLimit.RouteMaxTokens)
 		g.rateLimiter.SetGlobalMaxTokens(newCfg.Security.RateLimit.GlobalMaxTokens)
-		tlog.Info(context.TODO(), "rate limiter updated maxTokens=%d refresh=%v routeMax=%d globalMax=%d",
+		tlog.Info(g.ctx, "rate limiter updated maxTokens=%d refresh=%v routeMax=%d globalMax=%d",
 			tokens, refresh, newCfg.Security.RateLimit.RouteMaxTokens, newCfg.Security.RateLimit.GlobalMaxTokens)
 	}
 
@@ -571,14 +582,14 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		if newCfg.Security.Enabled {
 			g.whitelistBlacklist.ReplaceWhitelist(newCfg.Security.Whitelist)
 			g.whitelistBlacklist.ReplaceBlacklist(newCfg.Security.Blacklist)
-			tlog.Info(context.TODO(), "whitelist/blacklist updated whitelist=%d blacklist=%d",
+			tlog.Info(g.ctx, "whitelist/blacklist updated whitelist=%d blacklist=%d",
 				len(newCfg.Security.Whitelist),
 				len(newCfg.Security.Blacklist))
 		} else {
 			// 关闭安全链时清空残留列表，避免 fail-stale 继续拦截
 			g.whitelistBlacklist.ReplaceWhitelist(nil)
 			g.whitelistBlacklist.ReplaceBlacklist(nil)
-			tlog.Info(context.TODO(), "security disabled, whitelist/blacklist cleared")
+			tlog.Info(g.ctx, "security disabled, whitelist/blacklist cleared")
 		}
 	}
 
@@ -597,23 +608,23 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 动态更新 JWT 密钥（拒绝空 secret：空键可伪造任意令牌）
 	if g.jwtAuth != nil && newCfg.JWTAuth.Enabled {
 		if newCfg.JWTAuth.Secret == "" {
-			tlog.Warn(context.TODO(), "jwt secret update rejected: empty secret")
+			tlog.Warn(g.ctx, "jwt secret update rejected: empty secret")
 		} else {
 			g.jwtAuth.UpdateSecret(newCfg.JWTAuth.Secret)
-			tlog.Info(context.TODO(), "jwt secret updated")
+			tlog.Info(g.ctx, "jwt secret updated")
 		}
 	}
 
 	// 动态更新灰度规则
 	if g.canaryFilter != nil && newCfg.Canary.Enabled {
 		g.canaryFilter.UpdateConfig(newCfg.Canary)
-		tlog.Info(context.TODO(), "canary config updated percent=%d", newCfg.Canary.Percent)
+		tlog.Info(g.ctx, "canary config updated percent=%d", newCfg.Canary.Percent)
 	}
 
 	// 动态更新流量镜像比例
 	if g.trafficMirror != nil && newCfg.TrafficMirror.Enabled {
 		g.trafficMirror.UpdatePercent(newCfg.TrafficMirror.Percent)
-		tlog.Info(context.TODO(), "traffic mirror updated percent=%d", newCfg.TrafficMirror.Percent)
+		tlog.Info(g.ctx, "traffic mirror updated percent=%d", newCfg.TrafficMirror.Percent)
 	}
 
 	// 动态更新降级规则
@@ -621,13 +632,13 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		for _, rc := range newCfg.Degradation.Rules {
 			g.degradation.AddRule(rc)
 		}
-		tlog.Info(context.TODO(), "degradation rules updated count=%d", len(newCfg.Degradation.Rules))
+		tlog.Info(g.ctx, "degradation rules updated count=%d", len(newCfg.Degradation.Rules))
 	}
 
 	// 登录校验开关随 g.cfg 热更新；打一条便于确认是否误关
-	tlog.Info(context.TODO(), "login validation enabled=%v", newCfg.LoginValidation.Enabled)
+	tlog.Info(g.ctx, "login validation enabled=%v", newCfg.LoginValidation.Enabled)
 
-	tlog.Info(context.TODO(), "config updated dynamically")
+	tlog.Info(g.ctx, "config updated dynamically")
 }
 
 func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
@@ -670,7 +681,7 @@ func (g *Gateway) GetServerID() string {
 }
 
 func (g *Gateway) logMetrics() {
-	tlog.Info(context.TODO(), "gateway metrics connectionsActive=%d connectionsTotal=%d messagesReceived=%d messagesForwarded=%d messagesPushed=%d messagesProcessed=%d messagesFailed=%d",
+	tlog.Info(g.ctx, "gateway metrics connectionsActive=%d connectionsTotal=%d messagesReceived=%d messagesForwarded=%d messagesPushed=%d messagesProcessed=%d messagesFailed=%d",
 		g.connectionsActive.Load(),
 		g.connectionsTotal.Load(),
 		g.messagesReceived.Load(),
@@ -741,6 +752,9 @@ func (g *Gateway) Close() {
 // closeBody 关闭流程主体（Close/OnShutdown 已置 closing，仅执行一次）。
 func (g *Gateway) closeBody() {
 	close(g.stopChan)
+	if g.ctxCancel != nil {
+		g.ctxCancel()
+	}
 
 	// 阶段0：先拒绝新消息——将 Forward 连接置为 Closed。
 	// 必须在停止 engine 之前标记：gnet Stop 会拆除连接，之后状态标记已无意义。
@@ -763,6 +777,11 @@ func (g *Gateway) closeBody() {
 	drainTimeout := 2 * time.Minute
 	drainDone := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tlog.Error(g.ctx, "drainConnections panic recovered error=%v", r)
+			}
+		}()
 		g.drainConnections(drainTimeout)
 		close(drainDone)
 	}()
@@ -776,9 +795,9 @@ func (g *Gateway) closeBody() {
 			default:
 			}
 		}
-		tlog.Info(context.TODO(), "connection drain completed")
+		tlog.Info(g.ctx, "connection drain completed")
 	case <-drainTimer.C:
-		tlog.Warn(context.TODO(), "connection drain timed out, forcing close")
+		tlog.Warn(g.ctx, "connection drain timed out, forcing close")
 	}
 
 	if g.logicClientPool != nil {
@@ -817,7 +836,7 @@ func (g *Gateway) closeBody() {
 
 	g.StopStatsServer()
 
-	tlog.Info(context.TODO(), "gateway closed")
+	tlog.Info(g.ctx, "gateway closed")
 }
 
 // drainConnections 等待连接管理器清理完成（连接数降为 0）或超时。
@@ -842,6 +861,9 @@ func newGateway(cfg *config.Config) *Gateway {
 	// 防御：外部传入的 cfg 可能未走 Load（测试/热更新拷贝）
 	cfg.ApplyRuntimeDefaults()
 
+	// 网关生命周期 context：newGateway 创建，closeBody 取消（Close 路径）
+	ctx, cancel := context.WithCancel(context.Background())
+
 	gw := &Gateway{
 		connectionManager: connection.NewConnectionManager(cfg.Protection.MaxConnections, cfg.Protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
@@ -855,7 +877,7 @@ func newGateway(cfg *config.Config) *Gateway {
 		msgRate:                   newMessageRateTracker(60 * time.Second),
 		gatewayID:                 gatewayInstanceID(*cfg),
 		connectionDurationTracker: obs.NewLatencyTracker(10000),
-		tlsConfig:                 buildTLSConfig(cfg),
+		tlsConfig:                 buildTLSConfig(ctx, cfg),
 	}
 
 	// 存指针副本，避免调用方后续原地改写共享配置
@@ -866,7 +888,8 @@ func newGateway(cfg *config.Config) *Gateway {
 	gw.grpcCfg.Store(&stored.GRPC)
 	gw.streamCfg.Store(&stored.Stream)
 	gw.maintenance = newMaintenanceState()
-	gw.ctx = context.Background()
+	gw.ctx = ctx
+	gw.ctxCancel = cancel
 	gw.pipeline = NewMessagePipeline(gw)
 	gw.loginSlots = make(chan struct{}, 256)
 

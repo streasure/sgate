@@ -23,6 +23,7 @@ type LogicClient struct {
 	streamManager atomic.Pointer[StreamManager] // 流分片管理器（原子替换，热路径无锁读取）
 	messageQueue  *StreamMessageQueue           // 断线期间的消息缓存队列
 	gateway       GatewayInterface              // 网关接口引用
+	ctx           context.Context               // 客户端生命周期上下文（日志与派生用途）
 	closing       bool                          // 是否正在关闭
 	closed        chan struct{}                 // 关闭完成信号
 	totalShards   int                           // 分片总数（握手时确定，创建后只读）
@@ -42,6 +43,7 @@ func NewLogicClient(gateway GatewayInterface) *LogicClient {
 	}
 	lc := &LogicClient{
 		gateway:      gateway,
+		ctx:          context.Background(),
 		closing:      false,
 		closed:       make(chan struct{}),
 		messageQueue: NewStreamMessageQueue(queuePolicy),
@@ -76,7 +78,7 @@ func (lc *LogicClient) setState(newState LogicConnectionState) {
 
 // notifyStateChange 记录连接状态变更日志
 func (lc *LogicClient) notifyStateChange(oldState, newState LogicConnectionState) {
-	tlog.Info(context.TODO(), "logic connection state changed oldState=%s newState=%s",
+	tlog.Info(lc.ctx, "logic connection state changed oldState=%s newState=%s",
 		oldState.String(),
 		newState.String(),
 	)
@@ -127,7 +129,7 @@ func (lc *LogicClient) attachShard(idx int, stream dataStream) error {
 		lc.attached.Add(1)
 	} else {
 		// logic 重拨时旧流尚未报错：原地替换，计数不变。
-		tlog.Warn(context.TODO(), "shard stream replaced by new dial shard=%d serverID=%s", idx, lc.serverID)
+		tlog.Warn(lc.ctx, "shard stream replaced by new dial shard=%d serverID=%s", idx, lc.serverID)
 	}
 
 	if int(lc.attached.Load()) >= lc.totalShards && lc.getState() != LogicStateConnected {
@@ -160,11 +162,11 @@ func (lc *LogicClient) detachShard(sh *StreamShard, stream dataStream) {
 
 	n := lc.attached.Add(-1)
 	if n < 0 {
-		tlog.Error(context.TODO(), "detachShard: attached count went negative serverID=%s", lc.serverID)
+		tlog.Error(lc.ctx, "detachShard: attached count went negative serverID=%s", lc.serverID)
 		return
 	}
 	if int(n) < lc.totalShards && lc.getState() == LogicStateConnected {
-		tlog.Warn(context.TODO(), "logic stream set incomplete, marking disconnected attached=%d total=%d serverID=%s",
+		tlog.Warn(lc.ctx, "logic stream set incomplete, marking disconnected attached=%d total=%d serverID=%s",
 			int(n), lc.totalShards, lc.serverID)
 		lc.setState(LogicStateDisconnected)
 	}
@@ -199,7 +201,7 @@ func (lc *LogicClient) Close() {
 	}
 
 	close(lc.closed)
-	tlog.Info(context.TODO(), "closed logic server connection")
+	tlog.Info(lc.ctx, "closed logic server connection")
 }
 
 // SendMessage 发送消息到逻辑服，支持断线缓存
@@ -414,6 +416,11 @@ func (mq *StreamMessageQueue) RequeueFront(msg *protoGw.StreamData) {
 // Flush 冲刷队列中的消息，重连后调用以恢复转发。
 // maxRetries 统计连续失败次数而非成功消息数，避免长队列在 100 条后停止冲刷。
 func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error(lc.ctx, "message queue flush panic recovered error=%v", r)
+		}
+	}()
 	if !mq.flushing.CompareAndSwap(false, true) {
 		return // 已有 Flush 在运行
 	}
@@ -450,5 +457,5 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 		failures++
 		time.Sleep(retryInterval)
 	}
-	tlog.Warn(context.TODO(), "flush: aborted after consecutive failures policy=%v", mq.policy)
+	tlog.Warn(lc.ctx, "flush: aborted after consecutive failures policy=%v", mq.policy)
 }

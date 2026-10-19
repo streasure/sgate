@@ -116,6 +116,11 @@ func (a *AlertWebhook) Send(ctx context.Context, event AlertEvent) error {
 }
 
 func (a *AlertWebhook) sendOne(h webhookConfig, payload []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			tlog.Error(context.Background(), "alert webhook panic recovered error=%v", r)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.url, bytes.NewReader(payload))
@@ -125,14 +130,14 @@ func (a *AlertWebhook) sendOne(h webhookConfig, payload []byte) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		tlog.Warn(context.TODO(), "alert webhook send failed webhook=%s error=%v",
+		tlog.Warn(ctx, "alert webhook send failed webhook=%s error=%v",
 			h.name,
 			err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		tlog.Warn(context.TODO(), "alert webhook non-2xx webhook=%s status=%d",
+		tlog.Warn(ctx, "alert webhook non-2xx webhook=%s status=%d",
 			h.name,
 			resp.StatusCode)
 	}

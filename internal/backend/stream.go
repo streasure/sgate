@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -89,7 +88,7 @@ func (s *StreamShard) detach(stream dataStream) {
 func (s *StreamShard) startSendLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "startSendLoop panic recovered shard=%d error=%v", s.index, fmt.Sprintf("%v", r))
+			tlog.Error(s.lc.ctx, "startSendLoop panic recovered shard=%d error=%v", s.index, fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -136,7 +135,7 @@ func (s *StreamShard) startSendLoop() {
 func (s *StreamShard) sendBatch(batch []*protoGw.StreamData) {
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "sendBatch panic recovered shard=%d count=%d error=%v",
+			tlog.Error(s.lc.ctx, "sendBatch panic recovered shard=%d count=%d error=%v",
 				s.index, len(batch), fmt.Sprintf("%v", r))
 		}
 	}()
@@ -161,7 +160,7 @@ func (s *StreamShard) sendBatch(batch []*protoGw.StreamData) {
 	// StreamBatch 合帧：整批（含单条）压成单个 gRPC 帧（固定线格式），
 	// 接收端固定按 StreamBatch 解码，绝不能在同一股流上混发裸 StreamData。
 	if err := stream.SendMsg(&protoGw.StreamBatch{Items: batch}); err != nil {
-		tlog.Warn(context.TODO(), "shard send error, isolating shard shard=%d error=%v", s.index, err)
+		tlog.Warn(s.lc.ctx, "shard send error, isolating shard shard=%d error=%v", s.index, err)
 		s.detach(stream)
 		// 整批未能发出，归还对象池并计数丢弃。
 		if s.lc != nil && s.lc.gateway != nil {
@@ -239,9 +238,10 @@ var (
 // receiveMessages 分片接收循环：从 gRPC 流接收消息并分发给连接。
 // connGroup 代表一条独立的 gRPC 连接及其 gRPC 客户端
 func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
+	ctx := lc.ctx
 	defer func() {
 		if r := recover(); r != nil {
-			tlog.Error(context.TODO(), "receiveMessages panic recovered error=%v", fmt.Sprintf("%v", r))
+			tlog.Error(ctx, "receiveMessages panic recovered error=%v", fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -336,7 +336,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				lc.gateway.GetShardedCoalescer().AddMulti(cb.items[0].SessionId, responseData, cb.conn)
 				lc.gateway.AddPushedToClient(int64(len(cb.items)))
 			} else if sendErr := cb.conn.Send(responseData); sendErr != nil {
-				tlog.Warn(context.TODO(), "batch push to client failed sessionID=%s error=%v", cb.items[0].SessionId, sendErr)
+				tlog.Warn(ctx, "batch push to client failed sessionID=%s error=%v", cb.items[0].SessionId, sendErr)
 			} else {
 				lc.gateway.AddPushedToClient(int64(len(cb.items)))
 			}
@@ -402,7 +402,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 						lc.gateway.GetShardedCoalescer().AddMulti(msg.SessionId, responseData, conn)
 						lc.gateway.AddPushedToClient(1)
 					} else if sendErr := conn.Send(responseData); sendErr != nil {
-						tlog.Warn(context.TODO(), "push to client failed sessionID=%s cmd=%d error=%v", msg.SessionId, msg.Cmd, sendErr)
+						tlog.Warn(ctx, "push to client failed sessionID=%s cmd=%d error=%v", msg.SessionId, msg.Cmd, sendErr)
 					} else {
 						lc.gateway.AddPushedToClient(1)
 					}
@@ -431,7 +431,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		}
 
 		// 分片解绑由接收循环外层（OnData handler 的 defer）统一执行。
-		tlog.Warn(context.TODO(), "shard receive error shard=%d error=%v", shardIdx, err)
+		tlog.Warn(ctx, "shard receive error shard=%d error=%v", shardIdx, err)
 	}
 
 	for {
@@ -455,7 +455,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						tlog.Error(context.TODO(), "receiveMessages processOne panic recovered shard=%d error=%v", shardIdx, fmt.Sprintf("%v", r))
+						tlog.Error(ctx, "receiveMessages processOne panic recovered shard=%d error=%v", shardIdx, fmt.Sprintf("%v", r))
 					}
 				}()
 				processOne(m)
