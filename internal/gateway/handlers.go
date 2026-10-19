@@ -17,6 +17,7 @@ import (
 	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/util/netutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -113,11 +114,7 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 }
 
 func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(g.ctx, "OnClose panic recovered error=%v", r)
-		}
-	}()
+	defer panicutil.Recover(g.ctx, "gateway.OnClose")
 
 	var connectionID string
 	connCtx := c.Context()

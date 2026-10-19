@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -85,13 +87,8 @@ func (s *StreamShard) detach(stream dataStream) {
 
 // startSendLoop 启动发送循环，批量消费 sendCh 中的消息并发送到流。
 // 发送主体在 sendBatch 中逐批 recover：单批 panic 只丢弃该批，循环继续。
+// 外层由 panicutil.Go 启动（panic recover + 日志）。
 func (s *StreamShard) startSendLoop() {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(s.lc.ctx, "startSendLoop panic recovered shard=%d error=%v", s.index, fmt.Sprintf("%v", r))
-		}
-	}()
-
 	const maxBatchCount = 256
 	batch := make([]*protoGw.StreamData, 0, maxBatchCount)
 
@@ -129,17 +126,20 @@ func (s *StreamShard) startSendLoop() {
 	}
 }
 
-// sendBatch 发送一批消息。独立 recover：单批 panic（如 SendMsg 异常）不能终止
-// 发送循环——旧实现 panic 后协程死亡，sendCh 无人消费，分片所有发送超时卡死。
-// panic 时批内消息不归还对象池（可能已部分归还，重复 Put 会别名化，宁可丢弃）。
 func (s *StreamShard) sendBatch(batch []*protoGw.StreamData) {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(s.lc.ctx, "sendBatch panic recovered shard=%d count=%d error=%v",
-				s.index, len(batch), fmt.Sprintf("%v", r))
-		}
-	}()
+	// 单批 panic（如 SendMsg 异常）不能终止发送循环——panic 后 sendCh 无人消费，
+	// 分片所有发送超时卡死。panic 时批内消息不归还对象池（可能已部分归还，
+	// 重复 Put 会别名化，宁可丢弃）。测试裸建分片时 s.lc 可能为 nil。
+	ctx := context.Background()
+	if s.lc != nil {
+		ctx = s.lc.ctx
+	}
+	panicutil.Safe(ctx, fmt.Sprintf("backend.sendBatch shard=%d count=%d", s.index, len(batch)), func() {
+		s.sendBatchInner(batch)
+	})
+}
 
+func (s *StreamShard) sendBatchInner(batch []*protoGw.StreamData) {
 	// 获取整批消息共用的流引用。
 	s.mu.Lock()
 	stream := s.stream
@@ -239,11 +239,7 @@ var (
 // connGroup 代表一条独立的 gRPC 连接及其 gRPC 客户端
 func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	ctx := lc.ctx
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(ctx, "receiveMessages panic recovered error=%v", fmt.Sprintf("%v", r))
-		}
-	}()
+	defer panicutil.Recover(ctx, "backend.receiveMessages")
 
 	s.mu.Lock()
 	stream := s.stream
@@ -450,16 +446,11 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			if m == nil {
 				continue
 			}
-			// 逐条 recover：单条消息处理 panic 不得杀死整个接收循环
+			// 逐条保护：单条消息处理 panic 不得杀死整个接收循环
 			// （整循环只有一个外层 recover，panic 会导致分片接收永久中断）。
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						tlog.Error(ctx, "receiveMessages processOne panic recovered shard=%d error=%v", shardIdx, fmt.Sprintf("%v", r))
-					}
-				}()
+			panicutil.Safe(ctx, fmt.Sprintf("backend.processOne shard=%d", shardIdx), func() {
 				processOne(m)
-			}()
+			})
 		}
 	}
 }

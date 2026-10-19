@@ -12,6 +12,7 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -110,17 +111,14 @@ func (a *AlertWebhook) Send(ctx context.Context, event AlertEvent) error {
 	a.mu.RUnlock()
 	for _, h := range hooks {
 		payload := a.buildPayload(h, event)
-		go a.sendOne(h, payload)
+		panicutil.Go(context.Background(), "cluster.alertWebhook.sendOne", func() {
+			a.sendOne(h, payload)
+		})
 	}
 	return nil
 }
 
 func (a *AlertWebhook) sendOne(h webhookConfig, payload []byte) {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "alert webhook panic recovered error=%v", r)
-		}
-	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.url, bytes.NewReader(payload))

@@ -19,6 +19,16 @@
 - Components publish state through exported globals in `internal/component/resources.go`; Gateway reads via getters.
 - New code must pass `gofmt`, `go build ./...`, `go vet ./...`, and `go test ./... -count=1`.
 
+## Panic Recovery
+
+- Do NOT hand-write `if r := recover()` templates. Use `github.com/streasure/util/panicutil`:
+  - `panicutil.Go(ctx, tag, fn)` — one-shot async worker; panic logged with stack, no restart.
+  - `panicutil.GoLoop(ctx, tag, loopFn)` — long-running loop; panic logs + restarts after 1s backoff; normal `return` (stop signal) ends the loop. Loop must own its stop condition (`stopChan` etc.); close/cleanup channels only on the normal-return path (restart must not double-close).
+  - `panicutil.Recover(ctx, tag)` — `defer` in synchronous callbacks (gnet/gRPC handlers) that only need logging.
+  - `panicutil.Safe(ctx, tag, fn)` — per-iteration guard inside a loop (one message / one check); panic does not kill the outer loop.
+- Tag convention: `package.component` (e.g. `gateway.wsHeartbeatChecker`, `backend.receiveMessages`); may append static-ish context (`backend.sendBatch shard=%d count=%d`).
+- Hand-written recover is allowed ONLY when panic must affect a return value beyond logging (e.g. gnet `action = gnet.Close`, SendMessage converting send-on-closed-channel panic into `error`).
+
 ## Benchmarks
 
 - Bench package layout is intentional: each scenario is a standalone `main` under `bench/*` for isolated binaries and fair profiling. Do NOT merge bench mains into a single multi-command binary.

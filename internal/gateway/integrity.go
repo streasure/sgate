@@ -8,7 +8,7 @@ import (
 	"time"
 
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/panicutil"
 )
 
 type MessageIntegrity struct {
@@ -25,16 +25,11 @@ func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 		replayCache: make(map[string]int64),
 		stopCh:      make(chan struct{}),
 	}
-	go mi.cleanupCache()
+	panicutil.GoLoop(context.Background(), "gateway.messageIntegrity.cleanup", mi.cleanupCache)
 	return mi
 }
 
 func (mi *MessageIntegrity) cleanupCache() {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "message integrity cleanup panic recovered error=%v", r)
-		}
-	}()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/shirou/gopsutil/v3/process"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/sys"
 	"github.com/streasure/util/tlog"
 )
@@ -102,12 +103,7 @@ func NewOverloadProtector(cfg config.ProtectionConfig) *OverloadProtector {
 }
 
 func (op *OverloadProtector) Start() {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(context.Background(), "overload protector panic recovered error=%v", r)
-			}
-		}()
+	panicutil.GoLoop(context.Background(), "gateway.overloadProtector", func() {
 		ticker := time.NewTicker(op.checkInterval)
 		defer ticker.Stop()
 		for {
@@ -118,7 +114,7 @@ func (op *OverloadProtector) Start() {
 				op.check()
 			}
 		}
-	}()
+	})
 }
 
 func (op *OverloadProtector) check() {

@@ -13,6 +13,7 @@ import (
 	"github.com/streasure/protocol/enums"
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/netutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
 	"google.golang.org/grpc"
@@ -89,16 +90,11 @@ func (s *Service) Start() error {
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 5 * time.Second, PermitWithoutStream: true}),
 	)
 	protocol.RegisterGatewayStreamServer(s.grpcServer, s.server)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(s.ctx, "gRPC Serve panic recovered error=%v", r)
-			}
-		}()
+	panicutil.Go(s.ctx, "logic.grpcServe", func() {
 		if err := s.grpcServer.Serve(listener); err != nil {
 			tlog.Error(s.ctx, "gRPC server stopped error=%v", err)
 		}
-	}()
+	})
 	// 等待 gRPC 服务就绪后再注册 etcd，避免 sgate 连接时服务端还没 accept
 	time.Sleep(200 * time.Millisecond)
 	s.initRegistry()
@@ -157,15 +153,10 @@ func (s *Service) Stop() {
 		s.server.Stop()
 		if s.grpcServer != nil {
 			done := make(chan struct{})
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						tlog.Error(s.ctx, "grpc GracefulStop panic recovered error=%v", r)
-					}
-				}()
+			panicutil.Go(s.ctx, "logic.grpcGracefulStop", func() {
+				defer close(done)
 				s.grpcServer.GracefulStop()
-				close(done)
-			}()
+			})
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):

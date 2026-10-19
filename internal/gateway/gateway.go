@@ -28,6 +28,7 @@ import (
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/ugrpc"
 	"google.golang.org/grpc"
@@ -303,7 +304,7 @@ func (g *Gateway) StartServices() error {
 	// 保证 /stats 的 cpuPercent/memPercent 有值；benchMode 仅跳过 WS 心跳检测。
 	g.overloadProtector.Start()
 	if !benchMode {
-		go g.wsHeartbeatChecker()
+		panicutil.GoLoop(g.ctx, "gateway.wsHeartbeatChecker", g.wsHeartbeatChecker)
 		// 封禁收敛 P2：BatchValidate 周期安全网（enabled=false/batchInterval<=0 时内部自停）
 		g.startBatchValidateSweep()
 	}
@@ -331,13 +332,8 @@ func (g *Gateway) StartServices() error {
 	if g.configCenter != nil {
 		g.startConfigCenterWatcher()
 	}
-	go g.configWatcher()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "config update loop panic recovered error=%v", r)
-			}
-		}()
+	panicutil.GoLoop(g.ctx, "gateway.configWatcher", g.configWatcher)
+	panicutil.GoLoop(g.ctx, "gateway.configUpdate", func() {
 		for {
 			select {
 			case <-g.stopChan:
@@ -346,7 +342,7 @@ func (g *Gateway) StartServices() error {
 				g.handleConfigUpdate(newCfg)
 			}
 		}
-	}()
+	})
 
 	g.logicClient.SetGateway(g)
 	g.logicClientPool = backend.NewLogicClientPool(g)
@@ -355,12 +351,7 @@ func (g *Gateway) StartServices() error {
 	grpcCfg := g.GetGRPCConfig()
 	grpcPort := fmt.Sprintf(":%d", grpcCfg.Port)
 	tlog.Info(g.ctx, "starting gRPC server port=%s", grpcPort)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "gRPC server bootstrap panic recovered error=%v", r)
-			}
-		}()
+	panicutil.Go(g.ctx, "gateway.grpcBootstrap", func() {
 		if server, err := backend.StartGRPCServer(g, g.logicClientPool, grpcPort, grpcCfg.MaxMessageSize, grpcCfg.WindowSize, cfg.Security.KickInternalToken); err != nil {
 			tlog.Error(g.ctx, "failed to start gRPC server error=%v", err)
 		} else {
@@ -369,7 +360,7 @@ func (g *Gateway) StartServices() error {
 			g.grpcServerMu.Unlock()
 			tlog.Info(g.ctx, "gRPC server started port=%s", grpcPort)
 		}
-	}()
+	})
 
 	// 统计HTTP服务器
 	g.StartStatsServer(fmt.Sprintf(":%d", cfg.HttpPort))
@@ -410,14 +401,9 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 }
 
 // wsHeartbeatChecker 定期清理 WS 心跳超时连接。
-// 每轮热读 protection 配置（热更生效）；单轮 panic 恢复后继续下一轮，
-// 不像旧实现 recover 即退出——那会让 WS 心跳清理永久失效。
+// 每轮热读 protection 配置（热更生效）；由 panicutil.GoLoop 启动，
+// panic 退避重启，单轮异常不终止清理协程。
 func (g *Gateway) wsHeartbeatChecker() {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(g.ctx, "wsHeartbeatChecker panic recovered error=%v", r)
-		}
-	}()
 	for {
 		interval := time.Duration(g.getProtection().WSCheckInterval) * time.Second
 		if interval <= 0 {
@@ -439,11 +425,7 @@ func (g *Gateway) wsHeartbeatChecker() {
 
 // runWSHeartbeatCheck 执行一轮检查，独立 recover：单轮异常不终止清理协程。
 func (g *Gateway) runWSHeartbeatCheck(timeout time.Duration) {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(g.ctx, "wsHeartbeatCheck panic recovered error=%v", r)
-		}
-	}()
+	defer panicutil.Recover(g.ctx, "gateway.runWSHeartbeatCheck")
 	g.checkWebSocketConnections(timeout)
 }
 
@@ -488,11 +470,6 @@ func (g *Gateway) tryEnqueueConfig(newCfg *config.Config) {
 }
 
 func (g *Gateway) configWatcher() {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(g.ctx, "configWatcher panic recovered error=%v", r)
-		}
-	}()
 	// 优先使用 config.Load 记录的真实路径，避免 -conf 与默认路径不一致导致热更新失效
 	if p := config.Path(); p != "" {
 		g.configPath = p
@@ -776,15 +753,10 @@ func (g *Gateway) closeBody() {
 	// 阶段2：排空进行中的消息（最多2分钟）
 	drainTimeout := 2 * time.Minute
 	drainDone := make(chan struct{})
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "drainConnections panic recovered error=%v", r)
-			}
-		}()
+	panicutil.Go(g.ctx, "gateway.drainConnections", func() {
+		defer close(drainDone)
 		g.drainConnections(drainTimeout)
-		close(drainDone)
-	}()
+	})
 
 	drainTimer := time.NewTimer(drainTimeout)
 	select {

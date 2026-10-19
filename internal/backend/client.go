@@ -9,6 +9,7 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -99,7 +100,7 @@ func (lc *LogicClient) initAccepted(totalShards int) {
 	sm := NewStreamManager(totalShards, sendChannelSize, sendTimeout)
 	for i := range sm.shards {
 		sm.shards[i].lc = lc
-		go sm.shards[i].startSendLoop()
+		panicutil.Go(lc.ctx, "backend.startSendLoop", sm.shards[i].startSendLoop)
 	}
 	lc.totalShards = totalShards
 	lc.streamManager.Store(sm)
@@ -416,11 +417,7 @@ func (mq *StreamMessageQueue) RequeueFront(msg *protoGw.StreamData) {
 // Flush 冲刷队列中的消息，重连后调用以恢复转发。
 // maxRetries 统计连续失败次数而非成功消息数，避免长队列在 100 条后停止冲刷。
 func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(lc.ctx, "message queue flush panic recovered error=%v", r)
-		}
-	}()
+	defer panicutil.Recover(lc.ctx, "backend.StreamMessageQueue.Flush")
 	if !mq.flushing.CompareAndSwap(false, true) {
 		return // 已有 Flush 在运行
 	}

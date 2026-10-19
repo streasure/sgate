@@ -11,6 +11,7 @@ import (
 
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -52,15 +53,9 @@ func newStreamConn(stream dataStream, size int, gatewayID string, sendTimeout ti
 		stream: stream, sendCh: make(chan *protocol.StreamData, size), done: make(chan struct{}),
 		gatewayID: gatewayID, sessionIDs: make(map[string]struct{}), sendTimeout: sendTimeout,
 	}
-	go func() {
+	panicutil.Go(context.Background(), fmt.Sprintf("logic.streamConn.sendLoop gatewayID=%s", gatewayID), func() {
+		// send loop panic：shutdown 仍由本 defer 执行，记录后吞掉避免拖垮 logic 进程
 		defer c.shutdown()
-		defer func() {
-			if r := recover(); r != nil {
-				// send loop panic：shutdown 仍由上一个 defer 执行
-				// 记录后吞掉，避免拖垮整个 logic 进程
-				tlog.Error(context.Background(), "streamConn send loop panic recovered gatewayID=%s error=%v", gatewayID, r)
-			}
-		}()
 		const maxBatch = 256
 		batch := make([]*protocol.StreamData, 0, maxBatch)
 		for {
@@ -94,7 +89,7 @@ func newStreamConn(stream dataStream, size int, gatewayID string, sendTimeout ti
 				}
 			}
 		}
-	}()
+	})
 	return c
 }
 
@@ -604,18 +599,13 @@ func (s *Server) ScheduleGroupPush(groupID string, cmd int32, data []byte, inter
 		done:     make(chan struct{}),
 		server:   s,
 	}
-	go sp.run()
+	panicutil.Go(context.Background(), fmt.Sprintf("logic.scheduledPush group=%s", sp.GroupID), sp.run)
 	return sp
 }
 
 // run 定时推送任务的执行循环
 func (sp *ScheduledPush) run() {
 	defer close(sp.done)
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(context.Background(), "ScheduledPush panic recovered group=%s error=%v", sp.GroupID, r)
-		}
-	}()
 	ticker := time.NewTicker(sp.Interval)
 	defer ticker.Stop()
 	count := 0

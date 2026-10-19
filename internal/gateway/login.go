@@ -15,6 +15,7 @@ import (
 	protoLogin "github.com/streasure/protocol/loginserver"
 	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/netutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/retry"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uetcd"
@@ -133,12 +134,7 @@ func (g *Gateway) removeSessionAsync(conn *connection.Connection) {
 	}
 	sgateID := g.GetServerID()
 	connID := conn.ID()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "removeSessionAsync panic recovered conn=%s error=%v", connID, r)
-			}
-		}()
+	panicutil.Go(g.ctx, "gateway.removeSessionAsync", func() {
 		ctx, cancel := context.WithTimeout(g.ctx, 2*time.Second)
 		defer cancel()
 		if _, err := client.RemoveSession(ctx, &protoLogin.RemoveSessionReq{
@@ -147,7 +143,7 @@ func (g *Gateway) removeSessionAsync(conn *connection.Connection) {
 		}); err != nil {
 			tlog.Debug(g.ctx, "remove session best-effort failed sgate=%s conn=%s err=%v", sgateID, connID, err)
 		}
-	}()
+	})
 }
 
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
@@ -206,15 +202,10 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 
 	// 校验与绑定在 worker 中执行，避免同步 gRPC 阻塞 event loop。
 	// 成功后在 worker 中回写 LoginGateAck（writeFrame 在 worker 中改用 AsyncWrite）。
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "finishLoginGate panic recovered conn=%s error=%v", connectionID, r)
-			}
-		}()
+	panicutil.Go(g.ctx, "gateway.finishLoginGate", func() {
 		defer g.releaseLoginSlot()
 		g.finishLoginGate(c, connectionID, message, req)
-	}()
+	})
 	return gnet.None
 }
 
@@ -288,12 +279,7 @@ var errLogicClientUnavailable = errors.New("logic client unavailable")
 // forwardLoginAsync 异步转发登录消息到逻辑服：最多 20 次、间隔 100ms，
 // 全部失败时按 warnFormat（唯一参数 serverID）打点。TCP/WS 登录共用。
 func (g *Gateway) forwardLoginAsync(serverID string, msg *protoGw.StreamData, warnFormat string) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "forwardLoginAsync panic recovered serverID=%s error=%v", serverID, r)
-			}
-		}()
+	panicutil.Go(g.ctx, "gateway.forwardLoginAsync", func() {
 		err := retry.Do(g.ctx, 20, 100*time.Millisecond, func() error {
 			lc := g.GetLogicClient(serverID)
 			if lc == nil {
@@ -304,7 +290,7 @@ func (g *Gateway) forwardLoginAsync(serverID string, msg *protoGw.StreamData, wa
 		if err != nil {
 			tlog.Warn(g.ctx, warnFormat, serverID)
 		}
-	}()
+	})
 }
 
 func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {

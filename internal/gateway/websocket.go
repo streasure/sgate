@@ -19,6 +19,7 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/netutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -454,15 +455,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			return ackErr
 		}
 		routes.PutClientMessage(message)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					tlog.Error(g.ctx, "finishWSLoginGate panic recovered conn=%s error=%v", connectionID, r)
-				}
-			}()
+		panicutil.Go(g.ctx, "gateway.finishWSLoginGate", func() {
 			defer g.releaseLoginSlot()
 			g.finishWSLoginGate(wsConn, connectionID, msgCopy, req)
-		}()
+		})
 		return nil
 	}
 

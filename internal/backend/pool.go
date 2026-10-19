@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"context"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -9,6 +8,7 @@ import (
 	"github.com/streasure/sgate/internal/connection"
 
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -122,14 +122,9 @@ func (pool *LogicClientPool) Attach(meta routes.LogicStreamMeta, stream dataStre
 	pool.mu.Unlock()
 
 	if stale != nil {
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					tlog.Error(context.Background(), "stale client close panic recovered error=%v", r)
-				}
-			}()
+		panicutil.Go(client.ctx, "backend.staleClientClose", func() {
 			stale.Close()
-		}()
+		})
 	}
 
 	if err := client.attachShard(meta.ShardIdx, stream); err != nil {

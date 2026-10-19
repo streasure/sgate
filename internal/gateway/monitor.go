@@ -11,6 +11,7 @@ import (
 	json "github.com/bytedance/sonic"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhttp"
 	"gopkg.in/yaml.v3"
@@ -181,17 +182,12 @@ func (g *Gateway) StartStatsServer(addr string) {
 	g.registerAdminRoutes(mux)
 	srv := &http.Server{Addr: addr, Handler: mux}
 	g.statsServer = srv
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "stats server panic recovered error=%v", r)
-			}
-		}()
+	panicutil.Go(g.ctx, "gateway.statsServer", func() {
 		tlog.Info(g.ctx, "starting stats server addr=%s", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			tlog.Error(g.ctx, "stats server failed error=%v", err)
 		}
-	}()
+	})
 }
 
 func (g *Gateway) StopStatsServer() {
@@ -365,12 +361,7 @@ func (g *Gateway) startConfigCenterWatcher() {
 		tlog.Error(g.ctx, "config center watch failed error=%v", err)
 		return
 	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "config center watcher panic recovered error=%v", r)
-			}
-		}()
+	panicutil.GoLoop(g.ctx, "gateway.configCenterWatcher", func() {
 		for yamlBytes := range ch {
 			if len(yamlBytes) == 0 {
 				continue
@@ -401,5 +392,5 @@ func (g *Gateway) startConfigCenterWatcher() {
 			tlog.Info(g.ctx, "config updated from config center type=%s",
 				g.configCenter.Type())
 		}
-	}()
+	})
 }

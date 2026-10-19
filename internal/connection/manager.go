@@ -9,6 +9,7 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/streasure/util/netutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -452,24 +453,20 @@ func (cm *ConnectionManager) StartConnectionChecker(connIdleTimeout, connCheckIn
 	if !cm.checkStarted.CompareAndSwap(false, true) {
 		return // 已启动
 	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(cm.ctx, "connection checker panic recovered error=%v", r)
-			}
-		}()
-		defer close(cm.checkDone)
+	panicutil.GoLoop(cm.ctx, "connection.checker", func() {
 		ticker := time.NewTicker(connCheckInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-cm.stopCh:
+				// 仅正常退出路径关闭：GoLoop panic 重启不得二次 close
+				close(cm.checkDone)
 				return
 			case <-ticker.C:
 				cm.checkIdleConnections(connIdleTimeout)
 			}
 		}
-	}()
+	})
 }
 
 // SetOnRemoveClose 设置管理器主动移除连接前的回调（须在启动检查器/关闭前调用）。

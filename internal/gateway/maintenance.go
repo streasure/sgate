@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhttp"
 )
@@ -135,12 +136,7 @@ func (g *Gateway) kickConnectionsAsync(matched []*connection.Connection, reason 
 		return
 	}
 	total := len(matched)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "kickConnectionsAsync panic recovered error=%v", r)
-			}
-		}()
+	panicutil.Go(g.ctx, "gateway.kickConnectionsAsync", func() {
 		var kicked atomic.Int64
 		var wg sync.WaitGroup
 		const workers = 32
@@ -161,7 +157,7 @@ func (g *Gateway) kickConnectionsAsync(matched []*connection.Connection, reason 
 		}
 		wg.Wait()
 		tlog.Info(g.ctx, "maintenance kick done matched=%d kicked=%d reason=%s", total, kicked.Load(), reason)
-	}()
+	})
 }
 
 // maintenanceRequest /admin/maintenance 请求体。

@@ -6,6 +6,7 @@ import (
 	"net/http/pprof"
 	"sync"
 
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -42,17 +43,12 @@ func StartPProfServer(addr string) {
 			mux.Handle("/debug/pprof/"+name, pprof.Handler(name))
 		}
 		pprofServer = &http.Server{Addr: addr, Handler: mux}
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					tlog.Error(context.Background(), "pprof server panic recovered error=%v", r)
-				}
-			}()
+		panicutil.Go(context.Background(), "obs.pprofServer", func() {
 			tlog.Info(context.Background(), "pprof server started addr=%s", addr)
 			if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				tlog.Warn(context.Background(), "pprof server stopped error=%v", err)
 			}
-		}()
+		})
 	})
 }
 

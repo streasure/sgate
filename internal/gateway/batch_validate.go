@@ -8,6 +8,7 @@ import (
 	"github.com/streasure/sgate/internal/connection"
 
 	protoLogin "github.com/streasure/protocol/loginserver"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -25,12 +26,7 @@ import (
 //   - 单条 RPC 失败按 invalid 处理（fail-closed，下轮再确认）
 //   - 踢人复用 kickConn：KICK_NOTIFY + 逻辑服下线 + 断连
 func (g *Gateway) startBatchValidateSweep() {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				tlog.Error(g.ctx, "batchValidate sweep panic recovered error=%v", r)
-			}
-		}()
+	panicutil.GoLoop(g.ctx, "gateway.batchValidateSweep", func() {
 		for {
 			interval := g.batchValidateInterval()
 			if interval <= 0 {
@@ -49,7 +45,7 @@ func (g *Gateway) startBatchValidateSweep() {
 			}
 			g.runBatchValidateSweep()
 		}
-	}()
+	})
 }
 
 // batchValidateInterval 热读 batchInterval；enabled=false 或非法/零值返回 0（暂停）。
@@ -86,11 +82,7 @@ type batchSweepItem struct {
 
 // runBatchValidateSweep 执行一轮：收集在线会话 → 分片批量校验 → 踢失效。
 func (g *Gateway) runBatchValidateSweep() {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(g.ctx, "batch validate sweep panic recovered error=%v", r)
-		}
-	}()
+	defer panicutil.Recover(g.ctx, "gateway.runBatchValidateSweep")
 
 	g.loginServerMu.RLock()
 	client := g.loginServerClient
