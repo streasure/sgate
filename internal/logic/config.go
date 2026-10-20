@@ -34,14 +34,22 @@ type ServiceConfig struct {
 	Gateways           []string      `yaml:"gateways"`           // 静态网关 gRPC 地址列表（ip:port），与 etcd 发现互补
 }
 
+// defaultGRPCWindowSize / defaultGRPCMaxMessageSize logic 侧 gRPC 窗口与单消息上限的
+// 零值回退（唯一值源：defaultConfig 与 service/dialer 的 <=0 回退共用，勿另写字面量）。
+// 与网关侧 config.DefaultGatewayGRPCWindowSize 数值巧合相同（524288），但属不同子系统，不跨包合并。
+const (
+	defaultGRPCWindowSize     = 524288
+	defaultGRPCMaxMessageSize = 4 * 1024 * 1024
+)
+
 // defaultConfig 返回逻辑层服务的默认配置
 func defaultConfig() ServiceConfig {
 	return ServiceConfig{
 		ListenAddr: "0.0.0.0", ListenPort: "50052", Belong: "default", ServiceID: "", ServerType: "Logic",
 		ServiceName: "logic", Zone: "default", EtcdEndpoint: "http://127.0.0.1:2379",
 		EtcdServicePrefix: "/services", EtcdLeaseTTL: "10s", HeartbeatInterval: 3 * time.Second,
-		HeartbeatTTL: 10 * time.Second, GRPCWindowSize: 524288, GRPCMaxMessageSize: 4 * 1024 * 1024,
-		StreamSendTimeout: 5 * time.Second,
+		HeartbeatTTL: 10 * time.Second, GRPCWindowSize: defaultGRPCWindowSize, GRPCMaxMessageSize: defaultGRPCMaxMessageSize,
+		StreamSendTimeout: defaultStreamSendTimeout,
 	}
 }
 

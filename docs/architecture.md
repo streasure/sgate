@@ -55,7 +55,10 @@ Gateway 结构体承载全部接入侧状态：
 | 生命周期 | gateway.go | `NewGateway()`, `Init/Start/Destroy`, `StartServices` |
 | gnet 事件 | handlers.go | `OnOpen/OnTraffic/OnClose`（原 conn.go） |
 | 登录 | login.go | `handleLoginGate`, session 绑定 |
-| 登出/限流热更 | admin_ban.go | `handleLogoutGate`（断连无推送+JWT Revoke）、`POST /admin/ratelimit`（Bearer）；封禁已迁 loginserver（KickService 单向执行器） |
+| 登出/管理端 | admin.go | `handleLogoutGate`（断连无推送+JWT Revoke）、`POST /admin/ratelimit`（Bearer，`admin.token` 空=关闭） |
+| 维护模式 | maintenance.go | `handleAdminMaintenance`：按 serverId/zone 置维护，阻断新登录并踢出在线玩家（路由在 admin.go 注册） |
+| 踢人执行器 | kick.go | `kickConn`/`pushKickNotify`：loginserver 单向下发 KickAccounts/KickIP 的本地执行端（sgate 无封禁存储） |
+| 登录周期校验 | batch_validate.go | BatchValidate 周期安全网（`loginValidation.batchInterval`，P2） |
 | WebSocket | websocket.go | 握手升级、帧编解码 |
 | 消息管道 | pipeline.go | 认证→安全→过滤→转发 |
 | 过滤器 | filter.go | SPI 加载、`types.GetFilterChain()` |
@@ -93,6 +96,7 @@ Gateway 结构体承载全部接入侧状态：
 
 - `routes.go`：命令码常量（`CmdLoginGate`、`CmdPushBatch` 等）、路由解析、`ExtractMessageFrame`
 - `frame.go`：`DecodeClientMessage` / `MarshalClientMessage` / `MarshalClientError` / `NewErrorResponse`
+- `logicstream.go`：flip 握手元数据（`MetaLogicID`/`MetaShardIdx` 等）与 `LogicStreamMeta` 解析
 
 routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免循环依赖。
 
@@ -107,6 +111,10 @@ routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免�
 | `cluster` | etcd 注册/发现、配置中心、告警 webhook |
 | `obs` | 追踪、pprof、健康检查、延迟分位数 |
 | `types` | 过滤器链、公共类型定义 |
+
+### 2.6 internal/logic（逻辑服侧嵌入库，网关不依赖）
+
+`internal/logic` 是提供给逻辑服进程嵌入的 SDK，`internal/gateway`、`internal/backend` 均不 import 它（不参与上述分层依赖）。它封装：gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）、`Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*` 等）消费；网关侧与之对接的是 `internal/backend` 的 `GRPCServer` flip 流入口。详见 [README §十](../README.md#十逻辑层-api)。
 
 ---
 
@@ -141,19 +149,19 @@ container.Serve()
 
 ```go
 func NewGateway() *Gateway { ... }           // 无参数
-func NewLogicClient(g GatewayInterface) *LogicClient { ... }  // 仅消费方接口
+func NewLogicClient(gateway GatewayInterface) *LogicClient { ... }  // 仅消费方接口
 ```
 
 ### 3.3 全局资源模式
 
-组件 Init/Start 阶段写入 `internal/component/resources.go` 导出的全局变量；Gateway 通过 getter 读取：
+组件 Init/Start 阶段经 `internal/component/resources.go` 的包内 setter（如 `setSecurityResources`，未导出）写入全局变量；外部（含 Gateway）只能通过同文件导出的 getter 读取：
 
 ```go
-// 组件写入
-resources.SetRateLimiter(...)
+// 组件写入（component 包内部，security_component.go Init）
+setSecurityResources(wb, waf, rl, jwt, cb)
 
-// Gateway 读取
-resources.GetRateLimiter().Allow(...)
+// Gateway 读取（package component 导出的 getter，gateway.go Init）
+component.RateLimiter().Allow(dimension, key)
 ```
 
 ### 3.4 全局过滤器链
@@ -220,7 +228,7 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
 
 ### 5.1 gRPC 流分片
 
-- 默认 `shardCount = CPU × 8`（约 96 on 12C）
+- 网关默认 `shardCount = 96`（`config.DefaultStreamShardCount`）；logic 侧拨入默认 `NumCPU × 8`（12C 机器同为 96）
 - 按 `sessionID` 哈希选择 shard，同连接消息有序
 - 每 shard 独立 send channel + 发送协程，降低锁竞争
 

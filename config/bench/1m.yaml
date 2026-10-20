@@ -13,114 +13,61 @@ discovery:
   enabled: false
 
 transports:
-  - protocol: tcp
-    port: 48080
-  - protocol: tcp
-    port: 48081
+  - port: 48080
+  - port: 48081
     type: websocket
   # 多端口支持百万连接（每端口 ~6K 来自 localhost）
-  - protocol: tcp
-    port: 49000
-  - protocol: tcp
-    port: 49001
-  - protocol: tcp
-    port: 49002
-  - protocol: tcp
-    port: 49003
-  - protocol: tcp
-    port: 49004
-  - protocol: tcp
-    port: 49005
-  - protocol: tcp
-    port: 49006
-  - protocol: tcp
-    port: 49007
-  - protocol: tcp
-    port: 49008
-  - protocol: tcp
-    port: 49009
-  - protocol: tcp
-    port: 49010
-  - protocol: tcp
-    port: 49011
-  - protocol: tcp
-    port: 49012
-  - protocol: tcp
-    port: 49013
-  - protocol: tcp
-    port: 49014
-  - protocol: tcp
-    port: 49015
-  - protocol: tcp
-    port: 49016
-  - protocol: tcp
-    port: 49017
-  - protocol: tcp
-    port: 49018
-  - protocol: tcp
-    port: 49019
-  - protocol: tcp
-    port: 49020
-  - protocol: tcp
-    port: 49021
-  - protocol: tcp
-    port: 49022
-  - protocol: tcp
-    port: 49023
-  - protocol: tcp
-    port: 49024
-  - protocol: tcp
-    port: 49025
-  - protocol: tcp
-    port: 49026
-  - protocol: tcp
-    port: 49027
-  - protocol: tcp
-    port: 49028
-  - protocol: tcp
-    port: 49029
-  - protocol: tcp
-    port: 49030
-  - protocol: tcp
-    port: 49031
-  - protocol: tcp
-    port: 49032
-  - protocol: tcp
-    port: 49033
-  - protocol: tcp
-    port: 49034
-  - protocol: tcp
-    port: 49035
-  - protocol: tcp
-    port: 49036
-  - protocol: tcp
-    port: 49037
-  - protocol: tcp
-    port: 49038
-  - protocol: tcp
-    port: 49039
-  - protocol: tcp
-    port: 49040
-  - protocol: tcp
-    port: 49041
-  - protocol: tcp
-    port: 49042
-  - protocol: tcp
-    port: 49043
-  - protocol: tcp
-    port: 49044
-  - protocol: tcp
-    port: 49045
-  - protocol: tcp
-    port: 49046
-  - protocol: tcp
-    port: 49047
-  - protocol: tcp
-    port: 49048
-  - protocol: tcp
-    port: 49049
-  - protocol: tcp
-    port: 49050
+  - port: 49000
+  - port: 49001
+  - port: 49002
+  - port: 49003
+  - port: 49004
+  - port: 49005
+  - port: 49006
+  - port: 49007
+  - port: 49008
+  - port: 49009
+  - port: 49010
+  - port: 49011
+  - port: 49012
+  - port: 49013
+  - port: 49014
+  - port: 49015
+  - port: 49016
+  - port: 49017
+  - port: 49018
+  - port: 49019
+  - port: 49020
+  - port: 49021
+  - port: 49022
+  - port: 49023
+  - port: 49024
+  - port: 49025
+  - port: 49026
+  - port: 49027
+  - port: 49028
+  - port: 49029
+  - port: 49030
+  - port: 49031
+  - port: 49032
+  - port: 49033
+  - port: 49034
+  - port: 49035
+  - port: 49036
+  - port: 49037
+  - port: 49038
+  - port: 49039
+  - port: 49040
+  - port: 49041
+  - port: 49042
+  - port: 49043
+  - port: 49044
+  - port: 49045
+  - port: 49046
+  - port: 49047
+  - port: 49048
+  - port: 49049
+  - port: 49050
 
 grpc:
   port: 50051

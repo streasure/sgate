@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/util/uhash"
 
@@ -46,16 +47,19 @@ type StreamManager struct {
 	sendTimeout time.Duration  // 发送超时
 }
 
-// NewStreamManager 创建流管理器，根据 CPU 核心数和配置初始化分片
+// NewStreamManager 创建流管理器，根据 CPU 核心数和配置初始化分片。
+// 零值回退统一引用 config 包默认常量（唯一值源，勿在此处另写字面量）：
+// 容量=config.DefaultGatewayStreamSendChannelSize（65536），
+// 超时=config.DefaultSendTimeout（200ms，与 stream.queuePolicy.sendTimeout 缺省同源）。
 func NewStreamManager(shardCount int, sendChannelSize int, sendTimeout time.Duration) *StreamManager {
 	if shardCount <= 0 {
 		shardCount = runtime.NumCPU() * 4
 	}
 	if sendChannelSize <= 0 {
-		sendChannelSize = 65536
+		sendChannelSize = config.DefaultGatewayStreamSendChannelSize
 	}
 	if sendTimeout <= 0 {
-		sendTimeout = 200 * time.Millisecond
+		sendTimeout = config.DefaultSendTimeout
 	}
 	sm := &StreamManager{
 		shards:      make([]*StreamShard, shardCount),
@@ -160,7 +164,11 @@ func (s *StreamShard) sendBatchInner(batch []*protoGw.StreamData) {
 	// StreamBatch 合帧：整批（含单条）压成单个 gRPC 帧（固定线格式），
 	// 接收端固定按 StreamBatch 解码，绝不能在同一股流上混发裸 StreamData。
 	if err := stream.SendMsg(&protoGw.StreamBatch{Items: batch}); err != nil {
-		tlog.Warn(s.lc.ctx, "shard send error, isolating shard shard=%d error=%v", s.index, err)
+		logCtx := context.Background()
+		if s.lc != nil {
+			logCtx = s.lc.ctx
+		}
+		tlog.Warn(logCtx, "shard send error, isolating shard shard=%d error=%v", s.index, err)
 		s.detach(stream)
 		// 整批未能发出，归还对象池并计数丢弃。
 		if s.lc != nil && s.lc.gateway != nil {
@@ -172,8 +180,10 @@ func (s *StreamShard) sendBatchInner(batch []*protoGw.StreamData) {
 	}
 }
 
-// SendMessage 向分片发送消息，支持快速路径和超时机制
-func (s *StreamShard) SendMessage(msg *protoGw.StreamData) (err error) {
+// SendMessage 向分片发送消息，支持快速路径和超时机制。
+// stop 竞态语义：入队成功后立即复查 closed——stop 可能已置位且消费协程已退出，
+// 此时消息可能已被 stop 排空或滞留死队列，绝不能向上游返回“成功”造成假转发计数。
+func (s *StreamShard) SendMessage(msg *protoGw.StreamData) error {
 	// 快速路径：原子检查关闭标志，避免 defer/recover 开销。
 	if s.closed.Load() {
 		return ErrNotConnected
@@ -182,36 +192,50 @@ func (s *StreamShard) SendMessage(msg *protoGw.StreamData) (err error) {
 	// 先尝试非阻塞发送（最常见情况）。
 	select {
 	case s.sendCh <- msg:
+		if s.closed.Load() {
+			return ErrNotConnected
+		}
 		return nil
 	default:
 		// 通道已满，尝试带超时的发送。
 	}
 
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				err = fmt.Errorf("send on closed channel: %v", r)
-			}
-		}()
-		timer := time.NewTimer(s.sendTimeout)
-		defer timer.Stop()
-		select {
-		case s.sendCh <- msg:
-			err = nil
-		case <-s.stopCh:
-			err = ErrNotConnected
-		case <-timer.C:
-			err = ErrSendTimeout
+	timer := time.NewTimer(s.sendTimeout)
+	defer timer.Stop()
+	select {
+	case s.sendCh <- msg:
+		if s.closed.Load() {
+			return ErrNotConnected
 		}
-	}()
-	return
+		return nil
+	case <-s.stopCh:
+		return ErrNotConnected
+	case <-timer.C:
+		return ErrSendTimeout
+	}
 }
 
-// stop 停止分片的发送和接收
+// stop 停止分片的发送和接收，并排空 sendCh 中的滞留消息。
+// 消费协程见 stopCh 后直接退出，不排空则残留消息静默泄漏池对象且上游已计成功。
 func (s *StreamShard) stop() {
 	s.stopOnce.Do(func() {
 		s.closed.Store(true)
 		close(s.stopCh)
+		dropped := 0
+		for {
+			select {
+			case m := <-s.sendCh:
+				if m != nil {
+					PutStreamData(m)
+					dropped++
+				}
+			default:
+				if dropped > 0 && s.lc != nil && s.lc.gateway != nil {
+					s.lc.gateway.AddPushDroppedNoConn(int64(dropped))
+				}
+				return
+			}
+		}
 	})
 }
 

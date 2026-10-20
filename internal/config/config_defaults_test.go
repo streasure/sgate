@@ -62,7 +62,7 @@ func TestApplyRuntimeDefaults_ZeroValuesGetDefaults(t *testing.T) {
 	if c.Stream.QueuePolicy.Policy != DefaultStreamQueuePolicy {
 		t.Errorf("QueuePolicy.Policy = %q, want %q", c.Stream.QueuePolicy.Policy, DefaultStreamQueuePolicy)
 	}
-	if c.Stream.QueuePolicy.SendTimeout != DefaultSendTimeout {
+	if c.Stream.QueuePolicy.SendTimeout != DefaultSendTimeout.String() {
 		t.Errorf("QueuePolicy.SendTimeout = %q, want %q", c.Stream.QueuePolicy.SendTimeout, DefaultSendTimeout)
 	}
 

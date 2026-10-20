@@ -80,7 +80,7 @@ sgate 是一个基于 gnet v2 的高性能长连接网关。它承载 TCP 和 We
 
 | 依赖 | 版本 | 必需 | 说明 |
 | --- | --- | --- | --- |
-| Go | ≥ 1.22 | 是 | 编译网关和压测程序 |
+| Go | ≥ 1.26 | 是 | 编译网关和压测程序（go.mod 指定 1.26.5） |
 | etcd | ≥ 3.5 | 推荐 | 逻辑服服务发现；单体模式可选 |
 | Windows / Linux / macOS | — | 是 | 生产建议 Linux |
 
@@ -125,13 +125,16 @@ go build -o bench\bench1_tcp\bench1_tcp.exe .\bench\bench1_tcp
 .\sgate.exe -conf config\gateway.yaml -logger config\log\default.yaml
 ```
 
-看到以下日志表示启动成功：
+启动成功的关键日志（gnet 自身直接打 stdout；tlog 日志按 `config/log/default.yaml` 输出，该文件默认 `level: warn`、`console.enabled: false`，Info 级只在把 `log.level` 调到 `info` 并/或打开 `console` 后才可见，否则仅写文件 `logs/sgate.log`）：
 
 ```
-gateway starting... version=1.0.0
-config loaded port=8081
-gnet 启动 12 个事件循环，监听 tcp://:48080, tcp://:48081
-gRPC 服务器已启动 addr=:50051
+[gnet] Launching gnet with 12 event-loops, listening on: tcp://:48080
+[gnet] Launching gnet with 12 event-loops, listening on: tcp://:48081
+gateway starting http port:8081 version=v1.0.1 cpu=12 GOMAXPROCS=12
+starting gateway transport addr=tcp://:48080 type=
+starting gRPC server port=:50051
+gRPC server started port=:50051
+etcd 注册成功 serviceID=default/SERVER_TYPE_SGATE:default instanceID=gateway-1 address=...
 ```
 
 此时网关已就绪，等待客户端连接：
@@ -227,12 +230,11 @@ CONF=config/cluster/gateway1.yaml ./start.sh
 
 | 日志 | 含义 |
 | --- | --- |
-| `gateway starting...` | 网关进程启动 |
-| `config loaded` | 配置文件加载成功 |
-| `Launching gnet with N event-loops` | gnet 事件循环启动 |
-| `gRPC 服务器已启动` | gRPC 端口就绪，可接受逻辑服连接 |
-| `etcd 注册成功` | 网关自身已注册到 etcd（standalone/cluster 均会注册） |
-| `etcd 逻辑服务发现已启动` | 逻辑服发现正常 |
+| `gateway starting http port:... version=...` | 配置加载成功、网关进程启动（tlog；失败时为 `load config failed error=...` 并非零退出） |
+| `Launching gnet with N event-loops, listening on: ...` | gnet 事件循环启动（gnet 自身日志，直接打 stdout，每个监听端口一条） |
+| `starting gRPC server port=:50051` → `gRPC server started port=:50051` | gRPC 端口就绪，可接受逻辑服连接 |
+| `etcd 注册成功 serviceID=... instanceID=... address=...` | `discovery.registerSelf: true`（`config/gateway.yaml` 及 cluster/bench 配置默认如此）时网关自身已注册到 etcd |
+| `etcd 逻辑服务发现已启动（网关自身不注册）...` | `registerSelf: false` 时的另一分支：仅做逻辑服发现、不注册自身 |
 
 ### 4.4 停止网关
 
@@ -296,16 +298,13 @@ discovery:
 
 ```yaml
 transports:
-  - protocol: tcp
-    port: 48080
-  - protocol: tcp
-    port: 48081
+  - port: 48080
+  - port: 48081
     type: websocket
 ```
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `protocol` | string | 必须为 `tcp` |
 | `port` | int | 监听端口，每个端口唯一 |
 | `type` | string | 空 = TCP；`websocket` = WebSocket |
 
@@ -362,7 +361,7 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | --- | --- | --- | --- |
 | `port` | int | `50051` | gRPC 监听端口 |
 | `windowSize` | int | `512KiB`（零值回退；`config/gateway.yaml` 为 `64MiB`） | HTTP/2 流控窗口 |
-| `maxMessageSize` | int | `8MiB` | 单条消息最大字节数 |
+| `maxMessageSize` | int | `4MiB` | 单条消息最大字节数 |
 
 ### 6.7 `stream` 流分片和队列
 
@@ -659,6 +658,8 @@ Broadcast(command, data)                    // 向所有网关广播
 
 批量推送是 sgate 的传输优化，逻辑服不需要感知 `PushBatch`。
 
+**`internal/logic` 的定位**：逻辑服侧的嵌入库，网关侧不引用它（`internal/gateway`、`internal/backend` 均不 import）。它封装 gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）和 `Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓中由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*`、`bench/logic_logincheck`）消费，真实逻辑服进程同样以此库嵌入；网关侧与之对接的是 `internal/backend` 的 flip 流入口 `GRPCServer`。
+
 ---
 
 ## 十一、目录结构
@@ -706,8 +707,7 @@ internal/traffic/         灰度、镜像、降级
 internal/cluster/         配置中心、告警 webhook（无 Leader 选举）
 internal/obs/             监控、追踪、pprof
 internal/types/           过滤器链、公共类型
-internal/logic/           逻辑服 SDK（bench 用）
-internal/netutil/         网络工具
+internal/logic/           逻辑服侧嵌入库（gRPC 服务端 + etcd 注册 + flip 拨入网关；本仓由 bench 逻辑服使用，见 §十）
 
 bench/                    bench1、bench2 压测程序
 config/                   配置文件（按用途分子目录）
@@ -757,20 +757,22 @@ go vet ./...
 
 ```yaml
 log:
-  level: info          # debug / info / warn / error
-  format: json         # json / console
+  level: warn         # debug / info / warn / error（默认 warn：Info 级启动日志不输出）
+  format: json        # json / console
   console:
-    enabled: false     # 控制台输出
+    enabled: false    # 控制台输出
   file:
     enabled: true
     path: logs/sgate.log
     rotate:
-      max_size: 500    # MB
-      max_backups: 10
-      max_age: 30      # 天
+      max_size: 100   # MB
+      max_backups: 3
+      max_age: 7      # 天
   async:
     enabled: true
     buffer_size: 100000
+    batch_size: 1000
+    flush_interval: 100
 ```
 
 ---

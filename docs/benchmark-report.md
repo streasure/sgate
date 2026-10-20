@@ -96,7 +96,7 @@ gateway 与 logic 之间的 gRPC stream 若共享单条 TCP 连接，HTTP/2 协�
 
 sgate 所有监控数据通过以下方式输出（无标准输出）：
 
-1. **结构化日志**：`tlog.Info("gateway metrics", ...)` 每秒输出一次
+1. **结构化日志**：`tlog.Info(ctx, "gateway metrics ...", ...)` 每秒输出一次
 2. **HTTP API**：`/stats` 端点返回 JSON 格式指标
 3. **pprof**：`/debug/pprof/` 提供 Go 运行时分析
 
@@ -130,7 +130,7 @@ sgate 所有监控数据通过以下方式输出（无标准输出）：
 
 ## etcd 注册地址格式
 
-standalone 和 cluster 模式均向 etcd 注册网关连接信息，格式为 JSON：
+`discovery.registerSelf: true` 时网关向 etcd 注册网关连接信息，格式为 JSON：
 
 ```json
 {
@@ -141,6 +141,6 @@ standalone 和 cluster 模式均向 etcd 注册网关连接信息，格式为 JS
 }
 ```
 
-- etcd key: `/services/{belong}/{SERVER_TYPE_SGATE}:{zone}/{instanceId}`（protocol 枚举）
+- etcd key: `/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`（protocol 枚举）
 - lease: 自动续期，TTL 默认 10s
 - loginserver 通过 etcd watch 前缀 `/services/{belong}/SERVER_TYPE_SGATE:` 获取网关连接地址

@@ -42,7 +42,9 @@ func PutStreamData(msg *protoGw.StreamData) {
 	}
 	// 保留 Data 缓冲容量：GetStreamData 的调用方（消息管道热路径）
 	// 通过 append(msg.Data[:0], ...) 复用，消除每消息的字节切片分配。
-	// gRPC SendMsg 在返回前已完成序列化，归还后引用失效是安全的。
+	// 安全性：grpc-go clientStream.SendMsg 在返回前同步走 prepareMsg →
+	// codec.Marshal（proto.MarshalAppend 拷贝进独立缓冲），dataFrame 引用的
+	// 是已拷贝的 payload，不再读源消息；故 SendMsg 返回后归还即安全。
 	kept := msg.Data[:0]
 	msg.Reset()
 	msg.Data = kept

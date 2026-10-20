@@ -25,10 +25,10 @@ type ClusterComponent struct {
 	ctx            context.Context
 	cfg            config.Config
 	grpcPort       int
-	Discovery      *uetcd.Component
-	LoginDiscovery *uetcd.Component // 发现指定 zone 的 loginserver
-	ConfigCenter   clusterPkg.ConfigCenter
-	AlertWebhook   *clusterPkg.AlertWebhook
+	discovery      *uetcd.Component
+	loginDiscovery *uetcd.Component // 发现指定 zone 的 loginserver
+	configCenter   clusterPkg.ConfigCenter
+	alertWebhook   *clusterPkg.AlertWebhook
 }
 
 // NewClusterComponent 创建集群组件，配置从 config.Get() 读取。
@@ -46,12 +46,12 @@ func (c *ClusterComponent) Order() int   { return 400 }
 func (c *ClusterComponent) Init() error {
 	if c.cfg.ConfigCenter.Enabled {
 		// 配置中心后端是 etcd；etcd 默认接入，直接创建
-		c.ConfigCenter = clusterPkg.NewConfigCenter(c.cfg.ConfigCenter, c.cfg.Etcd)
+		c.configCenter = clusterPkg.NewConfigCenter(c.cfg.ConfigCenter, c.cfg.Etcd)
 	}
 	if c.cfg.Alert.Enabled {
-		c.AlertWebhook = clusterPkg.NewAlertWebhook(c.cfg.Alert)
+		c.alertWebhook = clusterPkg.NewAlertWebhook(c.cfg.Alert)
 	}
-	setClusterInitResources(c.ConfigCenter, c.AlertWebhook)
+	setClusterInitResources(c.configCenter, c.alertWebhook)
 	return nil
 }
 
@@ -107,8 +107,8 @@ func (c *ClusterComponent) Start() error {
 		}
 	}
 
-	c.Discovery = uetcd.New(compCfg)
-	if err := c.Discovery.Start(); err != nil {
+	c.discovery = uetcd.New(compCfg)
+	if err := c.discovery.Start(); err != nil {
 		return fmt.Errorf("start etcd: %w", err)
 	}
 
@@ -131,13 +131,13 @@ func (c *ClusterComponent) Start() error {
 			ServiceID: loginServiceID,
 		},
 	}
-	c.LoginDiscovery = uetcd.New(loginCompCfg)
-	if err := c.LoginDiscovery.Start(); err != nil {
+	c.loginDiscovery = uetcd.New(loginCompCfg)
+	if err := c.loginDiscovery.Start(); err != nil {
 		return fmt.Errorf("start loginserver discovery: %w", err)
 	}
 	tlog.Info(c.ctx, "loginserver discovery started serviceID=%s", loginServiceID)
 
-	setClusterStartResources(c.Discovery, c.LoginDiscovery)
+	setClusterStartResources(c.discovery, c.loginDiscovery)
 
 	tlog.Info(c.ctx, "cluster component started serverType=%s serverID=%s zone=%s",
 		c.cfg.ServerType,
@@ -147,13 +147,13 @@ func (c *ClusterComponent) Start() error {
 }
 
 func (c *ClusterComponent) Destroy() {
-	if c.Discovery != nil {
-		c.Discovery.Destroy()
+	if c.discovery != nil {
+		c.discovery.Destroy()
 	}
-	if c.LoginDiscovery != nil {
-		c.LoginDiscovery.Destroy()
+	if c.loginDiscovery != nil {
+		c.loginDiscovery.Destroy()
 	}
-	if c.ConfigCenter != nil {
-		c.ConfigCenter.Stop()
+	if c.configCenter != nil {
+		c.configCenter.Stop()
 	}
 }

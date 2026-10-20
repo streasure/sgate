@@ -35,9 +35,6 @@ type GatewayStream_OnDataServer = protocol.GatewayStream_OnDataServer
 // UnimplementedGatewayStreamServer 是未实现网关流服务端的嵌入式实现。
 type UnimplementedGatewayStreamServer = protocol.UnimplementedGatewayStreamServer
 
-// NewGatewayStreamClient 创建网关流客户端
-var NewGatewayStreamClient = protocol.NewGatewayStreamClient
-
 // RegisterGatewayStreamServer 注册网关流服务到 gRPC 服务器
 func RegisterGatewayStreamServer(s grpc.ServiceRegistrar, srv GatewayStreamServer) {
 	protocol.RegisterGatewayStreamServer(s, srv)

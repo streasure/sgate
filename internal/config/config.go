@@ -120,17 +120,12 @@ type OTelTracerConfig struct {
 	Workers     int    `yaml:"workers"`
 }
 
-// ConfigCenterConfig 配置中心配置（保留用于基于 HTTP 的动态配置）
+// ConfigCenterConfig 配置中心配置（etcd 配置中心，连接参数复用 Etcd 段；
+// type/endpoint/group/token/username/password/pollInterval 等历史 HTTP 轮询字段
+// 经全仓零引用核查后删除）。
 type ConfigCenterConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	Type         string `yaml:"type"`
-	Endpoint     string `yaml:"endpoint"`
-	DataID       string `yaml:"dataID"`
-	Group        string `yaml:"group"`
-	Token        string `yaml:"token"`
-	Username     string `yaml:"username"`
-	Password     string `yaml:"password"`
-	PollInterval string `yaml:"pollInterval"`
+	Enabled bool   `yaml:"enabled"`
+	DataID  string `yaml:"dataID"`
 }
 
 // EtcdConfig etcd 服务注册与发现配置（etcd 默认接入，无启用开关）
@@ -139,7 +134,6 @@ type EtcdConfig struct {
 	Endpoint      string   `yaml:"endpoint"`
 	Username      string   `yaml:"username"`
 	Password      string   `yaml:"password"`
-	DialTimeout   string   `yaml:"dialTimeout"`
 	ServicePrefix string   `yaml:"servicePrefix"`
 	LeaseTTL      string   `yaml:"leaseTTL"`
 }
@@ -349,17 +343,17 @@ type ProtectionConfig struct {
 	BenchMode bool `yaml:"benchMode"`
 }
 
-// Transport 网络传输配置
+// Transport 网络传输配置（历史 protocol 字段全仓零读取已删；
+// 传输类型由 Type 区分：空=tcp、websocket）
 type Transport struct {
-	Protocol string `yaml:"protocol"`
-	Port     int    `yaml:"port"`
-	Type     string `yaml:"type"`
+	Port int    `yaml:"port"`
+	Type string `yaml:"type"`
 }
 
 var conf atomic.Pointer[Config]
 var confPath atomic.Pointer[string] // 最近一次 Load 的配置文件路径
 
-// Validate 校验必填配置项。Load/LoadConfig 解析成功后调用。
+// Validate 校验必填配置项。Load 解析成功后调用。
 func (c *Config) Validate() error {
 	if c.HttpPort <= 0 {
 		return fmt.Errorf("httpPort is required and must be > 0")
@@ -406,7 +400,7 @@ func validateIPOrCIDR(s string) error {
 }
 
 // ApplyRuntimeDefaults 为运行时零值字段补齐安全默认值。
-// Load/LoadConfig 与配置热更新必须在 Store 前调用；幂等，可重复调用。
+// Load 与配置热更新必须在 Store 前调用；幂等，可重复调用。
 // 默认值与压测/生产网关当前行为保持一致（勿随意改数值，避免吞吐/内存回归）。
 func (c *Config) ApplyRuntimeDefaults() {
 	p := &c.Protection
@@ -463,13 +457,13 @@ func (c *Config) ApplyRuntimeDefaults() {
 		s.QueuePolicy.MaxSize = DefaultStreamQueueMaxSize
 	}
 	if s.QueuePolicy.BlockTimeout == "" {
-		s.QueuePolicy.BlockTimeout = DefaultStreamBlockTimeout
+		s.QueuePolicy.BlockTimeout = DefaultStreamBlockTimeout.String()
 	}
 	if s.QueuePolicy.BackpressureThreshold <= 0 {
 		s.QueuePolicy.BackpressureThreshold = DefaultBackpressureThreshold
 	}
 	if s.QueuePolicy.SendTimeout == "" {
-		s.QueuePolicy.SendTimeout = DefaultSendTimeout
+		s.QueuePolicy.SendTimeout = DefaultSendTimeout.String()
 	}
 
 	if c.Security.RateLimit.MaxTokens <= 0 {
@@ -583,30 +577,17 @@ func (c *Config) ApplyRuntimeDefaults() {
 	}
 }
 
-// LoadConfig 从指定的 YAML 文件加载配置，若未找到则使用默认配置
-// 采用合并语义：默认配置 + YAML 覆盖
-func LoadConfig(configFiles ...string) (*Config, error) {
-	cfg, err := uconfig.Load[Config](configFiles...)
-	if err != nil {
-		return nil, err
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-	cfg.ApplyRuntimeDefaults()
-	return cfg, nil
-}
-
 // Load 从指定的 YAML 文件加载配置并存入全局变量，返回配置指针。
+// 顺序与配置热更新（gateway.handleConfigUpdate）一致：解析 → 补默认值 → 校验 → Store。
 func Load(configFiles ...string) (*Config, error) {
 	cfg, err := uconfig.Load[Config](configFiles...)
 	if err != nil {
 		return nil, err
 	}
+	cfg.ApplyRuntimeDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	cfg.ApplyRuntimeDefaults()
 	conf.Store(cfg)
 	if len(configFiles) > 0 && configFiles[0] != "" {
 		p := configFiles[0]

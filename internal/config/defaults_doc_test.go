@@ -10,7 +10,7 @@ import (
 func TestDocDefaults_MatchREADME(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "min.yaml")
 	yaml := "httpPort: 8080\nbelong: b\nserverId: s\nserverType: Gateway\nzone: z\n" +
-		"transports:\n  - protocol: tcp\n    port: 1\n"
+		"transports:\n  - port: 1\n"
 	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}

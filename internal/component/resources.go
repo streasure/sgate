@@ -22,7 +22,6 @@ var (
 	// observability（Order 200）Init 写入。
 	globalTracer         *obs.Tracer
 	globalOTelTracer     *obs.OTelTracer
-	globalLogSanitizer   *obs.LogSanitizer
 	globalLatencyTracker *obs.LatencyTracker
 
 	// traffic（Order 300）Init 写入。
@@ -58,9 +57,6 @@ func Tracer() *obs.Tracer { return globalTracer }
 // OTelTracer 返回可观测组件创建的 OpenTelemetry 追踪器。
 func OTelTracer() *obs.OTelTracer { return globalOTelTracer }
 
-// LogSanitizer 返回可观测组件创建的日志脱敏器。
-func LogSanitizer() *obs.LogSanitizer { return globalLogSanitizer }
-
 // LatencyTracker 返回可观测组件创建的延迟追踪器。
 func LatencyTracker() *obs.LatencyTracker { return globalLatencyTracker }
 
@@ -93,10 +89,9 @@ func setSecurityResources(wb *security.WhitelistBlacklist, waf *security.WAF, rl
 	globalCircuitBreakerMgr = cb
 }
 
-func setObservabilityResources(tracer *obs.Tracer, otel *obs.OTelTracer, sanitizer *obs.LogSanitizer, latency *obs.LatencyTracker) {
+func setObservabilityResources(tracer *obs.Tracer, otel *obs.OTelTracer, latency *obs.LatencyTracker) {
 	globalTracer = tracer
 	globalOTelTracer = otel
-	globalLogSanitizer = sanitizer
 	globalLatencyTracker = latency
 }
 

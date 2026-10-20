@@ -23,11 +23,12 @@ type SecurityComponent struct {
 	waf config.WAFConfig
 	jwt config.JWTAuthConfig
 
-	WhitelistBlacklist *security.WhitelistBlacklist
-	WAF                *security.WAF
-	RateLimiter        *security.RateLimiter
-	JWTAuth            *security.JWTAuthFilter
-	CircuitBreakerMgr  *security.CircuitBreakerManager
+	// 资源字段仅包内使用（经 resources.go 全局量发布给 Gateway），不作为外部通路。
+	whitelistBlacklist *security.WhitelistBlacklist
+	wafInstance        *security.WAF
+	rateLimiter        *security.RateLimiter
+	jwtAuth            *security.JWTAuthFilter
+	circuitBreakerMgr  *security.CircuitBreakerManager
 }
 
 // NewSecurityComponent 创建安全组件，配置从 config.Get() 读取。
@@ -51,16 +52,16 @@ func (c *SecurityComponent) Init() error {
 	// 组件创建与否由 Enabled 决定，热更新仅调整已创建组件的参数）。
 	// 未启用时不创建，安全链热路径判空即跳过，快速路径判定（pipeline）才可能生效。
 	if c.cfg.Enabled {
-		c.WhitelistBlacklist = security.NewWhitelistBlacklist()
+		c.whitelistBlacklist = security.NewWhitelistBlacklist()
 		for _, ip := range c.cfg.Whitelist {
-			c.WhitelistBlacklist.AddToWhitelist(ip)
+			c.whitelistBlacklist.AddToWhitelist(ip)
 		}
 		for _, ip := range c.cfg.Blacklist {
-			c.WhitelistBlacklist.AddToBlacklist(ip)
+			c.whitelistBlacklist.AddToBlacklist(ip)
 		}
 	}
 	if c.cfg.CircuitBreaker.Enabled {
-		c.CircuitBreakerMgr = security.NewCircuitBreakerManager()
+		c.circuitBreakerMgr = security.NewCircuitBreakerManager()
 	}
 
 	// JWT 认证。
@@ -69,8 +70,8 @@ func (c *SecurityComponent) Init() error {
 			// fail-closed：空 secret意味着 HS256 空键可伪造任意令牌
 			return fmt.Errorf("jwtAuth.enabled=true requires jwtAuth.secret")
 		}
-		c.JWTAuth = security.NewJWTAuthFilter(c.jwt)
-		types.GetFilterChain().AddFilter(c.JWTAuth)
+		c.jwtAuth = security.NewJWTAuthFilter(c.jwt)
+		types.GetFilterChain().AddFilter(c.jwtAuth)
 	}
 
 	// 限流器。
@@ -83,21 +84,21 @@ func (c *SecurityComponent) Init() error {
 		if tokens <= 0 {
 			tokens = config.DefaultRateLimitMaxTokens
 		}
-		c.RateLimiter = security.NewRateLimiter(tokens, refresh)
+		c.rateLimiter = security.NewRateLimiter(tokens, refresh)
 		if c.cfg.RateLimit.RouteMaxTokens > 0 {
-			c.RateLimiter.SetRouteMaxTokens(c.cfg.RateLimit.RouteMaxTokens)
+			c.rateLimiter.SetRouteMaxTokens(c.cfg.RateLimit.RouteMaxTokens)
 		}
 		if c.cfg.RateLimit.GlobalMaxTokens > 0 {
-			c.RateLimiter.SetGlobalMaxTokens(c.cfg.RateLimit.GlobalMaxTokens)
+			c.rateLimiter.SetGlobalMaxTokens(c.cfg.RateLimit.GlobalMaxTokens)
 		}
 	}
 
 	// Web 应用防火墙。
 	if c.waf.Enabled {
-		c.WAF = security.NewWAF(c.waf)
+		c.wafInstance = security.NewWAF(c.waf)
 	}
 
-	setSecurityResources(c.WhitelistBlacklist, c.WAF, c.RateLimiter, c.JWTAuth, c.CircuitBreakerMgr)
+	setSecurityResources(c.whitelistBlacklist, c.wafInstance, c.rateLimiter, c.jwtAuth, c.circuitBreakerMgr)
 	return nil
 }
 
@@ -113,7 +114,7 @@ func (c *SecurityComponent) Start() error {
 
 func (c *SecurityComponent) Destroy() {
 	tlog.Info(c.ctx, "security component destroying")
-	if c.RateLimiter != nil {
-		c.RateLimiter.Stop()
+	if c.rateLimiter != nil {
+		c.rateLimiter.Stop()
 	}
 }

@@ -308,5 +308,11 @@ func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {
 	}
 	ntf := &protoGw.UserOfflineNtf{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), ServerId: serverID, OfflineTime: time.Now().UnixMilli()}
 	body, _ := proto.Marshal(ntf)
-	_ = client.SendMessage(&protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: routes.CmdUserOffline, Data: body})
+	data := &protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: routes.CmdUserOffline, Data: body}
+	// 调用方在 gnet 事件循环/空闲检查协程上：SendMessage 队列满时可能阻塞
+	// （QueuePolicyBlock 无超时），同步发送会拖死事件循环乃至 StopConnectionChecker。
+	// 幂等声明与取数保持同步，仅网络入队挪到后台协程。
+	panicutil.Go(g.ctx, "gateway.notifyLogicOffline", func() {
+		_ = client.SendMessage(data)
+	})
 }

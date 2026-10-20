@@ -1,12 +1,14 @@
 package config
 
+import "time"
+
 // ============================================================================
 // sgate 默认常量
 // ----------------------------------------------------------------------------
 // 用途：把"不常用/设置一次基本不改"的参数集中到代码常量，作为 yaml 缺省值的参考。
 //
 // 使用方法：
-//   1) 这些常量是文档化的默认值参考；Load/LoadConfig 使用 uconfig 合并语义，
+//   1) 这些常量是文档化的默认值参考；Load 使用 uconfig 合并语义，
 //      yaml 中显式出现的字段覆盖默认，未出现的字段保持 uconfig 解析零值。
 //      Validate 通过后调用 ApplyRuntimeDefaults 对零值字段统一补齐默认。
 //   2) 如需调整某个"不常用"参数（如 gRPC 窗口大小、限流阈值），直接改本文件常量
@@ -16,7 +18,7 @@ package config
 //   - 网络与协议常量（gRPC 窗口、stream 队列、帧大小）
 //   - 过载保护常量（检查间隔、超时）
 //   - 安全防护常量（限流阈值、熔断阈值、WAF 上限）
-//   - 集群常量（Leader 锁 key、TTL）
+//   - 发现 / etcd 常量
 //   - 组件运维常量（追踪采样率、告警频控、队列容量）
 // ============================================================================
 
@@ -26,14 +28,6 @@ const (
 	// DefaultGRPCPort gRPC 服务默认监听端口
 	DefaultGRPCPort = 50051
 
-	// DefaultGRPCWindowSize gRPC 流量控制窗口大小（字节）
-	// 调大可提升吞吐，但占用内存更多。一般 16MB 足够千万 QPS
-	DefaultGRPCWindowSize = 16 * 1024 * 1024
-
-	// DefaultGRPCMaxMessageSize 单条 gRPC 消息上限（字节）
-	// 批量转发场景按 batchSize × frameSize 估算，留 2x 余量
-	DefaultGRPCMaxMessageSize = 8 * 1024 * 1024
-
 	// DefaultGatewayGRPCWindowSize 网关零值回退：历史运行时默认（压测口径，勿改）
 	DefaultGatewayGRPCWindowSize = 524288
 
@@ -41,11 +35,8 @@ const (
 	DefaultGatewayGRPCMaxMessageSize = 4 * 1024 * 1024
 
 	// DefaultGatewayStreamSendChannelSize 网关零值回退：历史运行时默认（压测口径，勿改）
+	// backend 分片发送队列容量的零值回退同源于此常量
 	DefaultGatewayStreamSendChannelSize = 65536
-
-	// DefaultStreamSendChannelSize 正向 shard 发送队列容量
-	// 队列满则触发 ErrNotConnected 快速失败，防止背压堆积
-	DefaultStreamSendChannelSize = 131072 // 128K
 
 	// DefaultPipelineWorkerQueueSize 异步 pipeline worker 任务队列总大小
 	// （全池共享，启动时按分片数均分；A/B 实测同步路径更优，仅异步模式生效）
@@ -58,36 +49,22 @@ const (
 	DefaultStreamQueueMaxSize = 100000
 
 	// DefaultStreamBlockTimeout 阻塞/限时等待模式的超时时间
-	DefaultStreamBlockTimeout = "500ms"
+	// （time.Duration 强类型：yaml 缺省回填写 .String()，代码零值回退直接引用）
+	DefaultStreamBlockTimeout = 500 * time.Millisecond
 
 	// DefaultBackpressureThreshold 背压触发阈值（队列填充率 0.0-1.0）
 	DefaultBackpressureThreshold = 0.8
 
 	// DefaultSendTimeout 分片发送通道超时时间
-	DefaultSendTimeout = "200ms"
+	// （time.Duration 强类型：yaml 缺省回填写 .String()，代码零值回退直接引用）
+	DefaultSendTimeout = 200 * time.Millisecond
 
 	// DefaultMaxFrameSize 单帧 payload 上限（TCP）
 	// protobuf 业务消息一般 < 4KB；4MB 足够大业务消息
 	DefaultMaxFrameSize = 4 * 1024 * 1024
 
-	// DefaultMaxFrameBufSize TCP 帧缓冲区上限
-	// 百万连接场景下过大导致内存爆炸，64KB 足够容纳正常帧
-	DefaultMaxFrameBufSize = 64 * 1024
-
 	// DefaultMaxWSFrameSize 单帧 payload 上限（WebSocket）
 	DefaultMaxWSFrameSize = 4 * 1024 * 1024
-
-	// DefaultMaxConnections 网关最大总连接数，0=不限制
-	// 百万在线场景建议设置为 1200000（留 20% 余量）
-	DefaultMaxConnections = 1200000
-
-	// DefaultMaxConnectionsPerIP 单 IP 最大连接数，0=不限制
-	// 防止单个客户端耗尽所有连接
-	DefaultMaxConnectionsPerIP = 0
-
-	// DefaultMaxMessagesPerConn 单连接每秒最大消息数，0=不限制
-	// 防止异常连接占满 gRPC 发送队列
-	DefaultMaxMessagesPerConn = 0
 )
 
 // --- 过载保护 ---
@@ -215,26 +192,11 @@ const (
 	DefaultOTelWorkers = 2
 )
 
-// --- 配置中心 ---
-
-const (
-	// DefaultConfigCenterPollInterval 配置中心拉取间隔
-	// 轮询仅保留用于旧版 HTTP 配置后端，etcd 使用 watch 机制
-	DefaultConfigCenterPollInterval = "5s"
-)
-
 // --- 告警 ---
 
 const (
 	// DefaultAlertRateLimitPerMin 每分钟最大告警数（防止告警风暴）
 	DefaultAlertRateLimitPerMin = 30
-)
-
-// --- 灰度 ---
-
-const (
-	// DefaultCanaryPercent 灰度默认百分比（0 = 关闭）
-	DefaultCanaryPercent = 0
 )
 
 // --- 协议 / 预鉴权 ---

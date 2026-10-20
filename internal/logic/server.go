@@ -44,7 +44,7 @@ type streamConn struct {
 // sendTimeout 传 0 表示使用 defaultStreamSendTimeout（测试缩短超时用）。
 func newStreamConn(stream dataStream, size int, gatewayID string, sendTimeout time.Duration) *streamConn {
 	if size <= 0 {
-		size = 65536
+		size = defaultStreamChSize
 	}
 	if sendTimeout <= 0 {
 		sendTimeout = defaultStreamSendTimeout
@@ -100,6 +100,11 @@ func (c *streamConn) shutdown() {
 		close(c.done)
 	})
 }
+
+// defaultStreamChSize 流发送通道零值回退容量。
+// 与网关侧 backend 分片发送队列回退同值 65536（config.DefaultGatewayStreamSendChannelSize）；
+// logic 不依赖 config 包，故在本包保留同值常量，改动需两边同步。
+const defaultStreamChSize = 65536
 
 // defaultStreamSendTimeout 发送通道满时的最长等待。
 // 无超时会把单条慢流扩散成整个网关流的队头阻塞（接收循环卡死）。
@@ -162,7 +167,6 @@ type PushMetrics struct {
 	BroadcastSent   atomic.Int64 // 广播成功数
 	BroadcastFailed atomic.Int64 // 广播失败数
 	RetryAttempts   atomic.Int64 // 重试次数
-	ScheduledPushes atomic.Int64 // 定时推送次数
 }
 
 // GetSnapshot 获取当前监控指标的快照副本
@@ -175,7 +179,6 @@ func (m *PushMetrics) GetSnapshot() map[string]int64 {
 		"broadcastSent":   m.BroadcastSent.Load(),
 		"broadcastFailed": m.BroadcastFailed.Load(),
 		"retryAttempts":   m.RetryAttempts.Load(),
-		"scheduledPushes": m.ScheduledPushes.Load(),
 	}
 }
 
@@ -573,61 +576,6 @@ func (s *Server) LeaveGroupForUser(userUUID, groupID string) error {
 	}
 	s.LeaveGroup(groupID, sessionID)
 	return nil
-}
-
-// ScheduledPush 定时推送任务，可定期向组推送消息
-type ScheduledPush struct {
-	GroupID  string        // 目标组 ID
-	Cmd      int32         // 命令码
-	Data     []byte        // 消息数据
-	Interval time.Duration // 推送间隔
-	MaxCount int           // 最大推送次数（0 = 无限）
-	stopCh   chan struct{} // 停止信号
-	server   *Server       // 服务端引用
-	done     chan struct{} // 任务结束信号
-}
-
-// ScheduleGroupPush 启动定时组推送任务，返回可停止的句柄
-func (s *Server) ScheduleGroupPush(groupID string, cmd int32, data []byte, interval time.Duration, maxCount int) *ScheduledPush {
-	sp := &ScheduledPush{
-		GroupID:  groupID,
-		Cmd:      cmd,
-		Data:     data,
-		Interval: interval,
-		MaxCount: maxCount,
-		stopCh:   make(chan struct{}),
-		done:     make(chan struct{}),
-		server:   s,
-	}
-	panicutil.Go(context.Background(), fmt.Sprintf("logic.scheduledPush group=%s", sp.GroupID), sp.run)
-	return sp
-}
-
-// run 定时推送任务的执行循环
-func (sp *ScheduledPush) run() {
-	defer close(sp.done)
-	ticker := time.NewTicker(sp.Interval)
-	defer ticker.Stop()
-	count := 0
-	for {
-		select {
-		case <-sp.stopCh:
-			return
-		case <-ticker.C:
-			sp.server.SendToGroup(sp.GroupID, sp.Cmd, sp.Data)
-			sp.server.metrics.ScheduledPushes.Add(1)
-			count++
-			if sp.MaxCount > 0 && count >= sp.MaxCount {
-				return
-			}
-		}
-	}
-}
-
-// Stop 停止定时推送任务并等待协程结束
-func (sp *ScheduledPush) Stop() {
-	close(sp.stopCh)
-	<-sp.done
 }
 
 // Stop 关闭所有流连接，停止服务端

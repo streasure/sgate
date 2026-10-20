@@ -12,7 +12,7 @@ import (
 )
 
 // ObservabilityComponent 管理所有可观测性子模块的生命周期：
-// Tracer, OTelTracer, PProfServer, LogSanitizer, LatencyTracker.
+// Tracer, OTelTracer, PProfServer, LatencyTracker.
 type ObservabilityComponent struct {
 	component.BaseComponent
 
@@ -22,10 +22,10 @@ type ObservabilityComponent struct {
 	pprofAddr     string
 	disableTracer bool
 
-	Tracer         *obs.Tracer
-	OTelTracer     *obs.OTelTracer
-	LogSanitizer   *obs.LogSanitizer
-	LatencyTracker *obs.LatencyTracker
+	// 导出字段仅包内使用（资源经 resources.go 全局量发布），不作为外部通路。
+	tracer         *obs.Tracer
+	otelTracer     *obs.OTelTracer
+	latencyTracker *obs.LatencyTracker
 }
 
 // NewObservabilityComponent 创建可观测性组件，配置从 config.Get() 读取。
@@ -49,20 +49,19 @@ func (c *ObservabilityComponent) Init() error {
 		// 关闭后 component.Tracer() 返回 nil，消息管道走超级快速路径。
 		tlog.Info(c.ctx, "internal tracer disabled (monitoring.disableTracer=true)")
 	} else {
-		c.Tracer = obs.NewTracer(5 * time.Minute)
+		c.tracer = obs.NewTracer(5 * time.Minute)
 	}
 	// 32768 ≈ 1s 窗口（采样步长 16 下 500K msg/s ≈ 31K 样本/s）；
 	// 低速率时窗口覆盖更长时间，分位数更稳。内存 ~512KB 可忽略。
-	c.LatencyTracker = obs.NewLatencyTracker(32768)
-	c.LogSanitizer = obs.NewLogSanitizer()
+	c.latencyTracker = obs.NewLatencyTracker(32768)
 
 	// OpenTelemetry 分布式追踪。
 	if c.otelCfg.Enabled {
-		c.OTelTracer = obs.NewOTelTracer(c.otelCfg)
-		types.GetFilterChain().AddFilter(&obs.OTelSpanFilter{Tracer: c.OTelTracer})
+		c.otelTracer = obs.NewOTelTracer(c.otelCfg)
+		types.GetFilterChain().AddFilter(&obs.OTelSpanFilter{Tracer: c.otelTracer})
 	}
 
-	setObservabilityResources(c.Tracer, c.OTelTracer, c.LogSanitizer, c.LatencyTracker)
+	setObservabilityResources(c.tracer, c.otelTracer, c.latencyTracker)
 	return nil
 }
 
@@ -80,11 +79,11 @@ func (c *ObservabilityComponent) Start() error {
 
 func (c *ObservabilityComponent) Destroy() {
 	tlog.Info(c.ctx, "observability component destroying")
-	if c.Tracer != nil {
-		c.Tracer.Stop()
+	if c.tracer != nil {
+		c.tracer.Stop()
 	}
-	if c.OTelTracer != nil {
-		c.OTelTracer.Stop()
+	if c.otelTracer != nil {
+		c.otelTracer.Stop()
 	}
 	obs.StopPProfServer()
 }

@@ -5,10 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"runtime"
 	"strconv"
-	"syscall"
 
 	comp "github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
@@ -26,9 +24,9 @@ var (
 )
 
 // main 启动网关服务，初始化日志、加载配置、启动所有组件并等待信号退出
+// 信号处理由 Container.Serve 内部完成（signal.Notify），此处 ctx 仅作日志上下文。
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx := context.Background()
 
 	flag.Parse()
 	if *showVer {
@@ -65,16 +63,22 @@ func main() {
 		cfg.HttpPort, gateway.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
 
-	// 创建全局过滤器链并加载 SPI 过滤器
+	// 创建全局过滤器链并按配置加载 SPI 过滤器（filterChain.enabled=false 时不加载）
 	fc := types.InitFilterChain()
-	for _, fi := range cfg.FilterChain.Filters {
-		if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
-			tlog.Warn(ctx, "failed to load filter from config name=%s error=%v", fi.Name, err)
+	if cfg.FilterChain.Enabled {
+		for _, fi := range cfg.FilterChain.Filters {
+			if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
+				tlog.Warn(ctx, "failed to load filter from config name=%s error=%v", fi.Name, err)
+			}
 		}
 	}
 
 	// 平铺创建所有生命周期组件，Container 由 main 统一创建和组装
 	container := component.NewContainer()
+	// 容器生命周期日志走 tlog（默认 log.Printf 违反 AGENTS 日志规范）
+	container.SetLogger(func(format string, v ...any) {
+		tlog.Info(ctx, format, v...)
+	})
 	// uperf 组件 Order 最先：在任何业务组件分配大内存前应用 GC/内存软上限
 	container.Add(uperf.New(uperf.Config{
 		GcPercent:          cfg.Perf.GcPercent,

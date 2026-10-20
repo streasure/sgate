@@ -8,7 +8,7 @@
 
 **候选方案**：
 - `GOOS=linux go build ./internal/obs/` 做编译检查
-- CI 加 linux runner 跑 `TestMonoNowNs` / `TestMonoNowNsNoAlloc`
+- 本仓 CI 已删除；如重建，加 linux runner 跑 `TestMonoNowNs` / `TestMonoNowNsNoAlloc`
 - 或接受现状：非 Windows 精度低但不影响正确性，代码注释已说明
 
 **优先级**：低

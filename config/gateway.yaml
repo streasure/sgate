@@ -16,10 +16,8 @@ discovery:
   registerSelf: true   # standalone模式下向etcd注册网关连接信息（供loginserver发现）
 
 transports:
-  - protocol: tcp
-    port: 48080
-  - protocol: tcp
-    port: 48081
+  - port: 48080
+  - port: 48081
     type: websocket
 
 grpc:

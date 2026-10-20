@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"sync"
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/util/tlog"
@@ -43,13 +44,30 @@ func (c *etcdConfigCenter) Pull(context.Context) ([]byte, error) {
 }
 func (c *etcdConfigCenter) Watch(ctx context.Context) (<-chan []byte, error) {
 	ch := make(chan []byte, 4)
+	// mu 串行化发送与 close：ctx 取消关通道的同时，迟到的 etcd 回调可能正在
+	// select 中命中该通道的 send case（select 不保护 closed channel），无锁必 panic。
+	var mu sync.Mutex
+	stopped := false
 	c.component.OnConfigChange(func(data []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if stopped {
+			return
+		}
 		select {
 		case ch <- data:
 		default:
 		}
 	})
-	go func() { <-ctx.Done(); close(ch) }()
+	go func() {
+		<-ctx.Done()
+		mu.Lock()
+		defer mu.Unlock()
+		if !stopped {
+			stopped = true
+			close(ch)
+		}
+	}()
 	return ch, nil
 }
 func (c *etcdConfigCenter) Stop() { c.component.Destroy() }

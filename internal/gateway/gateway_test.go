@@ -14,7 +14,7 @@ func minimalConfig() *config.Config {
 		ServerID:   "gateway-test",
 		ServerType: "Gateway",
 		Zone:       "default",
-		Transports: []config.Transport{{Protocol: "tcp", Port: 48080}},
+		Transports: []config.Transport{{Port: 48080}},
 		GRPC:       config.GRPCConfig{Port: 50051},
 		Cluster:    config.ClusterConfig{NodeID: "node-test"},
 	}

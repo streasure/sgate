@@ -358,12 +358,24 @@ func (c *Connection) FlushCoalesced() int64 {
 	// data 为只读：TCP 路径直接引用 bufPtr 底层数组，WS 路径为 reframed 拷贝。
 	// 回调触发时 AsyncWrite 已完成，才可把 bufPtr 归还池；不能提前归还。
 	// WS 路径同样执行回调：否则 WS 连接的 coalescer 缓冲永不归还池。
-	_ = c.SendMultiWithCallback(data, func() {
-		if bufPtr != nil && cap(*bufPtr) <= coalescerMaxBufCap {
+	// returned CAS 保证缓冲只归还一次：AsyncWrite 同步返回错误（未入队，回调
+	// 不触发）时此处归还；若实现同时触发回调也不会双重 Put 污染池。
+	var returned atomic.Bool
+	putBack := func() {
+		if bufPtr == nil || !returned.CompareAndSwap(false, true) {
+			return
+		}
+		if cap(*bufPtr) <= coalescerMaxBufCap {
 			*bufPtr = (*bufPtr)[:0]
 			coalescerBufPool.Put(bufPtr)
 		}
-	})
+	}
+	if err := c.SendMultiWithCallback(data, putBack); err != nil {
+		// 未入队：回调不会执行，同步归还缓冲并按未发送计（消息已丢，
+		// 但 coalescedCount 已在锁内清零，调用方以返回值记推送量）
+		putBack()
+		return 0
+	}
 	return int64(count)
 }
 

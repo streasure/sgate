@@ -287,13 +287,14 @@ func (d *Dialer) runSession(g *gateLink) error {
 		g.setCancel(nil)
 	}()
 
+	// 零值回退引用包内唯一值源（见 logic/config.go defaultGRPCWindowSize 等）。
 	windowSize := int32(d.cfg.GRPCWindowSize)
 	if windowSize <= 0 {
-		windowSize = 524288
+		windowSize = defaultGRPCWindowSize
 	}
 	maxMsgSize := d.cfg.GRPCMaxMessageSize
 	if maxMsgSize <= 0 {
-		maxMsgSize = 4 * 1024 * 1024
+		maxMsgSize = defaultGRPCMaxMessageSize
 	}
 
 	conns := make([]*grpc.ClientConn, d.connGroupCount)

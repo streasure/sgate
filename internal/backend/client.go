@@ -291,16 +291,20 @@ type StreamMessageQueue struct {
 	closed                bool                  // 已关闭：唤醒并拒绝阻塞入队
 }
 
-// NewStreamMessageQueue 创建消息队列
+// NewStreamMessageQueue 创建消息队列。
+// 零值回退统一引用 config 包默认常量（唯一值源，勿在此处另写字面量）：
+// 容量=config.DefaultStreamQueueMaxSize（100000）、
+// 阻塞超时=config.DefaultStreamBlockTimeout（500ms）、
+// 背压阈值=config.DefaultBackpressureThreshold（0.8），与 ApplyRuntimeDefaults 缺省同源。
 func NewStreamMessageQueue(cfg config.StreamQueueConfig) *StreamMessageQueue {
 	maxSize := cfg.MaxSize
 	if maxSize <= 0 {
-		maxSize = 100000
+		maxSize = config.DefaultStreamQueueMaxSize
 	}
-	blockTimeout := gatewayutil.ParseDurationDefault(cfg.BlockTimeout, 500*time.Millisecond)
+	blockTimeout := gatewayutil.ParseDurationDefault(cfg.BlockTimeout, config.DefaultStreamBlockTimeout)
 	threshold := cfg.BackpressureThreshold
 	if threshold <= 0 || threshold > 1 {
-		threshold = 0.8
+		threshold = config.DefaultBackpressureThreshold
 	}
 	mq := &StreamMessageQueue{
 		queue:                 make([]*protoGw.StreamData, 0),

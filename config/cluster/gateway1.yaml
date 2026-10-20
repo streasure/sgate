@@ -13,10 +13,8 @@ discovery:
   registerSelf: true
 
 transports:
-  - protocol: tcp
-    port: 48080
-  - protocol: tcp
-    port: 48081
+  - port: 48080
+  - port: 48081
     type: websocket
 
 grpc:

@@ -12,7 +12,6 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
-	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhash"
 )
@@ -204,11 +203,9 @@ func (f *OTelSpanFilter) Process(fc *types.FilterContext) (bool, error) {
 		f.Tracer.SetTag(span, "conn", fc.ConnectionID)
 		f.Tracer.SetTag(span, "ip", fc.RemoteIP)
 		f.Tracer.SetTag(span, "user", fc.UserUUID)
-		// 异步 EndSpan（用 timer 模拟 duration 计算）；panic 由 panicutil 恢复，不影响热路径
-		panicutil.Go(context.Background(), "obs.otel.endSpanAsync", func() {
-			time.Sleep(time.Microsecond) // 占位，主 span 在转发完成时 End
-			f.Tracer.EndSpan(span)
-		})
+		// EndSpan 本身是入队即返（queue 非阻塞），无需再起协程 + sleep 占位——
+		// 热路径每消息一次 goroutine/定时器纯属浪费，且 1µs sleep 也量不出真实时长。
+		f.Tracer.EndSpan(span)
 	}
 	return true, nil
 }

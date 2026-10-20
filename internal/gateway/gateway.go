@@ -87,7 +87,6 @@ type Gateway struct {
 	alertWebhook  *cluster.AlertWebhook       // 告警 webhook（企业微信/钉钉）
 	canaryFilter  *traffic.CanaryFilter       // 灰度发布
 	trafficMirror *traffic.TrafficMirror      // 流量镜像
-	logSanitizer  *obs.LogSanitizer           // 日志脱敏
 
 	// trustedProxies 反向代理信任前缀（IP/CIDR）：仅 WS 握手解析 XFF/X-Real-IP 时用。
 	// Init 时从 config.Security.TrustedProxies 解析一次；空列表=不信任任何代理头。
@@ -247,7 +246,6 @@ func (g *Gateway) Order() int   { return 1000 }
 func (g *Gateway) Init() error {
 	// 前置组件已完成 Init，此处统一读取其写入的全局资源。
 	g.filterChain = types.GetFilterChain()
-	g.logSanitizer = component.LogSanitizer()
 	g.whitelistBlacklist = component.WhitelistBlacklist()
 	g.waf = component.WAF()
 	g.rateLimiter = component.RateLimiter()
@@ -274,9 +272,39 @@ func (g *Gateway) Init() error {
 				g.trustedProxies = append(g.trustedProxies, netip.PrefixFrom(a, bits))
 			}
 		}
+		if err := g.validateSecurityWiring(cfg); err != nil {
+			return err
+		}
 	}
 	// 管理器主动移除连接（空闲超时/关闭全部）时先发离线通知
 	g.connectionManager.SetOnRemoveClose(g.notifyLogicOffline)
+	return nil
+}
+
+// validateSecurityWiring 启动期装配校验：配置已启用的安全环节对应资源为 nil
+// 说明组件未装配（漏 Add/顺序错位），运行期安全链会静默放行（fail-open）。
+// 此处 fail-fast，拒绝带残缺安全链的启动。
+func (g *Gateway) validateSecurityWiring(cfg *config.Config) error {
+	if cfg.Security.Enabled && g.whitelistBlacklist == nil {
+		return fmt.Errorf("security.enabled=true but whitelist/blacklist resource is nil (security component not wired)")
+	}
+	if cfg.Security.RateLimit.Enabled && g.rateLimiter == nil {
+		return fmt.Errorf("security.rateLimit.enabled=true but rate limiter resource is nil (security component not wired)")
+	}
+	if cfg.WAF.Enabled && g.waf == nil {
+		return fmt.Errorf("waf.enabled=true but WAF resource is nil (security component not wired)")
+	}
+	if cfg.Security.CircuitBreaker.Enabled && g.circuitBreakerMgr == nil {
+		return fmt.Errorf("security.circuitBreaker.enabled=true but circuit breaker resource is nil (security component not wired)")
+	}
+	if cfg.JWTAuth.Enabled && g.jwtAuth == nil {
+		return fmt.Errorf("jwtAuth.enabled=true but JWT auth resource is nil (security component not wired)")
+	}
+	if cfg.FilterChain.Enabled && len(cfg.FilterChain.Filters) > 0 {
+		if g.filterChain == nil || g.filterChain.Len() == 0 {
+			return fmt.Errorf("filterChain.enabled=true with %d filters configured but filter chain is empty", len(cfg.FilterChain.Filters))
+		}
+	}
 	return nil
 }
 func (g *Gateway) Start() error {

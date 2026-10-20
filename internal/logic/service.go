@@ -76,13 +76,14 @@ func (s *Service) Start() error {
 		return fmt.Errorf("listen on %s:%s: %w", s.cfg.ListenAddr, s.cfg.ListenPort, err)
 	}
 	s.listener = listener
+	// 零值回退引用包内唯一值源（见 logic/config.go defaultGRPCWindowSize 等）。
 	windowSize := s.cfg.GRPCWindowSize
 	if windowSize <= 0 {
-		windowSize = 524288
+		windowSize = defaultGRPCWindowSize
 	}
 	maxMsgSize := s.cfg.GRPCMaxMessageSize
 	if maxMsgSize <= 0 {
-		maxMsgSize = 4 * 1024 * 1024
+		maxMsgSize = defaultGRPCMaxMessageSize
 	}
 	s.grpcServer = grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxMsgSize), grpc.MaxSendMsgSize(maxMsgSize),

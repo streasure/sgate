@@ -4,7 +4,7 @@
 
 - WebSocket 与 TCP 分开压测，WS 优先。
 - 客户端 ↔ sgate 消息体为 `protocol.MessageFrame`；sgate ↔ logic 为 `protocol.StreamData`。
-- sgate 与 logic 之间为 gRPC 双向流；所有 client 消息走同一条流，按 userUuid 区分（只需保证 stream 通信性能）。
+- sgate 与 logic 之间为 gRPC 双向流（flip：logic 拨入 sgate，`shardCount` 条流按 session 哈希分片）；同一 session 恒走同一条流（保证有序，压测只需保证 stream 通信性能）。
 - bench/logic 严禁做无用回包校验；bench 中除 LoginGate 外的协议 recv 直接丢弃，logic 收到的消息全部丢弃。
 - 压测配置禁止登录校验（`loginValidation.enabled: false`）；authfail 出现即为 sgate 登录校验或 bench/logic 误处理，不是预期行为。
 
@@ -165,7 +165,7 @@ bench1_tcp 100 连接下扫（以 `/stats.forwarded` 为准，客户端发送速
 
 ## etcd key 约定
 
-`/services/{belong}/{ServerTypeName}:{zone}/{instanceId}`（如 `SGATE` / `LOGINSERVER` / `LOGICSERVER`）。
+`/services/{belong}/{ServerTypeName}:{zone}/{instanceId}`（如 `SERVER_TYPE_SGATE` / `SERVER_TYPE_LOGINSERVER` / `SERVER_TYPE_LOGICSERVER`）。
 
 ## 停止所有压测进程
 
