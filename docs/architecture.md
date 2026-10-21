@@ -55,16 +55,16 @@ Gateway 结构体承载全部接入侧状态：
 | 生命周期 | gateway.go | `NewGateway()`, `Init/Start/Destroy`, `StartServices` |
 | gnet 事件 | handlers.go | `OnOpen/OnTraffic/OnClose`（原 conn.go） |
 | 登录 | login.go | `handleLoginGate`, session 绑定 |
-| 登出/管理端 | admin.go | `handleLogoutGate`（断连无推送+JWT Revoke）、`POST /admin/ratelimit`（Bearer，`admin.token` 空=关闭） |
+| 登出/管理端 | admin.go | `handleLogoutGate`（JWT Revoke+通知逻辑服+`SendThenClose` 可靠投递 ack 后断连）、`POST /admin/ratelimit`（Bearer，`admin.token` 空=关闭） |
 | 维护模式 | maintenance.go | `handleAdminMaintenance`：按 serverId/zone 置维护，阻断新登录并踢出在线玩家（路由在 admin.go 注册） |
-| 踢人执行器 | kick.go | `kickConn`/`pushKickNotify`：loginserver 单向下发 KickAccounts/KickIP 的本地执行端（sgate 无封禁存储） |
+| 踢人执行器 | kick.go | `kickConn`/`pushKickNotify`：loginserver 单向下发 KickAccounts/KickIP 的本地执行端（sgate 无封禁存储）；KickAccounts 按账号索引踢**全部**在线连接（同账号多逻辑服连接不漏踢） |
 | 登录周期校验 | batch_validate.go | BatchValidate 周期安全网（`loginValidation.batchInterval`，P2） |
 | WebSocket | websocket.go | 握手升级、帧编解码 |
 | 消息管道 | pipeline.go | 认证→安全→过滤→转发 |
 | 过滤器 | filter.go | SPI 加载、`types.GetFilterChain()` |
 | 监控 | monitor.go | `/stats`、配置热更新 |
 | 过载保护 | overload.go | `OverloadProtector`、CPU 阈值 |
-| 完整性 | integrity.go | `MessageIntegrity`（时间戳、去重） |
+| 完整性 | integrity.go | `MessageIntegrity`（时间戳、按 connectionID 分 16 片去重，防全局锁串行化热路径） |
 | 版本 | version.go | `Version`、`BuildInfo` |
 
 **GatewayInterface 实现**：gateway 包通过编译期断言确保 `*Gateway` 实现 `backend.GatewayInterface`，供 backend 反向调用（查连接、取配置、推送计数等），避免 backend→gateway 的包依赖。
@@ -85,7 +85,7 @@ Gateway 结构体承载全部接入侧状态：
 | 类型 | 文件 | 职责 |
 | --- | --- | --- |
 | `Connection` | connection.go | 客户端连接：session、状态、消息速率计数 |
-| `ConnectionManager` | manager.go | 分片存储、`ForEach`、空闲连接清理 |
+| `ConnectionManager` | manager.go | 分片存储、账号→连接集合索引（KickAccounts）、`ForEach`、空闲连接清理 |
 | `ConnectionGroup` | group.go | 组成员管理（广播/组播） |
 | `ShardedMap` | sharded_map.go | 分片并发 Map（降低锁竞争） |
 | `ShardedWriteCoalescer` | coalescer.go | 推送路径分片写合并（批量优化） |
@@ -277,6 +277,7 @@ var _ backend.GatewayInterface = (*Gateway)(nil)
 - **冷启动**：`config.Load()` → 全局 `conf` 指针 → 组件通过 `config.Get()` 读取（无 `config.Set`）
 - **热更新**：`configWatcher` 监听 `config.Path()` 指定文件 → `handleConfigUpdate` 应用差异
 - **支持热更的参数**：限流阈值、黑名单、过载保护、JWT、灰度、镜像、降级、连接限制、连接级流控
+- **不可热切的开关**：`security/rateLimit/waf/jwtAuth/circuitBreaker` 的 `enabled`（组件与过滤器仅启动时创建，热切会静默 fail-open/fail-stale）——`handleConfigUpdate` 检测到开关变化整单拒绝并告警，要求重启生效；非法配置（含帧缓冲交叉校验 `maxFrameBufSize ≥ maxFrameSize+4`）同样整体拒绝、保留当前配置
 
 ---
 

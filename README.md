@@ -401,9 +401,11 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 封禁管理已在封禁收敛 P1 迁至 loginserver（`POST/DELETE /api/v1/acl/blacklist`、`/api/v1/acl/banned-role`，
 X-Admin-Token 鉴权）；sgate 不再存封禁，仅通过 KickService 接收 loginserver 单向踢人指令。
 
-客户端登出：`CmdLogoutGate(1000003)` → 撤销 JWT → 通知逻辑服 → 断连（无业务推送）；ack 为 `CmdLogoutGateAck(1000004)`。
+客户端登出：`CmdLogoutGate(1000003)` → 撤销 JWT → 通知逻辑服 → `SendThenClose` 可靠投递 ack 后断连（无业务推送）；ack 为 `CmdLogoutGateAck(1000004)`。
 
 ### 6.9 `security` 安全组件
+
+**热切换限制**：`security/rateLimit/waf/jwtAuth/circuitBreaker` 的 `enabled` 开关仅启动时生效——组件与过滤器不随热更重建，配置中心改开关会被 `handleConfigUpdate` 整单拒绝（告警 `security enable flags cannot hot-toggle`），需重启网关。其余参数（限流阈值、黑白名单、JWT secret、过载保护等）支持热更；非法配置（如 `maxFrameBufSize < maxFrameSize+4`）同样整体拒绝、保留当前配置。
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -677,7 +679,7 @@ internal/gateway/         接入层（package gateway）
   filter.go                 过滤器链 SPI
   monitor.go                /stats、配置热更新
   overload.go               过载保护
-  integrity.go              消息完整性（时间戳/去重）
+  integrity.go              消息完整性（时间戳/去重，按连接分 16 片）
   version.go                版本信息
 
 internal/backend/         后端层（package backend）
@@ -690,7 +692,7 @@ internal/backend/         后端层（package backend）
 
 internal/connection/      连接层（package connection）
   connection.go             客户端连接对象
-  manager.go                ConnectionManager（分片存储、空闲检查）
+  manager.go                ConnectionManager（分片存储、账号→连接集合索引、空闲检查）
   group.go                  连接分组（广播/组播）
   sharded_map.go            分片并发 Map
   coalescer.go              分片写合并器（批量推送优化）
