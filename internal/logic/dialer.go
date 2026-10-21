@@ -16,6 +16,7 @@ import (
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/udiscovery"
 	"github.com/streasure/util/uetcd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -140,8 +141,7 @@ func (d *Dialer) startDiscovery() {
 	if zone == "" {
 		zone = "default"
 	}
-	sgateType := enums.ServerType_name[int32(enums.ServerType_SERVER_TYPE_SGATE)]
-	serviceID := belong + "/" + sgateType + ":" + zone
+	serviceID := udiscovery.JoinServiceID(belong, enums.ServerType_SERVER_TYPE_SGATE, zone)
 
 	comp := uetcd.New(uetcd.ComponentConfig{
 		Etcd: uetcd.Config{

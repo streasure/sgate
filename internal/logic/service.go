@@ -15,6 +15,7 @@ import (
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/udiscovery"
 	"github.com/streasure/util/uetcd"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -128,8 +129,7 @@ func (s *Service) initRegistry() {
 	}
 	// ServiceID 使用 protocol enums 的 SERVER_TYPE_LOGICSERVER，与网关发现一致
 	// 格式: {belong}/{serverType}:{zone}，etcd key: /services/{belong}/{serverType}:{zone}/{instanceId}
-	logicType := enums.ServerType_name[int32(enums.ServerType_SERVER_TYPE_LOGICSERVER)]
-	serviceID := belong + "/" + logicType + ":" + zone
+	serviceID := udiscovery.JoinServiceID(belong, enums.ServerType_SERVER_TYPE_LOGICSERVER, zone)
 	s.registry = uetcd.New(uetcd.ComponentConfig{
 		Etcd:         uetcd.Config{Endpoints: endpoints, Endpoint: s.cfg.EtcdEndpoint, Username: s.cfg.EtcdUsername, Password: s.cfg.EtcdPassword, ServicePrefix: s.cfg.EtcdServicePrefix},
 		Registration: uetcd.RegistrationConfig{ServiceID: serviceID, InstanceID: s.cfg.ServiceID, Address: s.cfg.AdvertiseAddr, LeaseTTL: s.cfg.EtcdLeaseTTL},

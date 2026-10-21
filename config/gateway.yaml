@@ -12,7 +12,6 @@ etcd:
   endpoints: ["http://127.0.0.1:2379"]
 
 discovery:
-  enabled: true
   registerSelf: true   # standalone模式下向etcd注册网关连接信息（供loginserver发现）
 
 transports:

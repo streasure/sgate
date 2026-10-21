@@ -8,21 +8,15 @@ type LogicConnectionState int32
 
 const (
 	LogicStateDisconnected LogicConnectionState = iota // 未连接
-	LogicStateConnecting                               // 连接中
 	LogicStateConnected                                // 已连接
-	LogicStateReconnecting                             // 重连中
 )
 
 func (s LogicConnectionState) String() string {
 	switch s {
 	case LogicStateDisconnected:
 		return "Disconnected"
-	case LogicStateConnecting:
-		return "Connecting"
 	case LogicStateConnected:
 		return "Connected"
-	case LogicStateReconnecting:
-		return "Reconnecting"
 	default:
 		return "Unknown"
 	}

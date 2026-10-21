@@ -233,25 +233,25 @@ func TestPoolAttachLifecycle(t *testing.T) {
 	}
 }
 
-func TestPoolRegisterAndFastClient(t *testing.T) {
+// TestPoolFastClient 用 Attach 驱动快速路径：单客户端置 fastClient，多客户端清空。
+func TestPoolFastClient(t *testing.T) {
 	gw := newGRPCFakeGateway()
 	pool := NewLogicClientPool(gw)
 
-	lc := NewLogicClient(gw)
-	lc.initAccepted(1)
-	pool.RegisterClient("a", lc)
+	meta := routes.LogicStreamMeta{LogicID: "a", Addr: "127.0.0.1:50051", ShardIdx: 0, ShardCount: 1}
+	if _, _, err := pool.Attach(meta, &fakeShardStream{}); err != nil {
+		t.Fatalf("attach a: %v", err)
+	}
 	if pool.fastClient.Load() == nil {
 		t.Fatal("single client should set fastClient")
 	}
-	lc2 := NewLogicClient(gw)
-	lc2.initAccepted(1)
-	pool.RegisterClient("b", lc2)
+	meta.LogicID = "b"
+	if _, _, err := pool.Attach(meta, &fakeShardStream{}); err != nil {
+		t.Fatalf("attach b: %v", err)
+	}
 	if pool.fastClient.Load() != nil {
 		t.Fatal("multi client should clear fastClient")
 	}
-	// 空 serverID / nil 忽略
-	pool.RegisterClient("", lc)
-	pool.RegisterClient("c", nil)
 	if pool.ClientCount() != 2 {
 		t.Fatalf("count = %d, want 2", pool.ClientCount())
 	}

@@ -9,14 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/streasure/protocol/enums"
 	clusterPkg "github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
-	"github.com/streasure/util/uetcd"
 )
 
 // mustLoadConfig 写最小合法 yaml 并 config.Load（组件构造器要求 config.Get() 非空）。
@@ -53,8 +51,6 @@ func resetComponentResources(t *testing.T) {
 		globalDegradation = nil
 		globalConfigCenter = nil
 		globalAlertWebhook = nil
-		globalDiscovery = nil
-		globalLoginDiscovery = nil
 	}
 	clear()
 	t.Cleanup(clear)
@@ -138,8 +134,6 @@ func TestResources_GettersNilBeforeInit(t *testing.T) {
 		{"Degradation", func() bool { return Degradation() == nil }},
 		{"ConfigCenter", func() bool { return ConfigCenter() == nil }},
 		{"AlertWebhook", func() bool { return AlertWebhook() == nil }},
-		{"Discovery", func() bool { return Discovery() == nil }},
-		{"LoginDiscovery", func() bool { return LoginDiscovery() == nil }},
 	}
 	for _, g := range getters {
 		if !g.isNil() {
@@ -192,13 +186,6 @@ func TestResources_SettersGettersRoundTrip(t *testing.T) {
 	setClusterInitResources(cc, hook)
 	if ConfigCenter() != cc || AlertWebhook() != hook {
 		t.Error("cluster init getters do not match setClusterInitResources arguments")
-	}
-
-	disc := &uetcd.Component{}
-	loginDisc := &uetcd.Component{}
-	setClusterStartResources(disc, loginDisc)
-	if Discovery() != disc || LoginDiscovery() != loginDisc {
-		t.Error("cluster start getters do not match setClusterStartResources arguments")
 	}
 }
 
@@ -428,9 +415,6 @@ func TestClusterComponent_Init_Disabled(t *testing.T) {
 	if ConfigCenter() != nil || AlertWebhook() != nil {
 		t.Error("disabled cluster component published non-nil init resources")
 	}
-	if Discovery() != nil || LoginDiscovery() != nil {
-		t.Error("Discovery non-nil before Start (Start requires etcd, not covered here)")
-	}
 }
 
 func TestClusterComponent_Init_AlertEnabled(t *testing.T) {
@@ -486,18 +470,5 @@ func TestBuildRegisterAddress(t *testing.T) {
 	}
 	if want := addr.IP + ":48081"; addr.WebSocket != want {
 		t.Errorf("websocket = %q, want %q", addr.WebSocket, want)
-	}
-}
-
-func TestServerTypeName(t *testing.T) {
-	got := serverTypeName(enums.ServerType_SERVER_TYPE_SGATE)
-	if got == "" {
-		t.Fatal("serverTypeName(SGATE) is empty")
-	}
-	if got2 := serverTypeName(enums.ServerType_SERVER_TYPE_LOGICSERVER); got2 == "" || got2 == got {
-		t.Errorf("serverTypeName(LOGICSERVER) = %q, want distinct non-empty name", got2)
-	}
-	if got3 := serverTypeName(enums.ServerType_SERVER_TYPE_LOGINSERVER); got3 == "" || got3 == got {
-		t.Errorf("serverTypeName(LOGINSERVER) = %q, want distinct non-empty name", got3)
 	}
 }

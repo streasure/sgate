@@ -27,7 +27,6 @@ func TestDocDefaults_MatchREADME(t *testing.T) {
 		{"rateLimit.enabled", c.Security.RateLimit.Enabled, false},
 		{"circuitBreaker.enabled", c.Security.CircuitBreaker.Enabled, false},
 		{"dropOnOverload", c.Protection.DropOnOverload, false},
-		{"discovery.enabled", c.Discovery.Enabled, false},
 		{"registerSelf", c.Discovery.RegisterSelf, false},
 		{"stream.batchPush", c.Stream.BatchPush, false},
 		{"loginValidation.enabled", c.LoginValidation.Enabled, false},

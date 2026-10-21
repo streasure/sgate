@@ -91,9 +91,6 @@ func TestApplyRuntimeDefaults_ZeroValuesGetDefaults(t *testing.T) {
 		t.Errorf("TrafficMirror.Workers = %d, want %d", c.TrafficMirror.Workers, DefaultMirrorWorkers)
 	}
 	// 发现 / etcd / 集群 / perf
-	if c.Discovery.ServiceName != DefaultDiscoveryServiceName {
-		t.Errorf("Discovery.ServiceName = %q, want %q", c.Discovery.ServiceName, DefaultDiscoveryServiceName)
-	}
 	if c.Etcd.ServicePrefix != DefaultEtcdServicePrefix {
 		t.Errorf("Etcd.ServicePrefix = %q, want %q", c.Etcd.ServicePrefix, DefaultEtcdServicePrefix)
 	}

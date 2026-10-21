@@ -62,8 +62,8 @@ func TestLoad_RepoGatewayYaml(t *testing.T) {
 	if c.Transports[1].Port != 48081 || c.Transports[1].Type != "websocket" {
 		t.Errorf("transports[1] = %+v, want {48081 websocket}", c.Transports[1])
 	}
-	if !c.Discovery.Enabled || !c.Discovery.RegisterSelf {
-		t.Errorf("discovery enabled/registerSelf = %v/%v, want true/true", c.Discovery.Enabled, c.Discovery.RegisterSelf)
+	if !c.Discovery.RegisterSelf {
+		t.Errorf("discovery.registerSelf = %v, want true", c.Discovery.RegisterSelf)
 	}
 	if c.GRPC.Port != 50051 {
 		t.Errorf("grpc.port = %d, want 50051", c.GRPC.Port)

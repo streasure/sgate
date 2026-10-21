@@ -207,7 +207,7 @@ CONF=config/cluster/gateway1.yaml ./start.sh
 **单体模式**（默认）：
 
 ```
-1. 启动 etcd（可选，逻辑服发现需要）
+1. 启动 etcd（必需：loginserver 发现与网关自身注册均依赖）
 2. 启动逻辑服（在 etcd 注册 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}` 服务）
 3. 启动 sgate 网关（./start.bat 或 sgate.exe -conf ...）
 4. 客户端连接网关
@@ -234,7 +234,8 @@ CONF=config/cluster/gateway1.yaml ./start.sh
 | `Launching gnet with N event-loops, listening on: ...` | gnet 事件循环启动（gnet 自身日志，直接打 stdout，每个监听端口一条） |
 | `starting gRPC server port=:50051` → `gRPC server started port=:50051` | gRPC 端口就绪，可接受逻辑服连接 |
 | `etcd 注册成功 serviceID=... instanceID=... address=...` | `discovery.registerSelf: true`（`config/gateway.yaml` 及 cluster/bench 配置默认如此）时网关自身已注册到 etcd |
-| `etcd 逻辑服务发现已启动（网关自身不注册）...` | `registerSelf: false` 时的另一分支：仅做逻辑服发现、不注册自身 |
+| `etcd 自注册未启用（registerSelf=false），跳过 etcd 注册` | `registerSelf: false` 时跳过自注册（loginserver 发现仍会建立，见下行） |
+| `login service ready serviceID=...` | loginserver 发现 + 服务客户端已建立（`initLoginService`；etcd 不可达则启动失败） |
 
 ### 4.4 停止网关
 
@@ -262,13 +263,12 @@ sgate 实例之间**无直接协作**（无网关间发现、无 Leader 选举�
 
 ```yaml
 discovery:
-  enabled: true        # 逻辑服发现
   registerSelf: true   # 向 etcd 注册网关自身（loginserver 需要）
 ```
 
 **行为：**
 - 在 etcd 注册网关自身连接信息（`/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`），供 loginserver 发现
-- 逻辑服发现（etcd）、负载均衡
+- 经 etcd 发现 loginserver 并保持服务客户端（登录校验/会话清理，`initLoginService`；单连接 round_robin 热切换）
 - 不做网关间发现、不做 Leader 选举
 
 **适用场景：** 单实例或多实例对等部署。
@@ -322,10 +322,10 @@ etcd 默认接入（无启用开关），启动网关前必须先启动 etcd。
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | 是否启用逻辑服发现（`config/gateway.yaml` 默认 `true`） |
-| `serviceName` | string | `logic` | 逻辑服服务名 |
-| `zone` | string | `default` | 优先选择的可用区 |
 | `registerSelf` | bool | `false` | 是否向 etcd 注册网关自身连接信息（供 loginserver 发现；`config/gateway.yaml` 默认 `true`） |
+
+> loginserver 发现无需配置：网关启动时按 `{belong}/SERVER_TYPE_LOGINSERVER:{zone}` 自动发现并保持服务客户端
+>（`initLoginService`，走 `etcd` 段连接配置；etcd 不可达则启动失败）。逻辑服不走此发现——logic 以 flip 模式主动拨入网关。
 
 ### 6.4.1 etcd 注册地址格式
 

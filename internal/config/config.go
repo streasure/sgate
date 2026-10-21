@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/streasure/util/uconfig"
+	"github.com/streasure/util/uetcd"
 )
 
 // Config 网关服务的完整配置结构体，包含所有模块配置
@@ -136,6 +137,17 @@ type EtcdConfig struct {
 	Password      string   `yaml:"password"`
 	ServicePrefix string   `yaml:"servicePrefix"`
 	LeaseTTL      string   `yaml:"leaseTTL"`
+}
+
+// Uetcd 返回 etcd 连接配置（注册与发现组件共用；LeaseTTL 属注册配置，不在此转换）。
+func (c *Config) Uetcd() uetcd.Config {
+	return uetcd.Config{
+		Endpoints:     c.Etcd.Endpoints,
+		Endpoint:      c.Etcd.Endpoint,
+		Username:      c.Etcd.Username,
+		Password:      c.Etcd.Password,
+		ServicePrefix: c.Etcd.ServicePrefix,
+	}
 }
 
 // AlertWebhookConfig 告警 webhook 配置
@@ -271,10 +283,7 @@ type ClusterConfig struct {
 
 // DiscoveryConfig 服务发现配置
 type DiscoveryConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	ServiceName  string `yaml:"serviceName"`
-	Zone         string `yaml:"zone"`
-	RegisterSelf bool   `yaml:"registerSelf"` // standalone模式下是否注册到etcd提供发现服务
+	RegisterSelf bool `yaml:"registerSelf"` // standalone模式下是否注册到etcd提供发现服务
 }
 
 // GRPCConfig gRPC 服务端配置
@@ -523,25 +532,7 @@ func (c *Config) ApplyRuntimeDefaults() {
 		c.Protection.CPUThreshold = DefaultOverloadCPUThreshold
 	}
 
-	// 发现 / etcd / 集群 / stream / perf 等「基本不改」项的零值默认
-	if !c.Discovery.Enabled && c.Discovery.ServiceName == "" && c.Discovery.Zone == "" {
-		// 未配置 discovery 段时补默认（enabled 仍为 false 需显式开）
-		c.Discovery.ServiceName = DefaultDiscoveryServiceName
-		if c.Zone != "" {
-			c.Discovery.Zone = c.Zone
-		} else {
-			c.Discovery.Zone = "default"
-		}
-	}
-	if c.Discovery.ServiceName == "" {
-		c.Discovery.ServiceName = DefaultDiscoveryServiceName
-	}
-	if c.Discovery.Zone == "" {
-		c.Discovery.Zone = c.Zone
-		if c.Discovery.Zone == "" {
-			c.Discovery.Zone = "default"
-		}
-	}
+	// etcd / 集群 / stream / perf 等「基本不改」项的零值默认
 	if c.Etcd.ServicePrefix == "" {
 		c.Etcd.ServicePrefix = DefaultEtcdServicePrefix
 	}

@@ -30,8 +30,8 @@ import (
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/udiscovery"
 	"github.com/streasure/util/ugrpc"
-	"google.golang.org/grpc"
 )
 
 // Gateway 表示网关实例，负责连接接入、协议处理、逻辑转发和组件生命周期。
@@ -121,10 +121,9 @@ type Gateway struct {
 	connectionDurationTracker *obs.LatencyTracker // 连接时长分位数追踪器
 	loginServerMu             sync.RWMutex
 	loginServerClient         protoLogin.LoginServiceClient
-	loginServerConn           *grpc.ClientConn
-	loginServerAddr           string
-	pipelineWorkerPool        *PipelineWorkerPool               // 异步 pipeline 工作池
-	shardedCoalescer          *connection.ShardedWriteCoalescer // 分片写合并器（推送路径）
+	loginService              *udiscovery.EtcdService[protoLogin.LoginServiceClient] // 发现+单连接客户端（网关自持发现）
+	pipelineWorkerPool        *PipelineWorkerPool                                    // 异步 pipeline 工作池
+	shardedCoalescer          *connection.ShardedWriteCoalescer                      // 分片写合并器（推送路径）
 }
 
 // SetTransportType 设置监听端口对应的传输类型。
@@ -308,10 +307,13 @@ func (g *Gateway) validateSecurityWiring(cfg *config.Config) error {
 	return nil
 }
 func (g *Gateway) Start() error {
-	// ClusterComponent 在 Start 中创建 discovery，需在其后重新读取。
+	// ClusterComponent 在 Start 中写入 init 资源，需在其后重新读取。
 	g.configCenter = component.ConfigCenter()
 	g.alertWebhook = component.AlertWebhook()
-	g.setLoginServerDiscovery(component.LoginDiscovery())
+	// loginserver 发现由网关自持（消费方持有发现，不依赖共享组件）
+	if err := g.initLoginService(); err != nil {
+		return err
+	}
 	if err := g.StartServices(); err != nil {
 		return err
 	}
@@ -841,6 +843,9 @@ func (g *Gateway) closeBody() {
 	}
 	if g.logicClient != nil {
 		g.logicClient.Close()
+	}
+	if g.loginService != nil {
+		_ = g.loginService.Close()
 	}
 	if g.overloadProtector != nil {
 		g.overloadProtector.Stop()

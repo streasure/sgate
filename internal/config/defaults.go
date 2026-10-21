@@ -124,9 +124,6 @@ const (
 // --- 发现 / 集群 ---
 
 const (
-	// DefaultDiscoveryServiceName 逻辑服服务名（etcd 发现）
-	DefaultDiscoveryServiceName = "logic"
-
 	// DefaultEtcdServicePrefix etcd key 前缀
 	DefaultEtcdServicePrefix = "/services"
 

@@ -54,7 +54,7 @@ Gateway 结构体承载全部接入侧状态：
 | --- | --- | --- |
 | 生命周期 | gateway.go | `NewGateway()`, `Init/Start/Destroy`, `StartServices` |
 | gnet 事件 | handlers.go | `OnOpen/OnTraffic/OnClose`（原 conn.go） |
-| 登录 | login.go | `handleLoginGate`, session 绑定 |
+| 登录 | login.go | `handleLoginGate`、`initLoginService`（loginserver 发现+服务客户端，网关自持）、session 绑定 |
 | 登出/管理端 | admin.go | `handleLogoutGate`（JWT Revoke+通知逻辑服+`SendThenClose` 可靠投递 ack 后断连）、`POST /admin/ratelimit`（Bearer，`admin.token` 空=关闭） |
 | 维护模式 | maintenance.go | `handleAdminMaintenance`：按 serverId/zone 置维护，阻断新登录并踢出在线玩家（路由在 admin.go 注册） |
 | 踢人执行器 | kick.go | `kickConn`/`pushKickNotify`：loginserver 单向下发 KickAccounts/KickIP 的本地执行端（sgate 无封禁存储）；KickAccounts 按账号索引踢**全部**在线连接（同账号多逻辑服连接不漏踢） |
@@ -79,6 +79,14 @@ Gateway 结构体承载全部接入侧状态：
 | `LogicConnectionState` 等 | state.go | 连接状态机、`Err*` 错误定义 |
 | `GRPCServer` | grpc_server.go | 逻辑服 flip 流入口、Gateway/Kick unary RPC |
 | `GatewayInterface` | iface.go | backend 对 gateway 的能力依赖（消费方定义接口） |
+
+**连接模型选型**（发现侧接入统一走 util 的 `ugrpc.Source` 插件契约，胶水在 `util/udiscovery`）：
+
+| 场景 | 选择 | 说明 |
+| --- | --- | --- |
+| 逻辑服连接（分片、按 serverID 路由、会话粘性） | `LogicClientPool`（backend 自有） | flip 模式：logic 主动拨入，地址来自握手元数据，非 etcd 拨号 |
+| 无状态服务、单连接多实例负载均衡（如 loginserver 校验） | `ugrpc.ServiceClient`（`udiscovery.DialEtcdService`） | resolver 热切换地址，round_robin；`gateway/login.go initLoginService` 即此形态 |
+| etcd 拨号、每实例一条连接、按 instanceID 路由 | `ugrpc.Pool.Attach(source)` | 同一 `Source()` 可多路消费（sgate 现未使用，供扩展） |
 
 ### 2.3 internal/connection
 
@@ -108,7 +116,7 @@ routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免�
 | `config` | 配置结构、默认值、`config.Get()` 热读取 |
 | `security` | 限流、熔断、WAF、JWT、黑白名单 |
 | `traffic` | 灰度、镜像、降级、WASM |
-| `cluster` | etcd 注册/发现、配置中心、告警 webhook |
+| `cluster` | etcd 自注册（registerSelf）、配置中心、告警 webhook |
 | `obs` | 追踪、pprof、健康检查、延迟分位数 |
 | `types` | 过滤器链、公共类型定义 |
 
@@ -140,7 +148,7 @@ container.Serve()
 | 100 | Security | 安全链先就绪 |
 | 200 | Obs | 日志/追踪/指标 |
 | 300 | Traffic | 流量治理 |
-| 400 | Cluster | 服务发现、负载均衡 |
+| 400 | Cluster | etcd 自注册、配置中心、告警 webhook（登录发现由 Gateway 自持，不在此组件） |
 | 1000 | Gateway | 接入层最后启动 |
 
 ### 3.2 构造函数零参数
@@ -163,6 +171,9 @@ setSecurityResources(wb, waf, rl, jwt, cb)
 // Gateway 读取（package component 导出的 getter，gateway.go Init）
 component.RateLimiter().Allow(dimension, key)
 ```
+
+例外：loginserver 发现不经全局资源——`Gateway.Start` 经 `udiscovery.DialEtcdService` 自持
+（`login.go initLoginService`），`closeBody` 对称关闭。
 
 ### 3.4 全局过滤器链
 
@@ -216,6 +227,7 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
   → 并发登录槽 (loginSlots，满则 429)
   → worker 协程 finishLoginGate（避免阻塞 event loop）
       ├─ loginValidation.enabled=true 时经 loginserver ValidateLoginToken（失败 401，fail-closed）
+      │    （loginserver 地址经 etcd 发现：initLoginService 单连接 + round_robin 热切换）
       ├─ 绑定 userUUID = {serverId}:{userId}、踢旧连接
       ├─ Client ← CmdLoginGateAck(1000002)（code=0 成功）
       └─ 原始 LoginGate StreamData 带 SessionId/UserKey 异步转发 logic

@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -14,7 +13,6 @@ import (
 
 type LogicClientPool struct {
 	clients    map[string]*LogicClient     // 逻辑服客户端映射（serverID -> client）
-	ordered    []string                    // 有序的服务 ID 列表
 	mu         sync.RWMutex                // 读写锁
 	gateway    GatewayInterface            // 网关接口引用
 	stopCh     chan struct{}               // 停止信号
@@ -22,21 +20,6 @@ type LogicClientPool struct {
 	fastClient atomic.Pointer[LogicClient] // 快速路径：单客户端时的原子指针
 	zoneMap    map[string]string           // zone 映射（serverID -> zone，来自 logic 拨入握手）
 	closed     bool                        // 池已关闭（Close 后拒绝新接入）
-}
-
-// RegisterClient 注册逻辑服客户端到池中
-func (pool *LogicClientPool) RegisterClient(serverID string, client *LogicClient) {
-	if serverID == "" || client == nil {
-		return
-	}
-	client.SetServerID(serverID)
-	pool.mu.Lock()
-	pool.clients[serverID] = client
-	if !slices.Contains(pool.ordered, serverID) {
-		pool.ordered = append(pool.ordered, serverID)
-	}
-	pool.updateFastClient()
-	pool.mu.Unlock()
 }
 
 // GetClient 根据 serverID 获取已连接的逻辑服客户端
@@ -112,9 +95,6 @@ func (pool *LogicClientPool) Attach(meta routes.LogicStreamMeta, stream dataStre
 		if meta.Zone != "" {
 			pool.zoneMap[meta.LogicID] = meta.Zone
 		}
-		if !slices.Contains(pool.ordered, meta.LogicID) {
-			pool.ordered = append(pool.ordered, meta.LogicID)
-		}
 		pool.updateFastClient()
 		tlog.Info(client.ctx, "logic client attached to pool serviceID=%s zone=%s address=%s shards=%d totalClients=%d",
 			meta.LogicID, meta.Zone, meta.Addr, meta.ShardCount, len(pool.clients))
@@ -150,7 +130,6 @@ func (pool *LogicClientPool) Close() {
 		client.Close()
 		delete(pool.clients, id)
 	}
-	pool.ordered = pool.ordered[:0]
 	clear(pool.zoneMap)
 }
 

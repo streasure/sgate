@@ -5,7 +5,6 @@ import (
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
-	"github.com/streasure/util/uetcd"
 )
 
 // 全局运行时资源：各组件在 Init/Start 中写入，Gateway（Order 最后）读取。
@@ -29,11 +28,9 @@ var (
 	globalTrafficMirror *traffic.TrafficMirror
 	globalDegradation   *traffic.DegradationManager
 
-	// cluster（Order 400）Init/Start 写入。
-	globalConfigCenter   cluster.ConfigCenter
-	globalAlertWebhook   *cluster.AlertWebhook
-	globalDiscovery      *uetcd.Component
-	globalLoginDiscovery *uetcd.Component
+	// cluster（Order 400）Init 写入。
+	globalConfigCenter cluster.ConfigCenter
+	globalAlertWebhook *cluster.AlertWebhook
 )
 
 // WhitelistBlacklist 返回安全组件创建的白黑名单。
@@ -75,12 +72,6 @@ func ConfigCenter() cluster.ConfigCenter { return globalConfigCenter }
 // AlertWebhook 返回集群组件创建的告警 webhook。
 func AlertWebhook() *cluster.AlertWebhook { return globalAlertWebhook }
 
-// Discovery 返回集群组件创建的逻辑服务发现。
-func Discovery() *uetcd.Component { return globalDiscovery }
-
-// LoginDiscovery 返回集群组件创建的 loginserver 发现。
-func LoginDiscovery() *uetcd.Component { return globalLoginDiscovery }
-
 func setSecurityResources(wb *security.WhitelistBlacklist, waf *security.WAF, rl *security.RateLimiter, jwt *security.JWTAuthFilter, cb *security.CircuitBreakerManager) {
 	globalWhitelistBlacklist = wb
 	globalWAF = waf
@@ -104,9 +95,4 @@ func setTrafficResources(canary *traffic.CanaryFilter, mirror *traffic.TrafficMi
 func setClusterInitResources(configCenter cluster.ConfigCenter, alertWebhook *cluster.AlertWebhook) {
 	globalConfigCenter = configCenter
 	globalAlertWebhook = alertWebhook
-}
-
-func setClusterStartResources(discovery, loginDiscovery *uetcd.Component) {
-	globalDiscovery = discovery
-	globalLoginDiscovery = loginDiscovery
 }

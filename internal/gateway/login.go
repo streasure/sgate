@@ -3,14 +3,14 @@ package gateway
 import (
 	"context"
 	"errors"
-	"net/netip"
-	"strings"
+	"fmt"
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
 
 	"github.com/panjf2000/gnet/v2"
+	"github.com/streasure/protocol/enums"
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogin "github.com/streasure/protocol/loginserver"
 	routes "github.com/streasure/sgate/internal/routes"
@@ -18,58 +18,31 @@ import (
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/retry"
 	"github.com/streasure/util/tlog"
-	"github.com/streasure/util/uetcd"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
+	"github.com/streasure/util/udiscovery"
+	"github.com/streasure/util/ugrpc"
 	"google.golang.org/protobuf/proto"
 )
 
-func (g *Gateway) setLoginServerDiscovery(discovery *uetcd.Component) {
-	if discovery == nil {
-		return
-	}
-	discovery.OnServiceChange(g.handleLoginServerChange)
-	for fullKey, address := range discovery.ServiceSet() {
-		instanceID := fullKey[strings.LastIndex(fullKey, "/")+1:]
-		g.handleLoginServerChange(uetcd.ServiceEvent{
-			Type:       uetcd.EventRegister,
-			ServiceID:  discovery.ServiceID(),
-			InstanceID: instanceID,
-			Address:    address,
+// initLoginService 按 etcd 发现自建 loginserver 服务客户端（发现由网关自持，
+// 不再依赖共享 loginDiscovery 组件）。单连接 + resolver 热切换地址，多实例 round_robin。
+// etcd 不可达时启动失败（与旧版共享 discovery 启动失败语义一致）。
+func (g *Gateway) initLoginService() error {
+	cfg := g.cfg.Load()
+	serviceID := udiscovery.JoinServiceID(cfg.Belong, enums.ServerType_SERVER_TYPE_LOGINSERVER, cfg.Zone)
+	svc, err := udiscovery.DialEtcdService[protoLogin.LoginServiceClient](cfg.Uetcd(), serviceID,
+		ugrpc.ServiceSpec[protoLogin.LoginServiceClient]{
+			NewClient:     protoLogin.NewLoginServiceClient,
+			AddressFilter: netutil.ValidAddrPort,
 		})
-	}
-}
-
-func (g *Gateway) handleLoginServerChange(event uetcd.ServiceEvent) {
-	if event.Type == uetcd.EventDeregister {
-		return
-	}
-	if _, err := netip.ParseAddrPort(event.Address); err != nil {
-		tlog.Warn(g.ctx, "invalid loginserver address instanceID=%s address=%s error=%v", event.InstanceID, event.Address, err)
-		return
+	if err != nil {
+		return fmt.Errorf("init login service %s: %w", serviceID, err)
 	}
 	g.loginServerMu.Lock()
-	defer g.loginServerMu.Unlock()
-	if g.loginServerAddr == event.Address {
-		return
-	}
-	conn, err := grpc.NewClient(event.Address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 30 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true}),
-	)
-	if err != nil {
-		tlog.Error(g.ctx, "connect loginserver failed address=%s error=%v", event.Address, err)
-		return
-	}
-	oldConn := g.loginServerConn
-	g.loginServerConn = conn
-	g.loginServerClient = protoLogin.NewLoginServiceClient(conn)
-	g.loginServerAddr = event.Address
-	if oldConn != nil {
-		_ = oldConn.Close()
-	}
-	tlog.Info(g.ctx, "loginserver connected instanceID=%s address=%s", event.InstanceID, event.Address)
+	g.loginService = svc
+	g.loginServerClient = svc.Client()
+	g.loginServerMu.Unlock()
+	tlog.Info(g.ctx, "login service ready serviceID=%s", serviceID)
+	return nil
 }
 
 // loginValidationEnabled 读取热更新后的登录校验开关。
