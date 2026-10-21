@@ -9,14 +9,14 @@ func TestApplyRuntimeDefaults_ZeroValuesGetDefaults(t *testing.T) {
 	if c.Protection.MaxFrameSize != DefaultMaxFrameSize {
 		t.Errorf("MaxFrameSize = %d, want %d", c.Protection.MaxFrameSize, DefaultMaxFrameSize)
 	}
-	if c.Protection.MaxFrameBufSize != DefaultMaxFrameSize {
-		t.Errorf("MaxFrameBufSize = %d, want %d (gateway historical default)", c.Protection.MaxFrameBufSize, DefaultMaxFrameSize)
+	if c.Protection.MaxFrameBufSize != DefaultMaxFrameSize+4 {
+		t.Errorf("MaxFrameBufSize = %d, want %d (frame + 4B length prefix)", c.Protection.MaxFrameBufSize, DefaultMaxFrameSize+4)
 	}
 	if c.Protection.MaxWSFrameSize != DefaultMaxWSFrameSize {
 		t.Errorf("MaxWSFrameSize = %d, want %d", c.Protection.MaxWSFrameSize, DefaultMaxWSFrameSize)
 	}
-	if c.Protection.MaxWSBufferSize != DefaultMaxWSFrameSize {
-		t.Errorf("MaxWSBufferSize = %d, want %d", c.Protection.MaxWSBufferSize, DefaultMaxWSFrameSize)
+	if c.Protection.MaxWSBufferSize != DefaultMaxWSFrameSize+14 {
+		t.Errorf("MaxWSBufferSize = %d, want %d (frame + max WS header)", c.Protection.MaxWSBufferSize, DefaultMaxWSFrameSize+14)
 	}
 	if c.Protection.WSHeartbeatTimeout != DefaultWSHeartbeatTimeoutSec {
 		t.Errorf("WSHeartbeatTimeout = %d, want %d", c.Protection.WSHeartbeatTimeout, DefaultWSHeartbeatTimeoutSec)

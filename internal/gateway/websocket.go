@@ -302,6 +302,8 @@ func (g *Gateway) handleWebSocketMessage(wsConn *WebSocketConnection, data []byt
 			wsConn.bufOff = 0
 		}
 		if len(wsConn.Buffer)+len(data) > g.getMaxWSBufferSize() {
+			tlog.Warn(g.ctx, "ws buffer overflow, closing connectionID=%s pending=%d incoming=%d maxWSBufferSize=%d",
+				wsConn.ConnectionID(), len(wsConn.Buffer), len(data), g.getMaxWSBufferSize())
 			wsConn.Buffer = nil
 			return gnet.Close
 		}
@@ -506,10 +508,14 @@ func (g *Gateway) handleWSLogoutGate(wsConn *WebSocketConnection, connectionID s
 		g.notifyLogicOffline(connObj)
 	}
 	ackBody, _ := proto.Marshal(&protoGw.LoginGateAck{Code: 0, Message: "ok", SessionId: connectionID})
-	if data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil {
-		_ = g.sendWebSocketMessageAsync(wsConn, WSOpBinary, data)
-	}
 	wsConn.State.Store(int32(WSStateClosing))
+	if data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil && connObj != nil {
+		// ack 可靠投递：SendThenClose（WS 路径自动封 0x82 帧）在写完成回调内 Close，
+		// 避免立即 Close 丢 ack（Windows 无 outbound flush）；不可用回退同步 Close。
+		if sendErr := connObj.SendThenClose(data); sendErr == nil {
+			return nil
+		}
+	}
 	if wsConn.Conn != nil {
 		_ = wsConn.Conn.Close()
 	}

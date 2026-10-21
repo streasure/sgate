@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
 
@@ -62,7 +63,7 @@ func NewTracer(cleanupInterval time.Duration) *Tracer {
 		maxTraceAge:     30 * time.Minute,
 	}
 
-	go tracer.cleanup()
+	panicutil.GoLoop(context.Background(), "obs.tracer.cleanup", tracer.cleanup)
 
 	return tracer
 }

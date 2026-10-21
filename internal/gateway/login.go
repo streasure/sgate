@@ -294,8 +294,9 @@ func (g *Gateway) forwardLoginAsync(serverID string, msg *protoGw.StreamData, wa
 }
 
 func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {
-	// 幂等：显式路径与 OnClose 可能都触发，仅首个调用者发送
-	if !conn.ClaimOfflineNotify() {
+	// 幂等标记 = 已送达（非已尝试）：显式路径与 OnClose 可能都触发，
+	// 已成功发送过的连接直接跳过；发送失败不置位，后续路径可重试。
+	if conn.OfflineNotified() {
 		return
 	}
 	serverID := conn.GetServerID()
@@ -311,8 +312,13 @@ func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {
 	data := &protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: routes.CmdUserOffline, Data: body}
 	// 调用方在 gnet 事件循环/空闲检查协程上：SendMessage 队列满时可能阻塞
 	// （QueuePolicyBlock 无超时），同步发送会拖死事件循环乃至 StopConnectionChecker。
-	// 幂等声明与取数保持同步，仅网络入队挪到后台协程。
+	// 仅网络入队挪到后台协程；成功后才置幂等标记，失败留给 OnClose 重试。
 	panicutil.Go(g.ctx, "gateway.notifyLogicOffline", func() {
-		_ = client.SendMessage(data)
+		if err := client.SendMessage(data); err != nil {
+			tlog.Warn(g.ctx, "offline notify enqueue failed, left for retry connectionID=%s serverID=%s error=%v",
+				conn.ID(), serverID, err)
+			return
+		}
+		conn.MarkOfflineNotified()
 	})
 }

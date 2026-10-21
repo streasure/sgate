@@ -553,6 +553,34 @@ func (g *Gateway) configWatcher() {
 	}
 }
 
+// securityEnableFlags 安全组件启停开关快照。
+// 与 security_component.Init 的创建条件一一对应：任一开关变化都意味着
+// 需要重建组件实例/重挂过滤器，热更路径无法安全完成 → 拒绝热切。
+type securityEnableFlags struct {
+	security       bool
+	rateLimit      bool
+	waf            bool
+	jwtAuth        bool
+	circuitBreaker bool
+}
+
+func securityEnableFlagsOf(c *config.Config) securityEnableFlags {
+	return securityEnableFlags{
+		security:       c.Security.Enabled,
+		rateLimit:      c.Security.RateLimit.Enabled,
+		waf:            c.WAF.Enabled,
+		jwtAuth:        c.JWTAuth.Enabled,
+		circuitBreaker: c.Security.CircuitBreaker.Enabled,
+	}
+}
+
+func (g *Gateway) currentSecurityEnableFlags() securityEnableFlags {
+	if c := g.cfg.Load(); c != nil {
+		return securityEnableFlagsOf(c)
+	}
+	return securityEnableFlags{}
+}
+
 func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 先补齐运行时默认值，再原子替换（防止零值热更把连接踢飞）
 	newCfg.ApplyRuntimeDefaults()
@@ -560,6 +588,14 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	// 非法配置整体拒绝，保留当前配置继续运行。
 	if err := newCfg.Validate(); err != nil {
 		tlog.Error(g.ctx, "config update rejected, keeping current config error=%v", err)
+		return
+	}
+	// 安全组件启停开关不可热切：组件只在启动时按配置创建/注册过滤器，
+	// 热切 enable 会出现「配置 true 实际不生效（fail-open）」或「配置 false
+	// 旧阈值继续拦（fail-stale）」。检测到开关变化整单拒绝，要求重启生效。
+	if oldFlags, newFlags := g.currentSecurityEnableFlags(), securityEnableFlagsOf(newCfg); oldFlags != newFlags {
+		tlog.Error(g.ctx, "config update rejected: security enable flags cannot hot-toggle, restart required old=%+v new=%+v",
+			oldFlags, newFlags)
 		return
 	}
 	g.cfg.Store(newCfg)

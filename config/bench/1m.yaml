@@ -82,9 +82,9 @@ stream:
   sendChannelSize: 1048576
 
 protection:
-  maxFrameSize: 4194304
+  maxFrameSize: 65532        # 必须 <= maxFrameBufSize-4，否则大帧静默断连（Validate 强制）
   maxFrameBufSize: 65536        # 64KB，降低百万连接内存
-  maxWSFrameSize: 4194304
+  maxWSFrameSize: 65522        # 必须 <= maxWSBufferSize-14
   maxWSBufferSize: 65536
   maxConnections: 1200000       # 百万连接 + 20% 余量
   maxConnectionsPerIP: 0        # 压测不限单 IP

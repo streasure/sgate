@@ -125,7 +125,7 @@ func (g *Gateway) revokeConnJWT(conn *connection.Connection) {
 }
 
 // handleLogoutGate 处理客户端登出：撤销 JWT → 通知逻辑服 → 断开，不向客户端再推业务消息。
-func (g *Gateway) handleLogoutGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
+func (g *Gateway) handleLogoutGate(_ gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
 	connObj := g.connectionManager.GetConnection(connectionID)
 	if connObj == nil {
 		return gnet.Close
@@ -134,7 +134,11 @@ func (g *Gateway) handleLogoutGate(c gnet.Conn, connectionID string, message *pr
 	g.notifyLogicOffline(connObj)
 	ackBody, _ := proto.Marshal(&protoGw.LoginGateAck{Code: 0, Message: "ok", SessionId: connectionID})
 	if data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil {
-		writeFrameAsync(c, data)
+		// ack 可靠投递：SendThenClose 在写完成回调内 Close（Windows 无 outbound flush，
+		// 立即 Close 会丢 ack）；不可用（连接已空等）回退同步 Close。
+		if sendErr := connObj.SendThenClose(data); sendErr == nil {
+			return gnet.None
+		}
 	}
 	if connObj.Conn != nil {
 		_ = connObj.Conn.Close()

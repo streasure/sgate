@@ -379,8 +379,9 @@ loginserver 可通过 etcd watch `/services/{belong}/SERVER_TYPE_SGATE:{zone}` �
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `maxFrameSize` | int | `4MiB` | TCP 单帧最大载荷 |
-| `maxFrameBufSize` | int | `4MiB` (零值回退，百万连接建议显式 `64KiB`) | TCP 帧缓冲区上限（百万连接场景需降低） |
+| `maxFrameBufSize` | int | `4MiB+4` (零值回退，百万连接建议显式 `64KiB` 并同步下调 `maxFrameSize`) | TCP 帧缓冲区上限。**必须 ≥ `maxFrameSize+4`**（4B 长度前缀），否则大帧静默断连（启动 Validate 强制） |
 | `maxWSFrameSize` | int | `4MiB` | WebSocket 单帧最大载荷 |
+| `maxWSBufferSize` | int | `4MiB+14` | WebSocket 帧缓冲上限。**必须 ≥ `maxWSFrameSize+14`**（最长 WS 头），否则大帧静默断连（启动 Validate 强制） |
 | `maxConnections` | int | `0` | 网关最大总连接数，`0`=不限制。生产环境建议设置 |
 | `maxConnectionsPerIP` | int | `0` | 单 IP 最大连接数，`0`=不限制。防止单客户端耗尽连接 |
 | `cpuThreshold` | float | `90` | CPU 过载阈值（%） |

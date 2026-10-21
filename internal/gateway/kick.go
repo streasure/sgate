@@ -75,20 +75,19 @@ func (g *Gateway) kickConn(conn *connection.Connection, p kickNotifyParams) {
 }
 
 // KickByAccounts 按登录账号踢本地连接，返回踢中数。
+// 同账号可能有多条连接在线（不同逻辑服），全部踢中。
 func (g *Gateway) KickByAccounts(accountIDs []string, reason string) int {
 	p := kickNotifyParams{reason: reason, code: 403, message: "account banned"}
 	kicked := 0
 	for _, accountID := range accountIDs {
-		connID, ok := g.connectionManager.GetAccountConnection(accountID)
-		if !ok {
-			continue
+		for _, connID := range g.connectionManager.GetAccountConnections(accountID) {
+			conn := g.connectionManager.GetConnection(connID)
+			if conn == nil {
+				continue
+			}
+			g.kickConn(conn, p)
+			kicked++
 		}
-		conn := g.connectionManager.GetConnection(connID)
-		if conn == nil {
-			continue
-		}
-		g.kickConn(conn, p)
-		kicked++
 	}
 	return kicked
 }

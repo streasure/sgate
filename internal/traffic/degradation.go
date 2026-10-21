@@ -26,14 +26,18 @@ type degradeRule struct {
 	route          string
 	errorThreshold float64 // 错误率阈值（0-1）
 	windowSize     int     // 滑动窗口大小
-	recentErrors   []bool  // 错误窗口
-	pos            int
-	count          int
-	errorCount     int
-	fallbackData   []byte // 兜底响应数据
-	degraded       atomic.Int32
-	coolDown       time.Duration
-	lastDegrade    atomic.Int64
+	// windowMu 保护滑动窗口写路径（pos/recentErrors/count/errorCount）。
+	// RecordResult 是每条转发消息的热路径：按 route 独立锁，避免全局 m.mu
+	// 把所有 route 的计数串行化（降级一开吞吐即崩）。
+	windowMu     sync.Mutex
+	recentErrors []bool // 错误窗口
+	pos          int
+	count        int
+	errorCount   int
+	fallbackData []byte // 兜底响应数据
+	degraded     atomic.Int32
+	coolDown     time.Duration
+	lastDegrade  atomic.Int64
 }
 
 // newDegradationRule 构造规则并补齐零值默认（启动构造与热更 AddRule 共用；
@@ -98,15 +102,23 @@ func (m *DegradationManager) Process(fc *types.FilterContext) (bool, error) {
 	return true, nil
 }
 
-// RecordResult 记录请求结果
-// 注意：写操作（r.pos/r.recentErrors/r.count/r.errorCount）必须用写锁
+// RecordResult 记录请求结果。
+// 热路径（每条转发消息调用）：rules map 只读 RLock 取规则，窗口写锁按 route
+// 独立（r.windowMu），不再串行化全部 route。
 func (m *DegradationManager) RecordResult(route string, isError bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
 	r, ok := m.rules[route]
+	m.mu.RUnlock()
 	if !ok {
 		return
 	}
+	r.recordResult(m, route, isError)
+}
+
+// recordResult 单规则滑动窗口统计；由 RecordResult 在 RUnlock 后调用。
+func (r *degradeRule) recordResult(m *DegradationManager, route string, isError bool) {
+	r.windowMu.Lock()
+	defer r.windowMu.Unlock()
 	pos := r.pos % r.windowSize
 	if r.count >= r.windowSize {
 		// 滑动窗口

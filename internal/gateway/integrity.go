@@ -4,26 +4,43 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/panicutil"
+	"github.com/streasure/util/uhash"
 )
 
+// integrityShardCount 重放缓存分片数（2 的幂）。单 map 全局写锁会让
+// verifyInbound=true 时所有连接的每条消息串行化；按 connectionID 哈希
+// 分片后热点摊到 N 把锁上（同连接恒同片，顺序语义不变）。
+const integrityShardCount = 16
+
+// errIntegrityReplay 预分配错误，避免热路径每次 fmt.Errorf 分配。
+var errIntegrityReplay = fmt.Errorf("replay attack detected")
+
+type integrityShard struct {
+	mu    sync.Mutex
+	cache map[string]int64
+}
+
 type MessageIntegrity struct {
-	timeWindow  int64
-	replayCache map[string]int64
-	cacheMutex  sync.RWMutex
-	stopOnce    sync.Once
-	stopCh      chan struct{}
+	timeWindow int64
+	shards     [integrityShardCount]integrityShard
+	stopOnce   sync.Once
+	stopCh     chan struct{}
 }
 
 func NewMessageIntegrity(timeWindow int64) *MessageIntegrity {
 	mi := &MessageIntegrity{
-		timeWindow:  timeWindow,
-		replayCache: make(map[string]int64),
-		stopCh:      make(chan struct{}),
+		timeWindow: timeWindow,
+		stopCh:     make(chan struct{}),
+	}
+	for i := range mi.shards {
+		mi.shards[i].cache = make(map[string]int64)
 	}
 	panicutil.GoLoop(context.Background(), "gateway.messageIntegrity.cleanup", mi.cleanupCache)
 	return mi
@@ -37,18 +54,26 @@ func (mi *MessageIntegrity) cleanupCache() {
 		case <-mi.stopCh:
 			return
 		case <-ticker.C:
-			mi.cacheMutex.Lock()
 			now := time.Now().UnixMilli()
-			maps.DeleteFunc(mi.replayCache, func(_ string, ts int64) bool {
-				return now-ts > mi.timeWindow
-			})
-			mi.cacheMutex.Unlock()
+			for i := range mi.shards {
+				sh := &mi.shards[i]
+				sh.mu.Lock()
+				maps.DeleteFunc(sh.cache, func(_ string, ts int64) bool {
+					return now-ts > mi.timeWindow
+				})
+				sh.mu.Unlock()
+			}
 		}
 	}
 }
 
 func (mi *MessageIntegrity) Stop() {
 	mi.stopOnce.Do(func() { close(mi.stopCh) })
+}
+
+// shardFor 按 connectionID 定位分片（FNV-1a，零分配）。
+func (mi *MessageIntegrity) shardFor(connectionID string) *integrityShard {
+	return &mi.shards[uhash.FNV1a32(connectionID)%integrityShardCount]
 }
 
 // ProcessMessage 按连接维度做重放检测。
@@ -60,13 +85,25 @@ func (mi *MessageIntegrity) ProcessMessage(connectionID string, msg *protoGw.Str
 	if msg.SeqId == 0 {
 		return fmt.Errorf("seq_id required when verifyInbound enabled cmd=%d", msg.Cmd)
 	}
-	msgID := fmt.Sprintf("%s-%s-%d-%d", connectionID, msg.UserKey, msg.Cmd, msg.SeqId)
-	mi.cacheMutex.Lock()
-	if _, exists := mi.replayCache[msgID]; exists {
-		mi.cacheMutex.Unlock()
-		return fmt.Errorf("replay attack detected")
+	// 拼接 key 替代 fmt.Sprintf（少一次反射式格式化与额外分配）
+	var b strings.Builder
+	b.Grow(len(connectionID) + len(msg.UserKey) + 32)
+	b.WriteString(connectionID)
+	b.WriteByte(0)
+	b.WriteString(msg.UserKey)
+	b.WriteByte(0)
+	b.WriteString(strconv.FormatInt(int64(msg.Cmd), 10))
+	b.WriteByte(0)
+	b.WriteString(strconv.FormatInt(msg.SeqId, 10))
+	key := b.String()
+
+	sh := mi.shardFor(connectionID)
+	sh.mu.Lock()
+	if _, exists := sh.cache[key]; exists {
+		sh.mu.Unlock()
+		return errIntegrityReplay
 	}
-	mi.replayCache[msgID] = time.Now().UnixMilli()
-	mi.cacheMutex.Unlock()
+	sh.cache[key] = time.Now().UnixMilli()
+	sh.mu.Unlock()
 	return nil
 }

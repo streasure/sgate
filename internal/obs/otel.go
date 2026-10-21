@@ -12,6 +12,7 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhash"
 )
@@ -64,7 +65,7 @@ func NewOTelTracer(cfg config.OTelTracerConfig) *OTelTracer {
 		workers = 2
 	}
 	for range workers {
-		go t.exportLoop()
+		panicutil.GoLoop(context.Background(), "obs.otel.exportLoop", t.exportLoop)
 	}
 	return t
 }

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"slices"
@@ -35,6 +36,7 @@ func GetConnContext() *ConnContext {
 	ctx.ConnectionID = ""
 	ctx.FrameBuf = nil
 	ctx.frameOff = 0
+	ctx.LogCtx = nil
 	return ctx
 }
 
@@ -42,11 +44,14 @@ func PutConnContext(ctx *ConnContext) {
 	ctx.ConnectionID = ""
 	ctx.FrameBuf = nil
 	ctx.frameOff = 0
+	ctx.LogCtx = nil
 	connContextPool.Put(ctx)
 }
 
 type ConnContext struct {
 	ConnectionID string
+	// LogCtx 日志上下文（OnOpen 置为 gateway ctx；测试可为 nil，超限日志按需跳过）
+	LogCtx context.Context
 	// FrameBuf 为底层数组（跨消息复用），有效数据 = FrameBuf[frameOff:]。
 	// frameOff 为已消费偏移：置 nil 会让下一次读事件重新分配（实测 ~6B/条），
 	// 中段切片 FrameBuf[n:] 又会丢失数组头部容量；offset 方案两者皆免。
@@ -103,6 +108,7 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 		connectionID := g.connectionManager.AddConnection(c, tempUserUUID)
 		connCtx := GetConnContext()
 		connCtx.ConnectionID = connectionID
+		connCtx.LogCtx = g.ctx
 		c.SetContext(connCtx)
 	}
 
@@ -234,6 +240,10 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 func (ctx *ConnContext) feedFrames(data []byte, maxFrameBuf, maxFrame int, fn func(frame []byte) bool) bool {
 	// 已收未消费的逻辑长度；超限断连（防 FrameBuf 无界增长）
 	if len(ctx.FrameBuf)-ctx.frameOff+len(data) > maxFrameBuf {
+		if ctx.LogCtx != nil {
+			tlog.Warn(ctx.LogCtx, "tcp frame buffer overflow, closing connectionID=%s pending=%d incoming=%d maxFrameBufSize=%d",
+				ctx.ConnectionID, len(ctx.FrameBuf)-ctx.frameOff, len(data), maxFrameBuf)
+		}
 		ctx.FrameBuf = nil
 		ctx.frameOff = 0
 		return false
@@ -251,6 +261,10 @@ func (ctx *ConnContext) feedFrames(data []byte, maxFrameBuf, maxFrame int, fn fu
 	for len(ctx.FrameBuf)-ctx.frameOff >= 4 {
 		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[ctx.frameOff:])
 		if frameLen == 0 || frameLen > uint32(maxFrame) {
+			if ctx.LogCtx != nil {
+				tlog.Warn(ctx.LogCtx, "tcp frame length invalid, closing connectionID=%s frameLen=%d maxFrameSize=%d",
+					ctx.ConnectionID, frameLen, maxFrame)
+			}
 			ctx.FrameBuf = nil
 			ctx.frameOff = 0
 			return false

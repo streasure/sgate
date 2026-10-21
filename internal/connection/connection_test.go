@@ -81,13 +81,14 @@ func TestUpdateConnectionUserUUID_CleansOrphanServerUserKey(t *testing.T) {
 	}
 }
 
-// TestClaimOfflineNotify 验证下线通知 CAS 幂等。
-func TestClaimOfflineNotify(t *testing.T) {
+// TestOfflineNotifyIdempotency 验证下线通知幂等标记 = 已送达语义。
+func TestOfflineNotifyIdempotency(t *testing.T) {
 	c := newConnection("id", mockConn{}, "u", "1.2.3.4:1")
-	if !c.ClaimOfflineNotify() {
-		t.Fatal("first claim should win")
+	if c.OfflineNotified() {
+		t.Fatal("should start unnotified")
 	}
-	if c.ClaimOfflineNotify() {
-		t.Fatal("second claim should lose")
+	c.MarkOfflineNotified()
+	if !c.OfflineNotified() {
+		t.Fatal("mark should stick")
 	}
 }

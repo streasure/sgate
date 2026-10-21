@@ -330,19 +330,11 @@ func (mq *StreamMessageQueue) Close() {
 func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 	mq.mu.Lock()
 	switch mq.policy {
-	case config.QueuePolicyBlock:
-		for len(mq.queue) >= mq.maxSize {
-			if mq.closed {
-				mq.mu.Unlock()
-				return ErrConnectionClosing
-			}
-			mq.cond.Wait()
-		}
-		mq.queue = append(mq.queue, msg)
-		mq.mu.Unlock()
-		return nil
-
-	case config.QueuePolicyTimeout:
+	// block 与 timeout 同语义：最多等待 blockTimeout（默认 500ms）后返回
+	// ErrQueueFull。Enqueue 在 gnet 事件循环的同步路径被调用（pipeline），
+	// 无限等待会在逻辑服断连期卡死整个事件循环（不止单连接）；历史上
+	// block 无限等仅因生产默认 drop 策略才未暴露。
+	case config.QueuePolicyBlock, config.QueuePolicyTimeout:
 		deadline := time.Now().Add(mq.blockTimeout)
 		for len(mq.queue) >= mq.maxSize {
 			if mq.closed {
@@ -372,7 +364,9 @@ func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 			return ErrBackpressure
 		}
 		if len(mq.queue) >= mq.maxSize {
+			oldest := mq.queue[0]
 			mq.queue = mq.queue[1:]
+			PutStreamData(oldest) // 丢弃归池，否则池无法复用被丢消息的缓冲
 		}
 		mq.queue = append(mq.queue, msg)
 		mq.cond.Signal()
@@ -381,7 +375,9 @@ func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 
 	default: // config.QueuePolicyDrop 或未知策略
 		if len(mq.queue) >= mq.maxSize {
+			oldest := mq.queue[0]
 			mq.queue = mq.queue[1:]
+			PutStreamData(oldest)
 		}
 		mq.queue = append(mq.queue, msg)
 		mq.cond.Signal()
@@ -408,12 +404,18 @@ func (mq *StreamMessageQueue) Dequeue() (*protoGw.StreamData, bool) {
 // 队列已满时丢弃当前最旧消息腾位，绝不阻塞——Flush 冲刷失败必须走此路径，
 // 否则 Block 等策略的 Enqueue 会等待空间，而唯一能腾出空间的 Dequeue 正被
 // 自身占用，形成死锁。
+// 头插用 copy 移窗复用底层数组（append([]*T{msg}, ...) 每次整段重分配，
+// 长队列 Flush 重试会 O(n²) 分配）。
 func (mq *StreamMessageQueue) RequeueFront(msg *protoGw.StreamData) {
 	mq.mu.Lock()
 	if len(mq.queue) >= mq.maxSize {
-		mq.queue = mq.queue[1:] // 与 Drop/Backpressure 一致：丢最旧
+		oldest := mq.queue[0] // 与 Drop/Backpressure 一致：丢最旧
+		mq.queue = mq.queue[1:]
+		PutStreamData(oldest)
 	}
-	mq.queue = append([]*protoGw.StreamData{msg}, mq.queue...)
+	mq.queue = append(mq.queue, nil)
+	copy(mq.queue[1:], mq.queue[:len(mq.queue)-1])
+	mq.queue[0] = msg
 	mq.cond.Signal()
 	mq.mu.Unlock()
 }

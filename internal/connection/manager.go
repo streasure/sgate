@@ -14,10 +14,14 @@ import (
 )
 
 type ConnectionManager struct {
-	ctx                   context.Context
-	connections           *shardedMap[*Connection] // 分片 map，按 connectionID 索引
-	userConnections       *shardedMap[string]      // 分片 map，按 userUUID → connectionID
-	accountConnections    *shardedMap[string]      // 分片 map，按登录账号 accountId → connectionID（KickAccounts 用）
+	ctx             context.Context
+	connections     *shardedMap[*Connection] // 分片 map，按 connectionID 索引
+	userConnections *shardedMap[string]      // 分片 map，按 userUUID → connectionID
+	// accountConnections 按登录账号 accountId → 连接集合（KickAccounts 用）。
+	// 同账号可同时登录不同逻辑服（多连接在线）：存单连接会互相覆盖，
+	// 封禁时只踢中最新一条、漏踢其余。写仅登录/断连，读仅 Kick，互斥锁足够。
+	accountMu             sync.Mutex
+	accountConnections    map[string]map[string]struct{}
 	serverUserConnections sync.Map
 	serverConnections     sync.Map
 	groups                sync.Map
@@ -73,7 +77,7 @@ func NewConnectionManager(maxConn, maxConnPerIP int) *ConnectionManager {
 		ctx:                context.Background(),
 		connections:        newShardedMap[*Connection](),
 		userConnections:    newShardedMap[string](),
-		accountConnections: newShardedMap[string](),
+		accountConnections: make(map[string]map[string]struct{}),
 		ipConnections:      make(map[string]int32),
 		stopCh:             make(chan struct{}),
 		checkDone:          make(chan struct{}),
@@ -212,7 +216,7 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	}
 	cm.userConnections.DeleteIf(conn.GetUserUUID(), connectionID)
 	if accountID := conn.GetAccountID(); accountID != "" {
-		cm.accountConnections.DeleteIf(accountID, connectionID)
+		cm.removeAccountConnection(accountID, connectionID)
 	}
 	serverID := conn.GetServerID()
 	userUUID := conn.GetUserUUID()
@@ -223,7 +227,7 @@ func (cm *ConnectionManager) RemoveConnection(connectionID string) {
 	// 扫描所有 group，移除该 serverUser 成员
 	cm.removeMemberFromAllGroups(serverID, userUUID)
 	// 追踪 IP 连接数
-	remoteIP := netutil.Host(conn.RemoteAddr)
+	remoteIP := netutil.Host(conn.GetRemoteAddr())
 	cm.decrementIP(remoteIP)
 	cm.count.Add(-1)
 	cm.activeConnections.Add(-1)
@@ -238,14 +242,36 @@ func (cm *ConnectionManager) SetConnectionServerID(connectionID, serverID string
 	}
 }
 
-// SetConnectionAccountID 登录成功后写入账号索引（accountId → connectionID）。
+// SetConnectionAccountID 登录成功后写入账号索引（accountId → 连接集合）。
+// 同账号多连接（不同逻辑服同时在线）全部保留，封禁 KickAccounts 不漏踢。
 func (cm *ConnectionManager) SetConnectionAccountID(connectionID, accountID string) {
 	if accountID == "" {
 		return
 	}
 	if conn := cm.GetConnection(connectionID); conn != nil {
 		conn.SetAccountID(accountID)
-		cm.accountConnections.Store(accountID, connectionID)
+		cm.accountMu.Lock()
+		set := cm.accountConnections[accountID]
+		if set == nil {
+			set = make(map[string]struct{}, 1)
+			cm.accountConnections[accountID] = set
+		}
+		set[connectionID] = struct{}{}
+		cm.accountMu.Unlock()
+	}
+}
+
+// removeAccountConnection 从账号索引移除一条连接；集合空时删除键。
+func (cm *ConnectionManager) removeAccountConnection(accountID, connectionID string) {
+	cm.accountMu.Lock()
+	defer cm.accountMu.Unlock()
+	set := cm.accountConnections[accountID]
+	if set == nil {
+		return
+	}
+	delete(set, connectionID)
+	if len(set) == 0 {
+		delete(cm.accountConnections, accountID)
 	}
 }
 
@@ -259,9 +285,19 @@ func (cm *ConnectionManager) SetConnectionLoginKey(connectionID, loginKey string
 	}
 }
 
-// GetAccountConnection 根据登录账号获取连接ID（KickAccounts 本地索引）。
-func (cm *ConnectionManager) GetAccountConnection(accountID string) (string, bool) {
-	return cm.accountConnections.Load(accountID)
+// GetAccountConnections 根据登录账号返回全部关联连接ID（KickAccounts 本地索引）。
+func (cm *ConnectionManager) GetAccountConnections(accountID string) []string {
+	cm.accountMu.Lock()
+	defer cm.accountMu.Unlock()
+	set := cm.accountConnections[accountID]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	return out
 }
 
 // UpdateConnectionUserUUID 更新连接关联的用户UUID，同步更新所有映射。

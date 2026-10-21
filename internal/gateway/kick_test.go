@@ -31,6 +31,25 @@ func TestKickByAccountsHitsAccountIndex(t *testing.T) {
 	}
 }
 
+// TestKickByAccountsMultiConnection 同账号多连接（不同逻辑服）全部踢中，不漏踢。
+func TestKickByAccountsMultiConnection(t *testing.T) {
+	g := newKickTestGateway()
+	mc1, mc2 := &kickMockConn{}, &kickMockConn{}
+	id1 := g.connectionManager.AddConnection(mc1, "")
+	id2 := g.connectionManager.AddConnection(mc2, "")
+	g.connectionManager.SetConnectionServerID(id1, "s1")
+	g.connectionManager.SetConnectionServerID(id2, "s2")
+	g.connectionManager.SetConnectionAccountID(id1, "20002")
+	g.connectionManager.SetConnectionAccountID(id2, "20002")
+
+	if n := g.KickByAccounts([]string{"20002"}, "blacklist"); n != 2 {
+		t.Fatalf("kicked=%d, want 2 (both conns of same account)", n)
+	}
+	if !mc1.isClosed() || !mc2.isClosed() {
+		t.Fatal("both connections of the account should be closed")
+	}
+}
+
 func TestKickByIPMatchesRemoteHost(t *testing.T) {
 	g := newKickTestGateway()
 	hit := &kickMockConn{}

@@ -58,7 +58,7 @@ type PipelineConfig struct {
 
 // PerfConfig 运行时性能调优参数（GC、内存限制），参数以机器资源百分比表示，跨机器通用。
 type PerfConfig struct {
-	GcPercent          int `yaml:"gcPercent"`          // GOGC 等价：堆增长触发 GC 的百分比（默认 100）
+	GcPercent          int `yaml:"gcPercent"`          // GOGC 等价：堆增长触发 GC 的百分比（默认 300）
 	MemoryLimitPercent int `yaml:"memoryLimitPercent"` // GOMEMLIMIT 等价：软内存上限占总内存百分比（推荐 80-90）
 }
 
@@ -382,6 +382,17 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("security.trustedProxies %q: %w", p, err)
 		}
 	}
+	// 帧缓冲与单帧上限交叉校验：缓冲必须容得下"最大合法帧"（TCP 帧 = 4B 长度前缀
+	// + payload；WS 帧 = 最长 14B 头 + payload），否则恰好达上限的合法帧会在
+	// feedFrames/WS 缓冲检查处被静默断连（线上表现为随机掉线）。
+	if c.Protection.MaxFrameBufSize < c.Protection.MaxFrameSize+4 {
+		return fmt.Errorf("protection.maxFrameBufSize (%d) must be >= maxFrameSize (%d) + 4 (frame length prefix)",
+			c.Protection.MaxFrameBufSize, c.Protection.MaxFrameSize)
+	}
+	if c.Protection.MaxWSBufferSize < c.Protection.MaxWSFrameSize+14 {
+		return fmt.Errorf("protection.maxWSBufferSize (%d) must be >= maxWSFrameSize (%d) + 14 (max WS header)",
+			c.Protection.MaxWSBufferSize, c.Protection.MaxWSFrameSize)
+	}
 	return nil
 }
 
@@ -408,14 +419,17 @@ func (c *Config) ApplyRuntimeDefaults() {
 		p.MaxFrameSize = DefaultMaxFrameSize
 	}
 	if p.MaxFrameBufSize <= 0 {
-		// 与历史网关运行时默认一致（4MB）；百万连接场景请在 yaml 显式设 64KB
-		p.MaxFrameBufSize = DefaultMaxFrameSize
+		// 与历史网关运行时默认一致（4MB）+4B 长度前缀（容纳最大合法帧，
+		// 与 Validate 交叉校验一致）；百万连接场景请在 yaml 显式设 64KB 并同步下调 maxFrameSize
+		p.MaxFrameBufSize = DefaultMaxFrameSize + 4
 	}
 	if p.MaxWSFrameSize <= 0 {
 		p.MaxWSFrameSize = DefaultMaxWSFrameSize
 	}
 	if p.MaxWSBufferSize <= 0 {
-		p.MaxWSBufferSize = DefaultMaxWSFrameSize
+		// +14：容纳最大帧的最长 WS 头（2B 扩展长度位/8B 长度/4B mask），
+		// 否则恰好 maxWSFrameSize 的帧会在缓冲检查处静默断连
+		p.MaxWSBufferSize = DefaultMaxWSFrameSize + 14
 	}
 	if p.WSHeartbeatTimeout <= 0 {
 		p.WSHeartbeatTimeout = DefaultWSHeartbeatTimeoutSec

@@ -1,11 +1,14 @@
 package security
 
 import (
+	"context"
 	"hash/maphash"
 	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/streasure/util/panicutil"
 )
 
 const (
@@ -163,7 +166,7 @@ func NewRateLimiter(maxTokens int, tokenRefresh time.Duration) *RateLimiter {
 	rl.cfgMu.Unlock()
 	rl.initGlobalBucket()
 
-	go rl.cleanup()
+	panicutil.GoLoop(context.Background(), "security.rateLimiter.cleanup", rl.cleanup)
 
 	return rl
 }

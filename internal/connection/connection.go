@@ -21,11 +21,13 @@ const (
 
 // Connection 表示客户端与网关之间的连接，封装了连接状态、用户信息和发送逻辑。
 type Connection struct {
-	id          string
-	Conn        gnet.Conn
-	RemoteAddr  string
-	CreatedAt   int64
-	LastActive  atomic.Int64
+	id         string
+	Conn       gnet.Conn
+	CreatedAt  int64
+	LastActive atomic.Int64
+	// remoteAddr 对端地址（ip:port）：SetRemoteHost（反代改写）在事件循环写，
+	// idle-checker/RemoveConnection 在检查协程读——atomic.Pointer 防 string 撕裂竞态。
+	remoteAddr  atomic.Pointer[string]
 	activitySeq atomic.Uint32
 	Status      int8
 	state       atomic.Int32
@@ -60,10 +62,10 @@ func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Conn
 	c := &Connection{
 		id:             id,
 		Conn:           conn,
-		RemoteAddr:     remoteAddr,
 		CreatedAt:      now,
 		msgWindowStart: now,
 	}
+	c.remoteAddr.Store(&remoteAddr)
 	c.LastActive.Store(now)
 	c.userUUID.Store(&userUUID)
 	c.state.Store(int32(StateForward))
@@ -145,32 +147,42 @@ func (c *Connection) GetServerID() string {
 	return ""
 }
 
+// GetRemoteAddr 返回对端地址（ip:port，可能被反代改写）；并发安全。
+func (c *Connection) GetRemoteAddr() string {
+	if v := c.remoteAddr.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
 // RemoteHost 返回去掉端口的对端 IP，每连接首次调用后缓存。
 // 热路径（过滤器上下文、安全链按 IP 限流）逐消息调用可免 SplitHostPort 分配。
 func (c *Connection) RemoteHost() string {
 	if v := c.remoteHost.Load(); v != nil {
 		return *v
 	}
-	host, _, err := net.SplitHostPort(c.RemoteAddr)
+	addr := c.GetRemoteAddr()
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		host = c.RemoteAddr
+		host = addr
 	}
 	c.remoteHost.Store(&host)
 	return host
 }
 
 // SetRemoteHost 覆盖缓存的对端 IP（反代场景：WS 握手解析 X-Real-IP/X-Forwarded-For
-// 后用真实客户端 IP 替换代理 IP）。同时更新 RemoteAddr 使日志口径一致。
+// 后用真实客户端 IP 替换代理 IP）。同时更新 remoteAddr 使日志口径一致。
 // 调用方需保证在此之前未并发调用过 RemoteHost()（热路径消息处理前完成），
 // 否则 per-IP 计数与缓存会短暂不一致——WS 握手在首帧之前，满足此约束。
 func (c *Connection) SetRemoteHost(host string) {
 	c.remoteHost.Store(&host)
-	if c.RemoteAddr != "" {
-		if _, port, ok := strings.Cut(c.RemoteAddr, ":"); ok {
-			c.RemoteAddr = host + ":" + port
+	if addr := c.GetRemoteAddr(); addr != "" {
+		if _, port, ok := strings.Cut(addr, ":"); ok {
+			addr = host + ":" + port
 		} else {
-			c.RemoteAddr = host
+			addr = host
 		}
+		c.remoteAddr.Store(&addr)
 	}
 }
 
@@ -194,9 +206,15 @@ func (c *Connection) SetJWTExp(exp int64) { c.jwtExp.Store(exp) }
 // GetJWTExp 返回连接上缓存的 JWT exp。
 func (c *Connection) GetJWTExp() int64 { return c.jwtExp.Load() }
 
-// ClaimOfflineNotify CAS 标记下线通知已发送；返回 true 表示本次应发送。
-func (c *Connection) ClaimOfflineNotify() bool {
-	return !c.offlineSent.Swap(true)
+// OfflineNotified 返回下线通知是否已成功送达。
+// 幂等语义 = "已送达"而非"已尝试"：发送失败不置位，允许 OnClose 等后续路径重试。
+func (c *Connection) OfflineNotified() bool {
+	return c.offlineSent.Load()
+}
+
+// MarkOfflineNotified 标记下线通知已成功送达（发送成功后调用）。
+func (c *Connection) MarkOfflineNotified() {
+	c.offlineSent.Store(true)
 }
 
 // TouchActive 刷新最后活跃时间（入站流量路径调用；与 Send 的 push 采样独立）。
