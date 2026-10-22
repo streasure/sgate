@@ -3,18 +3,14 @@ package logic
 import (
 	"context"
 	"errors"
-	"net"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
-
-	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/protocol/enums"
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/udiscovery"
 	"github.com/streasure/util/uetcd"
@@ -24,12 +20,6 @@ import (
 )
 
 var errDialerStopped = errors.New("logic: gateway dialer stopped")
-
-// sgateRegisterAddress 网关在 etcd 中注册的地址 JSON（与网关 buildRegisterAddress 对应）。
-type sgateRegisterAddress struct {
-	IP   string `json:"ip"`
-	GRPC int    `json:"grpc"`
-}
 
 // gateLink 与单个网关 gRPC 地址的拨入链路。
 type gateLink struct {
@@ -175,7 +165,7 @@ func (d *Dialer) startDiscovery() {
 // handleGateEvent 处理网关注册/注销事件。
 // 注销采用保守策略：不断开存活会话，仅标记 stale，会话自然结束。
 func (d *Dialer) handleGateEvent(event uetcd.ServiceEvent) {
-	addr, ok := parseGatewayAddress(event.Address)
+	addr, ok := netutil.ParseRegisterGRPCAddr(event.Address)
 	if !ok {
 		tlog.Warn(d.ctx, "ignoring unparsable gateway address value=%s", event.Address)
 		return
@@ -186,21 +176,6 @@ func (d *Dialer) handleGateEvent(event uetcd.ServiceEvent) {
 	case uetcd.EventDeregister:
 		d.markGateStale(addr)
 	}
-}
-
-// parseGatewayAddress 解析网关注册地址 JSON {ip, grpc, ...}；容忍裸 host:port。
-func parseGatewayAddress(raw string) (string, bool) {
-	var reg sgateRegisterAddress
-	if err := json.Unmarshal([]byte(raw), &reg); err == nil {
-		if reg.IP == "" || reg.GRPC <= 0 {
-			return "", false
-		}
-		return net.JoinHostPort(reg.IP, strconv.Itoa(reg.GRPC)), true
-	}
-	if strings.Contains(raw, ":") {
-		return raw, true
-	}
-	return "", false
 }
 
 // ensureGate 确保目标地址存在拨入循环（幂等；重新注册时清除 stale 标记）。

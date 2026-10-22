@@ -50,20 +50,12 @@ func (c *ClusterComponent) Init() error {
 	return nil
 }
 
-// registerAddress 是 etcd 注册地址的 JSON 结构，包含网关所有连接地址。
-type registerAddress struct {
-	IP        string `json:"ip"`
-	GRPC      int    `json:"grpc"`
-	TCP       string `json:"tcp,omitempty"`
-	WebSocket string `json:"websocket,omitempty"`
-}
-
-// buildRegisterAddress 根据配置构建 JSON 格式的注册地址。
+// buildRegisterAddress 根据配置构建 JSON 格式的注册地址（契约见 netutil.RegisterAddress）。
 func buildRegisterAddress(cfg config.Config, grpcPort int) string {
 	ip := netutil.OutboundIPv4()
-	addr := registerAddress{IP: ip, GRPC: grpcPort}
+	addr := netutil.RegisterAddress{IP: ip, GRPC: grpcPort}
 	for _, t := range cfg.Transports {
-		hostPort := fmt.Sprintf("%s:%d", ip, t.Port)
+		hostPort := netutil.JoinIPPort(ip, t.Port)
 		switch t.Type {
 		case "websocket":
 			addr.WebSocket = hostPort
