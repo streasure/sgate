@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	cmdLoginGate    int32 = 1000001
-	cmdLoginGateAck int32 = 1000002
-	cmdPushBatch    int32 = 9000002
+	cmdLoginGate    = routes.CmdLoginGate
+	cmdLoginGateAck = routes.CmdLoginGateAck
+	cmdPushBatch    = routes.CmdPushBatch
 )
 
 func main() {

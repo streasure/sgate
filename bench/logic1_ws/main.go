@@ -11,6 +11,7 @@ import (
 	"github.com/streasure/sgate/bench/logutil"
 	logic "github.com/streasure/sgate/internal/logic"
 	"github.com/streasure/sgate/internal/obs"
+	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -39,7 +40,7 @@ func main() {
 	)
 
 	// 登录转发消息（LoginGateReq）的空处理器：仅确认送达，消除 unregistered cmd 告警。
-	svc.RegisterProto(1000001, &protocol.LoginGateReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
+	svc.RegisterProto(routes.CmdLoginGate, &protocol.LoginGateReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
 		return nil
 	})
 

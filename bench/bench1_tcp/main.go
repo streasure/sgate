@@ -12,13 +12,14 @@ import (
 	"time"
 
 	protocol "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	cmdLoginGate    int32 = 1000001
-	cmdLoginGateAck int32 = 1000002
-	cmdHeartbeatReq int32 = 1100010
+	cmdLoginGate    = routes.CmdLoginGate
+	cmdLoginGateAck = routes.CmdLoginGateAck
+	cmdHeartbeatReq = routes.CmdHeartbeatReq
 )
 
 // main TCP基准测试入口，执行登录阶段和数据发送阶段

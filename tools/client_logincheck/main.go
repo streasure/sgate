@@ -16,6 +16,7 @@ import (
 	protocol "github.com/streasure/protocol/gateway"
 	logicproto "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/bench/logutil"
+	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
@@ -72,7 +73,11 @@ func readFrame(conn net.Conn) (*protocol.MessageFrame, error) {
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return nil, err
 	}
-	body := make([]byte, binary.BigEndian.Uint32(header))
+	frameLen := binary.BigEndian.Uint32(header)
+	if frameLen > config.DefaultMaxFrameSize {
+		return nil, fmt.Errorf("frame too large: %d bytes (max %d)", frameLen, config.DefaultMaxFrameSize)
+	}
+	body := make([]byte, frameLen)
 	if _, err := io.ReadFull(conn, body); err != nil {
 		return nil, err
 	}
