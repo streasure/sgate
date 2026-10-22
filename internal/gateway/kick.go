@@ -7,6 +7,7 @@ import (
 	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/routes"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -100,8 +101,8 @@ func (g *Gateway) KickByIP(ip, reason string) int {
 	if ip == "" {
 		return 0
 	}
-	prefix, ok := parseKickPrefix(ip)
-	if !ok {
+	prefix, err := netutil.ParseIPOrPrefix(ip)
+	if err != nil {
 		tlog.Warn(g.ctx, "kick by ip invalid target ip=%s", ip)
 		return 0
 	}
@@ -122,20 +123,4 @@ func (g *Gateway) KickByIP(ip, reason string) int {
 	}
 	tlog.Info(g.ctx, "kick by ip done ip=%s prefix=%s matched=%d reason=%s", ip, prefix, len(matched), reason)
 	return len(matched)
-}
-
-// parseKickPrefix 解析踢人目标为 netip.Prefix：CIDR 原样解析；纯 IP 转 /32 或 /128。
-func parseKickPrefix(s string) (netip.Prefix, bool) {
-	if p, err := netip.ParsePrefix(s); err == nil {
-		return p, true
-	}
-	addr, err := netip.ParseAddr(s)
-	if err != nil {
-		return netip.Prefix{}, false
-	}
-	bits := 32
-	if addr.Is6() {
-		bits = 128
-	}
-	return netip.PrefixFrom(addr, bits), true
 }

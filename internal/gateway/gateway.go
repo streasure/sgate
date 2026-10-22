@@ -28,6 +28,7 @@ import (
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/udiscovery"
@@ -261,14 +262,8 @@ func (g *Gateway) Init() error {
 	// 反代信任列表（仅 WS XFF 用；配置已 Validate，此处静默跳过非法项）
 	if cfg := config.Get(); cfg != nil {
 		for _, s := range cfg.Security.TrustedProxies {
-			if p, err := netip.ParsePrefix(s); err == nil {
+			if p, err := netutil.ParseIPOrPrefix(s); err == nil {
 				g.trustedProxies = append(g.trustedProxies, p)
-			} else if a, err := netip.ParseAddr(s); err == nil {
-				bits := 32
-				if a.Is6() {
-					bits = 128
-				}
-				g.trustedProxies = append(g.trustedProxies, netip.PrefixFrom(a, bits))
 			}
 		}
 		if err := g.validateSecurityWiring(cfg); err != nil {

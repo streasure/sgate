@@ -3,6 +3,8 @@ package gateway
 import (
 	"net/netip"
 	"testing"
+
+	"github.com/streasure/util/netutil"
 )
 
 func TestResolveRealClientIP(t *testing.T) {
@@ -55,14 +57,8 @@ func mustParsePrefixes(t *testing.T, ss ...string) []netip.Prefix {
 	t.Helper()
 	out := make([]netip.Prefix, 0, len(ss))
 	for _, s := range ss {
-		if p, err := netip.ParsePrefix(s); err == nil {
+		if p, err := netutil.ParseIPOrPrefix(s); err == nil {
 			out = append(out, p)
-		} else if a, err := netip.ParseAddr(s); err == nil {
-			bits := 32
-			if a.Is6() {
-				bits = 128
-			}
-			out = append(out, netip.PrefixFrom(a, bits))
 		}
 	}
 	return out

@@ -2,11 +2,10 @@ package config
 
 import (
 	"fmt"
-	"net/netip"
 	"strconv"
-	"strings"
 	"sync/atomic"
 
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/uconfig"
 	"github.com/streasure/util/uetcd"
 )
@@ -405,18 +404,10 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validateIPOrCIDR 校验字符串为合法 IP 或 CIDR 前缀
+// validateIPOrCIDR 校验字符串为合法 IP 或 CIDR 前缀（委托 netutil 单一实现）
 func validateIPOrCIDR(s string) error {
-	if strings.Contains(s, "/") {
-		if _, err := netip.ParsePrefix(s); err != nil {
-			return err
-		}
-		return nil
-	}
-	if _, err := netip.ParseAddr(s); err != nil {
-		return err
-	}
-	return nil
+	_, err := netutil.ParseIPOrPrefix(s)
+	return err
 }
 
 // ApplyRuntimeDefaults 为运行时零值字段补齐安全默认值。
