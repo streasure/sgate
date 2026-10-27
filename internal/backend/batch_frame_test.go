@@ -98,19 +98,20 @@ func TestSendLoopBatchesMultipleMessages(t *testing.T) {
 		stopCh: make(chan struct{}),
 		index:  1,
 	}
-	go s.startSendLoop()
-	defer close(s.stopCh)
-
+	// 先入队再启循环：5 条全部已在 channel 中，首轮 receive+非阻塞 drain 必收齐为单批，
+	// 结果确定（先启循环时首条可能单独成批、余下拆第二批，曾在 -race 全量并发下偶发失败）。
 	for i := int32(1); i <= 5; i++ {
 		if err := s.SendMessage(&protoGw.StreamData{Cmd: i, Data: []byte("x")}); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
 	}
+	go s.startSendLoop()
+	defer close(s.stopCh)
+
+	// 首批即唯一批（SendMsg 调用当下已快照全部条目），等待仅为批记录落地。
 	if !waitObserved(func() bool { _, batches := fs.snapshot(); return batches > 0 }) {
 		t.Fatal("send not observed in time")
 	}
-	// 给 drain 循环一点时间收齐
-	time.Sleep(20 * time.Millisecond)
 	raw, batches := fs.snapshot()
 	if raw != 0 {
 		t.Fatalf("must not mix raw frames, got %d", raw)
