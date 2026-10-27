@@ -114,7 +114,7 @@ func TestKickIPAuthAndDispatch(t *testing.T) {
 
 func TestConnectionLookupErrors(t *testing.T) {
 	gw := newGRPCFakeGateway()
-	srv := NewGRPCServer(gw, nil, "")
+	srv := NewGRPCServer(gw, nil, "sekrit")
 
 	if _, err := srv.connection(""); err == nil {
 		t.Fatal("empty session must error")
@@ -123,11 +123,11 @@ func TestConnectionLookupErrors(t *testing.T) {
 		t.Fatal("missing session must error")
 	}
 
-	// CloseSession / KickSession 不存在会话
+	// CloseSession / KickSession 不存在会话（KickSession 需带 token 才到达会话查找）
 	if _, err := srv.CloseSession(context.Background(), &protoGw.CloseSessionReq{SessionId: "x"}); err == nil {
 		t.Fatal("CloseSession missing must error")
 	}
-	if _, err := srv.KickSession(context.Background(), &protoGw.KickSessionReq{SessionId: "x"}); err == nil {
+	if _, err := srv.KickSession(tokenCtx("sekrit"), &protoGw.KickSessionReq{SessionId: "x"}); err == nil {
 		t.Fatal("KickSession missing must error")
 	}
 }

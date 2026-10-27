@@ -101,6 +101,10 @@ func (s *GRPCServer) CloseSession(_ context.Context, req *protoGw.CloseSessionRe
 
 // KickSession 踢出会话，强制关闭客户端连接
 func (s *GRPCServer) KickSession(ctx context.Context, req *protoGw.KickSessionReq) (*protoGw.KickSessionAck, error) {
+	// 与 KickAccounts/KickIP 同口径：Kick 系 RPC 一律经 x-internal-token 鉴权
+	if !kickTokenOK(ctx, s.kickToken) {
+		return nil, errKickUnauthenticated
+	}
 	conn, err := s.connection(req.GetSessionId())
 	if err != nil {
 		return nil, err
