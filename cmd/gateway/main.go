@@ -43,19 +43,18 @@ func main() {
 		}
 	}
 
-	logComp := tlog.NewLogComponent(*logConfig)
-	if err := logComp.Init(); err != nil {
+	if err := tlog.Init(*logConfig); err != nil {
 		// tlog 初始化失败时 tlog 不可用，只能走 stderr
 		fmt.Fprintf(os.Stderr, "failed to initialize tlog: %v\n", err)
 		return
 	}
-	defer logComp.Destroy()
+	defer tlog.Close()
 
 	cfg, err := config.Load(*confFiles)
 	if err != nil {
 		tlog.Error(ctx, "load config failed error=%v", err)
 		// 配置加载失败必须非零退出，避免进程管理器误判为正常退出
-		logComp.Destroy()
+		tlog.Close()
 		os.Exit(1)
 	}
 
@@ -74,11 +73,8 @@ func main() {
 	}
 
 	// 平铺创建所有生命周期组件，Container 由 main 统一创建和组装
+	// 容器生命周期日志默认走 tlog（util 已内置，无需接线）
 	container := component.NewContainer()
-	// 容器生命周期日志走 tlog（默认 log.Printf 违反 AGENTS 日志规范）
-	container.SetLogger(func(format string, v ...any) {
-		tlog.Info(ctx, format, v...)
-	})
 	// uperf 组件 Order 最先：在任何业务组件分配大内存前应用 GC/内存软上限
 	container.Add(uperf.New(uperf.Config{
 		GcPercent:          cfg.Perf.GcPercent,
