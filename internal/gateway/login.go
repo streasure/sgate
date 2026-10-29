@@ -61,7 +61,7 @@ func (g *Gateway) loginValidationEnabled() bool {
 // loginValidation.enabled=true：必须走 loginserver；空 loginKey 也不能绕过；
 // 无 loginserver 连接或 gRPC 失败时一律拒绝（fail-closed）。
 // 会话上下文（sgate_id/conn_id/client_ip）随请求携带，loginserver 校验通过后写三键会话缓存。
-func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP string) bool {
+func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP, serverID string) bool {
 	if !g.loginValidationEnabled() {
 		return true
 	}
@@ -80,6 +80,7 @@ func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP stri
 		SgateId:    g.GetServerID(),
 		ConnId:     connectionID,
 		ClientIp:   clientIP,
+		ServerId:   serverID,
 	})
 	if err != nil {
 		tlog.Warn(g.ctx, "validate login token failed accountId=%s error=%v", userID, err)
@@ -88,35 +89,10 @@ func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP stri
 	return ack.Valid
 }
 
-// removeSessionAsync 连接关闭时异步通知 loginserver 清理会话缓存（Session Unbind）。
-// best-effort：loginValidation 未启用或无 loginserver 连接时直接跳过；
-// 失败仅 debug 日志（TTL 24h 兜底，无需重试）。
+// removeSessionAsync 已废弃（单向 Kick 模型 v2）：会话索引依赖 Redis TTL 24h 自然过期。
+// 删除 RemoveSession 反向调用简化依赖；踢人时向旧 sgate 发无效 Kick 可接受（连接已关闭自然丢弃）。
 func (g *Gateway) removeSessionAsync(conn *connection.Connection) {
-	if !g.loginValidationEnabled() {
-		return
-	}
-	g.loginServerMu.RLock()
-	client := g.loginServerClient
-	g.loginServerMu.RUnlock()
-	if client == nil {
-		return
-	}
-	// 未登录连接（无 accountID）无会话缓存，跳过
-	if conn.GetAccountID() == "" {
-		return
-	}
-	sgateID := g.GetServerID()
-	connID := conn.ID()
-	panicutil.Go(g.ctx, "gateway.removeSessionAsync", func() {
-		ctx, cancel := context.WithTimeout(g.ctx, 2*time.Second)
-		defer cancel()
-		if _, err := client.RemoveSession(ctx, &protoLogin.RemoveSessionReq{
-			SgateId: sgateID,
-			ConnId:  connID,
-		}); err != nil {
-			tlog.Debug(g.ctx, "remove session best-effort failed sgate=%s conn=%s err=%v", sgateID, connID, err)
-		}
-	})
+	// no-op：保留桩函数避免 OnClose 调用链断裂
 }
 
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
@@ -190,7 +166,7 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		writeFrameAsync(c, data)
 	}
-	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, netutil.AddrHost(c.RemoteAddr())) {
+	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, netutil.AddrHost(c.RemoteAddr()), req.ServerId) {
 		writeAck(401, "invalid login key", req.ServerId)
 		return
 	}

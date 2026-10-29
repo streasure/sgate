@@ -546,7 +546,7 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 	if wsConn.Conn != nil && wsConn.Conn.RemoteAddr() != nil {
 		clientIP = netutil.AddrHost(wsConn.Conn.RemoteAddr())
 	}
-	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, clientIP) {
+	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, clientIP, req.ServerId) {
 		ack(401, "invalid login key")
 		return
 	}
