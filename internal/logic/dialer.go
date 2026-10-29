@@ -283,10 +283,15 @@ func (d *Dialer) runSession(g *gateLink) error {
 				grpc.MaxCallRecvMsgSize(maxMsgSize),
 				grpc.MaxCallSendMsgSize(maxMsgSize),
 			),
+			// keepalive 需匹配对端 gRPC 默认 enforcement（MinTime=5min、
+			// 禁止无活跃流 ping）：此前 30s+PermitWithoutStream 会周期性触发
+			// 对端 GoAway ENHANCE_YOUR_CALM "too_many_pings"，连接反复重建
+			// 拉长首登延迟。改为 ≥5min 且不无流 ping；断流检测交给
+			// Timeout+TCP 层，活跃 RPC 期间仍可感知死链。
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                30 * time.Second,
-				Timeout:             10 * time.Second,
-				PermitWithoutStream: true,
+				Time:                10 * time.Minute,
+				Timeout:             20 * time.Second,
+				PermitWithoutStream: false,
 			}),
 		)
 		if err != nil {
