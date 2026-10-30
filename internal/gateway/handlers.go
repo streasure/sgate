@@ -149,9 +149,6 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 			g.connectionDurationCount.Add(1)
 			g.connectionDurationTracker.Record(time.Duration(duration) * time.Millisecond)
 			g.notifyLogicOffline(conn)
-			// Session Unbind：异步通知 loginserver 清理会话缓存（best-effort，
-			// 失败靠 TTL 24h 兜底；仅已登录连接有 sgate/conn 上下文）
-			g.removeSessionAsync(conn)
 		}
 		g.connectionManager.RemoveConnection(connectionID)
 		tlog.Debug(g.ctx, "connection closed connectionID=%s error=%v", connectionID, err)

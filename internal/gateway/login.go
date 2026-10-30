@@ -89,12 +89,6 @@ func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP, ser
 	return ack.Valid
 }
 
-// removeSessionAsync 已废弃（单向 Kick 模型 v2）：会话索引依赖 Redis TTL 24h 自然过期。
-// 删除 RemoveSession 反向调用简化依赖；踢人时向旧 sgate 发无效 Kick 可接受（连接已关闭自然丢弃）。
-func (g *Gateway) removeSessionAsync(conn *connection.Connection) {
-	// no-op：保留桩函数避免 OnClose 调用链断裂
-}
-
 func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
 	// LoginGate 走捷径不经 pipeline，此处补齐过载/IP 限流检查。
 	// 成功路径由 finishLoginGate 异步持有 message（不归还解码池）；
