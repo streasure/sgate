@@ -57,7 +57,7 @@
 | bench2_tcp（batch off） | logic→sgate→client | TCP | 428,333 ~ 485,659 msg/s | 0 | 0 |
 | bench2_ws（batch off） | logic→sgate→client | WebSocket | 381,512 msg/s | 0 | 0 |
 
-**校验**：各轮 `connections failed=0` / `droppedAuth=0`，日志无 401 / authfail / login-key 拒绝。原始结果见 `bench/latest_results.json`；bench2 明细在 `logs/bench.log`。
+**校验**：各轮 `connections failed=0` / `droppedAuth=0`，日志无 401 / authfail / login-key 拒绝。
 
 **负载说明**：绝对数值受本机后台应用影响，同配置多轮约 ±10%。`batchPush=false` 为非合帧路径，数值低于 batch-on 属预期。对比吞吐时应以同批测量内部对比为准。限流下扫表与 30min churn 结果见 [`Bench.md`](../Bench.md)。
 

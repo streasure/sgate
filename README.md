@@ -591,7 +591,7 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 
 ## 八、性能数据
 
-当前工程实测吞吐清单。原始数据与逐秒明细见 `bench/latest_results.json`；绝对数值受本机后台负载影响，同配置多轮约 ±10%。
+当前工程实测吞吐清单。绝对数值受本机后台负载影响，同配置多轮约 ±10%。
 
 ### 8.1 测量条件
 

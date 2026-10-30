@@ -92,7 +92,7 @@ func main() {
 	loginserver := flag.String("loginserver", "127.0.0.1:10001", "loginserver HTTP address")
 	sgate := flag.String("sgate", "127.0.0.1:48080", "sgate TCP address")
 	serverID := flag.String("server-id", "logic-logincheck", "logic server ID")
-	logConfig := flag.String("config", "../logincheck/config/log.yaml", "log configuration")
+	logConfig := flag.String("config", "./configs/log.yaml", "log configuration")
 	flag.Parse()
 	defer logutil.Init(*logConfig)()
 

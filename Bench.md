@@ -60,7 +60,7 @@ go build -o bench\churn30\churn30.exe .\bench\churn30
 
 ## 参考吞吐（本机实测）
 
-原始数据：`bench/latest_results.json`；bench2 逐秒明细见 `logs/bench.log`。
+原始数据与逐秒明细见运行目录 `logs/` 下的 bench 输出。
 
 ### bench1 上行转发
 

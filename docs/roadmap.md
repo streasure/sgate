@@ -62,7 +62,7 @@
 
 3. **封禁收敛遗留**
    - 已完成：P1 单向 Kick 模型（loginserver 权威库 + KickService）+ P2 BatchValidate 周期安全网
-   - 待做：反代场景 `trustedProxies`（IP 踢人口径当前用 sgate 本地 RemoteHost）；多实例一致性压测（见 `docs/multi-sgate-test.md`）；NAT/CIDR 封禁
+   - 待做：多 zone 部署下的跨 zone 一致性验证；NAT 场景踢人口径
 
 ### P3：架构增强
 
