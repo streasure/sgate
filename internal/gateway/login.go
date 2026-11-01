@@ -19,30 +19,44 @@ import (
 	"github.com/streasure/util/retry"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/udiscovery"
-	"github.com/streasure/util/ugrpc"
 	"google.golang.org/protobuf/proto"
 )
 
-// initLoginService 按 etcd 发现自建 loginserver 服务客户端（发现由网关自持，
-// 不再依赖共享 loginDiscovery 组件）。单连接 + resolver 热切换地址，多实例 round_robin。
-// etcd 不可达时启动失败（与旧版共享 discovery 启动失败语义一致）。
+// initLoginService 按 etcd 发现注册 loginserver 客户端句柄（发现由网关自持）。
+// 实例增删由 etcd watch 自动驱动建连/摘除；etcd 不可达时启动失败
+// （与旧版共享 discovery 启动失败语义一致）。
 func (g *Gateway) initLoginService() error {
 	cfg := g.cfg.Load()
-	serviceID := udiscovery.JoinServiceID(cfg.Belong, enums.ServerType_SERVER_TYPE_LOGINSERVER, cfg.Zone)
-	svc, err := udiscovery.DialEtcdService[protoLogin.LoginServiceClient](cfg.Uetcd(), serviceID,
-		ugrpc.ServiceSpec[protoLogin.LoginServiceClient]{
-			NewClient:     protoLogin.NewLoginServiceClient,
-			AddressFilter: netutil.ValidAddrPort,
-		})
+	svc, err := udiscovery.Dial[protoLogin.LoginServiceClient](udiscovery.ClientSpec[protoLogin.LoginServiceClient]{
+		Belong:        cfg.Belong,
+		ServerType:    enums.ServerType_SERVER_TYPE_LOGINSERVER,
+		Zone:          cfg.Zone,
+		Etcd:          cfg.Uetcd(),
+		NewClient:     protoLogin.NewLoginServiceClient,
+		AddressFilter: netutil.ValidAddrPort,
+	})
 	if err != nil {
-		return fmt.Errorf("init login service %s: %w", serviceID, err)
+		return fmt.Errorf("init login service %s/%s: %w", cfg.Belong, cfg.Zone, err)
 	}
 	g.loginServerMu.Lock()
 	g.loginService = svc
-	g.loginServerClient = svc.Client()
 	g.loginServerMu.Unlock()
-	tlog.Info(g.ctx, "login service ready serviceID=%s", serviceID)
+	tlog.Info(g.ctx, "login service ready serviceID=%s", svc.ServiceID())
 	return nil
+}
+
+// loginClient 取校验用 loginserver 客户端：测试注入的覆盖客户端优先（生产恒为 nil），
+// 生产路径经句柄随机取一台健康实例；无实例返回 nil（调用方 fail-closed）。
+func (g *Gateway) loginClient() protoLogin.LoginServiceClient {
+	g.loginServerMu.RLock()
+	injected := g.loginServerClient
+	svc := g.loginService
+	g.loginServerMu.RUnlock()
+	if injected != nil {
+		return injected
+	}
+	c, _ := svc.Pick() // nil 句柄安全
+	return c
 }
 
 // loginValidationEnabled 读取热更新后的登录校验开关。
@@ -65,9 +79,7 @@ func (g *Gateway) validateLoginKey(userID, loginKey, connectionID, clientIP, ser
 	if !g.loginValidationEnabled() {
 		return true
 	}
-	g.loginServerMu.RLock()
-	client := g.loginServerClient
-	g.loginServerMu.RUnlock()
+	client := g.loginClient()
 	if client == nil {
 		tlog.Warn(g.ctx, "login validation enabled but loginserver not connected accountId=%s", userID)
 		return false

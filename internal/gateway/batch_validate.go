@@ -84,9 +84,7 @@ type batchSweepItem struct {
 func (g *Gateway) runBatchValidateSweep() {
 	defer panicutil.Recover(g.ctx, "gateway.runBatchValidateSweep")
 
-	g.loginServerMu.RLock()
-	client := g.loginServerClient
-	g.loginServerMu.RUnlock()
+	client := g.loginClient()
 	if client == nil {
 		return
 	}

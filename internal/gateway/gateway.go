@@ -121,10 +121,10 @@ type Gateway struct {
 	connectionDurationCount   atomic.Int64        // 已关闭连接数，用于计算平均值
 	connectionDurationTracker *obs.LatencyTracker // 连接时长分位数追踪器
 	loginServerMu             sync.RWMutex
-	loginServerClient         protoLogin.LoginServiceClient
-	loginService              *udiscovery.EtcdService[protoLogin.LoginServiceClient] // 发现+单连接客户端（网关自持发现）
-	pipelineWorkerPool        *PipelineWorkerPool                                    // 异步 pipeline 工作池
-	shardedCoalescer          *connection.ShardedWriteCoalescer                      // 分片写合并器（推送路径）
+	loginServerClient         protoLogin.LoginServiceClient                     // 测试注入的覆盖客户端（生产恒为 nil，生产路径经 loginClient 走句柄）
+	loginService              *udiscovery.Client[protoLogin.LoginServiceClient] // loginserver 客户端句柄（发现由网关自持，见 initLoginService）
+	pipelineWorkerPool        *PipelineWorkerPool                               // 异步 pipeline 工作池
+	shardedCoalescer          *connection.ShardedWriteCoalescer                 // 分片写合并器（推送路径）
 }
 
 // SetTransportType 设置监听端口对应的传输类型。
