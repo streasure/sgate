@@ -27,12 +27,11 @@ import (
 // （与旧版共享 discovery 启动失败语义一致）。
 func (g *Gateway) initLoginService() error {
 	cfg := g.cfg.Load()
-	svc, err := udiscovery.Dial[protoLogin.LoginServiceClient](udiscovery.ClientSpec[protoLogin.LoginServiceClient]{
+	svc, err := udiscovery.Dial(protoLogin.NewLoginServiceClient, udiscovery.ClientSpec{
 		Belong:        cfg.Belong,
 		ServerType:    enums.ServerType_SERVER_TYPE_LOGINSERVER,
 		Zone:          cfg.Zone,
 		Etcd:          cfg.Uetcd(),
-		NewClient:     protoLogin.NewLoginServiceClient,
 		AddressFilter: netutil.ValidAddrPort,
 	})
 	if err != nil {
