@@ -365,6 +365,8 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 			data:         dataCopy,
 			message:      message,
 			connectionID: connectionID,
+			isWebSocket:  false,
+			wsConn:       nil,
 		}
 		if !g.pipelineWorkerPool.Submit(task) {
 			routes.PutClientMessage(task.message)

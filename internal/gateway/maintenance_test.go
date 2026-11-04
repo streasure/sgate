@@ -180,7 +180,11 @@ func TestLoginGate_RejectInMaintenance(t *testing.T) {
 	defer gw.maintenance.disable("logic:zone:1", "")
 
 	c := &loginMockConn{}
-	action := gw.handleLoginGate(c, "conn-maint", loginReqFrame(t)) // ServerId=logic:zone:1
+	// 注册 mock 连接到 connectionManager
+	connectionID := gw.connectionManager.AddConnection(c, "")
+	defer gw.connectionManager.RemoveConnection(connectionID)
+
+	action := gw.handleLoginGate(c, connectionID, loginReqFrame(t)) // ServerId=logic:zone:1
 	if action != gnet.Close {
 		t.Fatalf("action=%v want gnet.Close", action)
 	}
@@ -285,7 +289,11 @@ func TestHandleAdminMaintenance(t *testing.T) {
 
 	// 维护中登录 s1 → 503
 	c := &loginMockConn{}
-	if action := gw.handleLoginGate(c, "conn-m1", loginReqFrameFor(t, "s1")); action != gnet.Close {
+	// 注册 mock 连接到 connectionManager
+	connectionID := gw.connectionManager.AddConnection(c, "")
+	defer gw.connectionManager.RemoveConnection(connectionID)
+
+	if action := gw.handleLoginGate(c, connectionID, loginReqFrameFor(t, "s1")); action != gnet.Close {
 		t.Fatalf("maintenance login action=%v want close", action)
 	}
 	if ack := decodeAck(t, c.written); ack == nil || ack.Code != 503 {

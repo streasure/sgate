@@ -400,33 +400,21 @@ func (p *MessagePipeline) ProcessForWS(conn gnet.Conn, data []byte, message *pro
 
 // ===== 异步 worker pool（合并自 pipeline_worker.go）=====
 
-// pipelineTask 是提交给 worker pool 的异步任务（TCP 或 WS）。
-type pipelineTask struct {
-	task   *pipelineTaskData
-	wsTask *wsPipelineTaskData
-}
-
-// pipelineTaskData TCP pipeline 任务数据。
+// pipelineTaskData 是协议无关的 pipeline 任务数据（TCP/WebSocket 统一）。
 type pipelineTaskData struct {
 	conn         gnet.Conn
 	data         []byte
 	message      *protoGw.StreamData
 	connectionID string
-}
-
-// wsPipelineTaskData WebSocket pipeline 任务数据。
-type wsPipelineTaskData struct {
-	wsConn       *WebSocketConnection
-	payload      []byte
-	message      *protoGw.StreamData
-	connectionID string
+	// WebSocket 特定字段（TCP 时为 nil）
+	isWebSocket bool
+	wsConn      *WebSocketConnection
 }
 
 // 池化：pipeline 任务结构与入站帧缓冲（热路径每消息一任务/一帧拷贝）。
 var (
-	pipelineTaskPool   = sync.Pool{New: func() any { return &pipelineTaskData{} }}
-	wsPipelineTaskPool = sync.Pool{New: func() any { return &wsPipelineTaskData{} }}
-	msgBufPool         = sync.Pool{New: func() any { b := make([]byte, 0, 512); return &b }}
+	pipelineTaskPool = sync.Pool{New: func() any { return &pipelineTaskData{} }}
+	msgBufPool       = sync.Pool{New: func() any { b := make([]byte, 0, 512); return &b }}
 )
 
 // getMsgBuf 返回长度为 n 的入站帧缓冲；池中对象容量不足时退化为新分配。
@@ -451,7 +439,7 @@ func putMsgBuf(b []byte) {
 
 // pipelineWorker 是单个 worker goroutine，处理一个分片内的所有连接。
 type pipelineWorker struct {
-	taskCh chan pipelineTask
+	taskCh chan *pipelineTaskData
 }
 
 // PipelineWorkerPool 是分片的异步 pipeline 工作池。
@@ -487,7 +475,7 @@ func NewPipelineWorkerPool(gw *Gateway, cfg config.PipelineConfig) *PipelineWork
 
 	perShard := max(queueSize/shards, 1)
 	for i := range shards {
-		p.workers[i].taskCh = make(chan pipelineTask, perShard)
+		p.workers[i].taskCh = make(chan *pipelineTaskData, perShard)
 		p.wg.Go(func() { p.runWorker(i) })
 	}
 
@@ -506,51 +494,34 @@ func (p *PipelineWorkerPool) logContext() context.Context {
 
 // runWorker 是单个 worker goroutine 的主循环。
 func (p *PipelineWorkerPool) runWorker(shard int) {
-	for t := range p.workers[shard].taskCh {
-		if t.wsTask != nil {
-			p.processWSTask(t.wsTask)
-		} else {
-			p.processTask(t.task)
-		}
+	for task := range p.workers[shard].taskCh {
+		p.processMessage(task)
 	}
 }
 
-// processTask 在 worker goroutine 中执行 TCP pipeline 处理。
-func (p *PipelineWorkerPool) processTask(task *pipelineTaskData) {
+// processMessage 在 worker goroutine 中执行协议无关的 pipeline 处理（TCP/WebSocket 统一）。
+func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 	defer func() {
 		routes.PutClientMessage(task.message)
 		putMsgBuf(task.data)
 		pipelineTaskPool.Put(task)
 	}()
-	result := p.gw.pipeline.Process(task.conn, task.data, task.message, task.connectionID)
+
+	// WebSocket 协议特定：前置处理 UserKey 映射更新（ProcessForWS 原有逻辑）
+	var result PipelineResult
+	if task.isWebSocket {
+		result = p.gw.pipeline.ProcessForWS(task.conn, task.data, task.message, task.connectionID)
+	} else {
+		result = p.gw.pipeline.Process(task.conn, task.data, task.message, task.connectionID)
+	}
+
 	if result.Error != nil {
 		if result.ProtoMsg != nil {
 			backend.PutStreamData(result.ProtoMsg)
 		}
 		_ = p.gw.sendFrameAsync(task.connectionID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
 	}
-	applyAsyncResult(task.conn, nil, result)
-}
-
-// processWSTask 在 worker goroutine 中执行 WebSocket pipeline 处理。
-func (p *PipelineWorkerPool) processWSTask(task *wsPipelineTaskData) {
-	defer func() {
-		routes.PutClientMessage(task.message)
-		putMsgBuf(task.payload)
-		wsPipelineTaskPool.Put(task)
-	}()
-	result := p.gw.pipeline.ProcessForWS(task.wsConn.Conn, task.payload, task.message, task.connectionID)
-	if result.Error != nil {
-		if result.ProtoMsg != nil {
-			backend.PutStreamData(result.ProtoMsg)
-		}
-		// WS 错误帧写出（跨协程异步，payload 由 framer 封帧）
-		wsConnID := task.wsConn.ConnectionID()
-		if wsConnID != "" {
-			_ = p.gw.sendFrameAsync(wsConnID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
-		}
-	}
-	applyAsyncResult(task.wsConn.Conn, task.wsConn, result)
+	applyAsyncResult(task.conn, task.wsConn, result)
 }
 
 // applyAsyncResult 在 worker 中执行 pipeline 返回的 Action（如 Close）。
@@ -579,13 +550,13 @@ func writeFrameAsync(conn gnet.Conn, data []byte) {
 	_ = conn.AsyncWrite(buf, connection.NoopAsyncCallback)
 }
 
-// Submit 将 TCP pipeline 任务提交到对应分片的 worker。
+// Submit 将 pipeline 任务提交到对应分片的 worker（TCP/WebSocket 统一）。
 // 提交失败（队列满）时返回 false，调用方负责归还任务与其缓冲。
 func (p *PipelineWorkerPool) Submit(task *pipelineTaskData) bool {
 	p.submitted.Add(1)
 	shard := p.getShard(task.connectionID)
 	select {
-	case p.workers[shard].taskCh <- pipelineTask{task: task}:
+	case p.workers[shard].taskCh <- task:
 		return true
 	default:
 		p.dropped.Add(1)
@@ -593,24 +564,6 @@ func (p *PipelineWorkerPool) Submit(task *pipelineTaskData) bool {
 			p.gw.messagesDroppedFull.Add(1)
 		}
 		tlog.Warn(p.logContext(), "pipeline worker queue full, task dropped shard=%d connectionID=%s", shard, task.connectionID)
-		return false
-	}
-}
-
-// SubmitWS 将 WebSocket pipeline 任务提交到对应分片的 worker。
-// 提交失败（队列满）时返回 false，调用方负责归还任务与其缓冲。
-func (p *PipelineWorkerPool) SubmitWS(task *wsPipelineTaskData) bool {
-	p.submitted.Add(1)
-	shard := p.getShard(task.connectionID)
-	select {
-	case p.workers[shard].taskCh <- pipelineTask{wsTask: task}:
-		return true
-	default:
-		p.dropped.Add(1)
-		if p.gw != nil {
-			p.gw.messagesDroppedFull.Add(1)
-		}
-		tlog.Warn(p.logContext(), "pipeline worker queue full, WS task dropped shard=%d connectionID=%s", shard, task.connectionID)
 		return false
 	}
 }

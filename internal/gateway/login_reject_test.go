@@ -85,7 +85,11 @@ func TestLoginGate_RateLimited429(t *testing.T) {
 	}
 
 	c := &loginMockConn{}
-	action := gw.handleLoginGate(c, "conn-rl", loginReqFrame(t))
+	// 注册 mock 连接到 connectionManager（笔1后 sendFrameSync 依赖 Connection 对象封帧）
+	connectionID := gw.connectionManager.AddConnection(c, "")
+	defer gw.connectionManager.RemoveConnection(connectionID)
+
+	action := gw.handleLoginGate(c, connectionID, loginReqFrame(t))
 	if action == gnet.Close {
 		t.Fatal("rate-limited login should not close connection")
 	}
@@ -107,7 +111,11 @@ func TestLoginGate_ConcurrentSlotFull429(t *testing.T) {
 	}
 
 	c := &loginMockConn{}
-	action := gw.handleLoginGate(c, "conn-slot", loginReqFrame(t))
+	// 注册 mock 连接到 connectionManager
+	connectionID := gw.connectionManager.AddConnection(c, "")
+	defer gw.connectionManager.RemoveConnection(connectionID)
+
+	action := gw.handleLoginGate(c, connectionID, loginReqFrame(t))
 	if action == gnet.Close {
 		t.Fatal("slot-full login should not close connection")
 	}

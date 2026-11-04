@@ -484,17 +484,19 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	if g.pipelineWorkerPool != nil {
 		payloadCopy := getMsgBuf(len(payload))
 		copy(payloadCopy, payload)
-		task := wsPipelineTaskPool.Get().(*wsPipelineTaskData)
-		*task = wsPipelineTaskData{
-			wsConn:       wsConn,
-			payload:      payloadCopy,
+		task := pipelineTaskPool.Get().(*pipelineTaskData)
+		*task = pipelineTaskData{
+			conn:         wsConn.Conn,
+			data:         payloadCopy,
 			message:      message,
 			connectionID: connectionID,
+			isWebSocket:  true,
+			wsConn:       wsConn,
 		}
-		if !g.pipelineWorkerPool.SubmitWS(task) {
+		if !g.pipelineWorkerPool.Submit(task) {
 			routes.PutClientMessage(task.message)
-			putMsgBuf(task.payload)
-			wsPipelineTaskPool.Put(task)
+			putMsgBuf(task.data)
+			pipelineTaskPool.Put(task)
 		}
 		return nil
 	}
