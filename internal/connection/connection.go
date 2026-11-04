@@ -99,11 +99,6 @@ func (c *Connection) IsAuthenticated() bool {
 	return uuid != "" && !strings.HasPrefix(uuid, "temp_")
 }
 
-// IsWebSocket 判断连接是否使用 WebSocket 传输。
-func (c *Connection) IsWebSocket() bool {
-	return c.isWebSocket
-}
-
 // SetUserUUID 设置连接关联的用户 UUID。
 func (c *Connection) SetUserUUID(uuid string) { c.userUUID.Store(&uuid) }
 func (c *Connection) GetUserUUID() string {

@@ -16,7 +16,7 @@ func newKickTestGateway() *Gateway {
 func TestKickByAccountsHitsAccountIndex(t *testing.T) {
 	g := newKickTestGateway()
 	mc := &kickMockConn{}
-	connID := g.connectionManager.AddConnection(mc, "")
+	connID := g.connectionManager.AddConnection(mc, "", false)
 	g.connectionManager.SetConnectionServerID(connID, "s1")
 	g.connectionManager.SetConnectionAccountID(connID, "10001")
 
@@ -35,8 +35,8 @@ func TestKickByAccountsHitsAccountIndex(t *testing.T) {
 func TestKickByAccountsMultiConnection(t *testing.T) {
 	g := newKickTestGateway()
 	mc1, mc2 := &kickMockConn{}, &kickMockConn{}
-	id1 := g.connectionManager.AddConnection(mc1, "")
-	id2 := g.connectionManager.AddConnection(mc2, "")
+	id1 := g.connectionManager.AddConnection(mc1, "", false)
+	id2 := g.connectionManager.AddConnection(mc2, "", false)
 	g.connectionManager.SetConnectionServerID(id1, "s1")
 	g.connectionManager.SetConnectionServerID(id2, "s2")
 	g.connectionManager.SetConnectionAccountID(id1, "20002")
@@ -54,8 +54,8 @@ func TestKickByIPMatchesRemoteHost(t *testing.T) {
 	g := newKickTestGateway()
 	hit := &kickMockConn{}
 	miss := &kickMockConn{}
-	hitID := g.connectionManager.AddConnection(hit, "u-hit")
-	missID := g.connectionManager.AddConnection(miss, "u-miss")
+	hitID := g.connectionManager.AddConnection(hit, "u-hit", false)
+	missID := g.connectionManager.AddConnection(miss, "u-miss", false)
 	_ = hitID
 	_ = missID
 
@@ -75,8 +75,8 @@ func TestKickByIPCIDRMatchesSubnet(t *testing.T) {
 	g := newKickTestGateway()
 	inSubnet := &kickMockConn{}
 	outSubnet := &kickMockConn{}
-	g.connectionManager.AddConnection(inSubnet, "u-in")
-	g.connectionManager.AddConnection(outSubnet, "u-out")
+	g.connectionManager.AddConnection(inSubnet, "u-in", false)
+	g.connectionManager.AddConnection(outSubnet, "u-out", false)
 
 	// inSubnet/outSubnet RemoteHost 均为 127.0.0.1（mock 固定）
 	// 10.0.0.0/8 不含 127.0.0.1 → 0
@@ -94,7 +94,7 @@ func TestKickByIPCIDRMatchesSubnet(t *testing.T) {
 
 func TestKickByIPInvalidTarget(t *testing.T) {
 	g := newKickTestGateway()
-	g.connectionManager.AddConnection(&kickMockConn{}, "u1")
+	g.connectionManager.AddConnection(&kickMockConn{}, "u1", false)
 	if n := g.KickByIP("not-an-ip", "blacklist"); n != 0 {
 		t.Fatalf("invalid target kicked=%d, want 0", n)
 	}

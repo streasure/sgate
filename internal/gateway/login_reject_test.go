@@ -86,7 +86,7 @@ func TestLoginGate_RateLimited429(t *testing.T) {
 
 	c := &loginMockConn{}
 	// 注册 mock 连接到 connectionManager（笔1后 sendFrameSync 依赖 Connection 对象封帧）
-	connectionID := gw.connectionManager.AddConnection(c, "")
+	connectionID := gw.connectionManager.AddConnection(c, "", false)
 	defer gw.connectionManager.RemoveConnection(connectionID)
 
 	action := gw.handleLoginGate(c, connectionID, loginReqFrame(t))
@@ -112,7 +112,7 @@ func TestLoginGate_ConcurrentSlotFull429(t *testing.T) {
 
 	c := &loginMockConn{}
 	// 注册 mock 连接到 connectionManager
-	connectionID := gw.connectionManager.AddConnection(c, "")
+	connectionID := gw.connectionManager.AddConnection(c, "", false)
 	defer gw.connectionManager.RemoveConnection(connectionID)
 
 	action := gw.handleLoginGate(c, connectionID, loginReqFrame(t))

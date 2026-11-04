@@ -181,7 +181,7 @@ func TestLoginGate_RejectInMaintenance(t *testing.T) {
 
 	c := &loginMockConn{}
 	// 注册 mock 连接到 connectionManager
-	connectionID := gw.connectionManager.AddConnection(c, "")
+	connectionID := gw.connectionManager.AddConnection(c, "", false)
 	defer gw.connectionManager.RemoveConnection(connectionID)
 
 	action := gw.handleLoginGate(c, connectionID, loginReqFrame(t)) // ServerId=logic:zone:1
@@ -200,7 +200,7 @@ func TestKickForMaintenance(t *testing.T) {
 	defer gw.Close()
 
 	mc := &kickMockConn{}
-	connID := gw.connectionManager.AddConnection(mc, "u1")
+	connID := gw.connectionManager.AddConnection(mc, "u1", false)
 	defer gw.connectionManager.RemoveConnection(connID) // 否则 gw.Close() drain 等待 2 分钟
 	gw.connectionManager.SetConnectionServerID(connID, "s1")
 	conn := gw.connectionManager.GetConnection(connID)
@@ -225,7 +225,7 @@ func TestSnapshotMaintenanceTargets(t *testing.T) {
 	defer gw.Close()
 
 	add := func(user, server string) string {
-		id := gw.connectionManager.AddConnection(&kickMockConn{}, user)
+		id := gw.connectionManager.AddConnection(&kickMockConn{}, user, false)
 		gw.connectionManager.SetConnectionServerID(id, server)
 		return id
 	}
@@ -260,11 +260,11 @@ func TestHandleAdminMaintenance(t *testing.T) {
 	s1Mocks := []*kickMockConn{{}, {}}
 	var allIDs []string
 	for _, mc := range s1Mocks {
-		id := gw.connectionManager.AddConnection(mc, "u1")
+		id := gw.connectionManager.AddConnection(mc, "u1", false)
 		gw.connectionManager.SetConnectionServerID(id, "s1")
 		allIDs = append(allIDs, id)
 	}
-	id := gw.connectionManager.AddConnection(&kickMockConn{}, "u3")
+	id := gw.connectionManager.AddConnection(&kickMockConn{}, "u3", false)
 	gw.connectionManager.SetConnectionServerID(id, "s2")
 	allIDs = append(allIDs, id)
 	defer func() { // 否则 gw.Close() drain 等待 2 分钟
@@ -290,7 +290,7 @@ func TestHandleAdminMaintenance(t *testing.T) {
 	// 维护中登录 s1 → 503
 	c := &loginMockConn{}
 	// 注册 mock 连接到 connectionManager
-	connectionID := gw.connectionManager.AddConnection(c, "")
+	connectionID := gw.connectionManager.AddConnection(c, "", false)
 	defer gw.connectionManager.RemoveConnection(connectionID)
 
 	if action := gw.handleLoginGate(c, connectionID, loginReqFrameFor(t, "s1")); action != gnet.Close {

@@ -60,14 +60,13 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 
 	task := pipelineTaskPool.Get().(*pipelineTaskData)
 	*task = pipelineTaskData{
-		conn:           c,
-		data:           dataCopy,
-		message:        message,
-		connectionID:   "udp_" + remoteAddr, // UDP 虚拟 connectionID
-		isWebSocket:    false,
-		wsConn:         nil,
-		isUDP:          true,
-		udpRemoteAddr:  remoteAddr,
+		conn:          c,
+		data:          dataCopy,
+		message:       message,
+		connectionID:  "udp_" + remoteAddr, // UDP 虚拟 connectionID
+		wsConn:        nil,
+		isUDP:         true,
+		udpRemoteAddr: remoteAddr,
 	}
 
 	if g.pipelineWorkerPool == nil {

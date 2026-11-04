@@ -89,6 +89,13 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	g := p.gw
 	protection := g.getProtection()
 
+	// WebSocket 特定：UserKey 映射更新（前置处理，避免影响后续逻辑）
+	if message.UserKey != "" {
+		oldUserUUID := "temp_" + connectionID
+		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserKey)
+		tlog.Debug(g.ctx, "received user UUID connectionID=%s userUUID=%s", connectionID, message.UserKey)
+	}
+
 	// 延迟测量：与 tracer 解耦，tracing 关闭时也计量。
 	// 裸 QPC 粒度 100ns（time.Now 被 runtime 粗化至 ~1.2µs，会把亚微秒延迟截成 0），
 	// 但 QPC 是 syscall（~1µs）：500K msg/s × 2 次/条会烧掉 ~1 核。
@@ -360,6 +367,16 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		g.latencyTracker.Record(time.Duration(obs.MonoNowNs() - pipelineStart))
 	}
 
+	// WebSocket 特定：响应字段注入（UserKey/SeqId 回填）
+	if protoMsg != nil {
+		if protoMsg.UserKey == "" && message.UserKey != "" {
+			protoMsg.UserKey = message.UserKey
+		}
+		if protoMsg.SeqId == 0 && message.SeqId != 0 {
+			protoMsg.SeqId = message.SeqId
+		}
+	}
+
 	if sendErr != nil {
 		return PipelineResult{
 			Action:   gnet.None,
@@ -371,33 +388,6 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	return PipelineResult{Action: gnet.None, ProtoMsg: protoMsg}
 }
 
-// ProcessForWS 是WebSocket调用者的轻量级封装，
-// 同时处理消息中的用户标识映射。核心管道逻辑委托给Process处理。
-func (p *MessagePipeline) ProcessForWS(conn gnet.Conn, data []byte, message *protoGw.StreamData, connectionID string) PipelineResult {
-	g := p.gw
-
-	// WebSocket特定：如果存在用户UUID则更新映射
-	if message.UserKey != "" {
-		oldUserUUID := "temp_" + connectionID
-		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserKey)
-		tlog.Debug(g.ctx, "received user UUID connectionID=%s userUUID=%s", connectionID, message.UserKey)
-	}
-
-	result := p.Process(conn, data, message, connectionID)
-
-	// 对于WebSocket，如果过滤器链未设置UserKey，则注入到协议消息中
-	if result.ProtoMsg != nil {
-		if result.ProtoMsg.UserKey == "" && message.UserKey != "" {
-			result.ProtoMsg.UserKey = message.UserKey
-		}
-		if result.ProtoMsg.SeqId == 0 && message.SeqId != 0 {
-			result.ProtoMsg.SeqId = message.SeqId
-		}
-	}
-
-	return result
-}
-
 // ===== 异步 worker pool（合并自 pipeline_worker.go）=====
 
 // pipelineTaskData 是协议无关的 pipeline 任务数据（TCP/WebSocket 统一）。
@@ -407,11 +397,10 @@ type pipelineTaskData struct {
 	message      *protoGw.StreamData
 	connectionID string
 	// WebSocket 特定字段（TCP 时为 nil）
-	isWebSocket bool
-	wsConn      *WebSocketConnection
+	wsConn *WebSocketConnection
 	// UDP 特定字段
-	isUDP          bool
-	udpRemoteAddr  string
+	isUDP         bool
+	udpRemoteAddr string
 }
 
 // 池化：pipeline 任务结构与入站帧缓冲（热路径每消息一任务/一帧拷贝）。
@@ -510,13 +499,8 @@ func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 		pipelineTaskPool.Put(task)
 	}()
 
-	// WebSocket 协议特定：前置处理 UserKey 映射更新（ProcessForWS 原有逻辑）
-	var result PipelineResult
-	if task.isWebSocket {
-		result = p.gw.pipeline.ProcessForWS(task.conn, task.data, task.message, task.connectionID)
-	} else {
-		result = p.gw.pipeline.Process(task.conn, task.data, task.message, task.connectionID)
-	}
+	// 统一处理路径（ProcessForWS 已合并到 Process，UserKey 映射已内联）
+	result := p.gw.pipeline.Process(task.conn, task.data, task.message, task.connectionID)
 
 	if result.Error != nil {
 		if result.ProtoMsg != nil {

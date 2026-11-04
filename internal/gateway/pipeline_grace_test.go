@@ -12,7 +12,7 @@ import (
 // 内到达的非 preAuth 消息只丢弃不断连；宽限期归零后恢复断连语义。
 func TestPipelineUnboundGraceDropNoClose(t *testing.T) {
 	gw := newGateway(minimalConfig())
-	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "temp_grace_user")
+	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "temp_grace_user", false)
 	msg := &protoGw.StreamData{Cmd: 1100010, Data: []byte("hb"), SeqId: 1}
 
 	res := gw.pipeline.Process(&kickMockConn{}, []byte("x"), msg, connID)
@@ -27,7 +27,7 @@ func TestPipelineUnboundGraceDropNoClose(t *testing.T) {
 	loginBindGrace = 0
 	defer func() { loginBindGrace = old }()
 
-	connID2 := gw.connectionManager.AddConnection(&kickMockConn{}, "temp_grace_user2")
+	connID2 := gw.connectionManager.AddConnection(&kickMockConn{}, "temp_grace_user2", false)
 	res2 := gw.pipeline.Process(&kickMockConn{}, []byte("x"), msg, connID2)
 	if res2.Action != gnet.Close {
 		t.Fatalf("expired grace action = %v, want gnet.Close", res2.Action)

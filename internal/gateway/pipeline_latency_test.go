@@ -14,7 +14,7 @@ func TestPipelineRecordsLatency(t *testing.T) {
 	gw := newGateway(minimalConfig())
 	gw.filterChain = types.NewFilterChain()
 
-	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user")
+	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user", false)
 	gw.connectionManager.SetConnectionServerID(connID, "logic:zone:1")
 	connObj := gw.connectionManager.GetConnection(connID)
 	if connObj == nil {

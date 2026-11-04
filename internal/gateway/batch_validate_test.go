@@ -59,7 +59,7 @@ func TestParseBatchInterval(t *testing.T) {
 func TestSetConnectionLoginKey(t *testing.T) {
 	g := newKickTestGateway()
 	mc := &kickMockConn{}
-	connID := g.connectionManager.AddConnection(mc, "")
+	connID := g.connectionManager.AddConnection(mc, "", false)
 	g.connectionManager.SetConnectionLoginKey(connID, "tk-abc")
 	conn := g.connectionManager.GetConnection(connID)
 	if conn == nil {
@@ -86,7 +86,7 @@ func TestRunBatchValidateSweepKicksInvalid(t *testing.T) {
 	// 三条连接：valid / banned / 无 loginKey（跳过）
 	add := func(account, key string) *kickMockConn {
 		mc := &kickMockConn{}
-		id := g.connectionManager.AddConnection(mc, "")
+		id := g.connectionManager.AddConnection(mc, "", false)
 		g.connectionManager.SetConnectionServerID(id, "s1")
 		if account != "" {
 			g.connectionManager.SetConnectionAccountID(id, account)
@@ -132,7 +132,7 @@ func TestRunBatchValidateSweepSkipIfTokenChanged(t *testing.T) {
 	g.loginServerClient = mock
 
 	mc := &kickMockConn{}
-	id := g.connectionManager.AddConnection(mc, "")
+	id := g.connectionManager.AddConnection(mc, "", false)
 	g.connectionManager.SetConnectionServerID(id, "s1")
 	g.connectionManager.SetConnectionAccountID(id, "acct-x")
 	g.connectionManager.SetConnectionLoginKey(id, "tok-old")

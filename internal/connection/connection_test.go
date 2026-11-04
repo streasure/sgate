@@ -46,7 +46,7 @@ func TestShardedMapRange_CallbackCanDelete(t *testing.T) {
 // TestRemoveConnection_Idempotent 验证并发/重复 RemoveConnection 只清理一次计数。
 func TestRemoveConnection_Idempotent(t *testing.T) {
 	cm := NewConnectionManager(0, 0)
-	conn := cm.AddConnection(mockConn{}, "user-1")
+	conn := cm.AddConnection(mockConn{}, "user-1", false)
 	if cm.GetConnectionCount() != 1 {
 		t.Fatalf("count=%d want 1", cm.GetConnectionCount())
 	}
@@ -67,7 +67,7 @@ func TestRemoveConnection_Idempotent(t *testing.T) {
 // TestUpdateConnectionUserUUID_CleansOrphanServerUserKey 验证换绑清理旧 serverUser 键。
 func TestUpdateConnectionUserUUID_CleansOrphanServerUserKey(t *testing.T) {
 	cm := NewConnectionManager(0, 0)
-	connID := cm.AddConnection(mockConn{}, "temp")
+	connID := cm.AddConnection(mockConn{}, "temp", false)
 	cm.UpdateConnectionUserUUID(connID, "old-user")
 	if _, ok := cm.serverUserConnections.Load(serverUserKey{userUUID: "old-user"}); !ok {
 		t.Fatal("old serverUser key should exist after first bind")

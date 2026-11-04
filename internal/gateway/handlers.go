@@ -99,13 +99,13 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 		// 握手的原始 WS 连接不计入 maxConnections/maxPerIP，可被绕过打满。
 		// 握手/首帧处仅在 ConnectionID 为空时补注册，此处预注册天然幂等。
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
-		connectionID := g.connectionManager.AddConnectionWS(c, tempUserUUID)
+		connectionID := g.connectionManager.AddConnection(c, tempUserUUID, true)
 		wsConn.SetConnectionID(connectionID)
 		c.SetContext(wsConn)
 		g.wsConnections.Store(wsConn, true)
 	} else {
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
-		connectionID := g.connectionManager.AddConnection(c, tempUserUUID)
+		connectionID := g.connectionManager.AddConnection(c, tempUserUUID, false)
 		connCtx := GetConnContext()
 		connCtx.ConnectionID = connectionID
 		connCtx.LogCtx = g.ctx
@@ -335,7 +335,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		connectionID = id
 	} else {
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
-		connectionID = g.connectionManager.AddConnection(c, tempUserUUID)
+		connectionID = g.connectionManager.AddConnection(c, tempUserUUID, false)
 		c.SetContext(&ConnContext{
 			ConnectionID: connectionID,
 			FrameBuf:     nil,
@@ -372,7 +372,6 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 			data:         dataCopy,
 			message:      message,
 			connectionID: connectionID,
-			isWebSocket:  false,
 			wsConn:       nil,
 		}
 		if !g.pipelineWorkerPool.Submit(task) {

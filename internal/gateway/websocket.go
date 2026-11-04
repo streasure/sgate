@@ -168,7 +168,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 
 	if wsConn.ConnectionID() == "" {
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
-		connectionID := g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID)
+		connectionID := g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID, true)
 		wsConn.SetConnectionID(connectionID)
 	}
 
@@ -183,7 +183,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		}
 	}
 
-	// 协议身份已在 AddConnectionWS 建连时绑定，此处无需 SetWS（死代码已删）
+	// 协议身份已在建连时绑定（AddConnection isWebSocket=true），无需后续设置
 
 	tlog.Debug(g.ctx, "WebSocket handshake success connectionID=%s", wsConn.ConnectionID())
 
@@ -415,12 +415,12 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	// 确保WebSocket连接已建立
 	connectionID := wsConn.ConnectionID()
 	if connectionID == "" {
-		// 握手未完成或首次消息：补注册为 WS 连接（AddConnectionWS 建连时绑定身份）
+		// 握手未完成或首次消息：补注册为 WS 连接（建连时绑定协议身份）
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
-		connectionID = g.connectionManager.AddConnectionWS(wsConn.Conn, tempUserUUID)
+		connectionID = g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID, true)
 		wsConn.SetConnectionID(connectionID)
 	}
-	// 协议身份已在建连时绑定，SetWS 为死代码已删
+	// 协议身份已在建连时绑定（AddConnection isWebSocket=true）
 	if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
 		conn.TouchActive()
 	}
@@ -490,7 +490,6 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			data:         payloadCopy,
 			message:      message,
 			connectionID: connectionID,
-			isWebSocket:  true,
 			wsConn:       wsConn,
 		}
 		if !g.pipelineWorkerPool.Submit(task) {
@@ -501,7 +500,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return nil
 	}
 
-	result := g.pipeline.ProcessForWS(wsConn.Conn, payload, message, connectionID)
+	result := g.pipeline.Process(wsConn.Conn, payload, message, connectionID)
 	routes.PutClientMessage(message)
 	if result.Error != nil {
 		if result.ProtoMsg != nil {
