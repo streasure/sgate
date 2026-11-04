@@ -409,6 +409,9 @@ type pipelineTaskData struct {
 	// WebSocket 特定字段（TCP 时为 nil）
 	isWebSocket bool
 	wsConn      *WebSocketConnection
+	// UDP 特定字段
+	isUDP          bool
+	udpRemoteAddr  string
 }
 
 // 池化：pipeline 任务结构与入站帧缓冲（热路径每消息一任务/一帧拷贝）。
@@ -519,21 +522,29 @@ func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 		if result.ProtoMsg != nil {
 			backend.PutStreamData(result.ProtoMsg)
 		}
-		_ = p.gw.sendFrameAsync(task.connectionID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		// UDP 特殊路径：直接发送响应（无 connectionID 查找）
+		if task.isUDP {
+			_ = sendUDPFrame(task.conn, task.udpRemoteAddr, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		} else {
+			_ = p.gw.sendFrameAsync(task.connectionID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		}
 	}
-	applyAsyncResult(task.conn, task.wsConn, result)
+	applyAsyncResult(task.conn, task.wsConn, task.isUDP, task.udpRemoteAddr, result)
 }
 
 // applyAsyncResult 在 worker 中执行 pipeline 返回的 Action（如 Close）。
 // gnet.Conn.Close 是并发安全的；不得在 worker 中使用非 Async 的 Write。
-func applyAsyncResult(conn gnet.Conn, wsConn *WebSocketConnection, result PipelineResult) {
+func applyAsyncResult(conn gnet.Conn, wsConn *WebSocketConnection, isUDP bool, udpRemoteAddr string, result PipelineResult) {
 	if result.Action != gnet.Close {
 		return
 	}
 	if wsConn != nil {
 		wsConn.State.Store(int32(WSStateClosing))
 	}
-	_ = conn.Close()
+	// UDP 无连接，无需关闭
+	if !isUDP {
+		_ = conn.Close()
+	}
 }
 
 // writeFrameAsync 从 worker goroutine 安全写 TCP 帧（gnet 要求跨协程用 AsyncWrite）。

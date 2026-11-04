@@ -18,6 +18,8 @@ transports:
   - port: 48080
   - port: 48081
     type: websocket
+  - port: 48082
+    type: udp
 
 grpc:
   port: 50051

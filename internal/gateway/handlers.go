@@ -185,6 +185,13 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	}
 
 	connCtx := c.Context()
+	
+	// UDP 协议分支：无连接状态，每个数据报独立处理
+	// （gnet UDP 不触发 OnOpen，首次 OnTraffic 时 Context 为 nil）
+	if connCtx == nil && c.LocalAddr().Network() == "udp" {
+		return g.handleUDPDatagram(c, data)
+	}
+
 	if connCtx == nil {
 		return gnet.Close
 
