@@ -183,9 +183,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 		}
 	}
 
-	if conn := g.connectionManager.GetConnection(wsConn.ConnectionID()); conn != nil && !conn.IsWebSocket() {
-		conn.SetWS(true)
-	}
+	// 协议身份已在 AddConnectionWS 建连时绑定，此处无需 SetWS（死代码已删）
 
 	tlog.Debug(g.ctx, "WebSocket handshake success connectionID=%s", wsConn.ConnectionID())
 
@@ -393,12 +391,23 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	message, ok := routes.DecodeClientMessage(payload)
 	if !ok {
 		tlog.Error(g.ctx, "WebSocket message unmarshal failed")
-		return g.sendWebSocketMessage(wsConn, WSOpBinary, routes.NewErrorFrame("error", "Invalid message format", "invalid message frame", string(payload)))
+		// 事件循环内同步写错误帧（快速路径：直接从 wsConn 获取 Connection）
+		if connID := wsConn.ConnectionID(); connID != "" {
+			if conn := g.connectionManager.GetConnection(connID); conn != nil {
+				_ = conn.SendSync(routes.NewErrorFrame("error", "Invalid message format", "invalid message frame", string(payload)))
+			}
+		}
+		return nil
 	}
 
 	if message.Cmd == 0 {
 		routes.PutClientMessage(message)
-		return g.sendWebSocketMessage(wsConn, WSOpBinary, routes.NewErrorFrame("error", "Invalid message format: missing cmd", "", ""))
+		if connID := wsConn.ConnectionID(); connID != "" {
+			if conn := g.connectionManager.GetConnection(connID); conn != nil {
+				_ = conn.SendSync(routes.NewErrorFrame("error", "Invalid message format: missing cmd", "", ""))
+			}
+		}
+		return nil
 	}
 
 	// 入站数据帧刷新心跳与活跃时间（浏览器客户端不发 WS ping，仅靠 ping 会被超时踢出）
@@ -406,12 +415,13 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	// 确保WebSocket连接已建立
 	connectionID := wsConn.ConnectionID()
 	if connectionID == "" {
+		// 握手未完成或首次消息：补注册为 WS 连接（AddConnectionWS 建连时绑定身份）
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
-		connectionID = g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID)
+		connectionID = g.connectionManager.AddConnectionWS(wsConn.Conn, tempUserUUID)
 		wsConn.SetConnectionID(connectionID)
 	}
+	// 协议身份已在建连时绑定，SetWS 为死代码已删
 	if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
-		conn.SetWS(true)
 		conn.TouchActive()
 	}
 
@@ -495,7 +505,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		if result.ProtoMsg != nil {
 			backend.PutStreamData(result.ProtoMsg)
 		}
-		return g.sendWebSocketMessage(wsConn, WSOpBinary, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		// 事件循环内同步写 WS 错误帧（快速路径：直接从 connectionID 获取 Connection）
+		if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
+			_ = conn.SendSync(routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		}
 	}
 	return nil
 }
@@ -522,7 +535,7 @@ func (g *Gateway) handleWSLogoutGate(wsConn *WebSocketConnection, connectionID s
 	return nil
 }
 
-// sendWebSocketLoginAck 发送WebSocket登录确认响应。
+// sendWebSocketLoginAck 发送WebSocket登录确认响应（事件循环内同步写）。
 func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionID string, seqID int64, code int32, text, serverID string) error {
 	body, err := proto.Marshal(&protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID})
 	if err != nil {
@@ -532,7 +545,12 @@ func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionI
 	if err != nil {
 		return err
 	}
-	return g.sendWebSocketMessage(wsConn, WSOpBinary, data)
+	// 事件循环内同步写（快速路径：直接从 connectionID 获取 Connection）
+	conn := g.connectionManager.GetConnection(connectionID)
+	if conn == nil {
+		return fmt.Errorf("connection not found")
+	}
+	return conn.SendSync(data)
 }
 
 // finishWSLoginGate 在后台协程完成 WS 登录：loginKey 校验、绑定、ack 异步回写与逻辑转发。
@@ -540,7 +558,8 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 	ack := func(code int32, text string) {
 		body, _ := proto.Marshal(&protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: req.ServerId})
 		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
-		_ = g.sendWebSocketMessageAsync(wsConn, WSOpBinary, data)
+		// 跨协程异步写（统一写出口，framer 自动封帧）
+		_ = g.sendFrameAsync(connectionID, data)
 	}
 	clientIP := ""
 	if wsConn.Conn != nil && wsConn.Conn.RemoteAddr() != nil {

@@ -37,12 +37,14 @@ type Connection struct {
 	serverID    atomic.Pointer[string] // 保存绑定的逻辑服标识。
 	accountID   atomic.Pointer[string] // 登录账号（=LoginGate userId；批量踢账号索引用）
 	loginKey    atomic.Pointer[string] // LoginGate loginKey（校验通过后保存；周期 BatchValidate 安全网重校验用，不落盘不转发）
-	isWS        atomic.Bool
 	logicClient atomic.Pointer[LogicClientProvider] // LogicClientProvider 缓存，避免每条消息查询连接池
 	jwtJti      atomic.Pointer[string]              // string：JWT jti（logout/封禁时撤销）
 	jwtExp      atomic.Int64                        // JWT exp（Unix 秒；0=未知）
 	offlineSent atomic.Bool                         // CmdUserOffline 已发送标记（防显式通知+OnClose 双发）
 	remoteHost  atomic.Pointer[string]              // 去端口对端 IP（每连接缓存一次，热路径免 SplitHostPort）
+
+	// 协议标识：建连时绑定（TCP=false / WS=true），此后只读，无竞态。
+	isWebSocket bool
 
 	// 连接级流控
 	msgRateMu      sync.Mutex // 保护 msgWindowStart 和 msgCount 的原子更新
@@ -57,13 +59,15 @@ type Connection struct {
 }
 
 // newConnection 创建新的连接对象，初始化基本属性和状态。
-func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string) *Connection {
+// framer 在建连时绑定协议身份（TCP/WS），此后只读，无晚置切换竞态。
+func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string, isWebSocket bool) *Connection {
 	now := time.Now().UnixMilli()
 	c := &Connection{
-		id:             id,
-		Conn:           conn,
-		CreatedAt:      now,
+		id:          id,
+		Conn:        conn,
+		CreatedAt:   now,
 		msgWindowStart: now,
+		isWebSocket: isWebSocket,
 	}
 	c.remoteAddr.Store(&remoteAddr)
 	c.LastActive.Store(now)
@@ -96,7 +100,9 @@ func (c *Connection) IsAuthenticated() bool {
 }
 
 // IsWebSocket 判断连接是否使用 WebSocket 传输。
-func (c *Connection) IsWebSocket() bool { return c.isWS.Load() }
+func (c *Connection) IsWebSocket() bool {
+	return c.isWebSocket
+}
 
 // SetUserUUID 设置连接关联的用户 UUID。
 func (c *Connection) SetUserUUID(uuid string) { c.userUUID.Store(&uuid) }
@@ -186,9 +192,6 @@ func (c *Connection) SetRemoteHost(host string) {
 	}
 }
 
-// SetWS 设置连接是否使用 WebSocket 传输。
-func (c *Connection) SetWS(v bool) { c.isWS.Store(v) }
-
 // SetJWTJti 持久化当前会话 JWT jti（供 logout/封禁撤销）。
 func (c *Connection) SetJWTJti(jti string) { c.jwtJti.Store(&jti) }
 
@@ -257,15 +260,18 @@ func (c *Connection) touch() {
 	c.LastActive.Store(time.Now().UnixMilli())
 }
 
-// Send 向客户端发送数据，WebSocket连接自动封装为WS帧。
+// Send 向客户端发送数据，根据协议自动封帧（TCP 4字节前缀 / WS binary 帧）。
 func (c *Connection) Send(data []byte) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	if c.IsWebSocket() {
-		return c.sendWSFrame(data)
+	// 内联异步封帧逻辑
+	if c.isWebSocket {
+		frame := EncodeWSFrame(0x82, data)
+		return c.Conn.AsyncWrite(frame, NoopAsyncCallback)
 	}
+	// TCP 快速路径：4字节长度前缀 + payload
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
 	return c.Conn.AsyncWritev([][]byte{header[:], data}, NoopAsyncCallback)
@@ -297,7 +303,7 @@ func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
 }
 
 // SendThenClose 发送数据并在写入完成后关闭连接（踢人通知专用）。
-// 保证客户端在连接关闭前收到通知帧：AsyncWritev 回调在 write 完成（成功或
+// 保证客户端在连接关闭前收到通知帧：AsyncWrite(v) 回调在 write 完成（成功或
 // 失败）后于 event loop 内触发，此时再执行 Close，避免 fire-and-forget Send
 // 后立即 Close 导致通知丢失（尤其 Windows 无 outbound flush）。
 func (c *Connection) SendThenClose(data []byte) error {
@@ -309,18 +315,42 @@ func (c *Connection) SendThenClose(data []byte) error {
 		_ = c.Conn.Close()
 		return nil
 	}
-	if c.IsWebSocket() {
-		return c.Conn.AsyncWrite(EncodeWSFrame(0x82, data), closeAfterWrite)
+	// 内联异步封帧逻辑
+	if c.isWebSocket {
+		frame := EncodeWSFrame(0x82, data)
+		return c.Conn.AsyncWrite(frame, closeAfterWrite)
 	}
+	// TCP 快速路径
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
 	return c.Conn.AsyncWritev([][]byte{header[:], data}, closeAfterWrite)
 }
 
 // sendWSFrame 将数据封装为WebSocket帧并发送，支持不同长度的载荷。
+// 已废弃：SendSync 事件循环内同步写，跨协程用 Send。保留是为避免破坏外部直接调用。
 func (c *Connection) sendWSFrame(data []byte) error {
 	frame := EncodeWSFrame(0x82, data)
 	return c.Conn.AsyncWrite(frame, NoopAsyncCallback)
+}
+
+// SendSync 在事件循环内同步写出一条消息（Writev TCP / Write WS）。
+// 仅允许在 gnet 事件循环内调用（OnTraffic 等）；跨协程写用 Send。
+func (c *Connection) SendSync(data []byte) error {
+	if c.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	c.touch()
+	// 内联封帧逻辑：编译器可完全消除分支开销（isWebSocket 常量传播）
+	if c.isWebSocket {
+		frame := EncodeWSFrame(0x82, data)
+		_, err := c.Conn.Write(frame)
+		return err
+	}
+	// TCP 快速路径：4字节长度前缀 + payload，零分配 Writev
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
+	_, err := c.Conn.Writev([][]byte{header[:], data})
+	return err
 }
 
 func (c *Connection) Close() error {
@@ -351,7 +381,7 @@ func (c *Connection) AppendCoalesced(payload []byte) bool {
 
 // FlushCoalesced 将累积的数据通过 AsyncWrite 发送，然后重置 buffer。
 // 返回成功推送的消息数。IO 在锁外执行，不阻塞 AppendCoalesced。
-// WebSocket 连接将 [len][payload] 单元序列重新包装为 WS binary 帧，避免客户端解析到裸 TCP 长度前缀。
+// 通过 Framer.WrapCoalesced 转换为线上格式：TCP 零拷贝原样发送，WS 重封为帧序列。
 func (c *Connection) FlushCoalesced() int64 {
 	c.coalescedMu.Lock()
 	if c.coalescedCount == 0 {
@@ -366,12 +396,16 @@ func (c *Connection) FlushCoalesced() int64 {
 	c.coalescedCount = 0
 	c.coalescedMu.Unlock()
 
-	if c.IsWebSocket() {
-		reframed := reframeCoalescedAsWSFrames(data)
-		if reframed != nil {
-			data = reframed
+	// 内联封帧转换：TCP 零拷贝 / WS reframe
+	if c.isWebSocket {
+		// 将 [len][payload]* 合并缓冲重封为 WS 帧序列
+		wsData := reframeCoalescedAsWSFrames(data)
+		if wsData != nil {
+			data = wsData
 		}
+		// 解析失败时 data 保持原缓冲（罕见异常路径，WS 客户端收到裸 TCP 格式）
 	}
+	// TCP 路径：data 已是 [len][payload]* 格式，零拷贝直接发送
 
 	// data 为只读：TCP 路径直接引用 bufPtr 底层数组，WS 路径为 reframed 拷贝。
 	// 回调触发时 AsyncWrite 已完成，才可把 bufPtr 归还池；不能提前归还。
@@ -399,6 +433,7 @@ func (c *Connection) FlushCoalesced() int64 {
 
 // reframeCoalescedAsWSFrames 将 coalescer 缓冲中的 [len][payload]* 序列转换为
 // 等价的 WS binary 帧序列（每个 payload 一个 FIN 帧）。解析失败返回 nil。
+// 已移入 wsFramer.WrapCoalesced；此函数保留供直接调用（测试/诊断）。
 func reframeCoalescedAsWSFrames(data []byte) []byte {
 	if len(data) == 0 {
 		return data

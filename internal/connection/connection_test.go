@@ -83,7 +83,7 @@ func TestUpdateConnectionUserUUID_CleansOrphanServerUserKey(t *testing.T) {
 
 // TestOfflineNotifyIdempotency 验证下线通知幂等标记 = 已送达语义。
 func TestOfflineNotifyIdempotency(t *testing.T) {
-	c := newConnection("id", mockConn{}, "u", "1.2.3.4:1")
+	c := newConnection("id", mockConn{}, "u", "1.2.3.4:1", false)
 	if c.OfflineNotified() {
 		t.Fatal("should start unnotified")
 	}

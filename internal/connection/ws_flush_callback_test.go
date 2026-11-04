@@ -36,8 +36,7 @@ func (c *cbCapturingConn) takeCallback() gnet.AsyncCallback {
 // 分支丢弃回调，导致 FlushCoalesced 的池化缓冲永不归还（coalescerBufPool 只出不进）。
 func TestSendMultiWithCallbackWSCarriesCallback(t *testing.T) {
 	gc := &cbCapturingConn{}
-	c := newConnection("id-ws", gc, "u", "1.27.0.0.1:1")
-	c.SetWS(true)
+	c := newConnection("id-ws", gc, "u", "1.27.0.0.1:1", true)
 
 	var called bool
 	if err := c.SendMultiWithCallback([]byte("payload"), func() { called = true }); err != nil {
@@ -60,8 +59,7 @@ func TestSendMultiWithCallbackWSCarriesCallback(t *testing.T) {
 // 后，AsyncWrite 完成回调必须触发（旧实现 WS 分支用 noop，缓冲归还逻辑被跳过）。
 func TestFlushCoalescedWSInvokesCallback(t *testing.T) {
 	gc := &cbCapturingConn{}
-	c := newConnection("id-ws-flush", gc, "u", "1.27.0.0.1:1")
-	c.SetWS(true)
+	c := newConnection("id-ws-flush", gc, "u", "1.27.0.0.1:1", true)
 
 	if !c.AppendCoalesced([]byte("msg-a")) {
 		t.Fatal("AppendCoalesced failed")

@@ -95,11 +95,11 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 
 	if isWS {
 		wsConn := NewWebSocketConnection(c)
-		// 立即注册进 connectionManager：否则未完成握手的原始 WS 连接不计入
-		// maxConnections/maxPerIP，可被绕过打满。握手/首帧处仅在
-		// ConnectionID 为空时补注册，此处预注册天然幂等。
+		// 立即注册进 connectionManager（WS 专用变体绑定协议身份）：否则未完成
+		// 握手的原始 WS 连接不计入 maxConnections/maxPerIP，可被绕过打满。
+		// 握手/首帧处仅在 ConnectionID 为空时补注册，此处预注册天然幂等。
 		tempUserUUID := "temp_" + connection.GenerateConnectionID()
-		connectionID := g.connectionManager.AddConnection(c, tempUserUUID)
+		connectionID := g.connectionManager.AddConnectionWS(c, tempUserUUID)
 		wsConn.SetConnectionID(connectionID)
 		c.SetContext(wsConn)
 		g.wsConnections.Store(wsConn, true)
@@ -381,7 +381,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		if result.ProtoMsg != nil {
 			backend.PutStreamData(result.ProtoMsg)
 		}
-		writeFrame(c, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		_ = g.sendFrameSync(connectionID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
 		return result.Action
 	}
 	return result.Action
@@ -410,4 +410,36 @@ func writeFrame(c gnet.Conn, data []byte) {
 func writeMsgFrame(c gnet.Conn, msg *protoGw.StreamData) {
 	data, _ := routes.MarshalClientMessage(msg)
 	writeFrame(c, data)
+}
+
+// ============================================================================
+// 统一写出口（协议无关）
+// ============================================================================
+
+// sendFrameSync 在事件循环内同步写出原始帧（ConnectionID 索引连接）。
+// 仅允许在 gnet 事件循环内调用（OnTraffic 等）；跨协程用 sendFrameAsync。
+func (g *Gateway) sendFrameSync(connectionID string, data []byte) error {
+	conn := g.connectionManager.GetConnection(connectionID)
+	if conn == nil {
+		return fmt.Errorf("connection not found")
+	}
+	return conn.SendSync(data)
+}
+
+// sendMsgSync 在事件循环内同步写出 StreamData 消息（序列化 + 封帧）。
+func (g *Gateway) sendMsgSync(connectionID string, msg *protoGw.StreamData) error {
+	data, err := routes.MarshalClientMessage(msg)
+	if err != nil {
+		return err
+	}
+	return g.sendFrameSync(connectionID, data)
+}
+
+// sendFrameAsync 跨协程异步写出原始帧（任意协程可调用）。
+func (g *Gateway) sendFrameAsync(connectionID string, data []byte) error {
+	conn := g.connectionManager.GetConnection(connectionID)
+	if conn == nil {
+		return fmt.Errorf("connection not found")
+	}
+	return conn.Send(data)
 }

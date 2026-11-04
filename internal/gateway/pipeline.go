@@ -527,7 +527,7 @@ func (p *PipelineWorkerPool) processTask(task *pipelineTaskData) {
 		if result.ProtoMsg != nil {
 			backend.PutStreamData(result.ProtoMsg)
 		}
-		writeFrameAsync(task.conn, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		_ = p.gw.sendFrameAsync(task.connectionID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
 	}
 	applyAsyncResult(task.conn, nil, result)
 }
@@ -544,7 +544,11 @@ func (p *PipelineWorkerPool) processWSTask(task *wsPipelineTaskData) {
 		if result.ProtoMsg != nil {
 			backend.PutStreamData(result.ProtoMsg)
 		}
-		p.gw.sendWebSocketMessageAsync(task.wsConn, WSOpBinary, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		// WS 错误帧写出（跨协程异步，payload 由 framer 封帧）
+		wsConnID := task.wsConn.ConnectionID()
+		if wsConnID != "" {
+			_ = p.gw.sendFrameAsync(wsConnID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		}
 	}
 	applyAsyncResult(task.wsConn.Conn, task.wsConn, result)
 }

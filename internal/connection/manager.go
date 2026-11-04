@@ -153,14 +153,24 @@ func (cm *ConnectionManager) GetIPConnectionCount(remoteIP string) int {
 	return int(cm.ipConnections[remoteIP])
 }
 
-// AddConnection 添加新连接，生成唯一ID并建立映射关系。
+// AddConnection 添加新 TCP 连接，生成唯一ID并建立映射关系。
 func (cm *ConnectionManager) AddConnection(conn gnet.Conn, userUUID string) string {
+	return cm.addConnection(conn, userUUID, false)
+}
+
+// AddConnectionWS 添加新 WebSocket 连接，协议身份建连时绑定，无晚置竞态。
+func (cm *ConnectionManager) AddConnectionWS(conn gnet.Conn, userUUID string) string {
+	return cm.addConnection(conn, userUUID, true)
+}
+
+// addConnection 内部实现：建连时绑定协议标识（isWebSocket），协议身份从此只读。
+func (cm *ConnectionManager) addConnection(conn gnet.Conn, userUUID string, isWebSocket bool) string {
 	connectionID := GenerateConnectionID()
 	remoteAddr := ""
 	if conn.RemoteAddr() != nil {
 		remoteAddr = conn.RemoteAddr().String()
 	}
-	c := newConnection(connectionID, conn, userUUID, remoteAddr)
+	c := newConnection(connectionID, conn, userUUID, remoteAddr, isWebSocket)
 	cm.connections.Store(connectionID, c)
 	cm.userConnections.Store(userUUID, connectionID)
 	cm.count.Add(1)
