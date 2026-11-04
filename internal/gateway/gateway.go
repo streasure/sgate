@@ -24,6 +24,7 @@ import (
 	"github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
+	"github.com/streasure/sgate/internal/protocol"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/types"
@@ -401,24 +402,22 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 		transportType := transport.Type
 		g.SetTransportType(fmt.Sprintf("%d", port), transportType)
 
-		addr := fmt.Sprintf("tcp://:%d", port)
-		options := []gnet.Option{
-			gnet.WithMulticore(true),
-			gnet.WithReusePort(true),
-			gnet.WithReadBufferCap(262144),
-			gnet.WithWriteBufferCap(262144),
-			gnet.WithSocketRecvBuffer(4 * 1024 * 1024),
-			gnet.WithSocketSendBuffer(4 * 1024 * 1024),
-			// OnTick 依赖 ticker：不开启则 OnTick 永不回调，
-			// msgRate 采样与每秒 metrics 日志都会失效（/stats 速率恒 0）。
-			gnet.WithTicker(true),
+		// 协议插件化：从注册表查找协议实现（tcp/websocket/udp）
+		// 配置 type 为空时默认 tcp（历史兼容）
+		protoName := transportType
+		if protoName == "" {
+			protoName = "tcp"
 		}
-		if transportType == "" || transportType == "websocket" {
-			options = append(options, gnet.WithTCPNoDelay(gnet.TCPNoDelay))
+		proto := protocol.Get(protoName)
+		if proto == nil {
+			tlog.Error(g.ctx, "unknown protocol type=%s port=%d (no plugin registered)", protoName, port)
+			continue
 		}
-		tlog.Info(g.ctx, "starting gateway transport addr=%s type=%s", addr, transportType)
+
+		tlog.Info(g.ctx, "starting gateway transport port=%d type=%s", port, protoName)
+		addr := fmt.Sprintf(":%d", port) // 仅用于日志标识
 		panicutil.Go(g.ctx, fmt.Sprintf("gateway.transportRun addr=%s", addr), func() {
-			if err := gnet.Run(g, addr, options...); err != nil {
+			if err := proto.Start(g, transport, cfg); err != nil {
 				tlog.Error(g.ctx, "gateway transport stopped addr=%s error=%v", addr, err)
 			}
 		})
