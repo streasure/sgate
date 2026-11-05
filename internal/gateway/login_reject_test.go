@@ -13,7 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// loginMockConn 捕获 LoginGate 回写的 ack 帧（writeMsgFrame 走 Writev）。
+// loginMockConn 捕获 LoginGate 回写的 ack 帧（经统一写出口走 Writev TCP 封帧）。
 type loginMockConn struct {
 	gnet.Conn
 	written []byte

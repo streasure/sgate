@@ -661,28 +661,6 @@ func (g *Gateway) handleWebSocketPongFrame(wsConn *WebSocketConnection) {
 	wsConn.setLastPingTime(time.Now())
 }
 
-// sendWebSocketMessage 向WebSocket连接发送指定操作码的消息帧，自动处理不同长度载荷的帧头编码。
-func (g *Gateway) sendWebSocketMessage(wsConn *WebSocketConnection, opCode WSOpCode, payload []byte) error {
-	if wsConn.State.Load() != int32(WSStateOpen) {
-		return fmt.Errorf("websocket connection not open")
-	}
-	frame := connection.EncodeWSFrame(byte(opCode|0x80), payload)
-	_, err := wsConn.Conn.Write(frame)
-	return err
-}
-
-// sendWebSocketMessageAsync 从非 event loop 协程安全发送 WS 帧（gnet 要求跨协程用 AsyncWrite）。
-func (g *Gateway) sendWebSocketMessageAsync(wsConn *WebSocketConnection, opCode WSOpCode, payload []byte) error {
-	if wsConn == nil || wsConn.Conn == nil {
-		return fmt.Errorf("websocket connection is nil")
-	}
-	if wsConn.State.Load() != int32(WSStateOpen) {
-		return fmt.Errorf("websocket connection not open")
-	}
-	frame := connection.EncodeWSFrame(byte(opCode|0x80), payload)
-	return wsConn.Conn.AsyncWrite(frame, connection.NoopAsyncCallback)
-}
-
 // sendHTTPResponse 发送HTTP响应，用于WebSocket握手失败时返回错误响应。
 func (g *Gateway) sendHTTPResponse(conn gnet.Conn, statusCode int, statusText string, headers map[string]string) {
 	var buf bytes.Buffer

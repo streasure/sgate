@@ -185,7 +185,7 @@ func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
 	}
 
 	connCtx := c.Context()
-	
+
 	// UDP 协议分支：无连接状态，每个数据报独立处理
 	// （gnet UDP 不触发 OnOpen，首次 OnTraffic 时 Context 为 nil）
 	if connCtx == nil && c.LocalAddr().Network() == "udp" {
@@ -407,17 +407,6 @@ func (g *Gateway) getOrCreateBreaker(route string) *security.CircuitBreaker {
 		return nil
 	}
 	return g.circuitBreakerMgr.GetCircuitBreaker(route, p.failureThreshold, p.successThreshold, p.timeout)
-}
-
-func writeFrame(c gnet.Conn, data []byte) {
-	var header [4]byte
-	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
-	c.Writev([][]byte{header[:], data})
-}
-
-func writeMsgFrame(c gnet.Conn, msg *protoGw.StreamData) {
-	data, _ := routes.MarshalClientMessage(msg)
-	writeFrame(c, data)
 }
 
 // ============================================================================

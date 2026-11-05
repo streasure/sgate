@@ -33,10 +33,10 @@ type Connection struct {
 	state       atomic.Int32
 
 	// 原子字段，用于无锁并发访问
-	userUUID    atomic.Pointer[string] // 保存用户唯一标识。
-	serverID    atomic.Pointer[string] // 保存绑定的逻辑服标识。
-	accountID   atomic.Pointer[string] // 登录账号（=LoginGate userId；批量踢账号索引用）
-	loginKey    atomic.Pointer[string] // LoginGate loginKey（校验通过后保存；周期 BatchValidate 安全网重校验用，不落盘不转发）
+	userUUID    atomic.Pointer[string]              // 保存用户唯一标识。
+	serverID    atomic.Pointer[string]              // 保存绑定的逻辑服标识。
+	accountID   atomic.Pointer[string]              // 登录账号（=LoginGate userId；批量踢账号索引用）
+	loginKey    atomic.Pointer[string]              // LoginGate loginKey（校验通过后保存；周期 BatchValidate 安全网重校验用，不落盘不转发）
 	logicClient atomic.Pointer[LogicClientProvider] // LogicClientProvider 缓存，避免每条消息查询连接池
 	jwtJti      atomic.Pointer[string]              // string：JWT jti（logout/封禁时撤销）
 	jwtExp      atomic.Int64                        // JWT exp（Unix 秒；0=未知）
@@ -63,11 +63,11 @@ type Connection struct {
 func newConnection(id string, conn gnet.Conn, userUUID, remoteAddr string, isWebSocket bool) *Connection {
 	now := time.Now().UnixMilli()
 	c := &Connection{
-		id:          id,
-		Conn:        conn,
-		CreatedAt:   now,
+		id:             id,
+		Conn:           conn,
+		CreatedAt:      now,
 		msgWindowStart: now,
-		isWebSocket: isWebSocket,
+		isWebSocket:    isWebSocket,
 	}
 	c.remoteAddr.Store(&remoteAddr)
 	c.LastActive.Store(now)
@@ -319,13 +319,6 @@ func (c *Connection) SendThenClose(data []byte) error {
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
 	return c.Conn.AsyncWritev([][]byte{header[:], data}, closeAfterWrite)
-}
-
-// sendWSFrame 将数据封装为WebSocket帧并发送，支持不同长度的载荷。
-// 已废弃：SendSync 事件循环内同步写，跨协程用 Send。保留是为避免破坏外部直接调用。
-func (c *Connection) sendWSFrame(data []byte) error {
-	frame := EncodeWSFrame(0x82, data)
-	return c.Conn.AsyncWrite(frame, NoopAsyncCallback)
 }
 
 // SendSync 在事件循环内同步写出一条消息（Writev TCP / Write WS）。

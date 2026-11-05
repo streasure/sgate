@@ -53,14 +53,17 @@ func TestLoad_RepoGatewayYaml(t *testing.T) {
 	if c.Belong != "default" || c.Zone != "default" {
 		t.Errorf("belong/zone = %q/%q, want default/default", c.Belong, c.Zone)
 	}
-	if len(c.Transports) != 2 {
-		t.Fatalf("len(transports) = %d, want 2", len(c.Transports))
+	if len(c.Transports) != 3 {
+		t.Fatalf("len(transports) = %d, want 3", len(c.Transports))
 	}
 	if c.Transports[0].Port != 48080 || c.Transports[0].Type != "" {
 		t.Errorf("transports[0] = %+v, want {48080 tcp-default}", c.Transports[0])
 	}
 	if c.Transports[1].Port != 48081 || c.Transports[1].Type != "websocket" {
 		t.Errorf("transports[1] = %+v, want {48081 websocket}", c.Transports[1])
+	}
+	if c.Transports[2].Port != 48082 || c.Transports[2].Type != "udp" {
+		t.Errorf("transports[2] = %+v, want {48082 udp}", c.Transports[2])
 	}
 	if !c.Discovery.RegisterSelf {
 		t.Errorf("discovery.registerSelf = %v, want true", c.Discovery.RegisterSelf)
