@@ -280,7 +280,8 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		}
 
 		// 阶段5：过滤器链（JWT、金丝雀、镜像、OpenTelemetry、降级）
-		protoMsg, filterOK = g.applyForwardFilters(conn, message.Data, connectionID, cmd, message.SeqId)
+		// 复用阶段2的 connObj 与阶段3的 routeKey，避免重复查找/重复计算。
+		protoMsg, filterOK = g.applyForwardFilters(conn, connObj, routeKey, message.Data, connectionID, cmd, message.SeqId)
 		if !filterOK {
 			if span != nil && g.tracer != nil {
 				g.tracer.EndSpan(span)
