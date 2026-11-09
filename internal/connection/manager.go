@@ -334,16 +334,6 @@ func (cm *ConnectionManager) GetConnectionCount() int {
 	return int(cm.count.Load())
 }
 
-// BroadcastBytes 向所有处于转发状态的连接广播数据。
-func (cm *ConnectionManager) BroadcastBytes(data []byte) {
-	cm.connections.Range(func(key string, conn *Connection) bool {
-		if conn.GetState() == StateForward {
-			conn.Send(data)
-		}
-		return true
-	})
-}
-
 // SendToUser 向指定用户发送数据。
 func (cm *ConnectionManager) SendToUser(userUUID string, data []byte) {
 	connectionID, ok := cm.userConnections.Load(userUUID)
@@ -352,30 +342,6 @@ func (cm *ConnectionManager) SendToUser(userUUID string, data []byte) {
 	}
 	if conn := cm.GetConnection(connectionID); conn != nil {
 		conn.Send(data)
-	}
-}
-
-// SendToGroupBytes 向指定分组的所有成员发送数据。
-func (cm *ConnectionManager) SendToGroupBytes(groupID string, data []byte) {
-	cm.groupMutex.RLock()
-	v, ok := cm.groups.Load(groupID)
-	if !ok {
-		cm.groupMutex.RUnlock()
-		return
-	}
-	group := v.(*ConnectionGroupInfo)
-	cm.groupMutex.RUnlock()
-
-	members := group.Snapshot()
-	for _, key := range members {
-		v2, ok := cm.serverUserConnections.Load(key)
-		if !ok {
-			continue
-		}
-		connectionID := v2.(string)
-		if conn := cm.GetConnection(connectionID); conn != nil {
-			conn.Send(data)
-		}
 	}
 }
 

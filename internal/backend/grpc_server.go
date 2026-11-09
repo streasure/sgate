@@ -187,12 +187,29 @@ func (s *GRPCServer) BroadcastAll(ctx context.Context, req *protoGw.BroadcastAll
 	if len(matched) == 0 {
 		return &protoGw.BroadcastAllAck{}, nil
 	}
-	// 分片并发入队（pattern 同 maintenance.kickConnectionsAsync）
-	var sent, failed atomic.Int64
-	var firstErr atomic.Pointer[error]
+	sent, failed, firstErr := sendToConnections(matched, data)
+	s.gateway.AddPushedToClient(sent)
+	if failed > 0 {
+		tlog.Warn(ctx, "broadcast all partial sent=%d failed=%d total=%d", sent, failed, len(matched))
+		if firstErr != nil {
+			return nil, firstErr
+		}
+	}
+	return &protoGw.BroadcastAllAck{}, nil
+}
+
+// sendToConnections 分片并发入队（pattern 同 maintenance.kickConnectionsAsync，32 worker）。
+// Send 内部走 AsyncWrite，真正写盘在 gnet loop；并发只加速遍历与入队。
+// 返回成功/失败计数与首个错误；调用方返回时仅保证「已分发」，不等待全部写盘完成。
+func sendToConnections(conns []*connection.Connection, data []byte) (sent, failed int64, firstErr error) {
+	if len(conns) == 0 {
+		return 0, 0, nil
+	}
+	var sentN, failedN atomic.Int64
+	var errP atomic.Pointer[error]
 	var wg sync.WaitGroup
 	const workers = 32
-	total := len(matched)
+	total := len(conns)
 	chunkSize := (total + workers - 1) / workers
 	for w := range workers {
 		lo := w * chunkSize
@@ -200,27 +217,23 @@ func (s *GRPCServer) BroadcastAll(ctx context.Context, req *protoGw.BroadcastAll
 			break
 		}
 		hi := min(lo+chunkSize, total)
-		chunk := matched[lo:hi]
+		chunk := conns[lo:hi]
 		wg.Go(func() {
 			for _, conn := range chunk {
 				if err := conn.Send(data); err != nil {
-					failed.Add(1)
-					firstErr.CompareAndSwap(nil, &err)
+					failedN.Add(1)
+					errP.CompareAndSwap(nil, &err)
 				} else {
-					sent.Add(1)
+					sentN.Add(1)
 				}
 			}
 		})
 	}
 	wg.Wait()
-	s.gateway.AddPushedToClient(sent.Load())
-	if failed.Load() > 0 {
-		tlog.Warn(ctx, "broadcast all partial sent=%d failed=%d total=%d", sent.Load(), failed.Load(), total)
-		if e := firstErr.Load(); e != nil {
-			return nil, *e
-		}
+	if e := errP.Load(); e != nil {
+		firstErr = *e
 	}
-	return &protoGw.BroadcastAllAck{}, nil
+	return sentN.Load(), failedN.Load(), firstErr
 }
 
 // JoinGroup 将会话加入指定分组
@@ -278,6 +291,8 @@ func (s *GRPCServer) broadcastGroup(ctx context.Context, groupID string, cmd int
 		tlog.Warn(ctx, "group push: encode failed groupID=%s error=%v", groupID, encodeErr)
 		return 0, len(sessions)
 	}
+	// 快照解析：session → conn，消失的会话计为失败（与并发发送解耦）
+	conns := make([]*connection.Connection, 0, len(sessions))
 	for _, sessionID := range sessions {
 		conn := cm.GetConnection(sessionID)
 		if conn == nil {
@@ -285,13 +300,14 @@ func (s *GRPCServer) broadcastGroup(ctx context.Context, groupID string, cmd int
 			tlog.Warn(ctx, "group push: session disappeared groupID=%s sessionID=%s", groupID, sessionID)
 			continue
 		}
-		if err := conn.Send(msg); err != nil {
-			failed++
-			tlog.Warn(ctx, "group push: send failed groupID=%s sessionID=%s error=%v", groupID, sessionID, err)
-			continue
-		}
-		sent++
-		s.gateway.AddPushedToClient(1)
+		conns = append(conns, conn)
+	}
+	// 分片并发入队（同 BroadcastAll / kickConnectionsAsync）
+	sent64, failed64, firstErr := sendToConnections(conns, msg)
+	s.gateway.AddPushedToClient(sent64)
+	sent, failed = int(sent64), failed+int(failed64)
+	if firstErr != nil {
+		tlog.Warn(ctx, "group push: send failed groupID=%s error=%v", groupID, firstErr)
 	}
 	if failed > 0 {
 		tlog.Warn(ctx, "group push completed with failures groupID=%s total=%d sent=%d failed=%d", groupID, len(sessions), sent, failed)
