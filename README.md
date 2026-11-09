@@ -306,7 +306,7 @@ transports:
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `port` | int | 监听端口，每个端口唯一 |
-| `type` | string | 空 = TCP；`websocket` = WebSocket |
+| `type` | string | 空 = TCP；`websocket` = WebSocket；`udp` = UDP（**预留通道，不承载业务**，见[九、协议说明](#九协议说明)的 UDP 边界） |
 
 ### 6.3 `etcd` 服务注册
 
@@ -629,7 +629,7 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 
 | 通信方向 | 消息 | 编码方式 |
 | --- | --- | --- |
-| 客户端 ↔ sgate | `MessageFrame` | TCP：4 字节大端长度前缀；WS：二进制帧 |
+| 客户端 ↔ sgate | `MessageFrame` | TCP：4 字节大端长度前缀；WS：二进制帧；UDP：4 字节大端长度前缀（单数据报 = 单帧） |
 | sgate ↔ 逻辑服 | `StreamData`（打包为 `StreamBatch` 合帧） | gRPC 双向流 protobuf |
 | sgate → 客户端批量推送 | `MessageFrame(CmdPushBatch)` | Body 嵌套 `PushBatch` |
 
@@ -646,6 +646,12 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 | `CmdHeartbeatAck` | `1100011` | 心跳应答 |
 | `CmdUserOffline` | `1100012` | 用户下线通知 |
 | `CmdPushBatch` | `9000002` | 网关批量推送 |
+
+### 9.1 UDP 边界（预留通道，不承载业务）
+
+`transports[].type: udp` 的端口当前**只收包、不承载业务**：gnet UDP 不触发 `OnOpen`（每个数据报新建 conn），`ConnectionManager` 里没有对应连接，因此网关在源 IP 限速 + 帧校验之后直接回一帧 `udp transport not supported`，并计入 `/stats` 的 `droppedUnsupported`（含在 `droppedTotal` 里）。垃圾数据报静默丢弃不回包（控制回包放大）。不建连接、不投 pipeline，详见 [architecture §4.4](docs/architecture.md#44-udp-边界与-wsudp-关联方案)。
+
+承载业务的规划方案是 **WS 会话 + UDP 关联通道**：客户端 WS 登录拿到一次性 token 后，用自己创建的 UDP socket 向该端口发 `ASSOCIATE` 关联包（NAT 映射只能由客户端先发包建立，服务器无法主动开 UDP、客户端也不能靠监听固定端口），网关建立 `connID ↔ 公网地址` 关联表，后续 UDP 包按源地址反查真实 connID **复用现有 pipeline 全链路**，回程走 `sendUDPFrame`，关联生命周期挂在 WS 会话上。
 
 ---
 

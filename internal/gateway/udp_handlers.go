@@ -9,12 +9,22 @@ import (
 	"github.com/streasure/util/tlog"
 )
 
-// handleUDPDatagram 处理单个 UDP 数据报（无连接状态）。
-// UDP 规则：
-// - 简化版：所有数据报直接投递 pipeline，无登录校验（登录校验在 pipeline 内完成）
-// - 每个数据报 = 完整帧（4 字节长度头 + 消息体）
-// - 安检不豁免（全走 pipeline）
-// - UDP 无持久会话，每个数据报独立处理
+// errUDPUnsupported 客户端可见的 UDP 拒绝原因（短句，回帧体积极小）。
+const errUDPUnsupported = "udp transport not supported"
+
+// handleUDPDatagram 处理单个 UDP 数据报。
+//
+// UDP 当前定位是「预留通道」，不承载业务：gnet UDP 不触发 OnOpen（每个数据报
+// 新建 conn 对象），ConnectionManager 中没有、也无法有对应连接，投进 pipeline
+// 只会在阶段 2 以 unknown connection 失败 —— 一次必然失败的完整往返。因此在
+// 限速与帧校验之后直接明确拒绝：只对能解码出合法消息的包回一帧语义诚实的错误
+// （垃圾包静默丢，控制回包放大），并计数 droppedUnsupported 供 /stats 观测。
+//
+// 承载业务的规划方案是「WS 会话 + UDP 关联通道」：客户端 WS 登录后用本地 UDP
+// socket 向本端口发携带一次性 token 的关联包，网关建立 connID ↔ 公网地址 关联表，
+// 后续 UDP 包按源地址反查真实 connID 复用现有 pipeline 全链路（鉴权/限流/过滤器
+// 一律不变），回程走 sendUDPFrame，关联生命周期挂在 WS 会话上。
+// 详见 docs/architecture.md「UDP 边界与 WS+UDP 关联方案」。
 func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 	remoteAddr := c.RemoteAddr().String()
 
@@ -41,49 +51,19 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 		return gnet.None
 	}
 
-	frame := data[4:]
-
-	// 解析消息头
-	message, ok := routes.DecodeClientMessage(frame)
-	if !ok {
-		tlog.Debug(g.ctx, "udp decode failed addr=%s", remoteAddr)
+	// 仅对能解码出合法消息的包回错误：垃圾包静默丢，控制回包放大倍数
+	message, ok := routes.DecodeClientMessage(data[4:])
+	if !ok || message.Cmd == 0 {
+		routes.PutClientMessage(message)
 		return gnet.None
 	}
-	if message.Cmd == 0 {
-		return gnet.None
+	routes.PutClientMessage(message)
+
+	n := g.messagesDroppedUnsupported.Add(1)
+	// 采样告警：UDP 高频场景逐包打日志会刷爆日志盘
+	if n == 1 || n%1000 == 0 {
+		tlog.Warn(g.ctx, "udp datagram rejected: transport does not carry business messages addr=%s total=%d", remoteAddr, n)
 	}
-
-	// UDP 简化处理：直接投递到 pipeline（无 connectionID，pipeline 内部判断 UDP 场景）
-	// 用 remoteAddr 作为虚拟 connectionID（UDP 无状态会话）
-	dataCopy := getMsgBuf(len(frame))
-	copy(dataCopy, frame)
-
-	task := pipelineTaskPool.Get().(*pipelineTaskData)
-	*task = pipelineTaskData{
-		conn:          c,
-		data:          dataCopy,
-		message:       message,
-		connectionID:  "udp_" + remoteAddr, // UDP 虚拟 connectionID
-		wsConn:        nil,
-		isUDP:         true,
-		udpRemoteAddr: remoteAddr,
-	}
-
-	if g.pipelineWorkerPool == nil {
-		// 同步路径（测试环境）：暂不支持 UDP
-		tlog.Warn(g.ctx, "udp sync path not supported")
-		routes.PutClientMessage(task.message)
-		putMsgBuf(task.data)
-		pipelineTaskPool.Put(task)
-		return gnet.None
-	}
-
-	if !g.pipelineWorkerPool.Submit(task) {
-		routes.PutClientMessage(task.message)
-		putMsgBuf(task.data)
-		pipelineTaskPool.Put(task)
-		return gnet.None
-	}
-
+	_ = sendUDPFrame(c, remoteAddr, routes.NewErrorFrame("error", errUDPUnsupported, "", ""))
 	return gnet.None
 }

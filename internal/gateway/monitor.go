@@ -84,6 +84,7 @@ type statsPayload struct {
 	DroppedIntegrity      int64   `json:"droppedIntegrity"`
 	DroppedFilterChain    int64   `json:"droppedFilterChain"`
 	DroppedAuth           int64   `json:"droppedAuth"`
+	DroppedUnsupported    int64   `json:"droppedUnsupported"` // UDP 等传输层不承载的业务消息
 	DroppedTotal          int64   `json:"droppedTotal"`
 	PushedToClient        int64   `json:"pushedToClient"`
 	PushDroppedNoConn     int64   `json:"pushDroppedNoConn"`
@@ -128,6 +129,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 		dropIntegrity := g.messagesDroppedIntegrity.Load()
 		dropFilterChain := g.messagesDroppedFilterChain.Load()
 		dropAuth := g.messagesDroppedAuth.Load()
+		dropUnsupported := g.messagesDroppedUnsupported.Load()
 		stats := statsPayload{
 			Received:              g.messagesReceived.Load(),
 			Forwarded:             g.messagesForwarded.Load(),
@@ -142,7 +144,8 @@ func (g *Gateway) StartStatsServer(addr string) {
 			DroppedIntegrity:      dropIntegrity,
 			DroppedFilterChain:    dropFilterChain,
 			DroppedAuth:           dropAuth,
-			DroppedTotal:          dropOverload + dropFull + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth,
+			DroppedUnsupported:    dropUnsupported,
+			DroppedTotal:          dropOverload + dropFull + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth + dropUnsupported,
 			PushedToClient:        g.messagesPushedToClient.Load(),
 			PushDroppedNoConn:     g.messagesPushDroppedNoConn.Load(),
 			Overloaded:            overloaded,

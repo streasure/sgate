@@ -61,9 +61,10 @@
    - 已完成：P1 单向 Kick 模型（loginserver 权威库 + KickService）+ P2 BatchValidate 周期安全网
    - 待做：多 zone 部署下的跨 zone 一致性验证；NAT 场景踢人口径
 
-3. **UDP 传输能力定位**
-   - 现状：UDP 为简化实现（无持久会话、虚拟 connectionID `udp_<addr>`、不支持同步路径）
-   - 待做：明确支持边界（哪些业务可走 UDP）、补齐限制文档与压测数据
+3. **UDP：WS 会话 + UDP 关联通道**（定位已完成，待设计稿评审）
+   - 已完成：定位为**预留通道** —— gnet UDP 不触发 `OnOpen`、无会话注册，原「投 pipeline 必然 unknown connection」的无效往返改为明确拒绝（回 `udp transport not supported` + `/stats` `droppedUnsupported` 计入 `droppedTotal`），补 `udp_reject_test` 回归与 README/architecture 边界文档
+   - 规划：WS 登录取一次性 token → 客户端 UDP socket 发 `ASSOCIATE` → 网关建 `connID ↔ 公网地址` 关联表 → 后续包按源地址反查真实 connID 复用现有 pipeline 全链路，回程 `sendUDPFrame`，关联生命周期挂 WS 会话（详见 architecture §4.4）
+   - 待做：设计稿评审（token 绑定防伪造、per-IP 关联上限、反放大、seq 去重 + 版本号覆盖、MTU≤1400B）→ 分阶段实现 → UDP 压测数据
 
 4. **Linux CI 与压测基线**
    - 问题：Windows 本地连接天花板约 16K，百万连接与吞吐压测无法在本机复现

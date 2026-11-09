@@ -116,6 +116,7 @@ type Gateway struct {
 	messagesDroppedIntegrity   atomic.Int64 // 完整性校验失败
 	messagesDroppedFilterChain atomic.Int64 // filter chain 中止
 	messagesDroppedAuth        atomic.Int64 // 认证拦截（缺少 serverID 或 userUUID）
+	messagesDroppedUnsupported atomic.Int64 // 传输不承载（UDP 业务消息）
 
 	// 连接生命周期指标
 	connectionDurationSum     atomic.Int64        // 连接总存活时长（毫秒），用于计算平均值

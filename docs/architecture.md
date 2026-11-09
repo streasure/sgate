@@ -234,6 +234,29 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
          （logic 直接读取原始 LoginGateReq，无 CmdLogicLoginReq/Ack 转换）
 ```
 
+### 4.4 UDP 边界与 WS+UDP 关联方案
+
+**现状（预留通道，不承载业务）**：`transports[].type: udp` 只注册监听与收包路径（`protocol/udp.go` → `handleUDPDatagram`）。
+
+- gnet UDP **不触发 `OnOpen`**（源码层面每个数据报新建 conn 对象），因此 `ConnectionManager` 中不存在、也无法存在对应连接
+- 过去把 `"udp_"+remoteAddr` 当 connectionID 投进 pipeline，阶段 2 必然 `unknown connection`——一次必然失败的完整往返（连 LoginGate 都过不去），且全仓无 UDP 测试
+- 现在在源 IP 限速 + 帧校验 + 解码之后**明确拒绝**：回一帧 `udp transport not supported`（垃圾包静默丢，控制回包放大），计数 `droppedUnsupported` 计入 `/stats` 的 `droppedTotal`；不建连接、不投 pipeline
+- 回归测试：`internal/gateway/udp_reject_test.go`
+
+**规划方案：WS 会话 + UDP 关联通道**（一个会话、两个通道，不给 UDP 单独建会话）
+
+```text
+1. WS/TCP 建连 → LoginGate 登录成功 → 取得一次性 udpToken
+2. 客户端自建 UDP socket（本地临时端口）→ 向网关固定 UDP 端口发 ASSOCIATE{udpToken, nonce}
+   （NAT 映射只能由客户端先发包建立：服务器无法主动开 UDP；客户端监听固定端口需端口映射，不可行）
+3. 网关验 token → 建关联表 connID ↔ (公网IP:port, lastSeen, seq) → 回 ASSOCIATE_OK
+4. 后续 UDP 包按源地址反查真实 connID → 复用现有 pipeline 全链路（鉴权/限流/过滤器/转发不变）
+5. 回程走 sendUDPFrame，必须从同一本地端口发出（NAT 按「服务器IP:端口」记账，换端口回包会被丢）
+6. WS 断开 / UDP 空闲超时 → 删除关联；NAT 保活靠客户端周期发包
+```
+
+安全与工程要点：token 绑定防源地址伪造、per-IP 关联数上限（防关联表耗尽）、未认证阶段反放大（回包 ≤ 来包）、seq 去重窗口、MTU ≤ 1400B 避免 IP 分片；可靠性分级——结算/掉落等丢不起的走 WS，移动/AOI 等高频可丢的走 UDP。改动全部落在 `internal/gateway`（`udp_handlers` + 一张关联表 + 回程分支），`backend`/`connection` 不动。
+
 ---
 
 ## 5. 并发与性能设计
