@@ -17,6 +17,7 @@
 | 连接级流控 | `protection.maxMessagesPerConn`（0=不限），pipeline 阶段 2.5 检查 |
 | 重连处理 | 重连时主动关闭旧连接 |
 | 分片化连接表 | ConnectionManager 分片 map；Group 成员无泄漏 |
+| 分片并发广播 | `BroadcastAll`/`broadcastGroup` 先快照再 32 worker 分片并发投递（共享 `sendToConnections`），百万连接广播不再阻塞 gRPC handler；返回仅保证「已分发」 |
 | 连接生命周期指标 | 平均时长 + P50/P95/P99（滑动窗口） |
 
 ### 鉴权与安全
@@ -36,6 +37,7 @@
 | --- | --- |
 | 热配置更新 | 限流阈值、黑名单、过载保护、JWT、灰度、流量镜像、降级、连接限制、连接级流控 |
 | 监控输出 | tlog 结构化日志、`/stats` HTTP API、`/debug/pprof/` |
+| 流量镜像 | `trafficMirror` 按 percent 稳定采样上行，经 `GatewayStream.OnData` 真实转发到独立测试环境 logic；目标故障指数退避（1s→30s）不阻塞主流程，`/stats` 输出 `mirrorForwarded/mirrorDropped/mirrorFailed` |
 | 速率采样 | `OnTick` 每秒采样 `msgRate`（Health 速率准确） |
 | WS 实现要点 | close 正确关 TCP、握手半包累积、分片重组、强制客户端 mask |
 | 多 TCP 连接并行 | `stream.connGroupCount`（默认 4），解除 HTTP/2 单连接写锁串行化 |
@@ -51,18 +53,21 @@
 
 ### P2：影响稳定性
 
-1. **广播性能优化**
-   - 问题：`BroadcastAll` 同步遍历所有连接，百万连接时广播一次可能导致秒级延迟
-   - 文件：`internal/backend/grpc_server.go`、`internal/connection/manager.go`
-   - 方案：广播改为异步分批投递，或按 zone 分片广播
-
-2. **消息可靠投递（ACK + 重传）**
+1. **消息可靠投递（ACK + 重传）**
    - 问题：当前 TCP 写失败直接丢弃。SLG 游戏对关键消息（战斗结果、资源变更）要求 at-least-once
    - 方案：消息 ACK + 重传机制，或逻辑服侧重试 + 幂等
 
-3. **封禁收敛遗留**
+2. **封禁收敛遗留**
    - 已完成：P1 单向 Kick 模型（loginserver 权威库 + KickService）+ P2 BatchValidate 周期安全网
    - 待做：多 zone 部署下的跨 zone 一致性验证；NAT 场景踢人口径
+
+3. **UDP 传输能力定位**
+   - 现状：UDP 为简化实现（无持久会话、虚拟 connectionID `udp_<addr>`、不支持同步路径）
+   - 待做：明确支持边界（哪些业务可走 UDP）、补齐限制文档与压测数据
+
+4. **Linux CI 与压测基线**
+   - 问题：Windows 本地连接天花板约 16K，百万连接与吞吐压测无法在本机复现
+   - 待做：Linux 环境的构建/压测 CI 基线，固化吞吐与连接数回归阈值
 
 ### P3：架构增强
 

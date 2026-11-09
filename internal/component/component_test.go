@@ -345,6 +345,7 @@ canary:
 trafficMirror:
   enabled: true
   percent: 100
+  targetAddr: "127.0.0.1:50099"
   queueSize: 64
   workers: 1
 degradation:

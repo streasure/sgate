@@ -385,6 +385,15 @@ func (c *Config) Validate() error {
 		// 空 secret时 HS256 用空键验签，任何知道此事实的人都能伪造任意用户令牌
 		return fmt.Errorf("jwtAuth.secret is required when jwtAuth.enabled=true")
 	}
+	if c.TrafficMirror.Enabled {
+		// 镜像目标缺失时采样只会静默丢弃，属配置错误而非可降级状态
+		if c.TrafficMirror.TargetAddr == "" {
+			return fmt.Errorf("trafficMirror.targetAddr is required when trafficMirror.enabled=true")
+		}
+		if c.TrafficMirror.Percent < 0 || c.TrafficMirror.Percent > 100 {
+			return fmt.Errorf("trafficMirror.percent (%d) must be in [0,100]", c.TrafficMirror.Percent)
+		}
+	}
 	for _, p := range c.Security.TrustedProxies {
 		if err := validateIPOrCIDR(p); err != nil {
 			return fmt.Errorf("security.trustedProxies %q: %w", p, err)

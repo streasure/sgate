@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
@@ -17,8 +18,8 @@ import (
 type TrafficMirror struct {
 	ctx        context.Context
 	mu         sync.RWMutex
-	percent    int    // 镜像比例 0-100
-	targetAddr string // 镜像目标地址（逻辑服务）
+	percent    int // 镜像比例 0-100
+	sender     *mirrorSender
 	queue      chan *types.FilterContext
 	stopCh     chan struct{}
 	stopOnce   sync.Once
@@ -26,19 +27,29 @@ type TrafficMirror struct {
 	enabled    atomic.Int32
 	dropped    atomic.Int64
 	forwarded  atomic.Int64
+	sendFailed atomic.Int64
 }
 
 // NewTrafficMirror 创建流量镜像器
 func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 	tm := &TrafficMirror{
-		ctx:        context.Background(),
-		percent:    cfg.Percent,
-		targetAddr: cfg.TargetAddr,
-		queue:      make(chan *types.FilterContext, max(cfg.QueueSize, 1024)),
-		stopCh:     make(chan struct{}),
+		ctx:     context.Background(),
+		percent: cfg.Percent,
+		queue:   make(chan *types.FilterContext, max(cfg.QueueSize, 1024)),
+		stopCh:  make(chan struct{}),
 	}
 	if cfg.Enabled {
 		tm.enabled.Store(1)
+		// 镜像目标缺失/非法时保持可运行（主流程不受影响），但所有采样都会计入 sendFailed
+		switch {
+		case cfg.TargetAddr == "":
+			tlog.Warn(tm.ctx, "traffic mirror enabled without targetAddr, sampled messages will be dropped")
+		default:
+			tm.sender = newMirrorSender(cfg.TargetAddr)
+			if tm.sender == nil {
+				tlog.Warn(tm.ctx, "traffic mirror invalid targetAddr, sampled messages will be dropped target=%s", cfg.TargetAddr)
+			}
+		}
 	}
 	// 启动 worker 异步发送镜像流量（避免阻塞主流程）
 	workers := cfg.Workers
@@ -91,7 +102,6 @@ func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
 		UserUUID:     fc.UserUUID,
 		Metadata:     gatewayutil.CopyMap(fc.Metadata),
 	}
-	clone.Mirrored = true
 	select {
 	case tm.queue <- clone:
 		tm.forwarded.Add(1)
@@ -106,19 +116,38 @@ func (tm *TrafficMirror) worker() {
 		case <-tm.stopCh:
 			return
 		case fc := <-tm.queue:
-			// 此处接入镜像目标（实现简化：仅日志记录）
-			// 实际生产可调用 mirror 专用 LogicClient
-			tlog.Debug(tm.ctx, "traffic mirror route=%s conn=%s target=%s",
-				fc.Route,
-				fc.ConnectionID,
-				tm.targetAddr)
+			tm.forward(fc)
 		}
+	}
+}
+
+// forward 把采样入队的上下文转成 StreamData 推给镜像目标。
+// 镜像只复制客户端上行：SessionId/Cmd/Data/UserKey/ClientIp 即目标侧重放所需全部字段；
+// Route 是本侧路由键，StreamData 无对应字段（目标侧按 cmd 分发），不透传。
+// 发送失败计入 sendFailed（与队列满丢弃 dropped 分开计），不回压主流程。
+func (tm *TrafficMirror) forward(fc *types.FilterContext) {
+	if tm.sender == nil {
+		tm.sendFailed.Add(1)
+		return
+	}
+	err := tm.sender.Send(&protoGw.StreamData{
+		SessionId: fc.ConnectionID,
+		UserKey:   fc.UserUUID,
+		Cmd:       fc.Cmd,
+		Data:      fc.Data,
+		ClientIp:  fc.RemoteIP,
+	})
+	if err != nil {
+		tm.sendFailed.Add(1)
 	}
 }
 
 func (tm *TrafficMirror) Stop() {
 	tm.stopOnce.Do(func() { close(tm.stopCh) })
 	tm.workersWG.Wait()
+	if tm.sender != nil {
+		tm.sender.Close()
+	}
 }
 
 func (tm *TrafficMirror) UpdatePercent(p int) {
@@ -129,6 +158,12 @@ func (tm *TrafficMirror) UpdatePercent(p int) {
 
 func (tm *TrafficMirror) Stats() (forwarded, dropped int64) {
 	return tm.forwarded.Load(), tm.dropped.Load()
+}
+
+// SendFailed 发送失败数：目标不可达或处于退避窗口而未投递的消息。
+// 与队列满丢弃（dropped）分开计，便于区分「目标故障」与「消费不过来」。
+func (tm *TrafficMirror) SendFailed() int64 {
+	return tm.sendFailed.Load()
 }
 
 func init() {

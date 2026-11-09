@@ -658,10 +658,14 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 		tlog.Info(g.ctx, "canary config updated percent=%d", newCfg.Canary.Percent)
 	}
 
-	// 动态更新流量镜像比例
+	// 动态更新流量镜像比例：只热更 percent —— enabled/targetAddr 决定发送端
+	// 连接，随组件装配一次性生效，与运行态不一致时告警（否则"改了没生效"不可见）
 	if g.trafficMirror != nil && newCfg.TrafficMirror.Enabled {
 		g.trafficMirror.UpdatePercent(newCfg.TrafficMirror.Percent)
 		tlog.Info(g.ctx, "traffic mirror updated percent=%d", newCfg.TrafficMirror.Percent)
+	} else if running := g.trafficMirror != nil; running != newCfg.TrafficMirror.Enabled {
+		tlog.Warn(g.ctx, "trafficMirror.enabled not hot-applied, restart required running=%v configured=%v",
+			running, newCfg.TrafficMirror.Enabled)
 	}
 
 	// 动态更新降级规则

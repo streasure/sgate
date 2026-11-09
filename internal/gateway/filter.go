@@ -90,10 +90,6 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, connObj *connection.Connectio
 			return nil, false
 		}
 	}
-	// 镜像副作用标记
-	if fcx.Mirrored && g.trafficMirror != nil {
-		g.trafficMirror.Mirror(fcx)
-	}
 	// 持久化 JWT jti/exp 到连接，供 logout/封禁撤销
 	if jti := fcx.Metadata["jwt.jti"]; jti != "" {
 		if connObj != nil {

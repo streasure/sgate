@@ -65,6 +65,20 @@ loginValidation:
 waf:
   enabled: false
 
+# 流量镜像：按 percent 采样客户端上行（connectionID 哈希稳定采样），
+# 经 GatewayStream.OnData 双向流复制到 targetAddr 指定的**独立测试环境 logic**。
+# 镜像流在目标侧与真实网关无异、会绑定 session 并承载其回包路由，
+# 指向生产 logic 会劫持同名会话 —— 该前提无法由配置校验识别，只能部署保证。
+# 发送端队列满即丢、目标故障指数退避（1s→30s），均不阻塞主流程；
+# 热更新仅 percent 生效（enabled/targetAddr 需重启，运行态不一致时打 Warn）；
+# /stats 输出 mirrorForwarded（入队）/ mirrorDropped（队列满）/ mirrorFailed（目标不可达）。
+trafficMirror:
+  enabled: false       # enabled=true 时 targetAddr 必填，percent 必须在 [0,100]
+  percent: 0
+  targetAddr: ""       # 如 "127.0.0.1:50061"（测试环境 logic 的 gRPC 地址）
+  queueSize: 1024
+  workers: 2
+
 pipeline:
   asyncEnabled: false      # A/B 实测：同步 498K > 异步 482K（异步另有 3% 队列丢弃），默认同步
   workerQueueSize: 262144  # 覆盖默认 65536（高吞吐建议）；仅 asyncEnabled=true 时生效

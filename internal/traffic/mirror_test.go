@@ -122,9 +122,6 @@ func TestTrafficMirror_ClonesContext(t *testing.T) {
 	if queued == orig {
 		t.Fatal("queued context is the original pointer, want a clone")
 	}
-	if !queued.Mirrored {
-		t.Error("clone Mirrored = false, want true")
-	}
 	if queued.ConnectionID != orig.ConnectionID || queued.Route != orig.Route ||
 		queued.Cmd != orig.Cmd || queued.UserUUID != orig.UserUUID || queued.RemoteIP != orig.RemoteIP {
 		t.Errorf("clone fields mismatch: %+v", queued)

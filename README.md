@@ -446,7 +446,7 @@ loginValidation:
 | `tls` | `enabled`, `certFile`, `keyFile` | TLS 配置（gnet v2 当前不支持 WSS） |
 | `jwtAuth` | `enabled`, `secret` | JWT 鉴权 |
 | `canary` | `enabled`, `percent` | 灰度流量 |
-| `trafficMirror` | `enabled`, `targetAddr` | 流量镜像 |
+| `trafficMirror` | `enabled`, `percent`, `targetAddr` | 流量镜像：按 percent 稳定采样客户端上行，经 `GatewayStream.OnData` 真实转发到**独立测试环境 logic**（`enabled=true` 时 `targetAddr` 必填；队列满或目标故障只丢弃不阻塞主流程，`/stats` 输出 `mirrorForwarded`/`mirrorDropped`/`mirrorFailed`） |
 | `otelTracer` | `enabled`, `endpoint` | OpenTelemetry 链路追踪 |
 | `configCenter` | `enabled` | 配置中心 |
 | `alert` | `enabled`, `webhooks` | 告警 Webhook |

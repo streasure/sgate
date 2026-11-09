@@ -105,6 +105,10 @@ type statsPayload struct {
 	ConnectionDurationP95Ms float64 `json:"connectionDurationP95Ms"`     // 连接存活时长 P95（毫秒）
 	ConnectionDurationP99Ms float64 `json:"connectionDurationP99Ms"`     // 连接存活时长 P99（毫秒）
 	IPConnectionCount       int     `json:"ipConnectionCount,omitempty"` // 当前 IP 连接数（调试用）
+	// 流量镜像：forwarded=入队，dropped=队列满丢弃，failed=目标不可达/退避未投递
+	MirrorForwarded int64 `json:"mirrorForwarded"`
+	MirrorDropped   int64 `json:"mirrorDropped"`
+	MirrorFailed    int64 `json:"mirrorFailed"`
 }
 
 func (g *Gateway) StartStatsServer(addr string) {
@@ -149,6 +153,10 @@ func (g *Gateway) StartStatsServer(addr string) {
 		}
 		if g.waf != nil {
 			stats.WAFBlocked = g.waf.GetBlockedCount()
+		}
+		if g.trafficMirror != nil {
+			stats.MirrorForwarded, stats.MirrorDropped = g.trafficMirror.Stats()
+			stats.MirrorFailed = g.trafficMirror.SendFailed()
 		}
 		if g.latencyTracker != nil {
 			latStats := g.latencyTracker.GetStats()

@@ -34,8 +34,6 @@ type FilterContext struct {
 	// 结果控制
 	Abort      bool   // 中止后续过滤器与转发
 	DropReason string // 中止原因
-	// 镜像副作用
-	Mirrored bool
 }
 
 // Filter SPI 过滤器接口
