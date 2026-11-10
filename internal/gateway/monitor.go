@@ -110,6 +110,11 @@ type statsPayload struct {
 	MirrorForwarded int64 `json:"mirrorForwarded"`
 	MirrorDropped   int64 `json:"mirrorDropped"`
 	MirrorFailed    int64 `json:"mirrorFailed"`
+	// WS+UDP 关联通道埋点（docs/udp-ws-design.md §8.4）：
+	// SweptWSSurviving = 关联被空闲淘汰时 WS 会话仍存活（stale 关联缺口签名，
+	// 方案 B 触发条件 = 该值 / 会话数超阈值）；UnassociatedDrops = 未关联源地址丢包。
+	UDPSweptWSSurviving  int64 `json:"udpSweptWsSurviving"`
+	UDPUnassociatedDrops int64 `json:"udpUnassociatedDrops"`
 }
 
 func (g *Gateway) StartStatsServer(addr string) {
@@ -153,6 +158,8 @@ func (g *Gateway) StartStatsServer(addr string) {
 			MemPercent:            memPct,
 			OverloadDropped:       dropped,
 			ActiveConnections:     g.connectionsActive.Load(),
+			UDPSweptWSSurviving:   g.udpAssocSweptWSSurviving.Load(),
+			UDPUnassociatedDrops:  g.udpAssocUnassociatedDrops.Load(),
 		}
 		if g.waf != nil {
 			stats.WAFBlocked = g.waf.GetBlockedCount()

@@ -54,6 +54,13 @@ func (c *udpMockConn) sentToCopy() net.Addr {
 	return c.sentTo
 }
 
+// writtenCopy 加锁拷贝已写入字节（错误帧断言用）。
+func (c *udpMockConn) writtenCopy() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.written...)
+}
+
 // decodeFirstFrame 解析 written 中第一个 4B 长度前缀帧。
 func decodeFirstFrame(t *testing.T, b []byte) *protoGw.StreamData {
 	t.Helper()
@@ -120,7 +127,7 @@ func TestUDPTokenExpired(t *testing.T) {
 	if _, err := gw.udpAssoc.issueToken(connID, -time.Second); err != nil {
 		t.Fatalf("issueToken: %v", err)
 	}
-	removed := gw.udpAssoc.sweep(time.Now().UnixMilli(), config.DefaultUDPIdleDuration.Milliseconds())
+	removed := gw.udpAssoc.sweep(time.Now().UnixMilli(), config.DefaultUDPIdleDuration.Milliseconds(), nil)
 	if removed != 0 {
 		t.Fatalf("sweep removed assoc=%d, want 0 (only tokens swept)", removed)
 	}
@@ -329,7 +336,7 @@ func TestUDPAssocIdleSweep(t *testing.T) {
 		t.Fatal("create 2 failed")
 	}
 
-	removed := gw.udpAssoc.sweep(time.Now().UnixMilli(), idle)
+	removed := gw.udpAssoc.sweep(time.Now().UnixMilli(), idle, nil)
 	if removed != 1 {
 		t.Fatalf("sweep removed=%d, want 1", removed)
 	}

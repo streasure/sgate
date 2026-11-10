@@ -23,9 +23,10 @@ const errUDPUnsupported = "udp transport not supported"
 // 解码出合法消息的包回一帧语义诚实的错误（垃圾包静默丢，防回包放大），并计数
 // droppedUnsupported 供 /stats 观测。
 //
-// udp.enabled=true（关联通道，docs/udp-ws-design.md §5.2）：只放行 ASSOCIATE
-// （验一次性 token 建关联）；其余包按源地址反查关联，未关联一律静默丢，已关联
-// 更新活性后进入阶段 2 的上行接入点（seq 去重 → pipeline）。错误帧跟随请求通道，
+// udp.enabled=true（关联通道，docs/udp-ws-design.md §5.2/§6 阶段 2）：只放行
+// ASSOCIATE（验一次性 token 建关联）；其余包按源地址反查关联，未关联一律静默丢
+// （计数 unassociatedDrops，§8.4 埋点），已关联则 seq 去重后以真实 WS connID 投递
+// 现有 pipeline 全链路（鉴权/限流/过滤器/转发一行不改）。错误帧跟随请求通道，
 // 不参与号段路由。
 func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 	remoteAddr := c.RemoteAddr()
@@ -72,7 +73,15 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 		return gnet.None
 	}
 
+	// MTU 上限（设计 §5.6：单包超限丢弃，避免 IP 分片丢包率飙升）。
+	// 仅开启态校验——关闭态行为必须与 #3 逐字节一致（含超大包回错误帧）。
+	if len(data) > g.udpMaxDatagram() {
+		routes.PutClientMessage(message)
+		return gnet.None
+	}
+
 	if message.Cmd == routes.CmdUdpAssociate {
+		g.messagesReceived.Add(1)
 		g.handleAssociate(c, remoteAddr, message)
 		routes.PutClientMessage(message)
 		return gnet.None
@@ -80,17 +89,58 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 
 	// 非 ASSOCIATE：按源地址反查关联。未关联的 UDP 包一律不处理（静默丢，
 	// 不回错误帧：源地址未授权，回包既无处可去又构成放大面）。
+	// 计数 unassociatedDrops：NAT 重绑后旧地址失联的旁证埋点（§8.4）。
 	assoc, found := g.udpAssoc.lookupByAddr(remoteAddr.String())
 	if !found {
+		g.udpAssocUnassociatedDrops.Add(1)
 		routes.PutClientMessage(message)
 		return gnet.None
 	}
+	g.messagesReceived.Add(1)
+	// 任何收包（含重复包）都刷新活性：包到达即证明 NAT 映射仍存活。
+	// 注意只更新关联的 lastSeen，不 TouchActive 会话——UDP 不参与会话存活判据（§5.7）。
 	assoc.lastSeen.Store(time.Now().UnixMilli())
 
-	// 阶段 2 接入点：seq 去重（assoc.seqBase 滑动窗口）→
-	// pipelineTask{connectionID: assoc.connID, isUDP: true, udpRemoteAddr} → 现有 worker pool。
-	// 阶段 1 尚未承载业务上行：已关联包更新活性后丢弃。
+	// 上行 seq 滑动窗口去重（§4.3）：重复/过旧静默丢；seq<=0 视为客户端
+	// 未携带序号（向后兼容），放行不计。
+	if assoc.seqDuplicate(message.SeqId, g.udpSeqWindow()) {
+		routes.PutClientMessage(message)
+		return gnet.None
+	}
+
+	// 阶段 2：以真实 WS connID 投递现有 worker pool。pipeline 对"会话已认证"
+	// 的门槛天然生效（GetConnection(connID) 未命中即拒），不引入第二套安全路径。
+	// 错误回程由 processMessage 的 isUDP 分支走 sendUDPFrame（跟随请求通道）。
+	if g.pipelineWorkerPool != nil {
+		// 深拷贝帧体：gnet UDP 读缓冲在 OnTraffic 返回后复用。
+		// 传帧体（不含 4B 长度头）与 TCP/WS 路径一致（WAF 检查看到同样的字节）。
+		frame := data[4:]
+		dataCopy := getMsgBuf(len(frame))
+		copy(dataCopy, frame)
+		task := pipelineTaskPool.Get().(*pipelineTaskData)
+		*task = pipelineTaskData{
+			conn:          c,
+			data:          dataCopy,
+			message:       message,
+			connectionID:  assoc.connID,
+			isUDP:         true,
+			udpRemoteAddr: assoc.publicAddr,
+		}
+		if !g.pipelineWorkerPool.Submit(task) {
+			routes.PutClientMessage(task.message)
+			putMsgBuf(task.data)
+			pipelineTaskPool.Put(task)
+		}
+		return gnet.None
+	}
+
+	// 同步路径：worker pool 未启动（测试直建网关）
+	result := g.pipeline.Process(c, data[4:], message, assoc.connID)
 	routes.PutClientMessage(message)
+	if result.Error != nil {
+		_ = sendUDPFrame(c, assoc.publicAddr, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+	}
+	// result.Action 忽略：UDP 无连接可关（applyAsyncResult 的 isUDP 分支同义）
 	return gnet.None
 }
 

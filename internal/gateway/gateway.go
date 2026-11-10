@@ -118,6 +118,10 @@ type Gateway struct {
 	messagesDroppedAuth        atomic.Int64 // 认证拦截（缺少 serverID 或 userUUID）
 	messagesDroppedUnsupported atomic.Int64 // 传输不承载（UDP 业务消息）
 
+	// WS+UDP 关联通道埋点（docs/udp-ws-design.md §8.4，方案 B 数据驱动触发条件）。
+	udpAssocSweptWSSurviving  atomic.Int64 // 关联空闲淘汰时 WS 会话仍存活（stale 关联缺口签名）
+	udpAssocUnassociatedDrops atomic.Int64 // 已开启 UDP 时未关联源地址丢包（源地址漂移旁证）
+
 	// udpAssoc WS+UDP 关联表（docs/udp-ws-design.md §5.1）。
 	// newGateway 无条件初始化（方法可安全调用），实际收发受 udp.enabled 控制。
 	udpAssoc *udpAssocTable

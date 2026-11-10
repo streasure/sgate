@@ -40,10 +40,18 @@ type udpAssociation struct {
 	// release 不关 fd/pc、不动 isDatagram，见 gnet v2.9.7 connection_unix/windows）
 
 	token     string       // 已消费的一次性 token（审计/防重放记录）
-	seqBase   int64        // 关联时分配的上行 seq 基线（回 Ack，阶段 2 去重窗口起点）
+	seqBase   int64        // 关联时分配的上行 seq 基线（回 Ack，客户端起始序号）
 	stateVer  atomic.Int64 // 下行状态版本（单调递增，阶段 3 生效）
 	lastSeen  atomic.Int64 // 最后收包时间（UnixMilli，空闲淘汰依据）
 	createdAt int64        // 创建时间（UnixMilli）
+
+	// 上行 seq 滑动窗口去重（§4.3，阶段 2）。位图位 i 对应 seq = seqMax - i，
+	// 窗口大小 = 字长 × 64（首包时按 config.seqWindow 分配，向上取整 64 倍数）。
+	// 正常情况下同源地址数据报在同一 event loop 串行处理，锁不竞争；
+	// seqMu 防御 reuseport 分发异常/未来多 loop 读写。
+	seqMu    sync.Mutex
+	seqMax   int64    // 窗口内最大已见 seq
+	seqWords []uint64 // nil = 尚未初始化（首包直接放行并定基）
 }
 
 // udpAssocTable 关联表：两个收包索引 + 结构性辅助表（mu 保护）。
@@ -183,14 +191,20 @@ func (t *udpAssocTable) lookupByAddr(addrKey string) (*udpAssociation, bool) {
 }
 
 // sweep 淘汰空闲关联（NAT 过期后关联无意义）与过期 token，返回删除的关联数。
-func (t *udpAssocTable) sweep(now, idleMillis int64) int {
+// onIdleRemoved 对每个被空闲淘汰的关联回调（持有表锁内调用，回调只做无锁读——
+// §8.4 埋点：淘汰时 WS 会话仍存活 = stale 关联缺口签名；nil 表示不关心）。
+func (t *udpAssocTable) sweep(now, idleMillis int64, onIdleRemoved func(connID string)) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	removed := 0
 	t.byConnID.Range(func(key, value any) bool {
 		a := value.(*udpAssociation)
 		if now-a.lastSeen.Load() > idleMillis {
-			t.removeLocked(key.(string), a)
+			connID := key.(string)
+			if onIdleRemoved != nil {
+				onIdleRemoved(connID)
+			}
+			t.removeLocked(connID, a)
 			removed++
 		}
 		return true
@@ -214,7 +228,7 @@ func (t *udpAssocTable) snapshot() (assoc, tokens int) {
 }
 
 // cloneUDPAddr 防御拷贝：gnet release 会把 remoteAddr 的 Zone 归还对象池，
-// 关联长期持有回程地址，不能与 gnet 内部别名共享底层。
+// 关联长期持有回程目标，不能与 gnet 内部别名共享底层。
 func cloneUDPAddr(a net.Addr) net.Addr {
 	if u, ok := a.(*net.UDPAddr); ok {
 		ip := make(net.IP, len(u.IP))
@@ -222,6 +236,68 @@ func cloneUDPAddr(a net.Addr) net.Addr {
 		return &net.UDPAddr{IP: ip, Port: u.Port, Zone: u.Zone}
 	}
 	return a
+}
+
+// seqDuplicate 上行 seq 滑动窗口去重：返回 true = 重复或过旧（应静默丢弃）。
+// 位图位 i 对应 seq = seqMax - i，窗口 = 字长×64（首包按 config.seqWindow
+// 向上取整 64 倍数分配一次，之后热更不重排窗口）。
+// seq <= 0 视为客户端未携带序号（向后兼容不设 seq 的客户端），不参与去重。
+// 仅由收包路径调用；正常同源地址包在同一 event loop 串行，seqMu 防御并发。
+func (a *udpAssociation) seqDuplicate(seq int64, window int) bool {
+	if seq <= 0 {
+		return false
+	}
+	a.seqMu.Lock()
+	defer a.seqMu.Unlock()
+	if a.seqWords == nil {
+		if window < 64 {
+			window = 64
+		}
+		a.seqWords = make([]uint64, (window+63)/64)
+		a.seqMax = seq
+		a.seqWords[0] = 1 // 本包已见（位 0 = seqMax）
+		return false
+	}
+	bits := uint64(len(a.seqWords) * 64)
+	if seq > a.seqMax {
+		a.shlSeqWindow(uint(seq - a.seqMax))
+		a.seqMax = seq
+		a.seqWords[0] |= 1
+		return false
+	}
+	gap := uint64(a.seqMax - seq)
+	if gap >= bits {
+		return true // 窗口外的旧包：无法判定，按过旧丢弃（乱序幅度超窗口视为无效）
+	}
+	if a.seqWords[gap/64]&(1<<(gap%64)) != 0 {
+		return true // 已见（重放/重复）
+	}
+	a.seqWords[gap/64] |= 1 << (gap % 64)
+	return false
+}
+
+// shlSeqWindow 位图整体前移 n 位（更高下标 = 更旧的 seq；滑出窗口的位丢弃）。
+// 调用方须持 seqMu。
+func (a *udpAssociation) shlSeqWindow(n uint) {
+	words := len(a.seqWords)
+	if n >= uint(words*64) {
+		for i := range a.seqWords {
+			a.seqWords[i] = 0
+		}
+		return
+	}
+	wordShift := int(n / 64)
+	bitShift := n % 64
+	for i := words - 1; i >= 0; i-- {
+		var v uint64
+		if src := i - wordShift; src >= 0 {
+			v = a.seqWords[src] << bitShift
+			if bitShift > 0 && src > 0 {
+				v |= a.seqWords[src-1] >> (64 - bitShift)
+			}
+		}
+		a.seqWords[i] = v
+	}
 }
 
 // randomSeqBase 关联时分配的上行 seq 基线（crypto/rand 63 位，客户端从该值递增）。
@@ -251,6 +327,22 @@ func (g *Gateway) udpAssocLimits() (maxPerIP, maxAssoc int) {
 		}
 	}
 	return maxPerIP, maxAssoc
+}
+
+// udpSeqWindow 热读上行 seq 去重窗口大小。
+func (g *Gateway) udpSeqWindow() int {
+	if cfg := g.cfg.Load(); cfg != nil && cfg.UDP.SeqWindow > 0 {
+		return cfg.UDP.SeqWindow
+	}
+	return config.DefaultUDPSeqWindow
+}
+
+// udpMaxDatagram 热读单数据报上限（MTU 安全值，设计 §5.6）。
+func (g *Gateway) udpMaxDatagram() int {
+	if cfg := g.cfg.Load(); cfg != nil && cfg.UDP.MaxDatagram > 0 {
+		return cfg.UDP.MaxDatagram
+	}
+	return config.DefaultUDPMaxDatagram
 }
 
 // udpAssociateTTL 热读一次性 token 有效期。
@@ -305,6 +397,17 @@ func (g *Gateway) releaseUDPAssoc(connID string) {
 	}
 }
 
+// udpAssocSweepOnce 执行一轮空闲清扫（janitor 与测试共用入口）。
+// §8.4 埋点：关联网关会话仍存活的关联被空闲淘汰 = stale 关联缺口签名
+// （NAT 重绑/UDP 静默但 WS 还活着），计数 udpAssocSweptWSSurviving。
+func (g *Gateway) udpAssocSweepOnce(now int64, idle time.Duration) int {
+	return g.udpAssoc.sweep(now, idle.Milliseconds(), func(connID string) {
+		if g.connectionManager.GetConnection(connID) != nil {
+			g.udpAssocSweptWSSurviving.Add(1)
+		}
+	})
+}
+
 // udpAssocJanitor 周期淘汰空闲关联与过期 token。
 // 无条件启动：空表扫描开销可忽略，且不依赖 udp.enabled 状态（热更开启时
 // 清扫已在运行）；单轮异常由 panicutil.GoLoop 退避重启。
@@ -329,8 +432,9 @@ func (g *Gateway) udpAssocJanitor() {
 		}
 
 		now := time.Now().UnixMilli()
-		if n := g.udpAssoc.sweep(now, idle.Milliseconds()); n > 0 {
-			tlog.Info(g.ctx, "udp assoc idle sweep removed=%d idleTimeout=%s", n, idle)
+		if n := g.udpAssocSweepOnce(now, idle); n > 0 {
+			tlog.Info(g.ctx, "udp assoc idle sweep removed=%d idleTimeout=%s sweptWsSurviving=%d",
+				n, idle, g.udpAssocSweptWSSurviving.Load())
 		}
 	}
 }
