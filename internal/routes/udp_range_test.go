@@ -38,6 +38,7 @@ func TestReliableCmdsOutsideUDPRange(t *testing.T) {
 		"CmdKickNotify":    CmdKickNotify,
 		"CmdHeartbeatReq":  CmdHeartbeatReq,
 		"CmdUserOffline":   CmdUserOffline,
+		"CmdMsgAck":        CmdMsgAck,
 		"CmdPushBatch":     CmdPushBatch,
 	}
 	for name, cmd := range reliable {

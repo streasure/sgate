@@ -29,6 +29,7 @@ func TestCmdSymmetryWithEnums(t *testing.T) {
 		{"kick_notify", CmdKickNotify, enums.Cmd_CMD_KICK_NOTIFY},
 		{"heartbeat_req", CmdHeartbeatReq, enums.Cmd_CMD_HEARTBEAT_REQ},
 		{"user_offline", CmdUserOffline, enums.Cmd_CMD_USER_OFFLINE_NTF},
+		{"msg_ack", CmdMsgAck, enums.Cmd_CMD_MSG_ACK},
 		// UDP 传输控制命令（1,200,000-1,299,999 号段，两侧同名同值）
 		{"udp_associate", CmdUdpAssociate, enums.Cmd_CMD_UDP_ASSOCIATE},
 		{"udp_associate_ack", CmdUdpAssociateAck, enums.Cmd_CMD_UDP_ASSOCIATE_ACK},

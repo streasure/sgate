@@ -52,6 +52,7 @@ const (
 	CmdKickNotify    int32 = 1100009 // 踢下线通知推送（先推后断，body 为 logic.KickNotify）
 	CmdHeartbeatReq  int32 = 1100010 // 心跳请求
 	CmdUserOffline   int32 = 1100012 // 用户下线通知
+	CmdMsgAck        int32 = 1100013 // 可靠推送端到端 ACK（C→L，body 为 logic.MsgAck）
 	CmdPushBatch     int32 = 9000002 // 批量推送命令
 )
 
