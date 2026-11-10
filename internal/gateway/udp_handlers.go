@@ -158,7 +158,8 @@ func (g *Gateway) handleAssociate(c gnet.Conn, remoteAddr net.Addr, message *pro
 	if !ok {
 		return // 未知 / 已过期 / 重放（一次性，消费即失效）
 	}
-	if g.connectionManager.GetConnection(connID) == nil {
+	connObj := g.connectionManager.GetConnection(connID)
+	if connObj == nil {
 		return // 会话已死：token 作废
 	}
 	maxPerIP, maxAssoc := g.udpAssocLimits()
@@ -166,6 +167,9 @@ func (g *Gateway) handleAssociate(c gnet.Conn, remoteAddr net.Addr, message *pro
 	if assoc == nil {
 		return // per-IP / 关联总量超限
 	}
+	// 注入下行通道：此后该会话号段内下行走 SendByCmd → SendUDP。
+	// 关联删除/失效后 SendUDP 返回错误，SendByCmd 自动回落 WS，注入无需清除。
+	connObj.SetUDPDownlink(g)
 
 	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {

@@ -190,6 +190,16 @@ func (t *udpAssocTable) lookupByAddr(addrKey string) (*udpAssociation, bool) {
 	return v.(*udpAssociation), true
 }
 
+// lookupByConnID 按会话反查关联（下行 SendUDP 用，无锁读）。
+// 未关联返回 false，调用方回落 WS。
+func (t *udpAssocTable) lookupByConnID(connID string) (*udpAssociation, bool) {
+	v, ok := t.byConnID.Load(connID)
+	if !ok {
+		return nil, false
+	}
+	return v.(*udpAssociation), true
+}
+
 // sweep 淘汰空闲关联（NAT 过期后关联无意义）与过期 token，返回删除的关联数。
 // onIdleRemoved 对每个被空闲淘汰的关联回调（持有表锁内调用，回调只做无锁读——
 // §8.4 埋点：淘汰时 WS 会话仍存活 = stale 关联缺口签名；nil 表示不关心）。
@@ -397,6 +407,16 @@ func (g *Gateway) releaseUDPAssoc(connID string) {
 	}
 }
 
+// udpIdleDuration 热读空闲淘汰时长（janitor 清扫与下行新鲜度条件共用同一配置源）。
+func (g *Gateway) udpIdleDuration() time.Duration {
+	if cfg := g.cfg.Load(); cfg != nil && cfg.UDP.IdleTimeout != "" {
+		if d, err := time.ParseDuration(cfg.UDP.IdleTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return config.DefaultUDPIdleDuration
+}
+
 // udpAssocSweepOnce 执行一轮空闲清扫（janitor 与测试共用入口）。
 // §8.4 埋点：关联网关会话仍存活的关联被空闲淘汰 = stale 关联缺口签名
 // （NAT 重绑/UDP 静默但 WS 还活着），计数 udpAssocSweptWSSurviving。
@@ -413,12 +433,7 @@ func (g *Gateway) udpAssocSweepOnce(now int64, idle time.Duration) int {
 // 清扫已在运行）；单轮异常由 panicutil.GoLoop 退避重启。
 func (g *Gateway) udpAssocJanitor() {
 	for {
-		idle := config.DefaultUDPIdleDuration
-		if cfg := g.cfg.Load(); cfg != nil && cfg.UDP.IdleTimeout != "" {
-			if d, err := time.ParseDuration(cfg.UDP.IdleTimeout); err == nil && d > 0 {
-				idle = d
-			}
-		}
+		idle := g.udpIdleDuration()
 		interval := idle / 2
 		if interval < time.Second {
 			interval = time.Second

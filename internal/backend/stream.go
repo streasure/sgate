@@ -390,15 +390,43 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			if err != nil {
 				return
 			}
+			// UDP 号段广播逐连接 SendByCmd 分流（各会话关联状态独立），
+			// 且不进合批（决策⑤：UDP 不走 coalescer）。
+			isUDP := routes.IsUDPCmd(msg.Cmd)
 			lc.gateway.GetConnectionManager().ForEach(func(conn *connection.Connection) bool {
-				if lc.gateway.GetShardedCoalescer() != nil {
+				if !isUDP && lc.gateway.GetShardedCoalescer() != nil {
 					lc.gateway.GetShardedCoalescer().AddMulti(conn.ID(), respData, conn)
 					lc.gateway.AddPushedToClient(1)
-				} else if sendErr := conn.Send(respData); sendErr == nil {
+				} else if sendErr := conn.SendByCmd(msg.Cmd, respData); sendErr == nil {
 					lc.gateway.AddPushedToClient(1)
 				}
 				return true
 			})
+			return
+		}
+
+		// UDP 号段消息入批前分流（§5.3）：PushBatch 外层帧是 CmdPushBatch，
+		// 先打包再判断会把 UDP 消息裹进 WS 帧；且 UDP 一包一消息，不等批量
+		// 冲刷立即发送（状态消息凑批会毁掉时效）。非批量单条推送同样在此分流，
+		// 下方分支只处理 WS 消息。
+		if routes.IsUDPCmd(msg.Cmd) {
+			conn := lc.gateway.GetConnectionManager().GetConnection(msg.SessionId)
+			if conn == nil {
+				lc.gateway.AddPushDroppedNoConn(1)
+				return
+			}
+			if msg.UserKey != "" {
+				lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
+			}
+			responseData, err := routes.MarshalClientMessage(msg)
+			if err != nil {
+				return
+			}
+			if sendErr := conn.SendByCmd(msg.Cmd, responseData); sendErr != nil {
+				tlog.Warn(ctx, "udp push to client failed sessionID=%s cmd=%d error=%v", msg.SessionId, msg.Cmd, sendErr)
+			} else {
+				lc.gateway.AddPushedToClient(1)
+			}
 			return
 		}
 
@@ -421,7 +449,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 					if lc.gateway.GetShardedCoalescer() != nil {
 						lc.gateway.GetShardedCoalescer().AddMulti(msg.SessionId, responseData, conn)
 						lc.gateway.AddPushedToClient(1)
-					} else if sendErr := conn.Send(responseData); sendErr != nil {
+					} else if sendErr := conn.SendByCmd(msg.Cmd, responseData); sendErr != nil {
 						tlog.Warn(ctx, "push to client failed sessionID=%s cmd=%d error=%v", msg.SessionId, msg.Cmd, sendErr)
 					} else {
 						lc.gateway.AddPushedToClient(1)

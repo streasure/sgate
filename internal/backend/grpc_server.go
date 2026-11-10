@@ -143,7 +143,7 @@ func (s *GRPCServer) SendToClient(_ context.Context, req *protoGw.SendToClientRe
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.Send(data); err != nil {
+	if err := conn.SendByCmd(req.GetCmd(), data); err != nil {
 		return nil, err
 	}
 	s.gateway.AddPushedToClient(1)
@@ -187,7 +187,7 @@ func (s *GRPCServer) BroadcastAll(ctx context.Context, req *protoGw.BroadcastAll
 	if len(matched) == 0 {
 		return &protoGw.BroadcastAllAck{}, nil
 	}
-	sent, failed, firstErr := sendToConnections(matched, data)
+	sent, failed, firstErr := sendToConnections(req.GetCmd(), matched, data)
 	s.gateway.AddPushedToClient(sent)
 	if failed > 0 {
 		tlog.Warn(ctx, "broadcast all partial sent=%d failed=%d total=%d", sent, failed, len(matched))
@@ -200,8 +200,9 @@ func (s *GRPCServer) BroadcastAll(ctx context.Context, req *protoGw.BroadcastAll
 
 // sendToConnections 分片并发入队（pattern 同 maintenance.kickConnectionsAsync，32 worker）。
 // Send 内部走 AsyncWrite，真正写盘在 gnet loop；并发只加速遍历与入队。
+// cmd 用于 SendByCmd 号段分流（唯一判定点在 connection.SendByCmd，此处不写条件）。
 // 返回成功/失败计数与首个错误；调用方返回时仅保证「已分发」，不等待全部写盘完成。
-func sendToConnections(conns []*connection.Connection, data []byte) (sent, failed int64, firstErr error) {
+func sendToConnections(cmd int32, conns []*connection.Connection, data []byte) (sent, failed int64, firstErr error) {
 	if len(conns) == 0 {
 		return 0, 0, nil
 	}
@@ -220,7 +221,7 @@ func sendToConnections(conns []*connection.Connection, data []byte) (sent, faile
 		chunk := conns[lo:hi]
 		wg.Go(func() {
 			for _, conn := range chunk {
-				if err := conn.Send(data); err != nil {
+				if err := conn.SendByCmd(cmd, data); err != nil {
 					failedN.Add(1)
 					errP.CompareAndSwap(nil, &err)
 				} else {
@@ -303,7 +304,7 @@ func (s *GRPCServer) broadcastGroup(ctx context.Context, groupID string, cmd int
 		conns = append(conns, conn)
 	}
 	// 分片并发入队（同 BroadcastAll / kickConnectionsAsync）
-	sent64, failed64, firstErr := sendToConnections(conns, msg)
+	sent64, failed64, firstErr := sendToConnections(cmd, conns, msg)
 	s.gateway.AddPushedToClient(sent64)
 	sent, failed = int(sent64), failed+int(failed64)
 	if firstErr != nil {

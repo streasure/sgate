@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
+	"github.com/streasure/sgate/internal/routes"
 )
 
 type ConnState int32
@@ -38,6 +39,7 @@ type Connection struct {
 	accountID   atomic.Pointer[string]              // 登录账号（=LoginGate userId；批量踢账号索引用）
 	loginKey    atomic.Pointer[string]              // LoginGate loginKey（校验通过后保存；周期 BatchValidate 安全网重校验用，不落盘不转发）
 	logicClient atomic.Pointer[LogicClientProvider] // LogicClientProvider 缓存，避免每条消息查询连接池
+	udp         atomic.Pointer[UDPDownlink]         // UDP 下行通道（ASSOCIATE 成功注入；nil=回落 WS）
 	jwtJti      atomic.Pointer[string]              // string：JWT jti（logout/封禁时撤销）
 	jwtExp      atomic.Int64                        // JWT exp（Unix 秒；0=未知）
 	offlineSent atomic.Bool                         // CmdUserOffline 已发送标记（防显式通知+OnClose 双发）
@@ -137,6 +139,12 @@ func (c *Connection) GetCachedLogicClient() LogicClientProvider {
 // SetCachedLogicClient 设置缓存的LogicClient。
 func (c *Connection) SetCachedLogicClient(lc LogicClientProvider) {
 	c.logicClient.Store(&lc)
+}
+
+// SetUDPDownlink 注入 UDP 下行通道（ASSOCIATE 成功时调用；关联失效后
+// SendUDP 返回错误，SendByCmd 自动回落 WS，无需清除注入）。
+func (c *Connection) SetUDPDownlink(d UDPDownlink) {
+	c.udp.Store(&d)
 }
 
 // SetServerID 设置连接关联的服务器 ID。
@@ -253,6 +261,20 @@ func (c *Connection) touch() {
 		return
 	}
 	c.LastActive.Store(time.Now().UnixMilli())
+}
+
+// SendByCmd 按命令号段分流的唯一回程入口（docs/udp-ws-design.md §5.3）。
+// 号段内（1200000~1299999）且 UDP 通道可用 → 走 UDP；无关联/关联不新鲜/
+// 发送失败 → 回落 WS（降级不丢是硬要求）。号段外直接 WS，与原 Send 等价。
+// 全系统下行调用点只换本方法名，不得在调用点散写 IsUDPCmd 判断。
+func (c *Connection) SendByCmd(cmd int32, data []byte) error {
+	if d := c.udp.Load(); d != nil && routes.IsUDPCmd(cmd) {
+		if err := (*d).SendUDP(c.id, data); err == nil {
+			return nil
+		}
+		// UDP 路不可用：回落 WS，消息不丢
+	}
+	return c.Send(data)
 }
 
 // Send 向客户端发送数据，根据协议自动封帧（TCP 4字节前缀 / WS binary 帧）。
