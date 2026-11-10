@@ -1,8 +1,8 @@
 # WS + UDP 关联通道设计稿
 
-> 状态：**已评审定稿**（§7 决策点全部定案），阶段 1 已合入（`d04d854`），按 §6 分阶段推进中。
+> 状态：**已评审定稿**（§7 决策点全部定案），阶段 1~3 已合入（`d04d854` / `430216e` / `0c537ba`），剩阶段 4 压测数据（需 Linux，与 roadmap P2-4 打包）。
 > 背景：#3 已把 UDP 定位为「预留通道」（`8f01d71`），本稿是承载业务的正式方案。
-> 关联：[architecture §4.4](architecture.md#44-udp-边界与-wsudp-关联方案)、[roadmap §3](roadmap.md)、README §9.1
+> 关联：[architecture §4.4](architecture.md#44-wsudp-关联通道已支持)、[roadmap §3](roadmap.md)、README §9.1
 
 ---
 

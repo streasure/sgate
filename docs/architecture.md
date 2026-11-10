@@ -234,28 +234,37 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
          （logic 直接读取原始 LoginGateReq，无 CmdLogicLoginReq/Ack 转换）
 ```
 
-### 4.4 UDP 边界与 WS+UDP 关联方案
+### 4.4 WS+UDP 关联通道（已支持）
 
-**现状（预留通道，不承载业务）**：`transports[].type: udp` 只注册监听与收包路径（`protocol/udp.go` → `handleUDPDatagram`）。
+**一个会话、两个通道**：WS 是会话与指令面（丢不起的消息），UDP 是状态同步面（高频可丢状态），关联生命周期挂在 WS 会话上。`udp.enabled: false`（默认）时所有下行回落 WS，零行为变化。完整设计与决策记录见 [udp-ws-design.md](udp-ws-design.md)。
 
-- gnet UDP **不触发 `OnOpen`**（源码层面每个数据报新建 conn 对象），因此 `ConnectionManager` 中不存在、也无法存在对应连接
-- 过去把 `"udp_"+remoteAddr` 当 connectionID 投进 pipeline，阶段 2 必然 `unknown connection`——一次必然失败的完整往返（连 LoginGate 都过不去），且全仓无 UDP 测试
-- 现在在源 IP 限速 + 帧校验 + 解码之后**明确拒绝**：回一帧 `udp transport not supported`（垃圾包静默丢，控制回包放大），计数 `droppedUnsupported` 计入 `/stats` 的 `droppedTotal`；不建连接、不投 pipeline
-- 回归测试：`internal/gateway/udp_reject_test.go`
+**为什么不能让 UDP 单独建会话**：
 
-**规划方案：WS 会话 + UDP 关联通道**（一个会话、两个通道，不给 UDP 单独建会话）
+- gnet UDP **不触发 `OnOpen`**（源码层面每个数据报新建 conn 对象），`ConnectionManager` 中不存在、也无法存在对应连接
+- 曾把 `"udp_"+remoteAddr` 当 connectionID 投进 pipeline，必然 `unknown connection`——一次必然失败的完整往返（连 LoginGate 都过不去），且全仓无 UDP 测试
+- 现在关闭态在源 IP 限速 + 帧校验 + 解码之后**明确拒绝**：回一帧 `udp transport not supported`（垃圾包静默丢，控制回包放大），计数 `droppedUnsupported` 计入 `/stats` 的 `droppedTotal`；不建连接、不投 pipeline（回归：`internal/gateway/udp_reject_test.go`）
+
+**工作方式**（开启态）：
 
 ```text
-1. WS/TCP 建连 → LoginGate 登录成功 → 取得一次性 udpToken
+1. WS/TCP 建连 → LoginGate 登录成功 → LoginGateAck 下发一次性 udpToken
 2. 客户端自建 UDP socket（本地临时端口）→ 向网关固定 UDP 端口发 ASSOCIATE{udpToken, nonce}
    （NAT 映射只能由客户端先发包建立：服务器无法主动开 UDP；客户端监听固定端口需端口映射，不可行）
-3. 网关验 token → 建关联表 connID ↔ (公网IP:port, lastSeen, seq) → 回 ASSOCIATE_OK
-4. 后续 UDP 包按源地址反查真实 connID → 复用现有 pipeline 全链路（鉴权/限流/过滤器/转发不变）
-5. 回程走 sendUDPFrame，必须从同一本地端口发出（NAT 按「服务器IP:端口」记账，换端口回包会被丢）
-6. WS 断开 / UDP 空闲超时 → 删除关联；NAT 保活靠客户端周期发包
+3. 网关验 token（一次性消费，防重放）→ 建关联表 connID ↔ (公网IP:port, lastSeen, seq 窗口)
+   → 回 ASSOCIATE_OK → conn.SetUDPDownlink(gw) 注入下行通道
+4. 上行：UDP 包按源地址反查真实 connID → seq 滑动窗口去重 → 以真实 connID 投现有
+   worker pool，复用 pipeline 全链路（鉴权/限流/过滤器/转发不变，帧体与 TCP/WS 逐字节一致）
+5. 下行：backend 各调用点只换 SendByCmd —— connection.SendByCmd 是全系统唯一分流点
+   （号段内 && 有关联 && 新鲜 → sendUDPFrame，否则回落 WS，降级不丢）；
+   UDP 消息不进 PushBatch、不走 coalescer（一包一消息，逐条发）
+6. WS 断开 / UDP 空闲超时（janitor，默认 60s）→ 删除关联；NAT 保活靠客户端 15s 周期发包
 ```
 
-安全与工程要点：token 绑定防源地址伪造、per-IP 关联数上限（防关联表耗尽）、未认证阶段反放大（回包 ≤ 来包）、seq 去重窗口、MTU ≤ 1400B 避免 IP 分片；可靠性分级——结算/掉落等丢不起的走 WS，移动/AOI 等高频可丢的走 UDP。改动全部落在 `internal/gateway`（`udp_handlers` + 一张关联表 + 回程分支），`backend`/`connection` 不动。
+**依赖方向**：`connection` 定义 `UDPDownlink` 接口（consumer-defined，同 `LogicClientProvider` 模式），`*gateway.Gateway` 实现并在 ASSOCIATE 成功时注入——`gateway → backend → connection` 单向依赖不变；号段判断收敛在 `routes.IsUDPCmd`（纯函数，热路径一次区间比较）。
+
+**安全与工程要点**：token 一次性消费防重放、per-IP/总量双上限防关联表耗尽、未关联数据报静默丢弃（反放大：回包 ≤ 来包，垃圾包零回包）、seq 去重窗口、MTU ≤ 1400B 避免 IP 分片、下行新鲜度条件（`now-lastSeen ≤ idleTimeout/2` 才走 UDP，stale 黑洞窗口砍半且不发起注定投向死地址的 SendTo）。**存活判据只看 WS**：UDP 丢包不断线，弱网玩家不被误踢。
+
+**测试**：`udp_reject_test.go`（关闭态拒绝）、`udp_assoc_test.go`（token 一次性/过期/撤销、关联生命周期、per-IP 与总量上限、空闲清扫、幂等替换）、`udp_uplink_test.go`（pipeline 转发/会话隔离/seq 去重/MTU/埋点）、`udp_send_test.go`（下行分流/新鲜度/回落/-race）、`backend/stream_udp_redirect_test.go`（批量绕过/广播分流/coalescer 绕过）、`connection/send_by_cmd_test.go`（唯一分流点）。
 
 ---
 

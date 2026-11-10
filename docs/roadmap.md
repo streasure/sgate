@@ -61,11 +61,10 @@
    - 已完成：P1 单向 Kick 模型（loginserver 权威库 + KickService）+ P2 BatchValidate 周期安全网
    - 待做：多 zone 部署下的跨 zone 一致性验证；NAT 场景踢人口径
 
-3. **UDP：WS 会话 + UDP 关联通道**（定位已完成，待设计稿评审）
-   - 已完成：定位为**预留通道** —— gnet UDP 不触发 `OnOpen`、无会话注册，原「投 pipeline 必然 unknown connection」的无效往返改为明确拒绝（回 `udp transport not supported` + `/stats` `droppedUnsupported` 计入 `droppedTotal`），补 `udp_reject_test` 回归与 README/architecture 边界文档
-   - 规划：WS 登录取一次性 token → 客户端 UDP socket 发 `ASSOCIATE` → 网关建 `connID ↔ 公网地址` 关联表 → 后续包按源地址反查真实 connID 复用现有 pipeline 全链路，回程 `sendUDPFrame`，关联生命周期挂 WS 会话（详见 architecture §4.4）
-   - **设计稿已完成待评审**：[docs/udp-ws-design.md](udp-ws-design.md)（关联表结构、ASSOCIATE 协议与时序、gnet 两平台收发机制核实、回程分流三方案对比、安全要点、四阶段落地与测试计划）
-   - 待做：设计稿评审 → 分阶段实现 → UDP 压测数据
+3. **UDP：WS 会话 + UDP 关联通道**（阶段 1~3 已合入，默认关闭零行为变化）
+   - 已完成：定位预留通道（`8f01d71`）→ 设计稿定稿（`6f97c84`）→ 阶段 1 关联表/token/ASSOCIATE（`d04d854`）→ 阶段 2 上行走通 + 弱网埋点（`430216e`）→ 阶段 3 下行号段分流唯一分流点 `SendByCmd`（`0c537ba`）；安全复核三项（反放大、token 过期、per-IP/总量表耗尽）测试齐备
+   - 关联细节：号段 `1200000~1299999`、`udp.enabled` 默认 false、降级不丢、新鲜度条件、stale 埋点（详见 [docs/udp-ws-design.md](udp-ws-design.md) 与 architecture §4.4）
+   - 待做：**阶段 4 压测数据**（UDP 关联建立 QPS、上行 msg/s、下行 stateVer 延迟分位数、与 WS 基线对比 + 弱网模拟）——需 Linux 环境，与 P2-4 打包进行
 
 4. **Linux CI 与压测基线**
    - 问题：Windows 本地连接天花板约 16K，百万连接与吞吐压测无法在本机复现

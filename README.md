@@ -306,7 +306,7 @@ transports:
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `port` | int | 监听端口，每个端口唯一 |
-| `type` | string | 空 = TCP；`websocket` = WebSocket；`udp` = UDP（**预留通道，不承载业务**，见[九、协议说明](#九协议说明)的 UDP 边界） |
+| `type` | string | 空 = TCP；`websocket` = WebSocket；`udp` = UDP 关联通道（`udp.enabled` 开启后承载状态同步类消息，见[九、协议说明](#九协议说明)的 §9.1） |
 
 ### 6.3 `etcd` 服务注册
 
@@ -647,11 +647,20 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 | `CmdUserOffline` | `1100012` | 用户下线通知 |
 | `CmdPushBatch` | `9000002` | 网关批量推送 |
 
-### 9.1 UDP 边界（预留通道，不承载业务）
+命令号段分配约定：**`1200000~1299999` 为 UDP 通道段**（`routes.CmdUDPRangeStart/End` 常量，含段内传输控制命令 `1200000~1200005`），该段消息按号段分流到 UDP 关联通道；**其余号段（含 ≥ `1300000`）一律 WS**。判据："这条消息丢了，客户端能否靠下一帧自愈？"能 → 分配进 UDP 段（位置/AOI/血条等状态同步）；不能（结算/掉落/交易）→ 留在 WS 段。号段是三端（sgate/logic/客户端）共享的 wire 契约，分配走代码评审与版本发布，不进 yaml 配置。
 
-`transports[].type: udp` 的端口当前**只收包、不承载业务**：gnet UDP 不触发 `OnOpen`（每个数据报新建 conn），`ConnectionManager` 里没有对应连接，因此网关在源 IP 限速 + 帧校验之后直接回一帧 `udp transport not supported`，并计入 `/stats` 的 `droppedUnsupported`（含在 `droppedTotal` 里）。垃圾数据报静默丢弃不回包（控制回包放大）。不建连接、不投 pipeline，详见 [architecture §4.4](docs/architecture.md#44-udp-边界与-wsudp-关联方案)。
+### 9.1 UDP 关联通道（`udp.enabled` 开关，默认关闭）
 
-承载业务的规划方案是 **WS 会话 + UDP 关联通道**：客户端 WS 登录拿到一次性 token 后，用自己创建的 UDP socket 向该端口发 `ASSOCIATE` 关联包（NAT 映射只能由客户端先发包建立，服务器无法主动开 UDP、客户端也不能靠监听固定端口），网关建立 `connID ↔ 公网地址` 关联表，后续 UDP 包按源地址反查真实 connID **复用现有 pipeline 全链路**，回程走 `sendUDPFrame`，关联生命周期挂在 WS 会话上。
+sgate 支持 **WS 会话 + UDP 关联通道**：一个会话、两个通道——WS 是会话与指令面（登录/交易/结算等丢不起的消息），UDP 是状态同步面（位置/AOI 等高频可丢状态）。分工由**命令号段**静态分配：`1200000~1299999` 走 UDP，其余一律 WS（判据："这条消息丢了，客户端能不能靠下一帧自愈？"能 → UDP）。
+
+工作方式：WS 登录后网关下发一次性 `udpToken`（`LoginGateAck` 扩展字段），客户端用自建 UDP socket 向网关 UDP 端口发 `ASSOCIATE`（NAT 映射只能由客户端先发包建立，服务器无法主动开 UDP），网关建立 `connID ↔ 公网地址` 关联表；后续 UDP 包按源地址反查真实 connID **复用现有 pipeline 全链路**（鉴权/限流/过滤器/转发不变），回程在 `connection.SendByCmd` 唯一分流点按号段路由到 `sendUDPFrame`，关联生命周期挂在 WS 会话上。
+
+- **默认关闭**：`udp.enabled: false` 时无关联、所有下行回落 WS，零行为变化（feature flag，关开关即回滚）
+- **降级不丢**：无关联 / 关联不新鲜（超过 `idleTimeout/2` 未收包）/ 发送失败 → 自动回落 WS
+- **存活判据只看 WS**：UDP 丢包不断线，弱网玩家不被误踢；`/stats` 暴露 `udpAssoc*`、`udpSweptWsSurviving`（stale 缺口埋点）等计数
+- 命令号段常量 `routes.CmdUDPRangeStart/End`（契约进代码，不进配置）
+
+边界与安全（反放大、token 一次性防重放、per-IP/总量上限、seq 去重、MTU 1400）与设计细节见 [architecture §4.4](docs/architecture.md#44-wsudp-关联通道已支持) 与 [udp-ws-design.md](docs/udp-ws-design.md)。
 
 ---
 

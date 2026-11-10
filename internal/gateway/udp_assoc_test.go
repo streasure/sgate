@@ -312,6 +312,40 @@ func TestUDPAssociatePerIPLimit(t *testing.T) {
 	}
 }
 
+// TestUDPAssociateTotalLimit 关联表总上限（防表耗尽）：maxAssociations 打满后
+// 新关联一律拒绝（即使 per-IP 未超），且静默丢弃不回包（关联未建立时回帧
+// 无处可去，构成放大面）。
+func TestUDPAssociateTotalLimit(t *testing.T) {
+	cfg := udpEnabledConfig()
+	cfg.UDP.MaxAssociations = 1
+	gw := newGateway(cfg)
+	defer gw.Close()
+
+	mkAssoc := func(t *testing.T, ip net.IP, port int) bool {
+		t.Helper()
+		connID := gw.connectionManager.AddConnection(&kickMockConn{}, "", false)
+		defer gw.connectionManager.RemoveConnection(connID)
+		token, _, ok := gw.issueUDPToken(connID)
+		if !ok {
+			t.Fatal("issue token failed")
+		}
+		c := &udpMockConn{addr: &net.UDPAddr{IP: ip, Port: port}}
+		gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, associateBody(t, token)))
+		return c.writtenLen() > 0
+	}
+
+	// 不同 IP（绕开 per-IP 上限），只能被总上限挡住
+	if !mkAssoc(t, net.IPv4(203, 0, 113, 30), 6000) {
+		t.Fatal("first association rejected, want accepted")
+	}
+	if mkAssoc(t, net.IPv4(203, 0, 113, 31), 6001) {
+		t.Fatal("association beyond maxAssociations accepted, want total limit hit")
+	}
+	if n, _ := gw.udpAssoc.snapshot(); n != 1 {
+		t.Fatalf("assoc count = %d, want 1", n)
+	}
+}
+
 // TestUDPAssocIdleSweep 空闲淘汰：超时关联拆除，活跃关联保留。
 func TestUDPAssocIdleSweep(t *testing.T) {
 	gw := newGateway(udpEnabledConfig())
