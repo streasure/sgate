@@ -33,6 +33,7 @@ func loginReqFrameFor(t *testing.T, serverID string) *protoGw.StreamData {
 // 踢人流程异步执行（kickConnectionsAsync），读写均需加锁避免 test -race。
 // AsyncWritev 会立即执行回调（模拟 gnet 写完成），使 SendThenClose 的
 // 回调式 Close 在测试中同步生效。
+// SendTo 是 UDP 下行出口（sendUDPFrame），同样捕获帧字节。
 type kickMockConn struct {
 	gnet.Conn
 	mu      sync.Mutex
@@ -62,6 +63,14 @@ func (c *kickMockConn) AsyncWrite(b []byte, cb gnet.AsyncCallback) error {
 		_ = cb(c, nil)
 	}
 	return nil
+}
+
+// SendTo 捕获 UDP 下行帧（sendUDPFrame 唯一出口走 gnet SendTo）。
+func (c *kickMockConn) SendTo(b []byte, _ net.Addr) (int, error) {
+	c.mu.Lock()
+	c.written = append(c.written, b...)
+	c.mu.Unlock()
+	return len(b), nil
 }
 
 func (c *kickMockConn) Close() error {

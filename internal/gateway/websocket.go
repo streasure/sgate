@@ -557,7 +557,16 @@ func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionI
 // finishWSLoginGate 在后台协程完成 WS 登录：loginKey 校验、绑定、ack 异步回写与逻辑转发。
 func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID string, message *protoGw.StreamData, req *protoGw.LoginGateReq) {
 	ack := func(code int32, text string) {
-		body, _ := proto.Marshal(&protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: req.ServerId})
+		ackMsg := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: req.ServerId}
+		if code == 0 {
+			// UDP 关联通道：登录成功随 ack 下发一次性 token（udp.enabled=false 时为空，
+			// 老客户端忽略新字段，wire 兼容）。TCP 登录不发——UDP 关联挂在 WS 会话上。
+			if token, port, ok := g.issueUDPToken(connectionID); ok {
+				ackMsg.UdpToken = token
+				ackMsg.UdpPort = int32(port)
+			}
+		}
+		body, _ := proto.Marshal(ackMsg)
 		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		// 跨协程异步写（统一写出口，framer 自动封帧）
 		_ = g.sendFrameAsync(connectionID, data)
@@ -636,6 +645,7 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 		if connObj := g.connectionManager.GetConnection(connID); connObj != nil {
 			g.notifyLogicOffline(connObj)
 		}
+		g.releaseUDPAssoc(connID) // 会话是根：WS 关闭帧也拆 UDP 关联（幂等，OnClose 兜底）
 		g.connectionManager.RemoveConnection(connID)
 	}
 	g.wsConnections.Delete(wsConn)

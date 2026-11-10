@@ -118,6 +118,10 @@ type Gateway struct {
 	messagesDroppedAuth        atomic.Int64 // 认证拦截（缺少 serverID 或 userUUID）
 	messagesDroppedUnsupported atomic.Int64 // 传输不承载（UDP 业务消息）
 
+	// udpAssoc WS+UDP 关联表（docs/udp-ws-design.md §5.1）。
+	// newGateway 无条件初始化（方法可安全调用），实际收发受 udp.enabled 控制。
+	udpAssoc *udpAssocTable
+
 	// 连接生命周期指标
 	connectionDurationSum     atomic.Int64        // 连接总存活时长（毫秒），用于计算平均值
 	connectionDurationCount   atomic.Int64        // 已关闭连接数，用于计算平均值
@@ -360,6 +364,8 @@ func (g *Gateway) StartServices() error {
 		g.startConfigCenterWatcher()
 	}
 	panicutil.GoLoop(g.ctx, "gateway.configWatcher", g.configWatcher)
+	// UDP 关联空闲淘汰/过期 token 清扫（空表扫描开销可忽略，不依赖 udp.enabled 状态）
+	panicutil.GoLoop(g.ctx, "gateway.udpAssocJanitor", g.udpAssocJanitor)
 	panicutil.GoLoop(g.ctx, "gateway.configUpdate", func() {
 		for {
 			select {
@@ -467,6 +473,7 @@ func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 				if connObj := g.connectionManager.GetConnection(connID); connObj != nil {
 					g.notifyLogicOffline(connObj)
 				}
+				g.releaseUDPAssoc(connID) // 会话是根：WS 心跳超时也拆 UDP 关联
 				g.connectionManager.RemoveConnection(connID)
 			}
 			if conn.Conn != nil {
@@ -932,6 +939,7 @@ func newGateway(cfg *config.Config) *Gateway {
 	gw.ctxCancel = cancel
 	gw.pipeline = NewMessagePipeline(gw)
 	gw.loginSlots = make(chan struct{}, 256)
+	gw.udpAssoc = newUDPAssocTable()
 
 	return gw
 }

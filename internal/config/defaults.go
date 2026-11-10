@@ -202,3 +202,32 @@ const (
 	// DefaultPreAuthCommands 绑定 serverID 前放行的命令（LoginGate）
 	DefaultPreAuthCommands = 1000001
 )
+
+// --- WS+UDP 关联通道 ---
+
+const (
+	// DefaultUDPAssociateTimeout 一次性关联 token 有效期（登录下发 → 客户端 ASSOCIATE 消费）
+	DefaultUDPAssociateTimeout = "30s"
+
+	// DefaultUDPIdleTimeout 关联空闲淘汰（无 UDP 收包即失效）。
+	// 60s = 客户端 15s 保活连丢 4 次才淘汰，瞬时抖动不误踢；上线后按真实弱网数据校准
+	DefaultUDPIdleTimeout = "60s"
+
+	// DefaultUDPMaxPerIP 单 IP 关联数上限（NAT/CGNAT 后多客户端共享一个公网 IP，留余量）
+	DefaultUDPMaxPerIP = 4
+
+	// DefaultUDPMaxAssociations 关联表总上限（防表耗尽）
+	DefaultUDPMaxAssociations = 100000
+
+	// DefaultUDPSeqWindow 上行 seq 去重滑动窗口（阶段 2 生效）
+	DefaultUDPSeqWindow = 1024
+
+	// DefaultUDPMaxDatagram 单数据报上限（MTU 安全值，避免 IP 分片丢包率飙升）
+	DefaultUDPMaxDatagram = 1400
+)
+
+// UDP 默认时长（与上面的字符串默认配套，供代码内引用，避免散落魔法值）
+const (
+	DefaultUDPAssociateDuration = 30 * time.Second
+	DefaultUDPIdleDuration      = 60 * time.Second
+)

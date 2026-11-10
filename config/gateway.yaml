@@ -62,6 +62,18 @@ loginValidation:
   batchInterval: "60s"
   batchSize: 200
 
+# WS+UDP 关联通道（docs/udp-ws-design.md）。号段是协议契约（routes 常量），不进配置。
+# enabled=false（默认）= 预留通道现状：UDP 端口明确拒绝业务消息；true 才建立关联。
+# 需要 transports 中存在 type=udp 监听（Validate fail-fast），token 经 WS LoginGateAck 下发。
+udp:
+  enabled: false
+  associateTimeout: "30s"   # 一次性 token 有效期（登录下发 → ASSOCIATE 消费）
+  idleTimeout: "60s"        # 关联空闲淘汰（客户端建议 15s 保活，连丢 4 次才淘汰）
+  maxPerIP: 4               # per-IP 关联上限（NAT/CGNAT 后多客户端共享公网 IP）
+  maxAssociations: 100000   # 关联表总上限（防表耗尽）
+  seqWindow: 1024           # 上行 seq 去重窗口（阶段 2 生效）
+  maxDatagram: 1400         # 单包上限（MTU 安全值，避免 IP 分片）
+
 waf:
   enabled: false
 

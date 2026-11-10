@@ -55,6 +55,33 @@ const (
 	CmdPushBatch     int32 = 9000002 // 批量推送命令
 )
 
+// UDP 通道命令号段。与 protocol/enums/cmd.proto 的 1,200,000-1,299,999 段一致
+// （沿用 cmd.proto 既有 1,000,000 / 1,100,000 分段惯例取下一空段）。
+// 号段是三端（客户端/网关/logic）共享的协议契约，定义为常量而非 yaml 配置：
+// 改号段 = 改协议，必须走代码评审，避免实例间配置漂移。
+const (
+	CmdUDPRangeStart int32 = 1200000 // UDP 通道命令下界
+	CmdUDPRangeEnd   int32 = 1299999 // 上界（1,300,000 及以上保留给 WS）
+)
+
+// 传输控制命令（落在 UDP 号段内，随关联通道走 UDP）。
+const (
+	CmdUdpAssociate    int32 = 1200000 // UDP 关联请求 C→S（body 为 UdpAssociateReq）
+	CmdUdpAssociateAck int32 = 1200001 // UDP 关联应答 S→C（body 为 UdpAssociateAck）
+	CmdUdpAction       int32 = 1200002 // UDP 上行动作 C→S（body 为 UdpAction）
+	CmdUdpState        int32 = 1200003 // UDP 下行状态 S→C（body 为 UdpState）
+	CmdUdpPing         int32 = 1200004 // UDP RTT 探测 C→S（WS 有队头阻塞，测出 RTT 不准）
+	CmdUdpPong         int32 = 1200005 // UDP RTT 应答 S→C
+)
+
+// IsUDPCmd 判定命令是否走 UDP 通道（sgate 下行分流的唯一判据）。
+// 必须用区间而非单边界：CmdPushBatch = 9000002 > 1299999，
+// 单边界会把批量推送误判进 UDP。
+// 规则：可丢的状态同步消息落在区间内，可靠消息永远 < CmdUDPRangeStart。
+func IsUDPCmd(cmd int32) bool {
+	return cmd >= CmdUDPRangeStart && cmd <= CmdUDPRangeEnd
+}
+
 // ExtractMessageFrame 从 protobuf 编码的数据中提取消息帧（命令码、序列号、消息体）
 func ExtractMessageFrame(data []byte) (cmd int32, seqID int64, body []byte, ok bool) {
 	for len(data) > 0 {

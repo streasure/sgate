@@ -150,6 +150,7 @@ func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 			g.connectionDurationTracker.Record(time.Duration(duration) * time.Millisecond)
 			g.notifyLogicOffline(conn)
 		}
+		g.releaseUDPAssoc(connectionID) // 会话是根：连接关闭即拆 UDP 关联（幂等）
 		g.connectionManager.RemoveConnection(connectionID)
 		tlog.Debug(g.ctx, "connection closed connectionID=%s error=%v", connectionID, err)
 	}

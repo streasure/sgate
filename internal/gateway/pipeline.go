@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"runtime"
 	"strconv"
 	"sync"
@@ -399,9 +400,9 @@ type pipelineTaskData struct {
 	connectionID string
 	// WebSocket 特定字段（TCP 时为 nil）
 	wsConn *WebSocketConnection
-	// UDP 特定字段
+	// UDP 特定字段（阶段 2 由 handleUDPDatagram 填充）
 	isUDP         bool
-	udpRemoteAddr string
+	udpRemoteAddr net.Addr // 回程目标（关联的公网地址，sendUDPFrame 用）
 }
 
 // 池化：pipeline 任务结构与入站帧缓冲（热路径每消息一任务/一帧拷贝）。
@@ -519,7 +520,7 @@ func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 
 // applyAsyncResult 在 worker 中执行 pipeline 返回的 Action（如 Close）。
 // gnet.Conn.Close 是并发安全的；不得在 worker 中使用非 Async 的 Write。
-func applyAsyncResult(conn gnet.Conn, wsConn *WebSocketConnection, isUDP bool, udpRemoteAddr string, result PipelineResult) {
+func applyAsyncResult(conn gnet.Conn, wsConn *WebSocketConnection, isUDP bool, udpRemoteAddr net.Addr, result PipelineResult) {
 	if result.Action != gnet.Close {
 		return
 	}

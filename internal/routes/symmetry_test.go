@@ -29,6 +29,13 @@ func TestCmdSymmetryWithEnums(t *testing.T) {
 		{"kick_notify", CmdKickNotify, enums.Cmd_CMD_KICK_NOTIFY},
 		{"heartbeat_req", CmdHeartbeatReq, enums.Cmd_CMD_HEARTBEAT_REQ},
 		{"user_offline", CmdUserOffline, enums.Cmd_CMD_USER_OFFLINE_NTF},
+		// UDP 传输控制命令（1,200,000-1,299,999 号段，两侧同名同值）
+		{"udp_associate", CmdUdpAssociate, enums.Cmd_CMD_UDP_ASSOCIATE},
+		{"udp_associate_ack", CmdUdpAssociateAck, enums.Cmd_CMD_UDP_ASSOCIATE_ACK},
+		{"udp_action", CmdUdpAction, enums.Cmd_CMD_UDP_ACTION},
+		{"udp_state", CmdUdpState, enums.Cmd_CMD_UDP_STATE},
+		{"udp_ping", CmdUdpPing, enums.Cmd_CMD_UDP_PING},
+		{"udp_pong", CmdUdpPong, enums.Cmd_CMD_UDP_PONG},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

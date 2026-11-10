@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/uconfig"
@@ -25,6 +27,7 @@ type Config struct {
 	Protection      ProtectionConfig
 	Security        SecurityConfig
 	LoginValidation LoginValidationConfig
+	UDP             UDPConfig
 	WAF             WAFConfig
 	TLS             TLSConfig
 	Cluster         ClusterConfig
@@ -358,6 +361,18 @@ type Transport struct {
 	Type string `yaml:"type"`
 }
 
+// UDPConfig WS+UDP 关联通道配置（设计见 docs/udp-ws-design.md）。
+// 命令号段不在此处：号段是三端共享协议契约，定义为 routes 常量（改号段 = 改协议）。
+type UDPConfig struct {
+	Enabled          bool   `yaml:"enabled"`          // 默认 false：预留通道现状不变，显式开启才生效
+	AssociateTimeout string `yaml:"associateTimeout"` // 一次性 token 有效期（登录下发 → ASSOCIATE 消费）
+	IdleTimeout      string `yaml:"idleTimeout"`      // 关联空闲淘汰（NAT 过期后关联无意义）
+	MaxPerIP         int    `yaml:"maxPerIP"`         // per-IP 关联数上限（NAT 后多客户端共享公网 IP）
+	MaxAssociations  int    `yaml:"maxAssociations"`  // 关联表总上限（防表耗尽）
+	SeqWindow        int    `yaml:"seqWindow"`        // 上行 seq 去重窗口（阶段 2 生效）
+	MaxDatagram      int    `yaml:"maxDatagram"`      // 单数据报上限（MTU 安全值）
+}
+
 var conf atomic.Pointer[Config]
 var confPath atomic.Pointer[string] // 最近一次 Load 的配置文件路径
 
@@ -409,6 +424,39 @@ func (c *Config) Validate() error {
 	if c.Protection.MaxWSBufferSize < c.Protection.MaxWSFrameSize+14 {
 		return fmt.Errorf("protection.maxWSBufferSize (%d) must be >= maxWSFrameSize (%d) + 14 (max WS header)",
 			c.Protection.MaxWSBufferSize, c.Protection.MaxWSFrameSize)
+	}
+	// WS+UDP 关联通道：enabled=true 时参数必须自洽（默认值已由 ApplyRuntimeDefaults 补齐）。
+	// 号段不在此校验——它是协议常量（routes），不是配置。
+	if c.UDP.Enabled {
+		hasUDPTransport := false
+		for _, t := range c.Transports {
+			if strings.EqualFold(t.Type, "udp") {
+				hasUDPTransport = true
+				break
+			}
+		}
+		if !hasUDPTransport {
+			// 无 UDP 监听则 ASSOCIATE 永远无法到达，功能静默失效属配置错误
+			return fmt.Errorf("udp.enabled=true requires a transport with type=udp")
+		}
+		if d, err := time.ParseDuration(c.UDP.AssociateTimeout); err != nil || d <= 0 {
+			return fmt.Errorf("udp.associateTimeout (%q) must be a positive duration", c.UDP.AssociateTimeout)
+		}
+		if d, err := time.ParseDuration(c.UDP.IdleTimeout); err != nil || d <= 0 {
+			return fmt.Errorf("udp.idleTimeout (%q) must be a positive duration", c.UDP.IdleTimeout)
+		}
+		if c.UDP.MaxPerIP <= 0 {
+			return fmt.Errorf("udp.maxPerIP (%d) must be > 0", c.UDP.MaxPerIP)
+		}
+		if c.UDP.MaxAssociations <= 0 {
+			return fmt.Errorf("udp.maxAssociations (%d) must be > 0", c.UDP.MaxAssociations)
+		}
+		if c.UDP.SeqWindow <= 0 {
+			return fmt.Errorf("udp.seqWindow (%d) must be > 0", c.UDP.SeqWindow)
+		}
+		if c.UDP.MaxDatagram <= 0 {
+			return fmt.Errorf("udp.maxDatagram (%d) must be > 0", c.UDP.MaxDatagram)
+		}
 	}
 	return nil
 }
@@ -512,6 +560,25 @@ func (c *Config) ApplyRuntimeDefaults() {
 	}
 	if c.LoginValidation.BatchSize <= 0 {
 		c.LoginValidation.BatchSize = DefaultLoginValidationBatchSize
+	}
+	// UDP 关联通道：零值补齐（enabled 保持调用方显式值，不改写）
+	if c.UDP.AssociateTimeout == "" {
+		c.UDP.AssociateTimeout = DefaultUDPAssociateTimeout
+	}
+	if c.UDP.IdleTimeout == "" {
+		c.UDP.IdleTimeout = DefaultUDPIdleTimeout
+	}
+	if c.UDP.MaxPerIP <= 0 {
+		c.UDP.MaxPerIP = DefaultUDPMaxPerIP
+	}
+	if c.UDP.MaxAssociations <= 0 {
+		c.UDP.MaxAssociations = DefaultUDPMaxAssociations
+	}
+	if c.UDP.SeqWindow <= 0 {
+		c.UDP.SeqWindow = DefaultUDPSeqWindow
+	}
+	if c.UDP.MaxDatagram <= 0 {
+		c.UDP.MaxDatagram = DefaultUDPMaxDatagram
 	}
 	if c.WAF.MaxPayloadSize <= 0 {
 		c.WAF.MaxPayloadSize = DefaultWAFMaxPayloadSize
