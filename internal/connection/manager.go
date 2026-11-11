@@ -3,6 +3,7 @@ package connection
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,26 +50,79 @@ type ConnectionManager struct {
 
 var connectionIDCounter atomic.Uint64
 
-var connIDBufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, 48)
-		return &b
-	},
+// sessionGatewayID 会话 ID 中嵌入的网关身份（config serverID，与 etcd 注册
+// instanceID 同一标识）。newGateway 构造时 SetSessionGatewayID 设置一次，
+// 之后本进程生成的所有 ID 均带该段——自描述 session ID（roadmap P3-1）。
+var sessionGatewayID atomic.Value // string；零值 Load 返回 nil
+
+// SetSessionGatewayID 设置会话 ID 嵌入的网关身份（网关构造时调用一次）。
+func SetSessionGatewayID(id string) { sessionGatewayID.Store(id) }
+
+// currentSessionGatewayID 返回当前嵌入的网关身份（未设置返回 ""）。
+func currentSessionGatewayID() string {
+	v, _ := sessionGatewayID.Load().(string)
+	return v
 }
 
-// GenerateConnectionID 生成唯一的连接标识符，格式为conn_时间戳_自增ID。
+// GenerateConnectionID 生成唯一的连接标识符。
+// 格式为 conn_{gatewayID}_{UnixNano}_{counter}（gatewayID 见 SetSessionGatewayID；
+// 未设置时退化为旧格式 conn_{UnixNano}_{counter}，测试/工具进程兼容）。
+// counter 为进程内自增：跨网关的唯一性由 gatewayID 段保证——没有该段时，
+// 两台网关在相同时钟读数下会发重号，logic 的 sessions 表会把消息送到错误网关。
 func GenerateConnectionID() string {
-	id := connectionIDCounter.Add(1)
-	bufPtr := connIDBufPool.Get().(*[]byte)
-	buf := (*bufPtr)[:0]
-	buf = append(buf, "conn_"...)
-	buf = strconv.AppendInt(buf, time.Now().UnixNano(), 10)
-	buf = append(buf, '_')
-	buf = strconv.AppendUint(buf, id, 10)
-	result := string(buf)
-	*bufPtr = buf
-	connIDBufPool.Put(bufPtr)
-	return result
+	return formatSessionID(currentSessionGatewayID(), time.Now().UnixNano(), connectionIDCounter.Add(1))
+}
+
+// formatSessionID 拼装会话 ID：conn_[{gatewayID}_]{ts}_{counter}。
+// gatewayID 可含下划线——解析方从右取两段纯数字（counter、ts），
+// 其余即 gatewayID（见 ParseSessionGateway）。
+func formatSessionID(gatewayID string, ts int64, counter uint64) string {
+	var b strings.Builder
+	b.Grow(len(gatewayID) + 48)
+	b.WriteString("conn_")
+	if gatewayID != "" {
+		b.WriteString(gatewayID)
+		b.WriteByte('_')
+	}
+	b.WriteString(strconv.FormatInt(ts, 10))
+	b.WriteByte('_')
+	b.WriteString(strconv.FormatUint(counter, 10))
+	return b.String()
+}
+
+// ParseSessionGateway 从会话 ID 解析网关身份（自描述 session ID 的解析端，
+// roadmap P3-1）。格式 conn_{gatewayID}_{UnixNano}_{counter}：从右取两段
+// 纯数字（counter、ts），其余部分即 gatewayID——因此 gatewayID 含下划线
+// 或以数字结尾均可正确还原。
+// 旧格式（无 gatewayID 段）或非 conn_ 前缀/字段非法时返回 ""。
+func ParseSessionGateway(sessionID string) string {
+	rest, ok := strings.CutPrefix(sessionID, "conn_")
+	if !ok {
+		return ""
+	}
+	i := strings.LastIndexByte(rest, '_')
+	if i < 0 || !isASCIIDigits(rest[i+1:]) {
+		return ""
+	}
+	rest = rest[:i]
+	j := strings.LastIndexByte(rest, '_')
+	if j < 0 || !isASCIIDigits(rest[j+1:]) {
+		return "" // 旧格式 conn_{ts}_{counter}：无 gatewayID 段
+	}
+	return rest[:j]
+}
+
+// isASCIIDigits 判断非空且全为 0-9（时间戳与序号段的校验）。
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // NewConnectionManager 创建新的连接管理器实例。

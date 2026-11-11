@@ -916,6 +916,10 @@ func newGateway(cfg *config.Config) *Gateway {
 	// 网关生命周期 context：newGateway 创建，closeBody 取消（Close 路径）
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// 自描述 session ID（roadmap P3-1）：把网关身份编进本进程生成的会话 ID，
+	// 定位时 ParseSessionGateway 解析即可得网关，无需外部登记表。
+	connection.SetSessionGatewayID(cfg.ServerID)
+
 	gw := &Gateway{
 		connectionManager: connection.NewConnectionManager(cfg.Protection.MaxConnections, cfg.Protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
