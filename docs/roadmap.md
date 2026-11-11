@@ -88,11 +88,16 @@
    - 阶段 1：protocol 仓 `CmdMsgAck` 枚举 + body → sgate routes 常量（跨仓先行，同 UDP 阶段 1 模式）——✅ 已完成（protocol `4c4d72b` / sgate `ba887f1`）
    - 阶段 2：logic 可靠推送层（seq 分配 / 未确认窗口 / 超时重传 / ACK 处理 / Offline 清窗 / 指标 / 配置）——✅ 已完成（`be0b39e`，含 -race 测试）
    - 阶段 3：网关 async 写失败观测 + README/architecture 文档——✅ 已完成
-   - 阶段 4：客户端实现（ACK + 滑动窗口去重）+ 测试（gRPC 断流补发、重复 ACK 幂等、窗口满背压、断线清窗、乱序到达）——待做（需客户端仓配合）
+   - 阶段 4：客户端实现（ACK + 滑动窗口去重）+ 测试——✅ 已完成（bench 侧，真实客户端仓待其落地时对齐）
+     - `bench/logic_reliable`（`6d7ea17`：PushReliable 推送 + `PushMetricsSnapshot` 导出）+ `bench/client_ack`（`05c85f3`：ACK 收集/批量发送/去重窗口/故障注入 `-drop-ack`/`-no-ack`/`-ack-interval`）
+     - 端到端实测发现并修复生产崩溃 `762ac3d`：会话断开瞬间 `PushReliable` 写已被 `dropSession` 置 nil 的窗口 map 打崩 logic 进程（补白盒 + 并发回归测试）
+     - 场景实测（Windows 本机，50 连接 15~20s/场景）：
+       1. 基线全 ACK：`pushed = acked + droppedOffline` 严格等式（482310 = 479183 + 3127），`retransmits=0 dup=0`
+       2. ACK 丢失（`-drop-ack 10`）：`logic acked 增量 == client ackedSeqs`（354843 逐条对上），`retransmits == client dup`（34835），重传后全部补 ACK、`giveUps=0`
+       3. 完全不 ACK：`windowFull` 背压计数增长不 panic；`giveUps=1280`（20 连接 × 窗口 64 全部达上限）+ Warn 日志
+       4. 杀网关断流：`droppedOffline` 如实清窗（+1920），logic 进程存活；重启网关后 logic 自动重拨，新推送 `acked 增量 == client ackedSeqs`（230208）收齐
 
-   **验收**：杀 logic↔网关 gRPC 流后客户端仍收齐全部关键消息；重复投递不重复执行；断线重连后拉取补齐；全仓门禁绿。
-
-   - 待做：阶段 4（端到端验收需客户端实现后进行）
+   **验收（阶段 4 按定稿语义修正）**：杀 logic↔网关 gRPC 流即清窗（决策④，未确认条目计入 `droppedOffline`，业务重连后全量/增量拉取补齐）；**流恢复后推送的消息客户端全部收齐、无重复执行**（去重窗口生效，`dup` 只计数不重复执行）；重复投递不重复执行；全仓门禁绿。
 
 2. **封禁收敛遗留**
    - 已完成：P1 单向 Kick 模型（loginserver 权威库 + KickService）+ P2 BatchValidate 周期安全网
