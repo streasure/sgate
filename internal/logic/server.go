@@ -354,6 +354,12 @@ func (s *Server) PushToConnection(sessionID string, targetCmd int32, data []byte
 	return err
 }
 
+// PushMetricsSnapshot 导出推送指标快照（bench / 监控消费，含可靠推送的
+// acked/retransmits/giveUps/droppedOffline）。只读快照，不影响行为。
+func (s *Server) PushMetricsSnapshot() map[string]int64 {
+	return s.metrics.GetSnapshot()
+}
+
 // RegisterUser 注册用户与会话的双向映射
 func (s *Server) RegisterUser(userUUID, sessionID string) {
 	if userUUID == "" || sessionID == "" {
