@@ -109,9 +109,39 @@
 
 ### P3：架构增强
 
-1. **跨网关路由（全局 Session 表）**
-   - 问题：session ID 网关本地生成，逻辑服必须知道用户在哪个网关；网关重启时连接需客户端重连
-   - 方案：全局 session ID + 网关路由表（etcd 维护 `session → gateway` 映射）
+1. **跨网关路由（全局 Session 表）→ 定稿：自描述 session ID（不建表）**
+
+   **问题表**：
+   | 现状 | 说明 |
+   | --- | --- |
+   | session ID `conn_{时间戳}_{序号}` 各网关本地生成 | 序号每台进程各自从 1 起，时间戳读数相同即发重号（虚拟化环境时钟粒度粗时并不罕见）；重号会让 logic 的 `sessions` 内存表把消息送到错误网关——静默数据错乱 |
+   | 外部服务拿到 session ID 无法定位所在网关 | loginserver 已用 Redis 三键索引自解；跨 zone / 跨服战（P3-2、P3-4）无现成机制 |
+   | "网关重启需客户端重连" | TCP 连接本性，属 P3-3 滚动升级，**本项不解决也不声称解决** |
+
+   **消费方盘点（为什么原 etcd 建表方案不采纳）**：
+   - logic 推送：flip 模式下 logic 拨入**全部**网关，会话挂在它来时的那条流上，内存 `sessions` 表即"会话→网关"映射——单 zone 内已解决
+   - loginserver 踢人：登录时已写 Redis `sess:conn:{sgateId}:{connId}` + etcd 服务发现拨 Kick——已有
+   - etcd 建百万级 session 表：etcd 定位是**低频服务注册**，百万会话随连接频繁增删 + 每条租约心跳续约是写放大，网关崩溃后残留还要等租约超时才清理；且建了也无真实消费方
+
+   **方案：自描述 session ID** —— 把网关身份（config `serverId`，即 etcd 注册的 instanceID）编进 ID：`conn_{serverID}_{UnixNano}_{counter}`。定位 = 解析出 serverID → 走**现有** etcd 服务发现（`{belong}/SERVER_TYPE_SGATE:{zone}/{serverId}`）取地址。零新增状态、零新表，顺带根治跨网关重号。
+
+   **原理**：路由信息不放外部登记表，而是"信封上直接写收件部门"——表会过期、要清理、要心跳续租；写在 ID 里随会话同生共死，天然一致、零维护。
+
+   **决策点（已定稿）**：
+   1. ✅ 自描述 ID，不建 etcd session 表 —— 表无真实消费方，且有写放大 / 残留清理代价
+   2. ✅ 编入 config `serverId`（与 etcd 注册 instanceID 同一标识），解析结果可直接查 etcd 取地址
+   3. ✅ 格式 `conn_{serverID}_{UnixNano}_{counter}`，解析**从右取两段**（末段序号、次末段时间戳均为纯数字），serverID 含下划线也能正确还原
+   4. ✅ serverID 为空（测试/工具进程）保持旧格式 `conn_{ts}_{counter}`，解析返回空 —— 零破坏兼容
+   5. ✅ 跨 zone 映射存储延后到 P3-2 有真实消费方再定（届时可能需要 zone 维度，本格式与解析仍可复用）
+
+   **分阶段**：
+   - 阶段 1：connection 包 ID 生成嵌入网关身份 + `ParseSessionGateway` 解析函数 + 网关构造时注入 serverID + 测试（跨网关不重号 / 含下划线 serverID / 旧格式兼容）
+   - 阶段 2：README / architecture 文档约定（格式、解析、定位流程）
+   - 阶段 3（延后，随 P3-2）：跨 zone 真实消费方出现后再定映射存储
+
+   **验收**：两台不同 serverID 网关生成的 ID 必不相同；解析函数往返一致；旧格式解析返回空不 panic；全仓门禁绿。
+
+   - 待做：阶段 1、2
 
 2. **多 Zone 支持**
    - 问题：当前单 zone，百万在线需跨 zone 部署（华北/华东/华南）
