@@ -233,6 +233,16 @@ func (s *Server) PushReliable(sessionID string, targetCmd int32, data []byte) er
 	w := s.reliable.windowFor(sessionID)
 	now := time.Now()
 	w.mu.Lock()
+	// 窗口可能已被并发回收（会话断开瞬间：clearReliable → dropSession 置
+	// entries=nil，而本方法在 windowFor 后才拿锁）。nil map 的 len 读是 0
+	// 能过容量检查，但写入会 panic——端到端 bench 实测：客户端断开与推送
+	// 竞态打崩 logic 进程。会话已终止即返回错误，不写孤儿窗口（孤儿窗口
+	// 不在 sessions 表，janitor 扫不到，条目会永久泄漏）。
+	if w.entries == nil {
+		w.mu.Unlock()
+		s.metrics.TotalFailed.Add(1)
+		return fmt.Errorf("logic: session %q window already released", sessionID)
+	}
 	if len(w.entries) >= s.reliable.cfg.WindowSize {
 		w.mu.Unlock()
 		s.metrics.TotalFailed.Add(1)

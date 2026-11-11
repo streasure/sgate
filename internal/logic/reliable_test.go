@@ -2,6 +2,7 @@ package logic
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,4 +309,61 @@ func countSeq(cs *capturingStream, seq int64) int {
 		}
 	}
 	return n
+}
+
+// TestPushReliableWindowReleasedNoPanic 回归（端到端 bench 实测崩溃）：
+// 会话断开瞬间 clearReliable → dropSession 把窗口 entries 置 nil，而
+// PushReliable 已在 windowFor 拿到该窗口引用、随后才拿 w.mu——nil map 的
+// len 读是 0 能过容量检查，但写入 panic，打崩整个 logic 进程。
+// 守卫必须返回错误而非 panic，且不往已回收窗口写条目。
+func TestPushReliableWindowReleasedNoPanic(t *testing.T) {
+	s, _, _ := newReliableFixture(t, ReliabilityConfig{})
+
+	// 白盒构造竞态结果："windowFor 已取到窗口引用、并发回收在其拿锁前完成"。
+	w := s.reliable.windowFor("sess-1")
+	w.mu.Lock()
+	w.entries = nil
+	w.mu.Unlock()
+
+	err := s.PushReliable("sess-1", 700001, []byte("payload"))
+	if err == nil {
+		t.Fatal("PushReliable on released window: want error, got nil")
+	}
+	// 不得复活/写入孤儿条目。
+	w.mu.Lock()
+	n := len(w.entries)
+	w.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("orphan entries written to released window: %d, want 0", n)
+	}
+}
+
+// TestPushReliableConcurrentClearNoPanic 压竞态：推送与清窗并发反复交错，
+// 修复前会 panic（写 nil map），修复后只允许返回错误。
+func TestPushReliableConcurrentClearNoPanic(t *testing.T) {
+	s, _, conn := newReliableFixture(t, ReliabilityConfig{WindowSize: 8})
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				// 模拟会话反复断开/重建：清窗后重新挂回会话。
+				s.clearReliable("sess-1")
+				s.sessions.Store("sess-1", conn)
+			}
+		}
+	}()
+
+	for i := range 2000 {
+		_ = s.PushReliable("sess-1", 700001, []byte("payload")) // 窗口满/已回收均为预期错误
+		_ = i
+	}
+	close(stop)
+	wg.Wait()
 }
