@@ -6,32 +6,33 @@ import (
 
 // ServiceConfig 逻辑层服务配置，包含身份标识、传输、拨入网关和 etcd 设置
 type ServiceConfig struct {
-	ListenAddr         string        `yaml:"listenAddr"`         // 监听地址
-	ListenPort         string        `yaml:"listenPort"`         // 监听端口
-	AdvertiseAddr      string        `yaml:"advertiseAddr"`      // 对外暴露地址
-	Belong             string        `yaml:"belong"`             // 所属应用/团队标识
-	ServiceID          string        `yaml:"serverId"`           // 服务实例 ID
-	ServerType         string        `yaml:"serverType"`         // 服务类型
-	ServiceName        string        `yaml:"serviceName"`        // 服务名称
-	Zone               string        `yaml:"zone"`               // 可用区
-	EtcdEndpoints      []string      `yaml:"etcdEndpoints"`      // etcd 集群端点列表
-	EtcdEndpoint       string        `yaml:"etcdEndpoint"`       // etcd 单节点端点
-	EtcdUsername       string        `yaml:"etcdUsername"`       // etcd 用户名
-	EtcdPassword       string        `yaml:"etcdPassword"`       // etcd 密码
-	EtcdServicePrefix  string        `yaml:"etcdServicePrefix"`  // etcd 服务路径前缀
-	EtcdLeaseTTL       string        `yaml:"etcdLeaseTTL"`       // etcd 租约 TTL
-	HeartbeatInterval  time.Duration `yaml:"heartbeatInterval"`  // 心跳间隔
-	HeartbeatTTL       time.Duration `yaml:"heartbeatTTL"`       // 心跳 TTL
-	GRPCWindowSize     int           `yaml:"grpcWindowSize"`     // gRPC 流控窗口大小
-	GRPCMaxMessageSize int           `yaml:"grpcMaxMessageSize"` // gRPC 单条消息最大长度
-	DispatchWorkers    int           `yaml:"dispatchWorkers"`    // 分发工作协程数
-	DispatchChSize     int           `yaml:"dispatchChSize"`     // 分发通道大小
-	StreamSendChSize   int           `yaml:"streamSendChSize"`   // 流发送通道大小
-	StreamSendTimeout  time.Duration `yaml:"streamSendTimeout"`  // 流发送通道满时的最长等待（<=0 用默认 5s）
-	Passthrough        bool          `yaml:"passthrough"`        // 是否直通模式
-	ShardCount         int           `yaml:"shardCount"`         // 拨入每个网关的流分片数（<=0 时 NumCPU*8）
-	ConnGroupCount     int           `yaml:"connGroupCount"`     // 拨入每个网关的独立 TCP 连接组数（<=0 时 4）
-	Gateways           []string      `yaml:"gateways"`           // 静态网关 gRPC 地址列表（ip:port），与 etcd 发现互补
+	ListenAddr         string            `yaml:"listenAddr"`         // 监听地址
+	ListenPort         string            `yaml:"listenPort"`         // 监听端口
+	AdvertiseAddr      string            `yaml:"advertiseAddr"`      // 对外暴露地址
+	Belong             string            `yaml:"belong"`             // 所属应用/团队标识
+	ServiceID          string            `yaml:"serverId"`           // 服务实例 ID
+	ServerType         string            `yaml:"serverType"`         // 服务类型
+	ServiceName        string            `yaml:"serviceName"`        // 服务名称
+	Zone               string            `yaml:"zone"`               // 可用区
+	EtcdEndpoints      []string          `yaml:"etcdEndpoints"`      // etcd 集群端点列表
+	EtcdEndpoint       string            `yaml:"etcdEndpoint"`       // etcd 单节点端点
+	EtcdUsername       string            `yaml:"etcdUsername"`       // etcd 用户名
+	EtcdPassword       string            `yaml:"etcdPassword"`       // etcd 密码
+	EtcdServicePrefix  string            `yaml:"etcdServicePrefix"`  // etcd 服务路径前缀
+	EtcdLeaseTTL       string            `yaml:"etcdLeaseTTL"`       // etcd 租约 TTL
+	HeartbeatInterval  time.Duration     `yaml:"heartbeatInterval"`  // 心跳间隔
+	HeartbeatTTL       time.Duration     `yaml:"heartbeatTTL"`       // 心跳 TTL
+	GRPCWindowSize     int               `yaml:"grpcWindowSize"`     // gRPC 流控窗口大小
+	GRPCMaxMessageSize int               `yaml:"grpcMaxMessageSize"` // gRPC 单条消息最大长度
+	DispatchWorkers    int               `yaml:"dispatchWorkers"`    // 分发工作协程数
+	DispatchChSize     int               `yaml:"dispatchChSize"`     // 分发通道大小
+	StreamSendChSize   int               `yaml:"streamSendChSize"`   // 流发送通道大小
+	StreamSendTimeout  time.Duration     `yaml:"streamSendTimeout"`  // 流发送通道满时的最长等待（<=0 用默认 5s）
+	Passthrough        bool              `yaml:"passthrough"`        // 是否直通模式
+	ShardCount         int               `yaml:"shardCount"`         // 拨入每个网关的流分片数（<=0 时 NumCPU*8）
+	ConnGroupCount     int               `yaml:"connGroupCount"`     // 拨入每个网关的独立 TCP 连接组数（<=0 时 4）
+	Gateways           []string          `yaml:"gateways"`           // 静态网关 gRPC 地址列表（ip:port），与 etcd 发现互补
+	Reliability        ReliabilityConfig `yaml:"reliability"`        // 可靠推送（端到端 ACK）参数，零值字段回退默认
 }
 
 // defaultGRPCWindowSize / defaultGRPCMaxMessageSize logic 侧 gRPC 窗口与单消息上限的
@@ -93,4 +94,9 @@ func WithGateways(addrs ...string) ServiceOption {
 // WithShardCount 设置拨入每个网关的流分片数。
 func WithShardCount(n int) ServiceOption {
 	return func(c *ServiceConfig) { c.ShardCount = n }
+}
+
+// WithReliability 设置可靠推送（端到端 ACK）参数，零值字段回退默认。
+func WithReliability(cfg ReliabilityConfig) ServiceOption {
+	return func(c *ServiceConfig) { c.Reliability = cfg }
 }

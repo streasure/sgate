@@ -106,12 +106,16 @@ func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protoc
 // builtinCommand 处理网关系统内置命令。返回 true 表示已消费（不告警）。
 //   - CmdHeartbeatReq: 网关健康检查心跳，无需应答
 //   - CmdUserOffline: 用户下线通知，清理会话/分组/用户映射（防止泄漏）
+//   - CmdMsgAck: 可靠推送端到端确认，批量移出未确认窗口
 func (s *Server) builtinCommand(msg *protocol.StreamData) bool {
 	switch msg.Cmd {
 	case routes.CmdHeartbeatReq:
 		return true
 	case routes.CmdUserOffline:
 		s.Offline(msg.SessionId, msg.UserKey)
+		return true
+	case routes.CmdMsgAck:
+		s.handleMsgAck(msg)
 		return true
 	}
 	return false

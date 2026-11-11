@@ -25,7 +25,11 @@ func (f *capturingStream) SendMsg(m any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if sb, ok := m.(*protocol.StreamBatch); ok {
-		f.batches = append(f.batches, sb.Items)
+		// sendLoop 跨批次复用同一底层数组，必须拷贝，
+		// 否则后续批次会覆写已捕获批次的内容（跨批次别名）。
+		items := make([]*protocol.StreamData, len(sb.Items))
+		copy(items, sb.Items)
+		f.batches = append(f.batches, items)
 	}
 	return nil
 }

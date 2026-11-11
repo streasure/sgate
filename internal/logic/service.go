@@ -47,6 +47,7 @@ func NewService(opts ...ServiceOption) *Service {
 		WithServerID(cfg.ServiceID),
 		WithStreamChSize(cfg.StreamSendChSize),
 		WithStreamSendTimeout(cfg.StreamSendTimeout),
+		WithReliableConfig(cfg.Reliability),
 	}
 	return &Service{server: NewServer(serverOpts...), cfg: cfg, ctx: context.Background()}
 }

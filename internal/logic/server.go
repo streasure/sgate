@@ -167,6 +167,12 @@ type PushMetrics struct {
 	BroadcastSent   atomic.Int64 // 广播成功数
 	BroadcastFailed atomic.Int64 // 广播失败数
 	RetryAttempts   atomic.Int64 // 重试次数
+
+	// 可靠推送（端到端 ACK）指标
+	Acked          atomic.Int64 // 收到客户端 ACK 移出窗口的条数
+	Retransmits    atomic.Int64 // 超时重传发送次数
+	GiveUps        atomic.Int64 // 达重传上限放弃的条数（需告警）
+	DroppedOffline atomic.Int64 // 会话终止（Offline/断流）时清掉的未确认条数
 }
 
 // GetSnapshot 获取当前监控指标的快照副本
@@ -179,6 +185,10 @@ func (m *PushMetrics) GetSnapshot() map[string]int64 {
 		"broadcastSent":   m.BroadcastSent.Load(),
 		"broadcastFailed": m.BroadcastFailed.Load(),
 		"retryAttempts":   m.RetryAttempts.Load(),
+		"acked":           m.Acked.Load(),
+		"retransmits":     m.Retransmits.Load(),
+		"giveUps":         m.GiveUps.Load(),
+		"droppedOffline":  m.DroppedOffline.Load(),
 	}
 }
 
@@ -205,6 +215,10 @@ type Server struct {
 	streamSendTimeout time.Duration // 流发送通道满时的最长等待（零值回退 defaultStreamSendTimeout）
 	stopOnce          sync.Once     // 确保只停止一次
 	metrics           PushMetrics   // 推送监控指标
+
+	reliable     *reliableManager // 可靠推送未确认窗口（按会话）
+	reliableOnce sync.Once        // 重传 janitor 惰性启动
+	reliableStop chan struct{}    // 重传 janitor 停止信号（Stop 关闭）
 }
 
 // ServerOption 服务端配置选项函数
@@ -233,6 +247,8 @@ func NewServer(opts ...ServerOption) *Server {
 		groups:        make(map[string]*pushGroup),
 		sessionGroups: make(map[string]map[string]struct{}),
 		streamChSize:  1024,
+		reliable:      newReliableManager(context.Background(), ReliabilityConfig{}),
+		reliableStop:  make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -273,6 +289,9 @@ func (s *Server) handleStream(stream dataStream, gatewayID string) error {
 			// 异常断流（网关崩溃/网络中断）不会走 Offline 命令：
 			// 必须在此移除分组绑定，否则 groups/sessionGroups 永久滞留增长。
 			s.leaveAllGroups(sessionID)
+			// 可靠推送窗口同理随会话回收（决策④），否则 janitor 会
+			// 对已死会话永久重传。
+			s.clearReliable(sessionID)
 		}
 		conn.sessionMu.Unlock()
 	}()
@@ -447,6 +466,8 @@ func (s *Server) Offline(sessionID, userUUID string) {
 		s.sessions.CompareAndDelete(sessionID, value)
 	}
 	s.leaveAllGroups(sessionID)
+	// 决策④：可靠推送窗口随会话终止（会话内 at-least-once，跨会话靠重连拉取）。
+	s.clearReliable(sessionID)
 	if userUUID != "" {
 		s.UnregisterUser(userUUID)
 		return
@@ -581,6 +602,8 @@ func (s *Server) LeaveGroupForUser(userUUID, groupID string) error {
 // Stop 关闭所有流连接，停止服务端
 func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
+		// 先停重传 janitor，避免扫描与流关闭竞态。
+		close(s.reliableStop)
 		var wg sync.WaitGroup
 		s.streams.Range(func(_, value any) bool {
 			conn := value.(*streamConn)
