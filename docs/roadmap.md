@@ -141,7 +141,8 @@
 
    **验收**：两台不同 serverID 网关生成的 ID 必不相同；解析函数往返一致；旧格式解析返回空不 panic；全仓门禁绿。
 
-   - 待做：阶段 1、2
+   - 已完成：阶段 1（`53fc974` connection ID 嵌入网关身份 + `ParseSessionGateway` + 5 组测试）→ 阶段 2（README §9.2 / architecture §4.6 文档约定）
+   - 待做：阶段 3（跨 zone 映射存储，延后随 P3-2 有真实消费方再定）
 
 2. **多 Zone 支持**
    - 问题：当前单 zone，百万在线需跨 zone 部署（华北/华东/华南）

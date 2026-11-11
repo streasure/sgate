@@ -93,7 +93,7 @@ Gateway 结构体承载全部接入侧状态：
 | 类型 | 文件 | 职责 |
 | --- | --- | --- |
 | `Connection` | connection.go | 客户端连接：session、状态、消息速率计数 |
-| `ConnectionManager` | manager.go | 分片存储、账号→连接集合索引（KickAccounts）、`ForEach`、空闲连接清理 |
+| `ConnectionManager` | manager.go | 分片存储、账号→连接集合索引（KickAccounts）、`ForEach`、空闲连接清理；session ID 生成/解析（`GenerateConnectionID`/`ParseSessionGateway`，自描述 ID §4.6） |
 | `ConnectionGroup` | group.go | 组成员管理（广播/组播） |
 | `ShardedMap` | sharded_map.go | 分片并发 Map（降低锁竞争） |
 | `ShardedWriteCoalescer` | coalescer.go | 推送路径分片写合并（批量优化） |
@@ -289,6 +289,32 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
 **安全与工程要点**：token 一次性消费防重放、per-IP/总量双上限防关联表耗尽、未关联数据报静默丢弃（反放大：回包 ≤ 来包，垃圾包零回包）、seq 去重窗口、MTU ≤ 1400B 避免 IP 分片、下行新鲜度条件（`now-lastSeen ≤ idleTimeout/2` 才走 UDP，stale 黑洞窗口砍半且不发起注定投向死地址的 SendTo）。**存活判据只看 WS**：UDP 丢包不断线，弱网玩家不被误踢。
 
 **测试**：`udp_reject_test.go`（关闭态拒绝）、`udp_assoc_test.go`（token 一次性/过期/撤销、关联生命周期、per-IP 与总量上限、空闲清扫、幂等替换）、`udp_uplink_test.go`（pipeline 转发/会话隔离/seq 去重/MTU/埋点）、`udp_send_test.go`（下行分流/新鲜度/回落/-race）、`backend/stream_udp_redirect_test.go`（批量绕过/广播分流/coalescer 绕过）、`connection/send_by_cmd_test.go`（唯一分流点）。
+
+### 4.6 自描述 session ID（跨网关定位）
+
+**问题**：session ID 原为 `conn_{UnixNano}_{counter}`，各网关本地生成——`counter` 每台进程各自从 1 起，两台网关在相同时钟读数下会发重号（虚拟化环境时钟粒度粗时并不罕见），logic 的 `sessions` 内存表会把消息送到错误网关（静默数据错乱）；且外部服务拿到 ID 无法定位所在网关。
+
+**方案**（roadmap P3-1，不建 etcd session 表）：把网关身份直接编进 ID——
+
+```text
+格式：conn_{serverID}_{UnixNano}_{counter}
+      ↑ config serverID（与 etcd 注册 instanceID 同一标识）
+
+生成：connection.GenerateConnectionID（唯一入口，addConnection 调用）
+      newGateway 构造时 connection.SetSessionGatewayID(cfg.ServerID) 注入一次
+定位：connection.ParseSessionGateway(id) 解析出 serverID
+      → 现有 etcd 服务发现 {belong}/SERVER_TYPE_SGATE:{zone}/{serverId} 取地址
+```
+
+**原理**：路由信息不放外部登记表，而是"信封上直接写收件部门"——表会过期、要心跳续租、崩溃后残留要等租约超时清理，且 etcd 定位是低频服务注册、扛不住百万级会话随连接频繁增删的写放大；写在 ID 里随会话同生共死，天然一致、零维护。
+
+**解析规则**：从右取两段纯数字（`counter`、`UnixNano`），其余部分即 `serverID`——`serverID` 含下划线或以数字结尾均可正确还原。旧格式（无 `serverID` 段）或非法输入返回 `""`，不 panic。
+
+**兼容**：`serverID` 为空（测试/工具进程）时 `SetSessionGatewayID` 存空串，生成退化为旧格式 `conn_{UnixNano}_{counter}`，零破坏。
+
+**为什么不建 etcd 表（决策记录）**：消费方盘点——logic 推送靠 flip 模式内存 `sessions` 表（单 zone 已解决）、loginserver 踢人靠 Redis 三键索引 `sess:conn:{sgateId}:{connId}`（已有），etcd 建表无真实消费方；"网关重启需客户端重连"是 TCP 连接本性，属 P3-3 滚动升级，本项不解决也不声称解决。跨 zone 映射存储延后到 P3-2 有真实消费方再定（届时本格式与解析仍可复用）。
+
+**测试**：`connection/session_id_test.go`（跨网关不重号、进程内 1000 条唯一、含下划线/数字结尾 serverID 往返、旧格式与非法输入返回空、未设置退化旧格式）。
 
 ---
 

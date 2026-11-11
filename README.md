@@ -663,6 +663,17 @@ sgate 支持 **WS 会话 + UDP 关联通道**：一个会话、两个通道—�
 
 边界与安全（反放大、token 一次性防重放、per-IP/总量上限、seq 去重、MTU 1400）与设计细节见 [architecture §4.4](docs/architecture.md#44-wsudp-关联通道已支持) 与 [udp-ws-design.md](docs/udp-ws-design.md)。
 
+### 9.2 自描述 session ID（跨网关定位）
+
+session ID 由网关生成，格式为 **`conn_{serverID}_{UnixNano}_{counter}`**——网关身份（config `serverId`，与 etcd 注册的 instanceID 同一标识）直接编在 ID 里：
+
+- **定位**：`connection.ParseSessionGateway(sessionID)` 从 ID 解析出 `serverID`，再走现有 etcd 服务发现（`{belong}/SERVER_TYPE_SGATE:{zone}/{serverId}`）取网关地址——**零新增状态、零外部登记表**（路由信息写在"信封"上，随会话同生共死，不过期、不需心跳续租、不需清理）
+- **解析规则**：从右取两段纯数字（`counter`、`UnixNano`），其余部分即 `serverID`——因此 `serverID` 含下划线或以数字结尾也能正确还原
+- **全局唯一**：`counter` 是进程内自增，跨网关唯一性由 `serverID` 段保证（没有该段时，两台网关在相同时钟读数下会发重号，logic 的 sessions 表会把消息送到错误网关）
+- **兼容**：`serverID` 为空（测试/工具进程）时退化为旧格式 `conn_{UnixNano}_{counter}`，`ParseSessionGateway` 返回空串不 panic
+
+消费方：logic 推送靠 flip 模式内存表、loginserver 踢人靠 Redis 三键索引，均已覆盖单 zone 场景；本约定服务跨 zone / 跨服战（P3-2、P3-4）的定位需求。详见 [architecture §4.6](docs/architecture.md#46-自描述-session-id跨网关定位)。
+
 ---
 
 ## 十、逻辑层 API
