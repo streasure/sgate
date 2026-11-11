@@ -734,7 +734,7 @@ func (g *Gateway) GetServerID() string {
 }
 
 func (g *Gateway) logMetrics() {
-	tlog.Info(g.ctx, "gateway metrics connectionsActive=%d connectionsTotal=%d messagesReceived=%d messagesForwarded=%d messagesPushed=%d messagesProcessed=%d messagesFailed=%d",
+	tlog.Info(g.ctx, "gateway metrics connectionsActive=%d connectionsTotal=%d messagesReceived=%d messagesForwarded=%d messagesPushed=%d messagesProcessed=%d messagesFailed=%d asyncWriteFailed=%d",
 		g.connectionsActive.Load(),
 		g.connectionsTotal.Load(),
 		g.messagesReceived.Load(),
@@ -742,6 +742,7 @@ func (g *Gateway) logMetrics() {
 		g.messagesPushedToClient.Load(),
 		g.messagesProcessed.Load(),
 		g.messagesFailed.Load(),
+		connection.AsyncWriteFailures(),
 	)
 }
 

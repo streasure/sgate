@@ -60,7 +60,7 @@
    | 丢包点 | 现状 |
    | --- | --- |
    | logic → 网关 gRPC 流中途断开 | sendLoop `SendMsg` 失败即 shutdown，整批静默丢失 |
-   | 网关异步写客户端失败 | `NoopAsyncCallback` 吞掉写错误，无感知 |
+   | 网关异步写客户端失败 | 已埋点：`/stats` 的 `asyncWriteFailed`（原 `NoopAsyncCallback` 吞掉写错误，无感知） |
    | 网关崩溃 / logic 断连期 | 内存队列清零 |
    | 客户端收到但没执行 | 完全无感知 |
 
@@ -85,14 +85,14 @@
    7. ✅ **重传参数进 yaml（reliability.*），号段与 seq 语义进代码** —— 沿用"契约进代码，行为进配置"
 
    **分阶段**：
-   - 阶段 1：protocol 仓 `CmdMsgAck` 枚举 + body → sgate routes 常量（跨仓先行，同 UDP 阶段 1 模式）
-   - 阶段 2：logic 可靠推送层（seq 分配 / 未确认窗口 / 超时重传 / ACK 处理 / Offline 清窗 / 指标 / 配置）
-   - 阶段 3：网关 async 写失败观测 + README/architecture 文档
-   - 阶段 4：客户端实现（ACK + 滑动窗口去重）+ 测试（gRPC 断流补发、重复 ACK 幂等、窗口满背压、断线清窗、乱序到达）
+   - 阶段 1：protocol 仓 `CmdMsgAck` 枚举 + body → sgate routes 常量（跨仓先行，同 UDP 阶段 1 模式）——✅ 已完成（protocol `4c4d72b` / sgate `ba887f1`）
+   - 阶段 2：logic 可靠推送层（seq 分配 / 未确认窗口 / 超时重传 / ACK 处理 / Offline 清窗 / 指标 / 配置）——✅ 已完成（`be0b39e`，含 -race 测试）
+   - 阶段 3：网关 async 写失败观测 + README/architecture 文档——✅ 已完成
+   - 阶段 4：客户端实现（ACK + 滑动窗口去重）+ 测试（gRPC 断流补发、重复 ACK 幂等、窗口满背压、断线清窗、乱序到达）——待做（需客户端仓配合）
 
    **验收**：杀 logic↔网关 gRPC 流后客户端仍收齐全部关键消息；重复投递不重复执行；断线重连后拉取补齐；全仓门禁绿。
 
-   - 待做：按阶段实现（阶段 1 需 protocol 仓配合）
+   - 待做：阶段 4（端到端验收需客户端实现后进行）
 
 2. **封禁收敛遗留**
    - 已完成：P1 单向 Kick 模型（loginserver 权威库 + KickService）+ P2 BatchValidate 周期安全网

@@ -645,6 +645,7 @@ Get-Process -Name sgate,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,ben
 | `CmdHeartbeatReq` | `1100010` | 心跳请求 |
 | `CmdHeartbeatAck` | `1100011` | 心跳应答 |
 | `CmdUserOffline` | `1100012` | 用户下线通知 |
+| `CmdMsgAck` | `1100013` | 可靠推送端到端 ACK（C→L，body 为 `MsgAck{repeated int64 seq_ids}`，批量确认） |
 | `CmdPushBatch` | `9000002` | 网关批量推送 |
 
 命令号段分配约定：**`1200000~1299999` 为 UDP 通道段**（`routes.CmdUDPRangeStart/End` 常量，含段内传输控制命令 `1200000~1200005`），该段消息按号段分流到 UDP 关联通道；**其余号段（含 ≥ `1300000`）一律 WS**。判据："这条消息丢了，客户端能否靠下一帧自愈？"能 → 分配进 UDP 段（位置/AOI/血条等状态同步）；不能（结算/掉落/交易）→ 留在 WS 段。号段是三端（sgate/logic/客户端）共享的 wire 契约，分配走代码评审与版本发布，不进 yaml 配置。
@@ -669,12 +670,26 @@ sgate 支持 **WS 会话 + UDP 关联通道**：一个会话、两个通道—�
 逻辑服通过 `logic.Server` 提供的 API 操作客户端连接：
 
 ```go
-PushToConnection(sessionID, command, data)  // 向指定会话推送
+PushToConnection(sessionID, command, data)  // 向指定会话推送（尽力而为，下一帧可自愈的消息）
+PushReliable(sessionID, command, data)      // 可靠推送（丢不起的消息：ACK + 超时重传）
 SendToGroup(groupID, command, data)         // 向组内成员推送
 Broadcast(command, data)                    // 向所有网关广播
 ```
 
 批量推送是 sgate 的传输优化，逻辑服不需要感知 `PushBatch`。
+
+### 10.1 可靠推送（端到端 ACK）
+
+`PushToConnection` 是"本地入队即算成功"——gRPC 流断、网关异步写失败、客户端没执行，业务都无感知。丢不起的消息（结算/掉落/交易）改用 `PushReliable`：
+
+- **端到端 ACK，网关零改动**：logic 按会话单调分配 `SeqId` 写入 `StreamData.SeqId`（wire 零改动），消息进该会话**未确认窗口**（默认 64 条）；客户端处理后回 `CmdMsgAck(1100013)`（body 为重复 seq 列表，可攒批），logic 批量移出窗口。ACK 是普通上行走现有 pipeline，网关保持纯管道、零新状态——任何一段丢包最终都表现为"没收到 ACK"，被同一机制兜住
+- **超时重传**：janitor 扫描式（非每消息一个 timer），指数退避 300ms 起、上限 5s、默认最多 5 次；达上限放弃并计 `giveUps` 告警
+- **窗口满背压**：返回 `ErrReliableWindowFull`，由业务决定等待/降级，**绝不静默丢**
+- **断线清窗**：会话 Offline/断流即清空窗口——本机制只保证**会话内 at-least-once**，不跨会话续传；断线补齐靠重连后的登录全量/增量同步（业务现有流程）。重复投递由客户端滑动窗口去重（窗口 1024，同 UDP seq 位图模式）
+- **顺序语义**：ACK 层只保证"到达 + 去重"，不保证相对顺序（补发可能晚于新消息），顺序由业务消息自带版本号兜底
+- **配置** `reliability.*`（`windowSize` / `scanInterval` / `initialBackoff` / `maxBackoff` / `maxRetries`，零值回退默认）；**观测** `PushMetrics` 的 `acked` / `retransmits` / `giveUps` / `droppedOffline`，网关 `/stats` 的 `asyncWriteFailed`
+
+按需 opt-in：只有丢不起的消息走 `PushReliable`，其余照旧 `PushToConnection`（全量 ACK 等于在应用层重造 TCP）。
 
 **`internal/logic` 的定位**：逻辑服侧的嵌入库，网关侧不引用它（`internal/gateway`、`internal/backend` 均不 import）。它封装 gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）和 `Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓中由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*`、`bench/logic_logincheck`）消费，真实逻辑服进程同样以此库嵌入；网关侧与之对接的是 `internal/backend` 的 flip 流入口 `GRPCServer`。
 

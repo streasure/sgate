@@ -219,6 +219,30 @@ types.GetFilterChain().AddFilter(myFilter)
 5. gnet 异步写回客户端
 ```
 
+每一步都可能丢（gRPC 流断、无连接、异步写失败），但**每一步的"成功"都不等于客户端收到**。因此丢不起的消息走端到端确认（§4.5）；其余消息依赖"下一帧覆盖"自愈。
+
+### 4.5 可靠推送：端到端 ACK（logic ↔ 客户端）
+
+**为什么 ACK 必须建在端到端**：投递好比寄挂号信——每段传送带（TCP、gRPC）只保证"把包裹交到下一段手里"，任何一段说"我送出去了"都不等于收件人签收。逐跳各建一层 ACK（网关停一层、gRPC 停一层）修不掉任何真实缺口，只是每层各造一套窗口/定时器/重传状态。唯一能证明送达的只有收件人回签收单，所以 ACK 建在 logic ↔ 客户端，**网关保持纯管道、零新状态**。
+
+```text
+PushReliable(sessionID, cmd, data)          ← logic 业务侧（opt-in）
+  → 按会话单调分配 SeqId 写入 StreamData.SeqId   （复用既有字段，wire 零改动）
+  → 入该会话未确认窗口（默认 64，满则返回 ErrReliableWindowFull 背压）
+  → 现有下行链路原样转发（MarshalClientMessage / PushBatch 透传 SeqId）
+
+客户端 → CmdMsgAck(1100013) MsgAck{seq_ids}  ← 普通上行走现有 pipeline（网关零改动）
+  → logic builtinCommand 批量移出窗口（重复/迟到 ACK 幂等）
+
+超时未收 ACK → janitor 扫描重传（指数退避 300ms~5s × 5 次，扫描式非每消息 timer）
+  → 达上限放弃 + giveUps 计数告警
+
+会话 Offline / 断流 → 清窗（droppedOffline 计数）
+  → 会话内 at-least-once；跨会话不续传，重连后走登录全量/增量同步拉取
+```
+
+**观测**：logic `PushMetrics`（`acked`/`retransmits`/`giveUps`/`droppedOffline`）与网关 `/stats` 的 `asyncWriteFailed`（gnet 异步写完成回调计数，原 `NoopAsyncCallback` 吞错无感知）互补，覆盖丢包点表的全部环节。配置 `reliability.*`（行为进 yaml，号段与 seq 语义进代码）。详见 [README §10.1](../README.md#101-可靠推送端到端-ack)。
+
 ### 4.3 登录流程
 
 ```text

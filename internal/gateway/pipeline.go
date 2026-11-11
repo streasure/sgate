@@ -544,7 +544,7 @@ func writeFrameAsync(conn gnet.Conn, data []byte) {
 	buf := make([]byte, 4+len(data))
 	copy(buf, header[:])
 	copy(buf[4:], data)
-	_ = conn.AsyncWrite(buf, connection.NoopAsyncCallback)
+	_ = conn.AsyncWrite(buf, connection.AsyncWriteCallback)
 }
 
 // Submit 将 pipeline 任务提交到对应分片的 worker（TCP/WebSocket 统一）。

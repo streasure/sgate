@@ -10,6 +10,7 @@ import (
 
 	json "github.com/bytedance/sonic"
 	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
@@ -71,29 +72,32 @@ func (r *messageRateTracker) rate() float64 {
 }
 
 type statsPayload struct {
-	Received              int64   `json:"received"`
-	Forwarded             int64   `json:"forwarded"`
-	MessagesFailed        int64   `json:"failed"`
-	DroppedOverload       int64   `json:"droppedOverload"`
-	DroppedFull           int64   `json:"droppedFull"`
-	DroppedNoLogicNotConn int64   `json:"droppedNoLogicNotConnected"`
-	DroppedBlacklist      int64   `json:"droppedBlacklist"`
-	DroppedRateLimit      int64   `json:"droppedRateLimit"`
-	DroppedWAF            int64   `json:"droppedWAF"`
-	DroppedCircuit        int64   `json:"droppedCircuit"`
-	DroppedIntegrity      int64   `json:"droppedIntegrity"`
-	DroppedFilterChain    int64   `json:"droppedFilterChain"`
-	DroppedAuth           int64   `json:"droppedAuth"`
-	DroppedUnsupported    int64   `json:"droppedUnsupported"` // UDP 等传输层不承载的业务消息
-	DroppedTotal          int64   `json:"droppedTotal"`
-	PushedToClient        int64   `json:"pushedToClient"`
-	PushDroppedNoConn     int64   `json:"pushDroppedNoConn"`
-	Overloaded            bool    `json:"overloaded"`
-	CPUPercent            float64 `json:"cpuPercent"`
-	MemPercent            float64 `json:"memPercent"`
-	OverloadDropped       int64   `json:"overloadDropped"`
-	ActiveConnections     int64   `json:"activeConnections"`
-	WAFBlocked            int64   `json:"wafBlocked"`
+	Received              int64 `json:"received"`
+	Forwarded             int64 `json:"forwarded"`
+	MessagesFailed        int64 `json:"failed"`
+	DroppedOverload       int64 `json:"droppedOverload"`
+	DroppedFull           int64 `json:"droppedFull"`
+	DroppedNoLogicNotConn int64 `json:"droppedNoLogicNotConnected"`
+	DroppedBlacklist      int64 `json:"droppedBlacklist"`
+	DroppedRateLimit      int64 `json:"droppedRateLimit"`
+	DroppedWAF            int64 `json:"droppedWAF"`
+	DroppedCircuit        int64 `json:"droppedCircuit"`
+	DroppedIntegrity      int64 `json:"droppedIntegrity"`
+	DroppedFilterChain    int64 `json:"droppedFilterChain"`
+	DroppedAuth           int64 `json:"droppedAuth"`
+	DroppedUnsupported    int64 `json:"droppedUnsupported"` // UDP 等传输层不承载的业务消息
+	DroppedTotal          int64 `json:"droppedTotal"`
+	PushedToClient        int64 `json:"pushedToClient"`
+	PushDroppedNoConn     int64 `json:"pushDroppedNoConn"`
+	// 异步写客户端失败（gnet 完成回调收到 err）：端到端 ACK 观测的一环，
+	// 与 logic 侧 giveUps/droppedOffline 互补，覆盖"网关异步写失败"丢包点。
+	AsyncWriteFailed  int64   `json:"asyncWriteFailed"`
+	Overloaded        bool    `json:"overloaded"`
+	CPUPercent        float64 `json:"cpuPercent"`
+	MemPercent        float64 `json:"memPercent"`
+	OverloadDropped   int64   `json:"overloadDropped"`
+	ActiveConnections int64   `json:"activeConnections"`
+	WAFBlocked        int64   `json:"wafBlocked"`
 	// 管道延迟：float 微秒（P50 常 <1µs，整数微秒会截断成 0）
 	LatencyP50Us float64 `json:"latencyP50Us"`
 	LatencyP95Us float64 `json:"latencyP95Us"`
@@ -153,6 +157,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 			DroppedTotal:          dropOverload + dropFull + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth + dropUnsupported,
 			PushedToClient:        g.messagesPushedToClient.Load(),
 			PushDroppedNoConn:     g.messagesPushDroppedNoConn.Load(),
+			AsyncWriteFailed:      connection.AsyncWriteFailures(),
 			Overloaded:            overloaded,
 			CPUPercent:            cpuPct,
 			MemPercent:            memPct,

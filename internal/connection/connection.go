@@ -251,8 +251,31 @@ func (c *Connection) CheckAndIncrementMsgRate(maxPerConn int) bool {
 	return true
 }
 
-// NoopAsyncCallback 是异步写入完成时使用的空回调。
-func NoopAsyncCallback(_ gnet.Conn, _ error) error { return nil }
+// asyncWriteFailures 异步写完成回调收到的失败计数。
+// 端到端 ACK 观测的一环（roadmap P2-1 阶段 3）：写失败原本被 Noop 回调吞掉，
+// /stats 完全无感知；计数后与 logic 侧 giveUps/droppedOffline 互补，
+// 覆盖"网关异步写客户端失败"这一丢包点。
+var asyncWriteFailures atomic.Int64
+
+// AsyncWriteFailures 返回异步写完成回调累计收到的失败数（/stats 观测）。
+func AsyncWriteFailures() int64 { return asyncWriteFailures.Load() }
+
+// recordAsyncWriteFailure 记录一次异步写完成失败。
+// 所有 async 完成回调共用的唯一观测点，勿在调用点散写计数。
+func recordAsyncWriteFailure(err error) {
+	if err != nil {
+		asyncWriteFailures.Add(1)
+	}
+}
+
+// AsyncWriteCallback 是异步写入完成时的计数回调：写失败时累加计数，
+// 不干预连接生命周期（连接由心跳超时与读错误清理负责）。
+// 回调在 gnet event loop 内触发，必须不阻塞——只做一次原子自增。
+// 返回 nil：gnet 忽略回调返回值，保持与原 NoopAsyncCallback 行为一致。
+func AsyncWriteCallback(_ gnet.Conn, err error) error {
+	recordAsyncWriteFailure(err)
+	return nil
+}
 
 // touch 更新连接的最后活跃时间，每64次调用才实际更新一次以减少原子操作开销。
 func (c *Connection) touch() {
@@ -286,12 +309,12 @@ func (c *Connection) Send(data []byte) error {
 	// 内联异步封帧逻辑
 	if c.isWebSocket {
 		frame := EncodeWSFrame(0x82, data)
-		return c.Conn.AsyncWrite(frame, NoopAsyncCallback)
+		return c.Conn.AsyncWrite(frame, AsyncWriteCallback)
 	}
 	// TCP 快速路径：4字节长度前缀 + payload
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
-	return c.Conn.AsyncWritev([][]byte{header[:], data}, NoopAsyncCallback)
+	return c.Conn.AsyncWritev([][]byte{header[:], data}, AsyncWriteCallback)
 }
 
 // SendMulti 发送已组装好的合并数据。
@@ -300,7 +323,7 @@ func (c *Connection) SendMulti(combined []byte) error {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	return c.Conn.AsyncWrite(combined, NoopAsyncCallback)
+	return c.Conn.AsyncWrite(combined, AsyncWriteCallback)
 }
 
 // SendMultiWithCallback 发送合并数据，写入完成后执行回调函数。
@@ -311,7 +334,9 @@ func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	return c.Conn.AsyncWrite(combined, func(_ gnet.Conn, _ error) error {
+	return c.Conn.AsyncWrite(combined, func(_ gnet.Conn, err error) error {
+		// coalescer 合并写同样计入 async 写失败（唯一观测点）。
+		recordAsyncWriteFailure(err)
 		if cb != nil {
 			cb()
 		}
@@ -328,7 +353,8 @@ func (c *Connection) SendThenClose(data []byte) error {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	closeAfterWrite := func(_ gnet.Conn, _ error) error {
+	closeAfterWrite := func(_ gnet.Conn, err error) error {
+		recordAsyncWriteFailure(err)
 		_ = c.Conn.Close()
 		return nil
 	}
