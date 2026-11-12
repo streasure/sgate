@@ -61,6 +61,56 @@
 
 **负载说明**：绝对数值受本机后台应用影响，同配置多轮约 ±10%。`batchPush=false` 为非合帧路径，数值低于 batch-on 属预期。对比吞吐时应以同批测量内部对比为准。限流下扫表与 30min churn 结果见 [`Bench.md`](../Bench.md)。
 
+### 16K 极限压测（2026-11，`config/bench/batch-on.yaml`）
+
+三场景分别逼近 Windows 单机可测的连接数与消息速率上限（bench 规则：`loginValidation.enabled: false`、仅 LoginGate、无 HTTP login）。
+
+#### 场景 A：连接极限（bench_1m，TCP，目标 16384）
+
+| 指标 | 结果 |
+|------|------|
+| 建连成功 | 16,095 / 16,384 与 16,071 / 16,384（两轮） |
+| 失败原因 | 289~313，全部为尾批 `bind: ...lacked sufficient buffer space or queue was full`——Windows 临时端口池（49152 起共 16384 个）耗尽，**非网关拒绝** |
+| 建连+登录速率 | **6,583 ~ 6,605 conn/s**（2.44s 建完 1.6 万连接并全部登录） |
+| 60s 保持期 | active=16,071 **零掉线**、droppedTotal=0 |
+| 保持期内存 | RSS 1,341 → 1,342MB 稳定（每连接约 75KB，进程基线 124MB）、alloc 1,162 → 1,164MB |
+| 保持期 goroutine | 16,364（≈ 每连接 1 个 + 300 基线，Windows gnet 每连接一 goroutine） |
+| 保持期 CPU | ≈ 0.3%（心跳/batch 校验被 benchMode 跳过） |
+
+**结论**：Windows 下 16K 即单机连接天花板（端口池硬限制）；网关侧 16K 保持零资源漂移。更大规模需 Linux（epoll）。
+
+#### 场景 B：15K 连接 WS 上行（bench1_ws）
+
+| 指标 | 结果 |
+|------|------|
+| 登录 | 15,000 / 15,000 零失败（批量并发登录，`-login-batch 100`） |
+| 10s 窗口吞吐 | **724,469 msg/s** 与 **759,359 msg/s**（client-side 发送口径，两轮） |
+| 网关侧对账 | `forwarded` 与客户端 `sent` 逐条对上；`failed=0`、`dropped*=0`、`asyncWriteFailed=0` |
+| 管道延迟（洪峰期 ring 采样） | P50 **0.5µs** / P95 0.8µs / P99 1.2µs / max 9.5ms |
+| 洪峰期网关 CPU | ≈ 3 核（10s 窗口累计 CPU 32s） |
+| 连接时长 | P50 17.4s / P95 18.0s |
+
+#### 场景 C：15K 连接 WS 下行（bench2_ws + logic2-ws，96 流，batch on）
+
+三方对账（消息条数口径，`pushedToClient` 按逻辑条数计）：
+
+| 侧 | 计数 | 说明 |
+|----|------|------|
+| logic 发出 | **22,754,772** | 推送窗口 10:51:50.5 → 10:52:26.5（36.1s），≈ **630K msg/s** |
+| 网关分发 | **22,635,259** | `pushedToClient`，占发出的 99.48% |
+| 差值 | 119,513 | `pushDroppedNoConn` 113,029 + Send/marshal 失败 6,484，**精确闭合、全部如实计数** |
+| 客户端读走 | **17,024,058** | 30s 读取窗口；差值 5,611,201 为客户端到点主动 `Close` 后的在途/队列积压（非网关丢失） |
+
+其他指标：
+
+- **零业务丢弃**：`droppedTotal=0`、`failed=0`（113,029 条 `pushDroppedNoConn` 全部产生于客户端主动关闭之后，属正常拒绝而非过载丢弃）
+- **连接稳定性**：推送期间 logic 侧 members 恒为 15,000，直到客户端 30s 到点关闭才开始递减（中途采样 `active=11971` 为关闭进行中的中间态）
+- **洪峰 CPU**：C 轮网关累计 129.9s，扣除登录与空闲 ≈ **2.5~3 核**（与 B 轮上行洪峰一致）
+- **内存画像**：洪峰期 RSS 峰值 **6,582MB**（Go heap `sys=6,605MB` 向 OS 已提交未归还 + 下行背压在途积压），真实活跃堆 `alloc=809MB`；推送结束、积压排空后 RSS 回落 **467MB**、alloc 207MB
+- **下行速率瓶颈**：logic 侧 630K/s 为网关分发能力；客户端实际读取 ≈ 471K msg/s（17.0M / 36.1s），差距来自下行背压下管道积压（关闭时刻在途约 3.7M 条）
+
+**结论**：单机 15K 连接下行洪峰下网关分发 **≈630K msg/s**、上行 **≈750K msg/s**，业务零丢弃、对账分毫不差；下行内存峰值受客户端读取速度制约（背压积压），生产中客户端慢读会以队列积压而非丢消息体现。
+
 ### 多 TCP 连接并行（connGroupCount）
 
 gateway 与 logic 之间的 gRPC stream 若共享单条 TCP 连接，HTTP/2 协议要求同一连接上的 stream 共享写锁，96 个 shard 会串行写入（实际并行度 1）。`stream.connGroupCount` 配置 gateway 对同一 logic 建立 N 条独立 TCP 连接（默认 4），每个 connGroup 承载 `shardCount/N` 个 stream、各自拥有独立 HTTP/2 写锁。当前配置默认 `connGroupCount: 4`。
