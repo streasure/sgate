@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,7 +30,7 @@ var (
 	addr      = flag.String("addr", "127.0.0.1", "网关 IP 地址")
 	ports     = flag.String("ports", "48080", "端口列表，逗号分隔或 start-end 范围")
 	total     = flag.Int("connections", 1000000, "目标连接数")
-	batchSize = flag.Int("batch", 2000, "每批创建连接数")
+	batchSize = flag.Int("batch", 200, "每批创建连接数（Windows 半开连接保护 TcpMaxHalfOpen 默认 500，批次过大 dial 会成批失败）")
 	interval  = flag.Duration("interval", 100*time.Millisecond, "每批间隔")
 	stayOpen  = flag.Duration("stay", 30*time.Second, "连接保持时间")
 )
@@ -48,6 +49,7 @@ func main() {
 	fmt.Printf("保持时间: %v\n\n", *stayOpen)
 
 	var successCount, failCount atomic.Int64
+	var userSeq atomic.Int64 // 每连接唯一 UserId：同 UserId 会触发网关重复登录踢旧连接，hold 阶段会被踢光
 	var mu sync.Mutex
 	conns := make([]net.Conn, 0, *total)
 
@@ -68,11 +70,13 @@ func main() {
 
 				conn, err := net.DialTimeout("tcp", target, 3*time.Second)
 				if err != nil {
-					failCount.Add(1)
+					if failCount.Add(1) <= 3 {
+						fmt.Fprintf(os.Stderr, "dial error: %v\n", err)
+					}
 					return
 				}
-				// 发送 LoginGate 请求激活连接
-				sendLoginGate(conn)
+				// 发送 LoginGate 请求激活连接（唯一 UserId，避免重复登录互踢）
+				sendLoginGate(conn, userSeq.Add(1))
 				successCount.Add(1)
 				mu.Lock()
 				conns = append(conns, conn)
@@ -137,9 +141,9 @@ func parsePorts(s string) []int {
 	return ports
 }
 
-func sendLoginGate(conn net.Conn) {
+func sendLoginGate(conn net.Conn, uid int64) {
 	req := &gateway.LoginGateReq{
-		UserId:   "bench_user",
+		UserId:   fmt.Sprintf("bench1m_user_%d", uid),
 		ServerId: "logic1",
 	}
 	data, _ := proto.Marshal(req)
