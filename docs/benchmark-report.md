@@ -128,6 +128,30 @@
 
 **结论**：对称双向把总吞吐推到 **≈670K~790K msg/s**，但网关 CPU 只用 2.6 核——四轮（A/B/C/D）一致证明**本机测试的瓶颈始终在压测工具两端（bench 发送节奏、logic 推送循环、客户端读取速度），sgate 自身远未到极限**；网关纯上限需多机部署（网关独占 CPU + 真实网卡）才能钉死。
 
+#### 场景 E/F：TCP 单协议速率补充（bench1_tcp / bench2_tcp，各 15000）
+
+按「压测严格单协议分开」原则补跑（每轮独立 gateway，轮间等待 TIME_WAIT 释放）：
+
+| 指标 | TCP 上行（bench1_tcp） | TCP 下行（bench2_tcp + logic2_tcp） |
+|------|----------------------|-----------------------------------|
+| 登录 | 15,000 / 15,000 零失败（串行登录仅 ~4s） | 15,000 / 15,000 零失败（批量 200） |
+| 速率 | **565,639 msg/s**（10s 窗口 628,231；总 6,311,345/11.16s） | logic 稳态 **≈505K msg/s**；网关活跃期分发 ≈476K |
+| 对账 | 客户端 `sent` 6,311,345 = 网关 `forwarded` 6,311,345 **精确** | logic 29,957,328 ≈ `pushedToClient` 29,822,734 + `pushDroppedNoConn` 128,370 + `asyncWriteFailed` 10,253（**误差 0.013%**） |
+| 网关 CPU | 洪峰 14.6s 增量 31.3s = **2.14 核** | 洪峰 21.3s 增量 78.4s = **3.68 核** |
+| 内存 | RSS 峰值 1,953MB | RSS 峰值 ≈6,000MB |
+| 业务零丢弃 | `droppedTotal=0`、`failed=0`、`awf=0` | `droppedTotal=0`、`failed=0` |
+
+**TCP vs WS 速率矩阵（15000 连接）**：
+
+| 方向 | TCP | WebSocket | 对比 |
+|------|-----|-----------|------|
+| 上行 | 565,639 msg/s | 724,469 ~ 759,359 msg/s | TCP 慢 ~26% |
+| 下行 | ≈505K msg/s | ≈607~627K msg/s | TCP 慢 ~17~20% |
+
+**反直觉现象（如实记录，归因需 pprof）**：100 连接时 TCP 下行 1.278M > WS 1.174M（TCP 快 9%），15000 连接时 WS 反超 TCP 20%——**连接数放大后两协议的相对性能反转**。候选原因：bench 工具两侧读写循环实现差异、高连接数下 TCP 每连接写路径与合帧行为、gnet Windows 事件循环路径；两轮现象可复现（上行下行一致），非偶测误差。
+
+**工程要点（Windows 同协议串行测试）**：回环场景下客户端主动关闭产生的 TIME_WAIT 四元组全部指向 `127.0.0.1:48080`（同目标不可复用），会占死动态端口池——**两轮 TCP 测试之间必须间隔 >240s（TcpTimedWaitDelay）**。首轮下行测试在上行轮结束后 92s 开跑，第 1091 个连接后端口池耗尽（`connectex: Only one usage of each socket address`），13,909 连接全部 dial 失败；等过期重跑后 15,000 全部成功。
+
 ### 多 TCP 连接并行（connGroupCount）
 
 gateway 与 logic 之间的 gRPC stream 若共享单条 TCP 连接，HTTP/2 协议要求同一连接上的 stream 共享写锁，96 个 shard 会串行写入（实际并行度 1）。`stream.connGroupCount` 配置 gateway 对同一 logic 建立 N 条独立 TCP 连接（默认 4），每个 connGroup 承载 `shardCount/N` 个 stream、各自拥有独立 HTTP/2 写锁。当前配置默认 `connGroupCount: 4`。
