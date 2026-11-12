@@ -33,6 +33,7 @@ func main() {
 	parallel := flag.Int("parallel", 100, "number of parallel connections")
 	serverID := flag.String("server-id", "logic1-ws", "logic server instance ID to bind")
 	sendWorkers := flag.Int("send-workers-per-conn", 1, "send goroutines per connection (1 = single sender per conn; >1 stresses sgate forwarding, writes serialized by a per-conn mutex)")
+	loginBatch := flag.Int("login-batch", 100, "concurrent login batch size")
 	flag.Parse()
 
 	fmt.Printf("bench1_ws: addr=%s duration=%s parallel=%d serverID=%s sendWorkersPerConn=%d\n", *addr, *duration, *parallel, *serverID, *sendWorkers)
@@ -47,80 +48,92 @@ func main() {
 	}
 	results := make([]connResult, *parallel)
 
-	fmt.Println("阶段1：登录中...")
-	loginDeadline := time.Now().Add(30 * time.Second)
-	for i := range *parallel {
+	// 批量并发登录：串行登录每条约 3ms，万级连接会撞固定 30s 超时；
+	// 批量并发 + 超时随规模伸缩。测量阶段（阶段2）不变。
+	loginBatchSize := max(*loginBatch, 1)
+	loginDeadline := time.Now().Add(30*time.Second + time.Duration(*parallel)*2*time.Millisecond)
+	fmt.Printf("阶段1：登录中...（批量 %d 并发，总超时 %s）\n", loginBatchSize, time.Until(loginDeadline).Round(time.Second))
+	var loginWg sync.WaitGroup
+	for batch := 0; batch < *parallel; batch += loginBatchSize {
+		end := min(batch+loginBatchSize, *parallel)
 		if time.Now().After(loginDeadline) {
-			fmt.Fprintf(os.Stderr, "login phase timeout after %d connections\n", i)
-			connectionsFailed.Add(int64(*parallel - i))
+			fmt.Fprintf(os.Stderr, "login phase timeout after %d connections\n", batch)
+			connectionsFailed.Add(int64(*parallel - batch))
 			break
 		}
+		for i := batch; i < end; i++ {
+			loginWg.Add(1)
+			go func(i int) {
+				defer loginWg.Done()
 
-		conn, err := net.DialTimeout("tcp", *addr, 3*time.Second)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "client %d dial error: %v\n", i, err)
-			connectionsFailed.Add(1)
-			results[i] = connResult{nil, err}
-			continue
-		}
+				conn, err := net.DialTimeout("tcp", *addr, 3*time.Second)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "client %d dial error: %v\n", i, err)
+					connectionsFailed.Add(1)
+					results[i] = connResult{nil, err}
+					return
+				}
 
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
+				conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-		if err := wsUpgrade(conn, *addr); err != nil {
-			fmt.Fprintf(os.Stderr, "client %d ws upgrade error: %v\n", i, err)
-			conn.Close()
-			connectionsFailed.Add(1)
-			results[i] = connResult{nil, err}
-			continue
-		}
+				if err := wsUpgrade(conn, *addr); err != nil {
+					fmt.Fprintf(os.Stderr, "client %d ws upgrade error: %v\n", i, err)
+					conn.Close()
+					connectionsFailed.Add(1)
+					results[i] = connResult{nil, err}
+					return
+				}
 
-		loginReq := &protocol.LoginGateReq{
-			ServerId: *serverID,
-			UserId:   fmt.Sprintf("bench_user_%d", i),
-			LoginKey: "",
-		}
-		loginBody, _ := proto.Marshal(loginReq)
+				loginReq := &protocol.LoginGateReq{
+					ServerId: *serverID,
+					UserId:   fmt.Sprintf("bench_user_%d", i),
+					LoginKey: "",
+				}
+				loginBody, _ := proto.Marshal(loginReq)
 
-		if err := sendWSBinary(conn, &protocol.MessageFrame{
-			Cmd:   cmdLoginGate,
-			SeqId: 1,
-			Body:  loginBody,
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "client %d send login error: %v\n", i, err)
-			conn.Close()
-			connectionsFailed.Add(1)
-			results[i] = connResult{nil, err}
-			continue
-		}
+				if err := sendWSBinary(conn, &protocol.MessageFrame{
+					Cmd:   cmdLoginGate,
+					SeqId: 1,
+					Body:  loginBody,
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "client %d send login error: %v\n", i, err)
+					conn.Close()
+					connectionsFailed.Add(1)
+					results[i] = connResult{nil, err}
+					return
+				}
 
-		resp, err := readWSBinary(conn)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "client %d read ack error: %v\n", i, err)
-			conn.Close()
-			connectionsFailed.Add(1)
-			results[i] = connResult{nil, err}
-			continue
-		}
-		if resp.Cmd != cmdLoginGateAck {
-			fmt.Fprintf(os.Stderr, "client %d unexpected cmd %d\n", i, resp.Cmd)
-			conn.Close()
-			connectionsFailed.Add(1)
-			results[i] = connResult{nil, fmt.Errorf("unexpected cmd")}
-			continue
-		}
-		ack := new(protocol.LoginGateAck)
-		if err := proto.Unmarshal(resp.Body, ack); err != nil || ack.Code != 0 {
-			code := ack.Code
-			fmt.Fprintf(os.Stderr, "client %d login rejected code=%d message=%s\n", i, code, ack.GetMessage())
-			conn.Close()
-			connectionsFailed.Add(1)
-			results[i] = connResult{nil, fmt.Errorf("login rejected code=%d", code)}
-			continue
-		}
+				resp, err := readWSBinary(conn)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "client %d read ack error: %v\n", i, err)
+					conn.Close()
+					connectionsFailed.Add(1)
+					results[i] = connResult{nil, err}
+					return
+				}
+				if resp.Cmd != cmdLoginGateAck {
+					fmt.Fprintf(os.Stderr, "client %d unexpected cmd %d\n", i, resp.Cmd)
+					conn.Close()
+					connectionsFailed.Add(1)
+					results[i] = connResult{nil, fmt.Errorf("unexpected cmd")}
+					return
+				}
+				ack := new(protocol.LoginGateAck)
+				if err := proto.Unmarshal(resp.Body, ack); err != nil || ack.Code != 0 {
+					code := ack.Code
+					fmt.Fprintf(os.Stderr, "client %d login rejected code=%d message=%s\n", i, code, ack.GetMessage())
+					conn.Close()
+					connectionsFailed.Add(1)
+					results[i] = connResult{nil, fmt.Errorf("login rejected code=%d", code)}
+					return
+				}
 
-		conn.SetDeadline(time.Time{})
-		totalAck.Add(1)
-		results[i] = connResult{conn, nil}
+				conn.SetDeadline(time.Time{})
+				totalAck.Add(1)
+				results[i] = connResult{conn, nil}
+			}(i)
+		}
+		loginWg.Wait()
 	}
 
 	loggedIn := totalAck.Load()
