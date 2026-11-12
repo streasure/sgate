@@ -811,7 +811,7 @@ Get-Process -Name gateway,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,b
 - **安全**：token 一次性防重放、反放大（回包 ≤ 来包，垃圾包零回包）、per-IP（默认 4）/总量（默认 100000）双上限、seq 去重窗口（1024）、MTU ≤ 1400B
 - 号段常量 `routes.IsUDPCmd`（纯函数，热路径一次区间比较）
 
-完整设计与决策记录见 [architecture §4.4](docs/architecture.md#44-wsudp-关联通道已支持) 与 [docs/udp-ws-design.md](docs/udp-ws-design.md)。**阶段 4 压测数据待 Linux 环境**（roadmap P2-3）。
+完整设计与决策记录见 [architecture §4.4](docs/architecture.md#44-wsudp-关联通道已支持) 与 [docs/udp-ws-design.md](docs/udp-ws-design.md)；客户端对接步骤见 [docs/client-guide.md §9](docs/client-guide.md)。**阶段 4 压测数据待 Linux 环境**（roadmap P2-3）。
 
 ### 9.2 自描述 session ID（跨网关定位）
 
@@ -854,7 +854,7 @@ Broadcast(command, data)                    // 向所有网关广播
 
 **验收实测**（50 连接四场景，详见 roadmap P2-1）：基线 `pushed = acked + droppedOffline` 严格等式；`-drop-ack 10%` 时重传全部补齐、`giveUps=0`；完全不 ACK 时窗口背压不 panic；杀网关断流 `droppedOffline` 如实清窗、重启后新推送全部收齐且去重不重复执行。
 
-**`internal/logic` 的定位**：逻辑服侧的嵌入库，网关侧不引用它（`internal/gateway`、`internal/backend` 均不 import）。它封装 gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）和 `Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓中由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*`、`bench/logic_reliable` 等）消费，真实逻辑服进程同样以此库嵌入；网关侧与之对接的是 `internal/backend` 的 flip 流入口 `GRPCServer`。
+**`internal/logic` 的定位**：逻辑服侧的嵌入库，网关侧不引用它（`internal/gateway`、`internal/backend` 均不 import）。它封装 gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）和 `Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓中由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*`、`bench/logic_reliable`）消费，真实逻辑服进程同样以此库嵌入；网关侧与之对接的是 `internal/backend` 的 flip 流入口 `GRPCServer`。**完整对接步骤见 [docs/logic-guide.md](docs/logic-guide.md)**。
 
 ---
 
@@ -1041,6 +1041,8 @@ Windows 临时端口池耗尽——上一轮 TCP 测试的 TIME_WAIT（240s）�
 
 ## 相关文档
 
+- [`docs/client-guide.md`](docs/client-guide.md) — **客户端接入手册**（帧格式/命令号/登录时序/心跳/PushBatch/ACK/UDP，对接方从这里开始）
+- [`docs/logic-guide.md`](docs/logic-guide.md) — **逻辑服接入手册**（SDK 嵌入/flip 拨入/推送 API/可靠推送/联调清单）
 - [`docs/architecture.md`](docs/architecture.md) — 架构权威文档（包职责、数据流、扩展点）
 - [`docs/benchmark-report.md`](docs/benchmark-report.md) — 压测报告（场景 A~F、对账与瓶颈分析）
 - [`docs/roadmap.md`](docs/roadmap.md) — 能力清单与待办（P2/P3）

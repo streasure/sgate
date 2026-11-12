@@ -389,6 +389,8 @@ var _ backend.GatewayInterface = (*Gateway)(nil)
 ## 9. 相关文档
 
 - [README.md](../README.md) — 快速开始、配置详解、压测指南
+- [client-guide.md](client-guide.md) — 客户端接入手册（帧格式、登录时序、ACK、UDP 关联）
+- [logic-guide.md](logic-guide.md) — 逻辑服接入手册（SDK 嵌入、推送 API、可靠推送）
 - [benchmark-report.md](benchmark-report.md) — 压测数据与瓶颈分析
 - [roadmap.md](roadmap.md) — 待办与已修复列表
 - [AGENTS.md](../AGENTS.md) — AI 工程规范（日志等）
