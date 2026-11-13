@@ -1,4 +1,4 @@
-package connection
+package dataplane
 
 import (
 	protoGw "github.com/streasure/protocol/gateway"

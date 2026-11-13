@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 )
 
 // wsMockConn 记录写出的字节，供断言 close/pong/HTTP 响应。
@@ -32,7 +32,7 @@ func newOpenWSConn() (*wsMockConn, *WebSocketConnection) {
 // wsConnID 返回网关中唯一的 temp 连接 ID（测试清理用）。
 func wsConnID(gw *Gateway) string {
 	var id string
-	gw.GetConnectionManager().ForEach(func(c *connection.Connection) bool {
+	gw.GetConnectionManager().ForEach(func(c *dataplane.Connection) bool {
 		id = c.ID()
 		return false
 	})

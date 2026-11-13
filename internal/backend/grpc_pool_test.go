@@ -6,13 +6,13 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"google.golang.org/grpc/metadata"
 )
 
 // grpcFakeGateway 带真实 ConnectionManager + Kick 计数的 gateway stub。
 type grpcFakeGateway struct {
-	cm            *connection.ConnectionManager
+	cm            *dataplane.ConnectionManager
 	kickAccounts  int
 	kickIP        int
 	kickReason    string
@@ -21,20 +21,20 @@ type grpcFakeGateway struct {
 }
 
 func newGRPCFakeGateway() *grpcFakeGateway {
-	return &grpcFakeGateway{cm: connection.NewConnectionManager(100, 10)}
+	return &grpcFakeGateway{cm: dataplane.NewConnectionManager(100, 10)}
 }
 
-func (f *grpcFakeGateway) GetConnectionManager() *connection.ConnectionManager { return f.cm }
-func (f *grpcFakeGateway) GetStreamConfig() config.StreamConfig                { return config.StreamConfig{} }
-func (f *grpcFakeGateway) GetGRPCConfig() config.GRPCConfig                    { return config.GRPCConfig{} }
-func (f *grpcFakeGateway) GetGatewayID() string                                { return "gw-test" }
-func (f *grpcFakeGateway) GetServerID() string                                 { return "gw-test" }
-func (f *grpcFakeGateway) AddPushedToClient(int64)                             {}
-func (f *grpcFakeGateway) AddPushDroppedNoConn(int64)                          {}
-func (f *grpcFakeGateway) GetLogicClient(string) connection.LogicClientProvider {
+func (f *grpcFakeGateway) GetConnectionManager() *dataplane.ConnectionManager { return f.cm }
+func (f *grpcFakeGateway) GetStreamConfig() config.StreamConfig               { return config.StreamConfig{} }
+func (f *grpcFakeGateway) GetGRPCConfig() config.GRPCConfig                   { return config.GRPCConfig{} }
+func (f *grpcFakeGateway) GetGatewayID() string                               { return "gw-test" }
+func (f *grpcFakeGateway) GetServerID() string                                { return "gw-test" }
+func (f *grpcFakeGateway) AddPushedToClient(int64)                            {}
+func (f *grpcFakeGateway) AddPushDroppedNoConn(int64)                         {}
+func (f *grpcFakeGateway) GetLogicClient(string) dataplane.LogicClientProvider {
 	return nil
 }
-func (f *grpcFakeGateway) GetShardedCoalescer() *connection.ShardedWriteCoalescer { return nil }
+func (f *grpcFakeGateway) GetShardedCoalescer() *dataplane.ShardedWriteCoalescer { return nil }
 func (f *grpcFakeGateway) KickByAccounts(ids []string, reason string) int {
 	f.kickAccounts++
 	f.kickReason = reason

@@ -13,7 +13,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -80,7 +80,7 @@ func decodeClientFrame(t *testing.T, b []byte) *protoGw.StreamData {
 	return out
 }
 
-// udpDownlinkSpy 记录 connection.UDPDownlink.SendUDP 调用（可配置失败）。
+// udpDownlinkSpy 记录 dataplane.UDPDownlink.SendUDP 调用（可配置失败）。
 type udpDownlinkSpy struct {
 	mu     sync.Mutex
 	sids   []string
@@ -122,25 +122,25 @@ func (s *udpDownlinkSpy) lastFrame(t *testing.T) *protoGw.StreamData {
 // streamGW 分流测试用 gateway stub：真实 ConnectionManager + 批量/合批开关
 // + 推送计数。
 type streamGW struct {
-	cm        *connection.ConnectionManager
+	cm        *dataplane.ConnectionManager
 	batchPush bool
-	coal      *connection.ShardedWriteCoalescer
+	coal      *dataplane.ShardedWriteCoalescer
 	pushed    int64
 	dropped   int64
 	mu        sync.Mutex
 }
 
-func (g *streamGW) GetConnectionManager() *connection.ConnectionManager { return g.cm }
-func (g *streamGW) GetGRPCConfig() config.GRPCConfig                    { return config.GRPCConfig{} }
+func (g *streamGW) GetConnectionManager() *dataplane.ConnectionManager { return g.cm }
+func (g *streamGW) GetGRPCConfig() config.GRPCConfig                   { return config.GRPCConfig{} }
 func (g *streamGW) GetStreamConfig() config.StreamConfig {
 	return config.StreamConfig{BatchPush: g.batchPush}
 }
-func (g *streamGW) GetGatewayID() string                                   { return "gw-test" }
-func (g *streamGW) GetServerID() string                                    { return "gw-test" }
-func (g *streamGW) GetLogicClient(string) connection.LogicClientProvider   { return nil }
-func (g *streamGW) GetShardedCoalescer() *connection.ShardedWriteCoalescer { return g.coal }
-func (g *streamGW) KickByAccounts([]string, string) int                    { return 0 }
-func (g *streamGW) KickByIP(string, string) int                            { return 0 }
+func (g *streamGW) GetGatewayID() string                                  { return "gw-test" }
+func (g *streamGW) GetServerID() string                                   { return "gw-test" }
+func (g *streamGW) GetLogicClient(string) dataplane.LogicClientProvider   { return nil }
+func (g *streamGW) GetShardedCoalescer() *dataplane.ShardedWriteCoalescer { return g.coal }
+func (g *streamGW) KickByAccounts([]string, string) int                   { return 0 }
+func (g *streamGW) KickByIP(string, string) int                           { return 0 }
 
 func (g *streamGW) AddPushedToClient(n int64) {
 	g.mu.Lock()
@@ -208,7 +208,7 @@ func runReceiveMessages(t *testing.T, gw *streamGW, fs *feedStream) {
 // 立即 SendByCmd 直发；同会话 WS 消息照常进 PushBatch（UDP 不得被裹进批量帧）。
 func TestStreamBatchUDPBypassesPushBatch(t *testing.T) {
 	gw := &streamGW{
-		cm:        connection.NewConnectionManager(100, 10),
+		cm:        dataplane.NewConnectionManager(100, 10),
 		batchPush: true,
 	}
 	cc := &redirectCaptureConn{}
@@ -251,7 +251,7 @@ func TestStreamBatchUDPBypassesPushBatch(t *testing.T) {
 // TestStreamBroadcastUDPPerConnection 广播：UDP 号段逐连接 SendByCmd，
 // 已关联会话走 UDP，未关联会话回落 WS（各会话关联状态独立）。
 func TestStreamBroadcastUDPPerConnection(t *testing.T) {
-	gw := &streamGW{cm: connection.NewConnectionManager(100, 10)}
+	gw := &streamGW{cm: dataplane.NewConnectionManager(100, 10)}
 	ccA := &redirectCaptureConn{}
 	ccB := &redirectCaptureConn{}
 	sidA := gw.cm.AddConnection(ccA, "user-a", false)
@@ -289,8 +289,8 @@ func TestStreamBroadcastUDPPerConnection(t *testing.T) {
 // TestStreamBroadcastUDPBypassesCoalescer 广播 + coalescer 存在：
 // UDP 号段必须绕过合批直接 SendByCmd（决策⑤：UDP 不走 coalescer）。
 func TestStreamBroadcastUDPBypassesCoalescer(t *testing.T) {
-	gw := &streamGW{cm: connection.NewConnectionManager(100, 10)}
-	gw.coal = connection.NewShardedWriteCoalescer(gw.cm, 4)
+	gw := &streamGW{cm: dataplane.NewConnectionManager(100, 10)}
+	gw.coal = dataplane.NewShardedWriteCoalescer(gw.cm, 4)
 	defer gw.coal.Stop()
 
 	cc := &redirectCaptureConn{}

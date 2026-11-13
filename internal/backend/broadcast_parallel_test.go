@@ -9,7 +9,7 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -41,7 +41,7 @@ func (c *captureConn) frameCount() int {
 
 // addGroupMember 建连并完成 group 成员所需的全部映射：
 // 连接 → serverID → serverUser 映射 → group 成员。
-func addGroupMember(t *testing.T, cm *connection.ConnectionManager, groupID, serverID, userUUID string) (*captureConn, string) {
+func addGroupMember(t *testing.T, cm *dataplane.ConnectionManager, groupID, serverID, userUUID string) (*captureConn, string) {
 	t.Helper()
 	cc := &captureConn{}
 	id := cm.AddConnection(cc, userUUID, false)

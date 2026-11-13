@@ -16,7 +16,7 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/backend"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhash"
@@ -171,7 +171,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	// 未绑定（preAuth 阶段，如 LoginGate）时 logicClient 为 nil，
 	// 由阶段6返回 ErrNotConnected 前需允许处理器本地处理——
 	// 实际上 LoginGate 由 handler 直接处理、不进入转发，此分支仅对绑定后消息生效。
-	var logicClient connection.LogicClientProvider
+	var logicClient dataplane.LogicClientProvider
 	boundServerID := connObj.GetServerID()
 	if boundServerID != "" {
 		logicClient = connObj.GetCachedLogicClient()
@@ -543,7 +543,7 @@ func writeFrameAsync(conn gnet.Conn, data []byte) {
 	buf := make([]byte, 4+len(data))
 	copy(buf, header[:])
 	copy(buf[4:], data)
-	_ = conn.AsyncWrite(buf, connection.AsyncWriteCallback)
+	_ = conn.AsyncWrite(buf, dataplane.AsyncWriteCallback)
 }
 
 // Submit 将 pipeline 任务提交到对应分片的 worker（TCP/WebSocket 统一）。

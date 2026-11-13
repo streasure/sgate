@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/backend"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 
 	ws "github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
@@ -166,7 +166,7 @@ func (g *Gateway) handleWebSocketHandshake(wsConn *WebSocketConnection, data []b
 	wsConn.State.Store(int32(WSStateOpen))
 
 	if wsConn.ConnectionID() == "" {
-		tempUserUUID := "temp_" + connection.GenerateConnectionID()
+		tempUserUUID := "temp_" + dataplane.GenerateConnectionID()
 		connectionID := g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID, true)
 		wsConn.SetConnectionID(connectionID)
 	}
@@ -415,7 +415,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	connectionID := wsConn.ConnectionID()
 	if connectionID == "" {
 		// 握手未完成或首次消息：补注册为 WS 连接（建连时绑定协议身份）
-		tempUserUUID := "temp_" + connection.GenerateConnectionID()
+		tempUserUUID := "temp_" + dataplane.GenerateConnectionID()
 		connectionID = g.connectionManager.AddConnection(wsConn.Conn, tempUserUUID, true)
 		wsConn.SetConnectionID(connectionID)
 	}
@@ -657,7 +657,7 @@ func (g *Gateway) handleWebSocketCloseFrame(wsConn *WebSocketConnection) error {
 
 // handleWebSocketPingFrame 处理WebSocket心跳探测帧，返回心跳回复帧并更新最后活跃时间。
 func (g *Gateway) handleWebSocketPingFrame(wsConn *WebSocketConnection, payload []byte) error {
-	frame := connection.EncodeWSFrame(0x8A, payload)
+	frame := dataplane.EncodeWSFrame(0x8A, payload)
 	if _, err := wsConn.Conn.Write(frame); err != nil {
 		return err
 	}

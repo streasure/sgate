@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/panicutil"
@@ -23,7 +23,7 @@ type LogicClientPool struct {
 }
 
 // GetClient 根据 serverID 获取已连接的逻辑服客户端
-func (pool *LogicClientPool) GetClient(serverID string) connection.LogicClientProvider {
+func (pool *LogicClientPool) GetClient(serverID string) dataplane.LogicClientProvider {
 	pool.mu.RLock()
 	client := pool.clients[serverID]
 	pool.mu.RUnlock()

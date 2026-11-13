@@ -23,7 +23,7 @@ func (f *countingAbortFilter) Process(fc *types.FilterContext) (bool, error) {
 	return false, nil
 }
 
-// fakeLogicClient 满足 connection.LogicClientProvider 的桩。
+// fakeLogicClient 满足 dataplane.LogicClientProvider 的桩。
 type fakeLogicClient struct{}
 
 func (fakeLogicClient) IsConnected() bool                     { return true }

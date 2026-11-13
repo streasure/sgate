@@ -5,14 +5,14 @@ import (
 	"testing"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 )
 
 // newConfigUpdateTestGateway 构造仅 handleConfigUpdate 所需字段的 Gateway。
 func newConfigUpdateTestGateway(cfg *config.Config) *Gateway {
 	g := &Gateway{
 		ctx:               context.Background(),
-		connectionManager: connection.NewConnectionManager(0, 0),
+		connectionManager: dataplane.NewConnectionManager(0, 0),
 	}
 	g.cfg.Store(cfg)
 	return g

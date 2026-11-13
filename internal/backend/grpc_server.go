@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/tlog"
@@ -74,7 +74,7 @@ func (s *GRPCServer) handleLogicStream(meta protoGw.LogicStreamMeta, stream prot
 }
 
 // connection 根据会话 ID 获取客户端连接
-func (s *GRPCServer) connection(sessionID string) (*connection.Connection, error) {
+func (s *GRPCServer) connection(sessionID string) (*dataplane.Connection, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("session_id is required")
 	}
@@ -175,9 +175,9 @@ func (s *GRPCServer) BroadcastAll(ctx context.Context, req *protoGw.BroadcastAll
 		return nil, err
 	}
 	// 快照：避免长时间持有分片锁
-	var matched []*connection.Connection
-	s.gateway.GetConnectionManager().ForEach(func(conn *connection.Connection) bool {
-		if conn.GetState() == connection.StateForward {
+	var matched []*dataplane.Connection
+	s.gateway.GetConnectionManager().ForEach(func(conn *dataplane.Connection) bool {
+		if conn.GetState() == dataplane.StateForward {
 			matched = append(matched, conn)
 		}
 		return true
@@ -198,9 +198,9 @@ func (s *GRPCServer) BroadcastAll(ctx context.Context, req *protoGw.BroadcastAll
 
 // sendToConnections 分片并发入队（pattern 同 maintenance.kickConnectionsAsync，32 worker）。
 // Send 内部走 AsyncWrite，真正写盘在 gnet loop；并发只加速遍历与入队。
-// cmd 用于 SendByCmd 号段分流（唯一判定点在 connection.SendByCmd，此处不写条件）。
+// cmd 用于 SendByCmd 号段分流（唯一判定点在 dataplane.SendByCmd，此处不写条件）。
 // 返回成功/失败计数与首个错误；调用方返回时仅保证「已分发」，不等待全部写盘完成。
-func sendToConnections(cmd int32, conns []*connection.Connection, data []byte) (sent, failed int64, firstErr error) {
+func sendToConnections(cmd int32, conns []*dataplane.Connection, data []byte) (sent, failed int64, firstErr error) {
 	if len(conns) == 0 {
 		return 0, 0, nil
 	}
@@ -291,7 +291,7 @@ func (s *GRPCServer) broadcastGroup(ctx context.Context, groupID string, cmd int
 		return 0, len(sessions)
 	}
 	// 快照解析：session → conn，消失的会话计为失败（与并发发送解耦）
-	conns := make([]*connection.Connection, 0, len(sessions))
+	conns := make([]*dataplane.Connection, 0, len(sessions))
 	for _, sessionID := range sessions {
 		conn := cm.GetConnection(sessionID)
 		if conn == nil {

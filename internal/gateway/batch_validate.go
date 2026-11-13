@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 
 	protoLogin "github.com/streasure/protocol/loginserver"
 	"github.com/streasure/util/panicutil"
@@ -72,7 +72,7 @@ func (g *Gateway) batchValidateSize() int {
 type batchSweepItem struct {
 	accountID string
 	loginKey  string
-	conn      *connection.Connection
+	conn      *dataplane.Connection
 }
 
 // runBatchValidateSweep 执行一轮：收集在线会话 → 分片批量校验 → 踢失效。
@@ -86,7 +86,7 @@ func (g *Gateway) runBatchValidateSweep() {
 
 	size := g.batchValidateSize()
 	items := make([]batchSweepItem, 0, size)
-	g.connectionManager.ForEach(func(conn *connection.Connection) bool {
+	g.connectionManager.ForEach(func(conn *dataplane.Connection) bool {
 		aid := conn.GetAccountID()
 		key := conn.GetLoginKey()
 		if aid == "" || key == "" {

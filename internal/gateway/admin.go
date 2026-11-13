@@ -10,7 +10,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhttp"
 	"google.golang.org/protobuf/proto"
@@ -111,7 +111,7 @@ func (g *Gateway) handleAdminRateLimit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (g *Gateway) revokeConnJWT(conn *connection.Connection) {
+func (g *Gateway) revokeConnJWT(conn *dataplane.Connection) {
 	jti := conn.GetJWTJti()
 	if jti == "" || g.jwtAuth == nil {
 		return

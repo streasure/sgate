@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhttp"
@@ -104,9 +104,9 @@ func (g *Gateway) isMaintenanceTarget(serverID string) bool {
 
 // snapshotMaintenanceTargets 收集当前在线且命中维护目标的连接。
 // serverID 非空时按 serverId 精确匹配；否则按 zone 匹配。
-func (g *Gateway) snapshotMaintenanceTargets(serverID, zone string) []*connection.Connection {
-	var matched []*connection.Connection
-	g.connectionManager.ForEach(func(conn *connection.Connection) bool {
+func (g *Gateway) snapshotMaintenanceTargets(serverID, zone string) []*dataplane.Connection {
+	var matched []*dataplane.Connection
+	g.connectionManager.ForEach(func(conn *dataplane.Connection) bool {
 		cid := conn.GetServerID()
 		if cid == "" {
 			return true
@@ -126,12 +126,12 @@ func (g *Gateway) snapshotMaintenanceTargets(serverID, zone string) []*connectio
 }
 
 // kickForMaintenance 单连接踢下线（维护语义的通知参数；共享 kickConn 路径）。
-func (g *Gateway) kickForMaintenance(conn *connection.Connection, reason string) {
+func (g *Gateway) kickForMaintenance(conn *dataplane.Connection, reason string) {
 	g.kickConn(conn, kickNotifyParams{reason: reason, code: 503, message: "server maintenance"})
 }
 
 // kickConnectionsAsync 分片并发踢人，完成后打点总耗时结果。
-func (g *Gateway) kickConnectionsAsync(matched []*connection.Connection, reason string) {
+func (g *Gateway) kickConnectionsAsync(matched []*dataplane.Connection, reason string) {
 	if len(matched) == 0 {
 		return
 	}

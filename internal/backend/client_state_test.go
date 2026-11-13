@@ -6,25 +6,25 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 )
 
 // fakeGateway 满足 NewLogicClient 所需的最小 GatewayInterface。
 type fakeGateway struct{}
 
-func (fakeGateway) GetConnectionManager() *connection.ConnectionManager { return nil }
-func (fakeGateway) GetStreamConfig() config.StreamConfig                { return config.StreamConfig{} }
-func (fakeGateway) GetGRPCConfig() config.GRPCConfig                    { return config.GRPCConfig{} }
-func (fakeGateway) GetGatewayID() string                                { return "gw-test" }
-func (fakeGateway) GetServerID() string                                 { return "gw-test" }
-func (fakeGateway) AddPushedToClient(int64)                             {}
-func (fakeGateway) AddPushDroppedNoConn(int64)                          {}
-func (fakeGateway) GetLogicClient(string) connection.LogicClientProvider {
+func (fakeGateway) GetConnectionManager() *dataplane.ConnectionManager { return nil }
+func (fakeGateway) GetStreamConfig() config.StreamConfig               { return config.StreamConfig{} }
+func (fakeGateway) GetGRPCConfig() config.GRPCConfig                   { return config.GRPCConfig{} }
+func (fakeGateway) GetGatewayID() string                               { return "gw-test" }
+func (fakeGateway) GetServerID() string                                { return "gw-test" }
+func (fakeGateway) AddPushedToClient(int64)                            {}
+func (fakeGateway) AddPushDroppedNoConn(int64)                         {}
+func (fakeGateway) GetLogicClient(string) dataplane.LogicClientProvider {
 	return nil
 }
-func (fakeGateway) GetShardedCoalescer() *connection.ShardedWriteCoalescer { return nil }
-func (fakeGateway) KickByAccounts([]string, string) int                    { return 0 }
-func (fakeGateway) KickByIP(string, string) int                            { return 0 }
+func (fakeGateway) GetShardedCoalescer() *dataplane.ShardedWriteCoalescer { return nil }
+func (fakeGateway) KickByAccounts([]string, string) int                   { return 0 }
+func (fakeGateway) KickByIP(string, string) int                           { return 0 }
 
 // TestLogicClientStateTransitions：attach 全部分片 → Connected；detach 一片 → Disconnected。
 func TestLogicClientStateTransitions(t *testing.T) {

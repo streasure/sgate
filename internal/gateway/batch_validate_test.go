@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 
 	protoLogin "github.com/streasure/protocol/loginserver"
 	"google.golang.org/grpc"
@@ -149,7 +149,7 @@ func TestRunBatchValidateSweepSkipIfTokenChanged(t *testing.T) {
 // tokenChangeClient 在返回 invalid 结果前更换连接 token（模拟 mid-sweep 重登）。
 type tokenChangeClient struct {
 	*mockLoginServiceClient
-	conn *connection.Connection
+	conn *dataplane.Connection
 }
 
 func (c *tokenChangeClient) BatchValidateLoginTokens(

@@ -11,7 +11,7 @@ import (
 
 	"github.com/streasure/sgate/internal/backend"
 
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
@@ -97,13 +97,13 @@ func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 		// 立即注册进 connectionManager（WS 专用变体绑定协议身份）：否则未完成
 		// 握手的原始 WS 连接不计入 maxConnections/maxPerIP，可被绕过打满。
 		// 握手/首帧处仅在 ConnectionID 为空时补注册，此处预注册天然幂等。
-		tempUserUUID := "temp_" + connection.GenerateConnectionID()
+		tempUserUUID := "temp_" + dataplane.GenerateConnectionID()
 		connectionID := g.connectionManager.AddConnection(c, tempUserUUID, true)
 		wsConn.SetConnectionID(connectionID)
 		c.SetContext(wsConn)
 		g.wsConnections.Store(wsConn, true)
 	} else {
-		tempUserUUID := "temp_" + connection.GenerateConnectionID()
+		tempUserUUID := "temp_" + dataplane.GenerateConnectionID()
 		connectionID := g.connectionManager.AddConnection(c, tempUserUUID, false)
 		connCtx := GetConnContext()
 		connCtx.ConnectionID = connectionID
@@ -313,7 +313,7 @@ func (g *Gateway) isPreAuthCommand(cmd int32) bool {
 	return slices.Contains(g.getProtection().PreAuthCommands, cmd)
 }
 
-func (g *Gateway) GetLogicClient(serverID string) connection.LogicClientProvider {
+func (g *Gateway) GetLogicClient(serverID string) dataplane.LogicClientProvider {
 	if g.logicClientPool == nil {
 		return nil
 	}
@@ -334,7 +334,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	} else if id, ok := connCtx.(string); ok {
 		connectionID = id
 	} else {
-		tempUserUUID := "temp_" + connection.GenerateConnectionID()
+		tempUserUUID := "temp_" + dataplane.GenerateConnectionID()
 		connectionID = g.connectionManager.AddConnection(c, tempUserUUID, false)
 		c.SetContext(&ConnContext{
 			ConnectionID: connectionID,

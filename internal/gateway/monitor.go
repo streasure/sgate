@@ -10,7 +10,7 @@ import (
 
 	json "github.com/bytedance/sonic"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
@@ -157,7 +157,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 			DroppedTotal:          dropOverload + dropFull + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth + dropUnsupported,
 			PushedToClient:        g.messagesPushedToClient.Load(),
 			PushDroppedNoConn:     g.messagesPushDroppedNoConn.Load(),
-			AsyncWriteFailed:      connection.AsyncWriteFailures(),
+			AsyncWriteFailed:      dataplane.AsyncWriteFailures(),
 			Overloaded:            overloaded,
 			CPUPercent:            cpuPct,
 			MemPercent:            memPct,

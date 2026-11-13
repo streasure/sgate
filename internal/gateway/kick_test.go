@@ -3,13 +3,13 @@ package gateway
 import (
 	"testing"
 
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 )
 
 // newKickTestGateway 构造最小可用 Gateway（仅连接管理器 + 踢人所需字段）。
 func newKickTestGateway() *Gateway {
 	return &Gateway{
-		connectionManager: connection.NewConnectionManager(0, 0),
+		connectionManager: dataplane.NewConnectionManager(0, 0),
 	}
 }
 

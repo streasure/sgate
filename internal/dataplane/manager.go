@@ -1,4 +1,4 @@
-package connection
+package dataplane
 
 import (
 	"context"
@@ -515,7 +515,7 @@ func (cm *ConnectionManager) StartConnectionChecker(connIdleTimeout, connCheckIn
 	if !cm.checkStarted.CompareAndSwap(false, true) {
 		return // 已启动
 	}
-	panicutil.GoLoop(cm.ctx, "connection.checker", func() {
+	panicutil.GoLoop(cm.ctx, "dataplane.checker", func() {
 		ticker := time.NewTicker(connCheckInterval)
 		defer ticker.Stop()
 		for {

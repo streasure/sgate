@@ -9,10 +9,10 @@ import (
 	"github.com/panjf2000/gnet/v2"
 )
 
-// errNoUDPAssoc SendUDP 失败原因（调用方 connection.SendByCmd 据此回落 WS）。
+// errNoUDPAssoc SendUDP 失败原因（调用方 dataplane.SendByCmd 据此回落 WS）。
 var errNoUDPAssoc = errors.New("no udp association")
 
-// SendUDP 实现 connection.UDPDownlink：把一条下行消息发到会话关联的客户端地址。
+// SendUDP 实现 dataplane.UDPDownlink：把一条下行消息发到会话关联的客户端地址。
 // 按会话反查关联 → 新鲜度条件（§8.5）→ sendUDPFrame。
 //
 // 新鲜度条件：now - lastSeen ≤ idleTimeout/2 才走 UDP。关联仍在表里但已 stale

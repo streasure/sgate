@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/util/uhash"
 
 	protoGw "github.com/streasure/protocol/gateway"
@@ -240,7 +240,7 @@ func (s *StreamShard) stop() {
 
 // connBatch batchPush 冲刷时按连接聚合的推送项集合（池化复用）。
 type connBatch struct {
-	conn  *connection.Connection
+	conn  *dataplane.Connection
 	items []*protoGw.PushItem
 }
 
@@ -392,7 +392,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			// UDP 号段广播逐连接 SendByCmd 分流（各会话关联状态独立），
 			// 且不进合批（决策⑤：UDP 不走 coalescer）。
 			isUDP := protoGw.IsUDPCmd(msg.Cmd)
-			lc.gateway.GetConnectionManager().ForEach(func(conn *connection.Connection) bool {
+			lc.gateway.GetConnectionManager().ForEach(func(conn *dataplane.Connection) bool {
 				if !isUDP && lc.gateway.GetShardedCoalescer() != nil {
 					lc.gateway.GetShardedCoalescer().AddMulti(conn.ID(), respData, conn)
 					lc.gateway.AddPushedToClient(1)

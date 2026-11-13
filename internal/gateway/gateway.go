@@ -16,7 +16,7 @@ import (
 
 	"github.com/streasure/sgate/internal/backend"
 
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 
 	"github.com/panjf2000/gnet/v2"
 	protoLogin "github.com/streasure/protocol/loginserver"
@@ -38,7 +38,7 @@ import (
 
 // Gateway 表示网关实例，负责连接接入、协议处理、逻辑转发和组件生命周期。
 type Gateway struct {
-	connectionManager *connection.ConnectionManager
+	connectionManager *dataplane.ConnectionManager
 	stopChan          chan struct{}
 	closing           atomic.Bool   // 关闭流程状态：首个调用者执行，其余等待完成
 	closeDone         chan struct{} // 关闭流程完成信号（Close 等待者挂在此）
@@ -135,7 +135,7 @@ type Gateway struct {
 	loginServerClient         protoLogin.LoginServiceClient                     // 测试注入的覆盖客户端（生产恒为 nil，生产路径经 loginClient 走句柄）
 	loginService              *udiscovery.Client[protoLogin.LoginServiceClient] // loginserver 客户端句柄（发现由网关自持，见 initLoginService）
 	pipelineWorkerPool        *PipelineWorkerPool                               // 异步 pipeline 工作池
-	shardedCoalescer          *connection.ShardedWriteCoalescer                 // 分片写合并器（推送路径）
+	shardedCoalescer          *dataplane.ShardedWriteCoalescer                  // 分片写合并器（推送路径）
 }
 
 // SetTransportType 设置监听端口对应的传输类型。
@@ -344,7 +344,7 @@ func (g *Gateway) StartServices() error {
 	}
 
 	// 初始化分片写合并器（推送路径：logic → client）
-	g.shardedCoalescer = connection.NewShardedWriteCoalescer(g.connectionManager, 16)
+	g.shardedCoalescer = dataplane.NewShardedWriteCoalescer(g.connectionManager, 16)
 
 	if !benchMode {
 		connCheckInterval := gatewayutil.ParseDurationDefault(protection.ConnCheckInterval, 5*time.Minute)
@@ -692,7 +692,7 @@ func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
 	return
 }
 
-func (g *Gateway) GetConnectionManager() *connection.ConnectionManager {
+func (g *Gateway) GetConnectionManager() *dataplane.ConnectionManager {
 	return g.connectionManager
 }
 
@@ -710,7 +710,7 @@ func (g *Gateway) GetStreamConfig() config.StreamConfig {
 	return config.StreamConfig{}
 }
 
-func (g *Gateway) GetShardedCoalescer() *connection.ShardedWriteCoalescer {
+func (g *Gateway) GetShardedCoalescer() *dataplane.ShardedWriteCoalescer {
 	return g.shardedCoalescer
 }
 
@@ -733,7 +733,7 @@ func (g *Gateway) logMetrics() {
 		g.messagesPushedToClient.Load(),
 		g.messagesProcessed.Load(),
 		g.messagesFailed.Load(),
-		connection.AsyncWriteFailures(),
+		dataplane.AsyncWriteFailures(),
 	)
 }
 
@@ -803,9 +803,9 @@ func (g *Gateway) closeBody() {
 
 	// 阶段0：先拒绝新消息——将 Forward 连接置为 Closed。
 	// 必须在停止 engine 之前标记：gnet Stop 会拆除连接，之后状态标记已无意义。
-	g.connectionManager.ForEach(func(conn *connection.Connection) bool {
-		if conn.GetState() == connection.StateForward {
-			conn.SetState(connection.StateForward, connection.StateClosed)
+	g.connectionManager.ForEach(func(conn *dataplane.Connection) bool {
+		if conn.GetState() == dataplane.StateForward {
+			conn.SetState(dataplane.StateForward, dataplane.StateClosed)
 		}
 		return true
 	})
@@ -916,10 +916,10 @@ func newGateway(cfg *config.Config, configPath string, res *component.Resources)
 
 	// 自描述 session ID（roadmap P3-1）：把网关身份编进本进程生成的会话 ID，
 	// 定位时 ParseSessionGateway 解析即可得网关，无需外部登记表。
-	connection.SetSessionGatewayID(cfg.ServerID)
+	dataplane.SetSessionGatewayID(cfg.ServerID)
 
 	gw := &Gateway{
-		connectionManager: connection.NewConnectionManager(cfg.Protection.MaxConnections, cfg.Protection.MaxConnectionsPerIP),
+		connectionManager: dataplane.NewConnectionManager(cfg.Protection.MaxConnections, cfg.Protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
 		closeDone:         make(chan struct{}),
 		serverID:          cfg.ServerID,

@@ -5,7 +5,7 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
@@ -23,7 +23,7 @@ type kickNotifyParams struct {
 
 // pushKickNotify 向客户端推送踢下线通知（CMD_KICK_NOTIFY + logic.KickNotify）。
 // Send 内部走 AsyncWrite，event loop 外安全。
-func (g *Gateway) pushKickNotify(conn *connection.Connection, p kickNotifyParams) {
+func (g *Gateway) pushKickNotify(conn *dataplane.Connection, p kickNotifyParams) {
 	body, err := proto.Marshal(&protoLogic.KickNotify{
 		Reason:  p.reason,
 		Code:    p.code,
@@ -47,7 +47,7 @@ func (g *Gateway) pushKickNotify(conn *connection.Connection, p kickNotifyParams
 //
 // 通知可靠性：优先 SendThenClose（写完成后在回调内 Close，保证客户端收到
 // KickNotify 后再断连）；SendThenClose 不可用（连接已空）时回退同步 Close。
-func (g *Gateway) kickConn(conn *connection.Connection, p kickNotifyParams) {
+func (g *Gateway) kickConn(conn *dataplane.Connection, p kickNotifyParams) {
 	body, err := proto.Marshal(&protoLogic.KickNotify{
 		Reason:  p.reason,
 		Code:    p.code,
@@ -106,8 +106,8 @@ func (g *Gateway) KickByIP(ip, reason string) int {
 		return 0
 	}
 	p := kickNotifyParams{reason: reason, code: 403, message: "ip banned"}
-	var matched []*connection.Connection
-	g.connectionManager.ForEach(func(conn *connection.Connection) bool {
+	var matched []*dataplane.Connection
+	g.connectionManager.ForEach(func(conn *dataplane.Connection) bool {
 		addr, err := netip.ParseAddr(conn.RemoteHost())
 		if err != nil {
 			return true

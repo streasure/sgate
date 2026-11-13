@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 
 	"github.com/panjf2000/gnet/v2"
 	"github.com/streasure/protocol/enums"
@@ -242,7 +242,7 @@ func (g *Gateway) forwardLoginAsync(serverID string, msg *protoGw.StreamData, wa
 	})
 }
 
-func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {
+func (g *Gateway) notifyLogicOffline(conn *dataplane.Connection) {
 	// 幂等标记 = 已送达（非已尝试）：显式路径与 OnClose 可能都触发，
 	// 已成功发送过的连接直接跳过；发送失败不置位，后续路径可重试。
 	if conn.OfflineNotified() {

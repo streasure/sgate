@@ -7,7 +7,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/backend"
-	"github.com/streasure/sgate/internal/connection"
+	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/netutil"
 )
@@ -46,7 +46,7 @@ func putFilterContext(fc *types.FilterContext) {
 // connObj/routeKey 由 pipeline 阶段2/阶段3 查得后传入：热路径每消息一次连接
 // 查找与一次路由键计算，此处复用避免重复开销（同 ID 必得同一连接对象）。
 // connObj 为 nil 时回退 RemoteAddr 解析（仅测试等直调场景）。
-func (g *Gateway) buildFilterContext(c gnet.Conn, connObj *connection.Connection, routeKey string, data []byte, connectionID string, cmd int32) *types.FilterContext {
+func (g *Gateway) buildFilterContext(c gnet.Conn, connObj *dataplane.Connection, routeKey string, data []byte, connectionID string, cmd int32) *types.FilterContext {
 	fc := getFilterContext()
 	fc.Ctx = g.ctx
 	fc.ConnectionID = connectionID
@@ -64,7 +64,7 @@ func (g *Gateway) buildFilterContext(c gnet.Conn, connObj *connection.Connection
 	return fc
 }
 
-func (g *Gateway) applyForwardFilters(c gnet.Conn, connObj *connection.Connection, routeKey string, data []byte, connectionID string, cmd int32, seqID int64) (*protoGw.StreamData, bool) {
+func (g *Gateway) applyForwardFilters(c gnet.Conn, connObj *dataplane.Connection, routeKey string, data []byte, connectionID string, cmd int32, seqID int64) (*protoGw.StreamData, bool) {
 	// 空链（未注册任何过滤器）轻量路径：跳过 FilterContext 构造、Phase 遍历与
 	// 对象池全套开销，直接构造转发消息。Data 用入站池化缓冲拷贝而非引用——
 	// 与非空链路径最终经 pipeline 阶段5.5 切断别名的结果一致，但省去每消息
