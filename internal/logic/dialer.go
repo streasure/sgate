@@ -9,7 +9,6 @@ import (
 
 	"github.com/streasure/protocol/enums"
 	protocol "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/udiscovery"
@@ -317,7 +316,7 @@ func (d *Dialer) runSession(g *gateLink) error {
 	for i := range d.shardCount {
 		idx := i
 		establish.Go(func() {
-			sctx := routes.AppendLogicStreamMetadata(ctx, routes.LogicStreamMeta{
+			sctx := protocol.AppendLogicStreamMetadata(ctx, protocol.LogicStreamMeta{
 				LogicID:    d.cfg.ServiceID,
 				Zone:       d.cfg.Zone,
 				Addr:       d.cfg.AdvertiseAddr,

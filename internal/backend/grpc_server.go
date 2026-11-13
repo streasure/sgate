@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/sgate/internal/routes"
-
 	"github.com/streasure/sgate/internal/connection"
 
 	protoGw "github.com/streasure/protocol/gateway"
@@ -46,7 +44,7 @@ func NewGRPCServer(gateway GatewayInterface, pool *LogicClientPool, kickToken st
 // logic 主动拨入（flip 模式）必须携带握手元数据；缺失即拒绝（旧版
 // sgate 主动拨入的命令流已移除，唯一 dialer 恒附 metadata）。
 func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
-	meta, ok := routes.LogicStreamMetadataFromContext(stream.Context())
+	meta, ok := protoGw.LogicStreamMetadataFromContext(stream.Context())
 	if !ok {
 		return status.Error(codes.InvalidArgument, "logic stream metadata required")
 	}
@@ -55,7 +53,7 @@ func (s *GRPCServer) OnData(stream protoGw.GatewayStream_OnDataServer) error {
 
 // handleLogicStream flip 模式接收循环：附着分片后由本 handler 驱动
 // 消息路由，流结束即返回，由 gRPC 框架回收；返回前统一解绑分片。
-func (s *GRPCServer) handleLogicStream(meta routes.LogicStreamMeta, stream protoGw.GatewayStream_OnDataServer) error {
+func (s *GRPCServer) handleLogicStream(meta protoGw.LogicStreamMeta, stream protoGw.GatewayStream_OnDataServer) error {
 	ctx := stream.Context()
 	if s.pool == nil {
 		return fmt.Errorf("logic stream rejected: pool not initialized")

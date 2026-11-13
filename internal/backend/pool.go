@@ -6,7 +6,7 @@ import (
 
 	"github.com/streasure/sgate/internal/connection"
 
-	"github.com/streasure/sgate/internal/routes"
+	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
@@ -73,7 +73,7 @@ func (pool *LogicClientPool) IsClientConnected(serverID string) bool {
 // Attach 接受 logic 主动拨入的一个流分片（flip 模式）。
 // 首次接入时创建 LogicClient 与分片管理器；logic 重启导致分片总数变化时重建客户端。
 // 返回附着后的客户端与分片，调用方随后驱动接收循环，并在流结束时 defer 分片解绑。
-func (pool *LogicClientPool) Attach(meta routes.LogicStreamMeta, stream dataStream) (*LogicClient, *StreamShard, error) {
+func (pool *LogicClientPool) Attach(meta protoGw.LogicStreamMeta, stream dataStream) (*LogicClient, *StreamShard, error) {
 	pool.mu.Lock()
 	if pool.closed {
 		pool.mu.Unlock()

@@ -7,7 +7,6 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
-	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -161,7 +160,7 @@ func TestPoolAttachLifecycle(t *testing.T) {
 	gw := newGRPCFakeGateway()
 	pool := NewLogicClientPool(gw)
 
-	meta := routes.LogicStreamMeta{
+	meta := protoGw.LogicStreamMeta{
 		LogicID:    "logic-1",
 		Zone:       "z1",
 		Addr:       "127.0.0.1:50051",
@@ -225,7 +224,7 @@ func TestPoolAttachLifecycle(t *testing.T) {
 
 	pool.Close()
 	// Close 后拒绝接入
-	if _, _, err := pool.Attach(routes.LogicStreamMeta{LogicID: "x", ShardCount: 1}, &fakeShardStream{}); err != ErrConnectionClosing {
+	if _, _, err := pool.Attach(protoGw.LogicStreamMeta{LogicID: "x", ShardCount: 1}, &fakeShardStream{}); err != ErrConnectionClosing {
 		t.Fatalf("attach after close = %v, want ErrConnectionClosing", err)
 	}
 	if pool.ClientCount() != 0 {
@@ -238,7 +237,7 @@ func TestPoolFastClient(t *testing.T) {
 	gw := newGRPCFakeGateway()
 	pool := NewLogicClientPool(gw)
 
-	meta := routes.LogicStreamMeta{LogicID: "a", Addr: "127.0.0.1:50051", ShardIdx: 0, ShardCount: 1}
+	meta := protoGw.LogicStreamMeta{LogicID: "a", Addr: "127.0.0.1:50051", ShardIdx: 0, ShardCount: 1}
 	if _, _, err := pool.Attach(meta, &fakeShardStream{}); err != nil {
 		t.Fatalf("attach a: %v", err)
 	}

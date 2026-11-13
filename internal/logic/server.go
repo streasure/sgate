@@ -10,7 +10,6 @@ import (
 	"time"
 
 	protocol "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/grpc"
@@ -261,7 +260,7 @@ func (s *Server) GetServerID() string { return s.serverID }
 // OnData 旧版握手：网关主动拨入时的流处理。
 func (s *Server) OnData(stream protocol.GatewayStream_OnDataServer) error {
 	gatewayID := ""
-	if values := metadata.ValueFromIncomingContext(stream.Context(), routes.MetaGatewayID); len(values) > 0 && values[0] != "" {
+	if values := metadata.ValueFromIncomingContext(stream.Context(), protocol.MetaGatewayID); len(values) > 0 && values[0] != "" {
 		gatewayID = values[0]
 	}
 	return s.handleStream(stream, gatewayID)
