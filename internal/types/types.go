@@ -60,28 +60,17 @@ type FilterChain struct {
 var (
 	globalFilterRegistry   = map[string]FilterFactory{}
 	globalFilterRegistryMu sync.RWMutex
-	globalFilterChain      *FilterChain
 )
 
-// RegisterFilter 全局注册过滤器工厂（SPI 入口）
+// RegisterFilter 全局注册过滤器工厂（SPI 入口，仅包 init() 期调用；
+// 链实例本身无全局态——由组合根经 component.NewResources 创建后注入）。
 func RegisterFilter(name string, f FilterFactory) {
 	globalFilterRegistryMu.Lock()
 	defer globalFilterRegistryMu.Unlock()
 	globalFilterRegistry[name] = f
 }
 
-// InitFilterChain 创建全局过滤器链，应在配置加载后调用一次。
-func InitFilterChain() *FilterChain {
-	globalFilterChain = NewFilterChain()
-	return globalFilterChain
-}
-
-// GetFilterChain 返回全局过滤器链，需先调用 InitFilterChain。
-func GetFilterChain() *FilterChain {
-	return globalFilterChain
-}
-
-// NewFilterChain 创建过滤器链
+// NewFilterChain 创建过滤器链（快照当前 SPI 注册表）。
 func NewFilterChain() *FilterChain {
 	globalFilterRegistryMu.RLock()
 	registry := make(map[string]FilterFactory, len(globalFilterRegistry))

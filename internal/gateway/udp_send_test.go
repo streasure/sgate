@@ -23,7 +23,7 @@ func decodeUDPFrame(b []byte) ([]byte, bool) {
 
 // TestSendUDP_NoAssociation 无关联 → errNoUDPAssoc（SendByCmd 据此回落 WS）。
 func TestSendUDP_NoAssociation(t *testing.T) {
-	gw := newGateway(udpEnabledConfig(), "")
+	gw := newTestGateway(udpEnabledConfig())
 	defer gw.Close()
 
 	if err := gw.SendUDP("no-such-session", []byte("x")); !errors.Is(err, errNoUDPAssoc) {
@@ -34,7 +34,7 @@ func TestSendUDP_NoAssociation(t *testing.T) {
 // TestSendUDP_StaleNotAttempted 关联存在但已 stale（超过 idleTimeout/2）
 // → 返回错误且不尝试 SendTo（系统调用会成功、错误回不了头，形成静默黑洞）。
 func TestSendUDP_StaleNotAttempted(t *testing.T) {
-	gw := newGateway(udpEnabledConfig(), "")
+	gw := newTestGateway(udpEnabledConfig())
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 70), 15000, true)
@@ -59,7 +59,7 @@ func TestSendUDP_StaleNotAttempted(t *testing.T) {
 
 // TestSendUDP_FreshSendsToAssocAddr 关联新鲜 → 帧（4B 头 + payload）发往关联地址。
 func TestSendUDP_FreshSendsToAssocAddr(t *testing.T) {
-	gw := newGateway(udpEnabledConfig(), "")
+	gw := newTestGateway(udpEnabledConfig())
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 71), 15001, true)
@@ -86,7 +86,7 @@ func TestSendUDP_FreshSendsToAssocAddr(t *testing.T) {
 // janitor sweep / 显式删除并发（无锁读 byConnID，删除窗口内返回已拆索引
 // 关联只产生发送错误 → SendByCmd 回落，无 panic 无副作用）。
 func TestSendUDP_ConcurrentWithSweep(t *testing.T) {
-	gw := newGateway(udpEnabledConfig(), "")
+	gw := newTestGateway(udpEnabledConfig())
 	defer gw.Close()
 
 	connID, _ := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 73), 15003, true)
@@ -131,7 +131,7 @@ func TestSendUDP_ConcurrentWithSweep(t *testing.T) {
 // SetUDPDownlink 后，连接的 SendByCmd（号段内）走 UDP 发往关联地址，
 // WS conn 零写入；关联删除后回落 WS（降级不丢）。
 func TestSendUDP_AssociateInjectsDownlink(t *testing.T) {
-	gw := newGateway(udpEnabledConfig(), "")
+	gw := newTestGateway(udpEnabledConfig())
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 72), 15002, true)

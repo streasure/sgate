@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
 )
 
@@ -20,6 +21,12 @@ func minimalConfig() *config.Config {
 	}
 }
 
+// newTestGateway 以空资源容器构造网关（gateway 包测试均不调 Init/Start，
+// 容器仅满足构造期注入；组件写入路径由 component 包测试覆盖）。
+func newTestGateway(cfg *config.Config) *Gateway {
+	return newGateway(cfg, "", component.NewResources())
+}
+
 func TestNewGatewayPanicsOnNilConfig(t *testing.T) {
 	// 构造器显式收参后，nil 配置是编程错误——必须 fail-fast panic，
 	// 而不是在 Start 阶段以 nil deref 形式更难排查地崩。
@@ -28,12 +35,12 @@ func TestNewGatewayPanicsOnNilConfig(t *testing.T) {
 			t.Fatal("NewGateway(nil) should panic")
 		}
 	}()
-	_ = NewGateway(nil, "")
+	_ = NewGateway(nil, "", component.NewResources())
 }
 
 func TestNewGatewayAppliesDefaultsAndStoresCopy(t *testing.T) {
 	cfg := minimalConfig()
-	gw := newGateway(cfg, "")
+	gw := newTestGateway(cfg)
 	if gw == nil {
 		t.Fatal("newGateway returned nil")
 	}
@@ -92,7 +99,7 @@ func TestNewGatewayAppliesDefaultsAndStoresCopy(t *testing.T) {
 func TestNewGatewayBuildsTLSConfig(t *testing.T) {
 	cfg := minimalConfig()
 	cfg.TLS.Enabled = false
-	gw := newGateway(cfg, "")
+	gw := newTestGateway(cfg)
 	if gw.tlsConfig == nil {
 		t.Fatal("tlsConfig should not be nil even when TLS disabled")
 	}
@@ -118,7 +125,7 @@ func TestBuildTLSConfigDisabled(t *testing.T) {
 
 func TestMetricsLogEnabledDefault(t *testing.T) {
 	cfg := minimalConfig()
-	gw := newGateway(cfg, "")
+	gw := newTestGateway(cfg)
 	defer gw.Close()
 
 	if !gw.metricsLogEnabled() {
@@ -136,7 +143,7 @@ func TestMetricsLogEnabledDefault(t *testing.T) {
 
 func TestTryEnqueueConfigKeepsLatest(t *testing.T) {
 	cfg := minimalConfig()
-	gw := newGateway(cfg, "")
+	gw := newTestGateway(cfg)
 	defer gw.Close()
 
 	cfg1 := minimalConfig()

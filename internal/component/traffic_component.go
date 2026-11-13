@@ -7,7 +7,6 @@ import (
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/traffic"
-	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 )
@@ -26,16 +25,19 @@ type TrafficComponent struct {
 	CanaryFilter  *traffic.CanaryFilter
 	TrafficMirror *traffic.TrafficMirror
 	Degradation   *traffic.DegradationManager
+
+	res *Resources
 }
 
-// NewTrafficComponent 创建流量组件，配置由组合根（main）在 config.Load 后显式传入。
-func NewTrafficComponent(cfg *config.Config) *TrafficComponent {
+// NewTrafficComponent 创建流量组件：配置与资源容器由组合根（main）显式传入。
+func NewTrafficComponent(cfg *config.Config, res *Resources) *TrafficComponent {
 	return &TrafficComponent{
 		ctx:            context.Background(),
 		canaryCfg:      cfg.Canary,
 		mirrorCfg:      cfg.TrafficMirror,
 		degradationCfg: cfg.Degradation,
 		wasmCfg:        cfg.WasmRuntime,
+		res:            res,
 	}
 }
 
@@ -48,19 +50,19 @@ func (c *TrafficComponent) Init() error {
 	// 灰度过滤器。
 	if c.canaryCfg.Enabled {
 		c.CanaryFilter = traffic.NewCanaryFilter(c.canaryCfg)
-		types.GetFilterChain().AddFilter(c.CanaryFilter)
+		c.res.FC.AddFilter(c.CanaryFilter)
 	}
 
 	// 流量镜像。
 	if c.mirrorCfg.Enabled {
 		c.TrafficMirror = traffic.NewTrafficMirror(c.mirrorCfg)
-		types.GetFilterChain().AddFilter(&traffic.MirrorFilter{TM: c.TrafficMirror})
+		c.res.FC.AddFilter(&traffic.MirrorFilter{TM: c.TrafficMirror})
 	}
 
 	// 降级管理器。
 	if c.degradationCfg.Enabled {
 		c.Degradation = traffic.NewDegradationManager(c.degradationCfg.Rules)
-		types.GetFilterChain().AddFilter(c.Degradation)
+		c.res.FC.AddFilter(c.Degradation)
 	}
 
 	// WASM 模块加载：启动时从文件读入并实例化，供 filterChain 的 wasm-filter 调用。
@@ -71,7 +73,10 @@ func (c *TrafficComponent) Init() error {
 		}
 	}
 
-	setTrafficResources(c.CanaryFilter, c.TrafficMirror, c.Degradation)
+	// 发布到注入的资源容器（Gateway Order 最后读取）。
+	c.res.CanaryFilter = c.CanaryFilter
+	c.res.TrafficMirror = c.TrafficMirror
+	c.res.Degradation = c.Degradation
 	return nil
 }
 

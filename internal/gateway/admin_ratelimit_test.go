@@ -13,7 +13,7 @@ import (
 
 // TestAdminRateLimitAuth 鉴权失败必须 401。
 func TestAdminRateLimitAuth(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 	gw.rateLimiter = security.NewRateLimiter(100, time.Second)
 
@@ -31,7 +31,7 @@ func TestAdminRateLimitAuth(t *testing.T) {
 
 // TestAdminRateLimitApply 热更后 UpdateRate 生效。
 func TestAdminRateLimitApply(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 	gw.rateLimiter = security.NewRateLimiter(100, time.Second)
 
@@ -59,7 +59,7 @@ func TestAdminRateLimitApply(t *testing.T) {
 
 // TestAdminRateLimitDisabledRateLimiter 未启用限流返回 503。
 func TestAdminRateLimitDisabledRateLimiter(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 	gw.rateLimiter = nil
 

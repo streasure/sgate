@@ -143,7 +143,7 @@ func decodeMaintenanceResp(t *testing.T, rec *httptest.ResponseRecorder) mainten
 
 // TestMaintenanceStateEnableDisable 标记的增删与命中判断。
 func TestMaintenanceStateEnableDisable(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	if gw.isMaintenanceTarget("s1") {
@@ -166,7 +166,7 @@ func TestMaintenanceStateEnableDisable(t *testing.T) {
 
 // TestMaintenance_ZoneFallback zone 标记通过网关自身 zone 命中（静态/无发现回退）。
 func TestMaintenance_ZoneFallback(t *testing.T) {
-	gw := newGateway(minimalConfig(), "") // Zone=default，logicClientPool 为 nil
+	gw := newTestGateway(minimalConfig()) // Zone=default，logicClientPool 为 nil
 	defer gw.Close()
 
 	gw.maintenance.enable("", "default", "zone maintenance")
@@ -182,7 +182,7 @@ func TestMaintenance_ZoneFallback(t *testing.T) {
 
 // TestLoginGate_RejectInMaintenance 维护中的 serverId 拒绝新登录（503 + 关闭）。
 func TestLoginGate_RejectInMaintenance(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	gw.maintenance.enable("logic:zone:1", "", "upgrade")
@@ -205,7 +205,7 @@ func TestLoginGate_RejectInMaintenance(t *testing.T) {
 
 // TestKickForMaintenance 踢人链路：KickNotify 帧推送 + 连接关闭。
 func TestKickForMaintenance(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	mc := &kickMockConn{}
@@ -230,7 +230,7 @@ func TestKickForMaintenance(t *testing.T) {
 
 // TestSnapshotMaintenanceTargets serverId 精确匹配与 zone 匹配。
 func TestSnapshotMaintenanceTargets(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	add := func(user, server string) string {
@@ -262,7 +262,7 @@ func TestSnapshotMaintenanceTargets(t *testing.T) {
 
 // TestHandleAdminMaintenance HTTP 端到端：enable 标记 + matched 计数 + 登录被拒 → disable 恢复。
 func TestHandleAdminMaintenance(t *testing.T) {
-	gw := newGateway(maintenanceConfig(), "")
+	gw := newTestGateway(maintenanceConfig())
 	defer gw.Close()
 
 	// 两条在线连接绑到 s1，一条绑到 s2
@@ -340,7 +340,7 @@ func TestHandleAdminMaintenance(t *testing.T) {
 
 // TestHandleAdminMaintenance_Validation 参数校验：方法/动作/单选。
 func TestHandleAdminMaintenance_Validation(t *testing.T) {
-	gw := newGateway(maintenanceConfig(), "")
+	gw := newTestGateway(maintenanceConfig())
 	defer gw.Close()
 
 	// GET → 405

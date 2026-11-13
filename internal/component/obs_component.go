@@ -6,7 +6,6 @@ import (
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
-	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 )
@@ -22,19 +21,23 @@ type ObservabilityComponent struct {
 	pprofAddr     string
 	disableTracer bool
 
-	// 导出字段仅包内使用（资源经 resources.go 全局量发布），不作为外部通路。
+	// 资源字段包内生命周期管理（Destroy 用），Init 末尾同步写入
+	// 注入的 *Resources 发布给 Gateway，不作为外部通路。
 	tracer         *obs.Tracer
 	otelTracer     *obs.OTelTracer
 	latencyTracker *obs.LatencyTracker
+
+	res *Resources
 }
 
-// NewObservabilityComponent 创建可观测性组件，配置由组合根（main）在 config.Load 后显式传入。
-func NewObservabilityComponent(cfg *config.Config) *ObservabilityComponent {
+// NewObservabilityComponent 创建可观测性组件：配置与资源容器由组合根（main）显式传入。
+func NewObservabilityComponent(cfg *config.Config, res *Resources) *ObservabilityComponent {
 	return &ObservabilityComponent{
 		ctx:           context.Background(),
 		otelCfg:       cfg.OTelTracer,
 		pprofAddr:     cfg.Monitoring.PprofAddr,
 		disableTracer: cfg.Monitoring.DisableTracer,
+		res:           res,
 	}
 }
 
@@ -45,7 +48,7 @@ func (c *ObservabilityComponent) Init() error {
 	tlog.Info(c.ctx, "observability component init")
 
 	if c.disableTracer {
-		// 关闭后 component.Tracer() 返回 nil，消息管道走超级快速路径。
+		// 关闭后注入资源的 Tracer 为 nil，消息管道走超级快速路径。
 		tlog.Info(c.ctx, "internal tracer disabled (monitoring.disableTracer=true)")
 	} else {
 		c.tracer = obs.NewTracer(5 * time.Minute)
@@ -57,10 +60,13 @@ func (c *ObservabilityComponent) Init() error {
 	// OpenTelemetry 分布式追踪。
 	if c.otelCfg.Enabled {
 		c.otelTracer = obs.NewOTelTracer(c.otelCfg)
-		types.GetFilterChain().AddFilter(&obs.OTelSpanFilter{Tracer: c.otelTracer})
+		c.res.FC.AddFilter(&obs.OTelSpanFilter{Tracer: c.otelTracer})
 	}
 
-	setObservabilityResources(c.tracer, c.otelTracer, c.latencyTracker)
+	// 发布到注入的资源容器（Gateway Order 最后读取）。
+	c.res.Tracer = c.tracer
+	c.res.OTelTracer = c.otelTracer
+	c.res.LatencyTracker = c.latencyTracker
 	return nil
 }
 

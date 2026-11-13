@@ -209,19 +209,6 @@ func TestFilterChain_RunByPhase_DisabledSkipsFilters(t *testing.T) {
 	}
 }
 
-func TestInitGetFilterChain_Global(t *testing.T) {
-	chain := InitFilterChain()
-	if chain == nil {
-		t.Fatal("InitFilterChain() = nil")
-	}
-	if got := GetFilterChain(); got != chain {
-		t.Errorf("GetFilterChain() = %p, want %p (same as InitFilterChain)", got, chain)
-	}
-	if got := chain.Len(); got != 0 {
-		t.Errorf("fresh global chain Len() = %d, want 0", got)
-	}
-}
-
 func TestRegisterFilter_GlobalRegistryVisibleToNewChains(t *testing.T) {
 	RegisterFilter("test-global-mock", func(cfg map[string]any) (Filter, error) {
 		return &mockFilter{name: "test-global-mock", phase: PhasePostAuth, priority: 10}, nil

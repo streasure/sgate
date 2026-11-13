@@ -41,7 +41,7 @@ func wsConnID(gw *Gateway) string {
 
 // TestWSHandshake_HalfPacketAccumulation 验证半包跨 packet 累积后再完成握手（H2）。
 func TestWSHandshake_HalfPacketAccumulation(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	// 握手会注册连接，Close 需 drain；测试末尾先移除避免 2 分钟等待
 	defer func() {
 		if id := wsConnID(gw); id != "" {
@@ -82,7 +82,7 @@ func TestWSHandshake_HalfPacketAccumulation(t *testing.T) {
 
 // TestWSHandshake_OversizedRejected 验证半包缓冲上限（16KB）防无限缓冲。
 func TestWSHandshake_OversizedRejected(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	mc := &wsMockConn{}
@@ -97,7 +97,7 @@ func TestWSHandshake_OversizedRejected(t *testing.T) {
 
 // TestWS_UnmaskedFrameRejected 验证 RFC6455 客户端帧必须 mask（H4）。
 func TestWS_UnmaskedFrameRejected(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	_, ws := newOpenWSConn()
@@ -110,7 +110,7 @@ func TestWS_UnmaskedFrameRejected(t *testing.T) {
 
 // TestWS_FragmentationReassembly 验证 FIN=0 + continuation 重组（H3）。
 func TestWS_FragmentationReassembly(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	_, ws := newOpenWSConn()
@@ -134,7 +134,7 @@ func TestWS_FragmentationReassembly(t *testing.T) {
 // TestWS_BufferReuseExactBoundary 精确边界消费后 Buffer 容量必须保留
 // （防 nil 置零重分配回归，同 TCP FrameBuf）。
 func TestWS_BufferReuseExactBoundary(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	_, ws := newOpenWSConn()
@@ -159,7 +159,7 @@ func TestWS_BufferReuseExactBoundary(t *testing.T) {
 
 // TestWS_BufferLimitRejected 缓冲超限必须断连（同 TCP FrameBuf）。
 func TestWS_BufferLimitRejected(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 	p := gw.getProtection()
 	p.MaxWSBufferSize = 64
@@ -178,7 +178,7 @@ func TestWS_BufferLimitRejected(t *testing.T) {
 
 // TestWS_CoalescedMultiFrames 粘包：一次读事件多帧顺序交付（offset 复用回归）。
 func TestWS_CoalescedMultiFrames(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	_, ws := newOpenWSConn()
@@ -196,7 +196,7 @@ func TestWS_CoalescedMultiFrames(t *testing.T) {
 
 // TestWS_PartialFrameAcrossReads 跨读事件重组：半帧到达等待补全。
 func TestWS_PartialFrameAcrossReads(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	_, ws := newOpenWSConn()
@@ -217,7 +217,7 @@ func TestWS_PartialFrameAcrossReads(t *testing.T) {
 
 // TestWS_UnexpectedContinuationRejected 无前置分片的 continuation 帧应断连。
 func TestWS_UnexpectedContinuationRejected(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	_, ws := newOpenWSConn()
@@ -229,7 +229,7 @@ func TestWS_UnexpectedContinuationRejected(t *testing.T) {
 
 // TestWS_CloseFrameClearsAndClosesTCP 验证 close 帧清理映射并关闭底层 TCP（H1，防 FD 泄漏）。
 func TestWS_CloseFrameClearsAndClosesTCP(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	mc, ws := newOpenWSConn()
@@ -254,7 +254,7 @@ func TestWS_CloseFrameClearsAndClosesTCP(t *testing.T) {
 
 // TestWS_PingUpdatesHeartbeat 验证 ping 帧回写 pong 并刷新心跳时间。
 func TestWS_PingUpdatesHeartbeat(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
 	mc, ws := newOpenWSConn()

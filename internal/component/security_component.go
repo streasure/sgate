@@ -7,7 +7,6 @@ import (
 
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/security"
-	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
@@ -23,21 +22,25 @@ type SecurityComponent struct {
 	waf config.WAFConfig
 	jwt config.JWTAuthConfig
 
-	// 资源字段仅包内使用（经 resources.go 全局量发布给 Gateway），不作为外部通路。
+	// 资源字段包内生命周期管理（Start/Destroy 用），Init 末尾同步写入
+	// 注入的 *Resources 发布给 Gateway，不作为外部通路。
 	whitelistBlacklist *security.WhitelistBlacklist
 	wafInstance        *security.WAF
 	rateLimiter        *security.RateLimiter
 	jwtAuth            *security.JWTAuthFilter
 	circuitBreakerMgr  *security.CircuitBreakerManager
+
+	res *Resources
 }
 
-// NewSecurityComponent 创建安全组件，配置由组合根（main）在 config.Load 后显式传入。
-func NewSecurityComponent(cfg *config.Config) *SecurityComponent {
+// NewSecurityComponent 创建安全组件：配置与资源容器由组合根（main）显式传入。
+func NewSecurityComponent(cfg *config.Config, res *Resources) *SecurityComponent {
 	return &SecurityComponent{
 		ctx: context.Background(),
 		cfg: cfg.Security,
 		waf: cfg.WAF,
 		jwt: cfg.JWTAuth,
+		res: res,
 	}
 }
 
@@ -70,7 +73,7 @@ func (c *SecurityComponent) Init() error {
 			return fmt.Errorf("jwtAuth.enabled=true requires jwtAuth.secret")
 		}
 		c.jwtAuth = security.NewJWTAuthFilter(c.jwt)
-		types.GetFilterChain().AddFilter(c.jwtAuth)
+		c.res.FC.AddFilter(c.jwtAuth)
 	}
 
 	// 限流器。
@@ -97,7 +100,12 @@ func (c *SecurityComponent) Init() error {
 		c.wafInstance = security.NewWAF(c.waf)
 	}
 
-	setSecurityResources(c.whitelistBlacklist, c.wafInstance, c.rateLimiter, c.jwtAuth, c.circuitBreakerMgr)
+	// 发布到注入的资源容器（Gateway Order 最后读取）。
+	c.res.WhitelistBlacklist = c.whitelistBlacklist
+	c.res.WAF = c.wafInstance
+	c.res.RateLimiter = c.rateLimiter
+	c.res.JWTAuth = c.jwtAuth
+	c.res.CircuitBreakerMgr = c.circuitBreakerMgr
 	return nil
 }
 

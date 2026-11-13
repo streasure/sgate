@@ -1,20 +1,13 @@
 package component
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
-	clusterPkg "github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/obs"
-	"github.com/streasure/sgate/internal/security"
-	"github.com/streasure/sgate/internal/traffic"
-	"github.com/streasure/sgate/internal/types"
 )
 
 // mustLoadConfig 写最小合法 yaml 并 config.Load，返回 cfg 供组件构造器显式传入。
@@ -34,30 +27,9 @@ func mustLoadConfig(t *testing.T, extraYAML string) *config.Config {
 	return cfg
 }
 
-// resetComponentResources 清空全局资源，防跨用例污染。
-func resetComponentResources(t *testing.T) {
-	t.Helper()
-	clear := func() {
-		globalWhitelistBlacklist = nil
-		globalWAF = nil
-		globalRateLimiter = nil
-		globalJWTAuth = nil
-		globalCircuitBreakerMgr = nil
-		globalTracer = nil
-		globalOTelTracer = nil
-		globalLatencyTracker = nil
-		globalCanaryFilter = nil
-		globalTrafficMirror = nil
-		globalDegradation = nil
-		globalConfigCenter = nil
-		globalAlertWebhook = nil
-	}
-	clear()
-	t.Cleanup(clear)
-}
-
 func TestComponents_NameAndOrder(t *testing.T) {
 	cfg := mustLoadConfig(t, "")
+	res := NewResources()
 	tests := []struct {
 		name  string
 		order int
@@ -66,10 +38,10 @@ func TestComponents_NameAndOrder(t *testing.T) {
 			Order() int
 		}
 	}{
-		{"security", 100, NewSecurityComponent(cfg)},
-		{"observability", 200, NewObservabilityComponent(cfg)},
-		{"traffic", 300, NewTrafficComponent(cfg)},
-		{"cluster", 400, NewClusterComponent(cfg)},
+		{"security", 100, NewSecurityComponent(cfg, res)},
+		{"observability", 200, NewObservabilityComponent(cfg, res)},
+		{"traffic", 300, NewTrafficComponent(cfg, res)},
+		{"cluster", 400, NewClusterComponent(cfg, res)},
 	}
 	for _, tt := range tests {
 		if got := tt.comp.Name(); got != tt.name {
@@ -92,21 +64,22 @@ monitoring:
   disableTracer: true
   pprofAddr: "127.0.0.1:6061"
 `)
-	sec := NewSecurityComponent(cfg)
+	res := NewResources()
+	sec := NewSecurityComponent(cfg, res)
 	if !reflect.DeepEqual(sec.cfg, cfg.Security) || !reflect.DeepEqual(sec.waf, cfg.WAF) || !reflect.DeepEqual(sec.jwt, cfg.JWTAuth) {
 		t.Error("SecurityComponent did not copy config sections")
 	}
-	obs := NewObservabilityComponent(cfg)
+	obs := NewObservabilityComponent(cfg, res)
 	if !reflect.DeepEqual(obs.otelCfg, cfg.OTelTracer) || obs.pprofAddr != "127.0.0.1:6061" || !obs.disableTracer {
 		t.Errorf("ObservabilityComponent config copy mismatch: otel=%+v pprof=%q disableTracer=%v",
 			obs.otelCfg, obs.pprofAddr, obs.disableTracer)
 	}
-	tr := NewTrafficComponent(cfg)
+	tr := NewTrafficComponent(cfg, res)
 	if !reflect.DeepEqual(tr.canaryCfg, cfg.Canary) || !reflect.DeepEqual(tr.mirrorCfg, cfg.TrafficMirror) ||
 		!reflect.DeepEqual(tr.degradationCfg, cfg.Degradation) || !reflect.DeepEqual(tr.wasmCfg, cfg.WasmRuntime) {
 		t.Error("TrafficComponent did not copy config sections")
 	}
-	cl := NewClusterComponent(cfg)
+	cl := NewClusterComponent(cfg, res)
 	if cl.grpcPort != 6000 {
 		t.Errorf("ClusterComponent.grpcPort = %d, want 6000", cl.grpcPort)
 	}
@@ -115,96 +88,56 @@ monitoring:
 	}
 }
 
-func TestResources_GettersNilBeforeInit(t *testing.T) {
-	resetComponentResources(t)
-	getters := []struct {
-		name  string
-		isNil func() bool
-	}{
-		{"WhitelistBlacklist", func() bool { return WhitelistBlacklist() == nil }},
-		{"WAF", func() bool { return WAF() == nil }},
-		{"RateLimiter", func() bool { return RateLimiter() == nil }},
-		{"JWTAuth", func() bool { return JWTAuth() == nil }},
-		{"CircuitBreakerMgr", func() bool { return CircuitBreakerMgr() == nil }},
-		{"Tracer", func() bool { return Tracer() == nil }},
-		{"OTelTracer", func() bool { return OTelTracer() == nil }},
-		{"LatencyTracker", func() bool { return LatencyTracker() == nil }},
-		{"CanaryFilter", func() bool { return CanaryFilter() == nil }},
-		{"TrafficMirror", func() bool { return TrafficMirror() == nil }},
-		{"Degradation", func() bool { return Degradation() == nil }},
-		{"ConfigCenter", func() bool { return ConfigCenter() == nil }},
-		{"AlertWebhook", func() bool { return AlertWebhook() == nil }},
+// TestResources_NewEmpty 新建资源容器：滤链就绪且为空，其余资源在组件
+// Init 前为 nil（替代旧的全局量 getter nil 守卫测试）。
+func TestResources_NewEmpty(t *testing.T) {
+	res := NewResources()
+	if res.FC == nil {
+		t.Fatal("NewResources().FC = nil, want fresh filter chain")
 	}
-	for _, g := range getters {
-		if !g.isNil() {
-			t.Errorf("%s() = non-nil before Init, want nil", g.name)
+	if got := res.FC.Len(); got != 0 {
+		t.Errorf("fresh filter chain Len() = %d, want 0", got)
+	}
+	fields := []struct {
+		name  string
+		isNil bool
+	}{
+		{"WhitelistBlacklist", res.WhitelistBlacklist == nil},
+		{"WAF", res.WAF == nil},
+		{"RateLimiter", res.RateLimiter == nil},
+		{"JWTAuth", res.JWTAuth == nil},
+		{"CircuitBreakerMgr", res.CircuitBreakerMgr == nil},
+		{"Tracer", res.Tracer == nil},
+		{"OTelTracer", res.OTelTracer == nil},
+		{"LatencyTracker", res.LatencyTracker == nil},
+		{"CanaryFilter", res.CanaryFilter == nil},
+		{"TrafficMirror", res.TrafficMirror == nil},
+		{"Degradation", res.Degradation == nil},
+		{"ConfigCenter", res.ConfigCenter == nil},
+		{"AlertWebhook", res.AlertWebhook == nil},
+	}
+	for _, f := range fields {
+		if !f.isNil {
+			t.Errorf("%s = non-nil before component Init, want nil", f.name)
 		}
 	}
 }
 
-// stubConfigCenter 仅用于资源发布回环测试（不连 etcd）。
-type stubConfigCenter struct{}
-
-func (stubConfigCenter) Watch(_ context.Context) (<-chan []byte, error) { return nil, nil }
-func (stubConfigCenter) Pull(_ context.Context) ([]byte, error)         { return nil, nil }
-func (stubConfigCenter) Type() string                                   { return "stub" }
-func (stubConfigCenter) Stop()                                          {}
-
-func TestResources_SettersGettersRoundTrip(t *testing.T) {
-	resetComponentResources(t)
-
-	wb := security.NewWhitelistBlacklist()
-	waf := security.NewWAF(config.WAFConfig{})
-	rl := security.NewRateLimiter(10, time.Second)
-	defer rl.Stop()
-	jwt := security.NewJWTAuthFilter(config.JWTAuthConfig{})
-	cb := security.NewCircuitBreakerManager()
-	setSecurityResources(wb, waf, rl, jwt, cb)
-	if WhitelistBlacklist() != wb || WAF() != waf || RateLimiter() != rl || JWTAuth() != jwt || CircuitBreakerMgr() != cb {
-		t.Error("security getters do not return the pointers passed to setSecurityResources")
-	}
-
-	tr := &obs.Tracer{}
-	otel := &obs.OTelTracer{}
-	lt := &obs.LatencyTracker{}
-	setObservabilityResources(tr, otel, lt)
-	if Tracer() != tr || OTelTracer() != otel || LatencyTracker() != lt {
-		t.Error("observability getters do not return the pointers passed to setObservabilityResources")
-	}
-
-	canary := traffic.NewCanaryFilter(config.CanaryConfig{})
-	mirror := traffic.NewTrafficMirror(config.TrafficMirrorConfig{})
-	defer mirror.Stop()
-	degrade := traffic.NewDegradationManager(nil)
-	setTrafficResources(canary, mirror, degrade)
-	if CanaryFilter() != canary || TrafficMirror() != mirror || Degradation() != degrade {
-		t.Error("traffic getters do not return the pointers passed to setTrafficResources")
-	}
-
-	cc := clusterPkg.ConfigCenter(stubConfigCenter{})
-	hook := clusterPkg.NewAlertWebhook(config.AlertWebhookConfig{})
-	setClusterInitResources(cc, hook)
-	if ConfigCenter() != cc || AlertWebhook() != hook {
-		t.Error("cluster init getters do not match setClusterInitResources arguments")
-	}
-}
-
 func TestSecurityComponent_Init_Disabled(t *testing.T) {
-	resetComponentResources(t)
-	types.InitFilterChain()
+	res := NewResources()
 	cfg := mustLoadConfig(t, "")
 
-	c := NewSecurityComponent(cfg)
+	c := NewSecurityComponent(cfg, res)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	defer c.Destroy()
 
-	if WhitelistBlacklist() != nil || WAF() != nil || RateLimiter() != nil ||
-		JWTAuth() != nil || CircuitBreakerMgr() != nil {
+	if res.WhitelistBlacklist != nil || res.WAF != nil || res.RateLimiter != nil ||
+		res.JWTAuth != nil || res.CircuitBreakerMgr != nil {
 		t.Error("disabled security component published non-nil resources")
 	}
-	if got := types.GetFilterChain().Len(); got != 0 {
+	if got := res.FC.Len(); got != 0 {
 		t.Errorf("filter chain Len() = %d after disabled Init, want 0", got)
 	}
 	if err := c.Start(); err != nil {
@@ -213,8 +146,7 @@ func TestSecurityComponent_Init_Disabled(t *testing.T) {
 }
 
 func TestSecurityComponent_Init_Enabled(t *testing.T) {
-	resetComponentResources(t)
-	types.InitFilterChain()
+	res := NewResources()
 	cfg := mustLoadConfig(t, `
 security:
   enabled: true
@@ -229,15 +161,15 @@ waf:
   enabled: true
 `)
 
-	c := NewSecurityComponent(cfg)
+	c := NewSecurityComponent(cfg, res)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	defer c.Destroy()
 
-	wbl := WhitelistBlacklist()
+	wbl := res.WhitelistBlacklist
 	if wbl == nil {
-		t.Fatal("WhitelistBlacklist() = nil after enabled Init")
+		t.Fatal("res.WhitelistBlacklist = nil after enabled Init")
 	}
 	if !wbl.IsInWhitelist("10.0.0.1") {
 		t.Error("configured whitelist IP not whitelisted")
@@ -245,22 +177,21 @@ waf:
 	if !wbl.IsInBlacklist("192.168.1.9") {
 		t.Error("configured blacklist IP not blacklisted")
 	}
-	if WAF() == nil || RateLimiter() == nil || CircuitBreakerMgr() == nil {
+	if res.WAF == nil || res.RateLimiter == nil || res.CircuitBreakerMgr == nil {
 		t.Error("expected non-nil WAF/RateLimiter/CircuitBreakerMgr after enabled Init")
 	}
-	if JWTAuth() != nil {
-		t.Error("JWTAuth() non-nil though jwtAuth disabled")
+	if res.JWTAuth != nil {
+		t.Error("res.JWTAuth non-nil though jwtAuth disabled")
 	}
 }
 
 func TestSecurityComponent_Init_JWT(t *testing.T) {
-	resetComponentResources(t)
-	types.InitFilterChain()
+	res := NewResources()
 	cfg := mustLoadConfig(t, "")
 
 	// 组件级 fail-closed：Validate 已拦空 secret，此处直改热更路径的配置字段，
 	// 验证 Init 仍二次兜底拒绝（空 HS256 密钥可伪造任意令牌）。
-	c := NewSecurityComponent(cfg)
+	c := NewSecurityComponent(cfg, res)
 	c.jwt = config.JWTAuthConfig{Enabled: true, Secret: ""}
 	if err := c.Init(); err == nil {
 		t.Fatal("Init() with jwtAuth.enabled and empty secret error = nil, want fail-closed error")
@@ -272,41 +203,40 @@ jwtAuth:
   secret: "s3cret"
   issuer: "test-issuer"
 `)
-	c = NewSecurityComponent(cfg2)
+	c = NewSecurityComponent(cfg2, res)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() with jwt secret error = %v", err)
 	}
 	defer c.Destroy()
-	if JWTAuth() == nil {
-		t.Error("JWTAuth() = nil after enabled Init")
+	if res.JWTAuth == nil {
+		t.Error("res.JWTAuth = nil after enabled Init")
 	}
-	if got := types.GetFilterChain().Len(); got != 1 {
+	if got := res.FC.Len(); got != 1 {
 		t.Errorf("filter chain Len() = %d, want 1 (jwt filter)", got)
 	}
 }
 
 func TestObservabilityComponent_Init(t *testing.T) {
-	resetComponentResources(t)
-	types.InitFilterChain()
+	res := NewResources()
 	cfg := mustLoadConfig(t, `
 monitoring:
   disableTracer: true
 `)
 
-	c := NewObservabilityComponent(cfg)
+	c := NewObservabilityComponent(cfg, res)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	defer c.Destroy()
 
-	if Tracer() != nil {
-		t.Error("Tracer() non-nil though monitoring.disableTracer=true")
+	if res.Tracer != nil {
+		t.Error("res.Tracer non-nil though monitoring.disableTracer=true")
 	}
-	if LatencyTracker() == nil {
-		t.Error("LatencyTracker() = nil after Init")
+	if res.LatencyTracker == nil {
+		t.Error("res.LatencyTracker = nil after Init")
 	}
-	if OTelTracer() != nil {
-		t.Error("OTelTracer() non-nil though otel disabled")
+	if res.OTelTracer != nil {
+		t.Error("res.OTelTracer non-nil though otel disabled")
 	}
 	if err := c.Start(); err != nil {
 		t.Errorf("Start() error = %v", err)
@@ -314,20 +244,19 @@ monitoring:
 }
 
 func TestTrafficComponent_Init_Disabled(t *testing.T) {
-	resetComponentResources(t)
-	types.InitFilterChain()
+	res := NewResources()
 	cfg := mustLoadConfig(t, "")
 
-	c := NewTrafficComponent(cfg)
+	c := NewTrafficComponent(cfg, res)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	defer c.Destroy()
 
-	if CanaryFilter() != nil || TrafficMirror() != nil || Degradation() != nil {
+	if res.CanaryFilter != nil || res.TrafficMirror != nil || res.Degradation != nil {
 		t.Error("disabled traffic component published non-nil resources")
 	}
-	if got := types.GetFilterChain().Len(); got != 0 {
+	if got := res.FC.Len(); got != 0 {
 		t.Errorf("filter chain Len() = %d, want 0", got)
 	}
 	if err := c.Start(); err != nil {
@@ -336,8 +265,7 @@ func TestTrafficComponent_Init_Disabled(t *testing.T) {
 }
 
 func TestTrafficComponent_Init_AllEnabled(t *testing.T) {
-	resetComponentResources(t)
-	types.InitFilterChain()
+	res := NewResources()
 	cfg := mustLoadConfig(t, `
 canary:
   enabled: true
@@ -357,7 +285,7 @@ degradation:
       fallbackData: "FB"
 `)
 
-	c := NewTrafficComponent(cfg)
+	c := NewTrafficComponent(cfg, res)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -366,10 +294,10 @@ degradation:
 		t.Errorf("Start() error = %v", err)
 	}
 
-	if CanaryFilter() == nil || TrafficMirror() == nil || Degradation() == nil {
+	if res.CanaryFilter == nil || res.TrafficMirror == nil || res.Degradation == nil {
 		t.Fatal("expected non-nil canary/mirror/degradation after enabled Init")
 	}
-	if got := types.GetFilterChain().Len(); got != 3 {
+	if got := res.FC.Len(); got != 3 {
 		t.Errorf("filter chain Len() = %d, want 3 (canary+mirror+degradation)", got)
 	}
 }
@@ -390,11 +318,10 @@ func TestTrafficComponent_Init_WasmModuleValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resetComponentResources(t)
-			types.InitFilterChain()
+			res := NewResources()
 			cfg := mustLoadConfig(t, "wasmRuntime:\n  enabled: true\n  modules:\n"+tt.modules)
 
-			c := NewTrafficComponent(cfg)
+			c := NewTrafficComponent(cfg, res)
 			if err := c.Init(); err == nil {
 				t.Fatal("Init() with invalid wasm modules error = nil, want fail-fast error")
 			}
@@ -404,22 +331,22 @@ func TestTrafficComponent_Init_WasmModuleValidation(t *testing.T) {
 }
 
 func TestClusterComponent_Init_Disabled(t *testing.T) {
-	resetComponentResources(t)
+	res := NewResources()
 	cfg := mustLoadConfig(t, "")
 
-	c := NewClusterComponent(cfg)
+	c := NewClusterComponent(cfg, res)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	defer c.Destroy()
 
-	if ConfigCenter() != nil || AlertWebhook() != nil {
+	if res.ConfigCenter != nil || res.AlertWebhook != nil {
 		t.Error("disabled cluster component published non-nil init resources")
 	}
 }
 
 func TestClusterComponent_Init_AlertEnabled(t *testing.T) {
-	resetComponentResources(t)
+	res := NewResources()
 	cfg := mustLoadConfig(t, `
 alert:
   enabled: true
@@ -430,14 +357,14 @@ alert:
       type: generic
 `)
 
-	c := NewClusterComponent(cfg)
+	c := NewClusterComponent(cfg, res)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	defer c.Destroy()
 
-	if AlertWebhook() == nil {
-		t.Error("AlertWebhook() = nil after alert.enabled Init")
+	if res.AlertWebhook == nil {
+		t.Error("res.AlertWebhook = nil after alert.enabled Init")
 	}
 }
 

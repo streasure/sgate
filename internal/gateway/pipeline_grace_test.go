@@ -11,7 +11,7 @@ import (
 // TestPipelineUnboundGraceDropNoClose 登录宽限期：新连接（绑定在后台协程完成）
 // 内到达的非 preAuth 消息只丢弃不断连；宽限期归零后恢复断连语义。
 func TestPipelineUnboundGraceDropNoClose(t *testing.T) {
-	gw := newGateway(minimalConfig(), "")
+	gw := newTestGateway(minimalConfig())
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "temp_grace_user", false)
 	msg := &protoGw.StreamData{Cmd: 1100010, Data: []byte("hb"), SeqId: 1}
 

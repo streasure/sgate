@@ -11,7 +11,6 @@ import (
 	comp "github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/gateway"
-	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uperf"
@@ -62,11 +61,12 @@ func main() {
 		cfg.HttpPort, gateway.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
 
-	// 创建全局过滤器链并按配置加载 SPI 过滤器（filterChain.enabled=false 时不加载）
-	fc := types.InitFilterChain()
+	// 运行时资源容器：组件 Init 内写入、Gateway Init 读取（替代包级全局量）。
+	// 过滤器链随容器创建，按配置加载 SPI 过滤器（filterChain.enabled=false 时不加载）。
+	res := comp.NewResources()
 	if cfg.FilterChain.Enabled {
 		for _, fi := range cfg.FilterChain.Filters {
-			if err := fc.LoadByName(fi.Name, fi.Config); err != nil {
+			if err := res.FC.LoadByName(fi.Name, fi.Config); err != nil {
 				tlog.Warn(ctx, "failed to load filter from config name=%s error=%v", fi.Name, err)
 			}
 		}
@@ -80,11 +80,11 @@ func main() {
 		GcPercent:          cfg.Perf.GcPercent,
 		MemoryLimitPercent: cfg.Perf.MemoryLimitPercent,
 	}))
-	container.Add(comp.NewSecurityComponent(cfg))
-	container.Add(comp.NewObservabilityComponent(cfg))
-	container.Add(comp.NewTrafficComponent(cfg))
-	container.Add(comp.NewClusterComponent(cfg))
-	container.Add(gateway.NewGateway(cfg, *confFiles))
+	container.Add(comp.NewSecurityComponent(cfg, res))
+	container.Add(comp.NewObservabilityComponent(cfg, res))
+	container.Add(comp.NewTrafficComponent(cfg, res))
+	container.Add(comp.NewClusterComponent(cfg, res))
+	container.Add(gateway.NewGateway(cfg, *confFiles, res))
 	if err := container.Serve(); err != nil {
 		// Init/Start 失败必须非零退出，避免容器/进程管理器误判为正常退出
 		tlog.Error(ctx, "gateway serve failed error=%v", err)

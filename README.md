@@ -109,8 +109,8 @@ uperf（GOGC/GOMEMLIMIT 软上限，最先）
 三条配套约定：
 
 1. **构造器显式收参**：组件 `NewXxx(cfg *config.Config)` 由组合根（`cmd/gateway/main.go`）把 `config.Load` 结果传入——无包级全局配置态，组件不携带环境信息，天然可测试。
-2. **全局资源模式**：组件在 Init 阶段把能力写入 `internal/component/resources.go`（如 `setSecurityResources(...)`），Gateway 只能通过导出 getter 读取（如 `component.RateLimiter().Allow(...)`）——写入点收在 component 包内部，读取点全部显式。
-3. **全局过滤器链**：main 里 `types.InitFilterChain()` 初始化一次，组件用 `types.GetFilterChain().AddFilter(...)` 注册，配置 `filterChain.filters` 按名加载 SPI 过滤器。
+2. **资源容器注入**：组合根 `main` 用 `component.NewResources()` 创建一个 `*component.Resources`（内含过滤器链 `FC` 与 13 项运行时资源），注入 4 个组件构造器与 `NewGateway(cfg, configPath, res)`；组件在 Init 阶段按 Order 写入 `res.XXX`，Gateway 在自己的 Init 读 `g.res`——无包级全局量、无导出 getter。
+3. **过滤器链随容器注入**：`res.FC` 由 `NewResources` 创建（快照 SPI 注册表），main 按配置 `filterChain.filters` 调 `res.FC.LoadByName` 加载，组件用 `res.FC.AddFilter(...)` 注册内置过滤器；`types.InitFilterChain`/`types.GetFilterChain` 已删除，仅保留 init 期 `types.RegisterFilter`。
 
 ### 1.5 上行 / 下行数据流
 
@@ -902,7 +902,7 @@ internal/routes/          路由与协议帧（gateway 与 backend 共同依赖�
   frame.go                  MessageFrame 编解码、错误响应构造
   logicstream.go            flip 握手元数据
 
-internal/component/       组件容器（Security/Obs/Traffic/Cluster + resources.go 全局资源）
+internal/component/       组件容器（Security/Obs/Traffic/Cluster + resources.go 资源容器）
 internal/config/          配置结构、defaults.go 默认值、校验、热更新
 internal/security/        白名单、限流、熔断、WAF、JWT
 internal/traffic/         灰度、镜像、降级、WASM

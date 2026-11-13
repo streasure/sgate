@@ -15,8 +15,7 @@
 - `component.NewContainer()` may only be called in `cmd/gateway/main.go`.
 - Component constructors take `*config.Config` explicitly (the composition root `cmd/gateway/main.go` passes the result of `config.Load`); there is no package-level config state (`config.Get`/`config.Path` must not come back).
 - Lifecycle order: Security(100) → Obs(200) → Traffic(300) → Cluster(400) → Gateway(1000).
-- Global filter chain: initialize once with `types.InitFilterChain()` in main; components register via `types.GetFilterChain().AddFilter(...)`.
-- Components publish state through exported globals in `internal/component/resources.go`; Gateway reads via getters.
+- Runtime resources are injected: the composition root creates one `*component.Resources` (filter chain `FC` included) via `component.NewResources()` and passes it to every component constructor and `NewGateway`; components write `res.XXX` / `res.FC.AddFilter` in `Init` (Order-sequenced), Gateway reads `g.res` in its `Init`. No package-level resource globals, no exported getters, no `types.InitFilterChain`/`types.GetFilterChain` (only init-time `types.RegisterFilter` SPI registration remains).
 - New code must pass `gofmt`, `go build ./...`, `go vet ./...`, and `go test ./... -count=1`.
 
 ## Panic Recovery

@@ -24,14 +24,17 @@ type ClusterComponent struct {
 	discovery    *uetcd.Component
 	configCenter clusterPkg.ConfigCenter
 	alertWebhook *clusterPkg.AlertWebhook
+
+	res *Resources
 }
 
-// NewClusterComponent 创建集群组件，配置由组合根（main）在 config.Load 后显式传入。
-func NewClusterComponent(cfg *config.Config) *ClusterComponent {
+// NewClusterComponent 创建集群组件：配置与资源容器由组合根（main）显式传入。
+func NewClusterComponent(cfg *config.Config, res *Resources) *ClusterComponent {
 	return &ClusterComponent{
 		ctx:      context.Background(),
 		cfg:      *cfg,
 		grpcPort: cfg.GRPC.Port,
+		res:      res,
 	}
 }
 func (c *ClusterComponent) Name() string { return "cluster" }
@@ -45,7 +48,9 @@ func (c *ClusterComponent) Init() error {
 	if c.cfg.Alert.Enabled {
 		c.alertWebhook = clusterPkg.NewAlertWebhook(c.cfg.Alert)
 	}
-	setClusterInitResources(c.configCenter, c.alertWebhook)
+	// 发布到注入的资源容器（Gateway Order 最后读取）。
+	c.res.ConfigCenter = c.configCenter
+	c.res.AlertWebhook = c.alertWebhook
 	return nil
 }
 

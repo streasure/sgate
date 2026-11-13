@@ -50,6 +50,7 @@ type Gateway struct {
 	cfg               atomic.Pointer[config.Config]
 	wsConnections     sync.Map
 	configPath        string
+	res               *component.Resources // 运行时资源容器（组合根注入，组件 Init 写入）
 	configUpdateChan  chan *config.Config
 	messageIntegrity  *MessageIntegrity
 	tracer            *obs.Tracer
@@ -208,11 +209,10 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
 }
 
-// NewGateway 创建网关实例。cfg 由组合根（main）在 config.Load 后显式传入，
-// configPath 为配置文件路径（热更新 watcher 用；测试传空串走默认回退）。
-// 运行时资源由各组件在 Init/Start 中写入后经 component 包 getter 读取。
-func NewGateway(cfg *config.Config, configPath string) *Gateway {
-	return newGateway(cfg, configPath)
+// NewGateway 创建网关实例：配置、配置文件路径与运行时资源容器均由组合根
+// （main）显式传入；各组件按 Order 写入 res，本实例 Init（Order 最后）读取。
+func NewGateway(cfg *config.Config, configPath string, res *component.Resources) *Gateway {
+	return newGateway(cfg, configPath, res)
 }
 
 // buildTLSConfig 根据配置构建 TLS 配置；证书加载失败时保持无证书（仅记录错误）。
@@ -250,21 +250,22 @@ func (g *Gateway) Name() string { return "gateway" }
 func (g *Gateway) Order() int   { return 1000 }
 
 func (g *Gateway) Init() error {
-	// 前置组件已完成 Init，此处统一读取其写入的全局资源。
-	g.filterChain = types.GetFilterChain()
-	g.whitelistBlacklist = component.WhitelistBlacklist()
-	g.waf = component.WAF()
-	g.rateLimiter = component.RateLimiter()
-	g.jwtAuth = component.JWTAuth()
-	g.circuitBreakerMgr = component.CircuitBreakerMgr()
-	g.tracer = component.Tracer()
-	g.otelTracer = component.OTelTracer()
-	g.latencyTracker = component.LatencyTracker()
-	g.canaryFilter = component.CanaryFilter()
-	g.trafficMirror = component.TrafficMirror()
-	g.degradation = component.Degradation()
-	g.configCenter = component.ConfigCenter()
-	g.alertWebhook = component.AlertWebhook()
+	// 前置组件已按 Order 完成 Init 并写入注入的资源容器，此处统一读取。
+	res := g.res
+	g.filterChain = res.FC
+	g.whitelistBlacklist = res.WhitelistBlacklist
+	g.waf = res.WAF
+	g.rateLimiter = res.RateLimiter
+	g.jwtAuth = res.JWTAuth
+	g.circuitBreakerMgr = res.CircuitBreakerMgr
+	g.tracer = res.Tracer
+	g.otelTracer = res.OTelTracer
+	g.latencyTracker = res.LatencyTracker
+	g.canaryFilter = res.CanaryFilter
+	g.trafficMirror = res.TrafficMirror
+	g.degradation = res.Degradation
+	g.configCenter = res.ConfigCenter
+	g.alertWebhook = res.AlertWebhook
 	// 反代信任列表（仅 WS XFF 用；配置已 Validate，此处静默跳过非法项）
 	if cfg := g.cfg.Load(); cfg != nil {
 		for _, s := range cfg.Security.TrustedProxies {
@@ -308,9 +309,6 @@ func (g *Gateway) validateSecurityWiring(cfg *config.Config) error {
 	return nil
 }
 func (g *Gateway) Start() error {
-	// ClusterComponent 在 Start 中写入 init 资源，需在其后重新读取。
-	g.configCenter = component.ConfigCenter()
-	g.alertWebhook = component.AlertWebhook()
 	// loginserver 发现由网关自持（消费方持有发现，不依赖共享组件）
 	if err := g.initLoginService(); err != nil {
 		return err
@@ -901,11 +899,14 @@ func (g *Gateway) drainConnections(timeout time.Duration) {
 // ===== construction =====
 
 // newGateway 用已加载并补齐默认值的配置构造网关。
-// 参数仅为 *config.Config + 配置文件路径，避免 GatewayDeps 单字段间接层。
-func newGateway(cfg *config.Config, configPath string) *Gateway {
+// 参数为配置、配置文件路径与资源容器，避免 GatewayDeps 单字段间接层。
+func newGateway(cfg *config.Config, configPath string, res *component.Resources) *Gateway {
 	if cfg == nil {
 		// fail-fast：半初始化 Gateway 会在 Start 阶段 panic，更难排查
 		panic("gateway: nil *config.Config passed to constructor")
+	}
+	if res == nil {
+		panic("gateway: nil *component.Resources passed to constructor")
 	}
 	// 防御：外部传入的 cfg 可能未走 Load（测试/热更新拷贝）
 	cfg.ApplyRuntimeDefaults()
@@ -924,6 +925,7 @@ func newGateway(cfg *config.Config, configPath string) *Gateway {
 		serverID:          cfg.ServerID,
 		zone:              cfg.Zone,
 		configPath:        configPath,
+		res:               res,
 
 		configUpdateChan:          make(chan *config.Config, 1),
 		overloadProtector:         NewOverloadProtector(cfg.Protection),

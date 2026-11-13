@@ -52,7 +52,7 @@ Gateway 结构体承载全部接入侧状态：
 
 | 职责 | 文件 | 关键类型/方法 |
 | --- | --- | --- |
-| 生命周期 | gateway.go | `NewGateway()`, `Init/Start/Destroy`, `StartServices` |
+| 生命周期 | gateway.go | `NewGateway(cfg, configPath, res)`, `Init/Start/Destroy`, `StartServices` |
 | gnet 事件 | handlers.go | `OnOpen/OnTraffic/OnClose`（原 conn.go） |
 | 登录 | login.go | `handleLoginGate`、`initLoginService`（loginserver 发现+服务客户端，网关自持）、session 绑定 |
 | 登出/管理端 | admin.go | `handleLogoutGate`（JWT Revoke+通知逻辑服+`SendThenClose` 可靠投递 ack 后断连）、`POST /admin/ratelimit`（Bearer，`admin.token` 空=关闭） |
@@ -61,7 +61,7 @@ Gateway 结构体承载全部接入侧状态：
 | 登录周期校验 | batch_validate.go | BatchValidate 周期安全网（`loginValidation.batchInterval`，P2） |
 | WebSocket | websocket.go | 握手升级、帧编解码 |
 | 消息管道 | pipeline.go | 认证→安全→过滤→转发 |
-| 过滤器 | filter.go | SPI 加载、`types.GetFilterChain()` |
+| 过滤器 | filter.go | FilterContext 池、`g.filterChain.RunByPhase` 分阶段执行（链由 `res.FC` 注入） |
 | 监控 | monitor.go | `/stats`、配置热更新 |
 | 过载保护 | overload.go | `OverloadProtector`、CPU 阈值 |
 | 完整性 | integrity.go | `MessageIntegrity`（时间戳、按 connectionID 分 16 片去重，防全局锁串行化热路径） |
@@ -111,7 +111,7 @@ routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免�
 
 | 包 | 职责 |
 | --- | --- |
-| `component` | 组件容器、扁平生命周期、全局资源（`resources.go`） |
+| `component` | 组件容器、扁平生命周期、资源容器（`resources.go` 的 `*Resources`，组合根注入） |
 | `config` | 配置结构、默认值、`Load` 解析校验（无包级全局态，由调用方持有） |
 | `security` | 限流、熔断、WAF、JWT、黑白名单 |
 | `traffic` | 灰度、镜像、降级、WASM |
@@ -131,12 +131,14 @@ logic SDK 是提供给逻辑服进程嵌入的 SDK，**已独立为模块 `githu
 
 ```go
 // cmd/gateway/main.go — 唯一组装点
+cfg, err := config.Load(*confFiles)           // 配置显式传参
+res := comp.NewResources()                     // 资源容器（含过滤器链 FC）
 container := component.NewContainer()
-container.Add(comp.NewSecurityComponent())    // Order 100
-container.Add(comp.NewObservabilityComponent())// Order 200
-container.Add(comp.NewTrafficComponent())      // Order 300
-container.Add(comp.NewClusterComponent())      // Order 400
-container.Add(gateway.NewGateway())            // Order 1000
+container.Add(comp.NewSecurityComponent(cfg, res))      // Order 100
+container.Add(comp.NewObservabilityComponent(cfg, res)) // Order 200
+container.Add(comp.NewTrafficComponent(cfg, res))       // Order 300
+container.Add(comp.NewClusterComponent(cfg, res))       // Order 400
+container.Add(gateway.NewGateway(cfg, *confFiles, res)) // Order 1000
 container.Serve()
 ```
 
@@ -152,41 +154,47 @@ container.Serve()
 
 ### 3.2 构造器显式收参
 
-组件构造函数显式接收 `*config.Config`（组合根在 `config.Load` 后传入），不读任何包级全局配置：
+组件构造函数显式接收 `*config.Config` 与 `*component.Resources`（组合根在 `config.Load`、`NewResources` 后传入），不读任何包级全局配置与全局资源：
 
 ```go
-func NewGateway(cfg *config.Config, configPath string) *Gateway { ... }
-func NewSecurityComponent(cfg *config.Config) *SecurityComponent { ... }
+func NewGateway(cfg *config.Config, configPath string, res *component.Resources) *Gateway { ... }
+func NewSecurityComponent(cfg *config.Config, res *Resources) *SecurityComponent { ... }
 func NewLogicClient(gateway GatewayInterface) *LogicClient { ... }  // 仅消费方接口
 ```
 
-### 3.3 全局资源模式
+### 3.3 资源容器注入
 
-组件 Init/Start 阶段经 `internal/component/resources.go` 的包内 setter（如 `setSecurityResources`，未导出）写入全局变量；外部（含 Gateway）只能通过同文件导出的 getter 读取：
+组合根用 `component.NewResources()` 创建一个 `*component.Resources`（`resources.go`，内含过滤器链 `FC` 与 13 项资源字段）并注入全部组件构造器与 `NewGateway`；组件在 Init 阶段按 Order 写入，Gateway（Order 1000）在自己的 Init 读取——无包级全局量、无导出 getter：
 
 ```go
-// 组件写入（component 包内部，security_component.go Init）
-setSecurityResources(wb, waf, rl, jwt, cb)
+// 组合根创建并注入（cmd/gateway/main.go）
+res := comp.NewResources()
 
-// Gateway 读取（package component 导出的 getter，gateway.go Init）
-component.RateLimiter().Allow(dimension, key)
+// 组件写入（security_component.go Init 末尾）
+c.res.WhitelistBlacklist = c.whitelistBlacklist
+c.res.FC.AddFilter(c.jwtAuth)
+
+// Gateway 读取（gateway.go Init）
+g.rateLimiter = res.RateLimiter
 ```
 
-例外：loginserver 发现不经全局资源——`Gateway.Start` 经 `udiscovery.DialEtcdService` 自持
+例外：loginserver 发现不经资源容器——`Gateway.Start` 经 `udiscovery.DialEtcdService` 自持
 （`login.go initLoginService`），`closeBody` 对称关闭。
 
-### 3.4 全局过滤器链
+### 3.4 过滤器链（随资源容器注入）
 
 ```go
-// main.go 初始化一次
-fc := types.InitFilterChain()
+// main.go：链随 NewResources 创建（快照 SPI 注册表），按配置加载过滤器
+res := comp.NewResources()
 for _, fi := range cfg.FilterChain.Filters {
-    fc.LoadByName(fi.Name, fi.Config)
+    res.FC.LoadByName(fi.Name, fi.Config)
 }
 
-// 组件注册过滤器
-types.GetFilterChain().AddFilter(myFilter)
+// 组件注册内置过滤器（Init 内，经注入的容器）
+c.res.FC.AddFilter(myFilter)
 ```
+
+`types.InitFilterChain`/`types.GetFilterChain` 已删除；仅保留 init 期 `types.RegisterFilter`（SPI 工厂注册表，`NewFilterChain` 构造时快照）。
 
 ---
 
@@ -368,7 +376,7 @@ var _ backend.GatewayInterface = (*Gateway)(nil)
 
 ## 7. 配置与热更新
 
-- **冷启动**：`config.Load()` 返回 `*config.Config` → 组合根显式传入各组件构造器与 `NewGateway(cfg, configPath)`（无包级全局态，无 `config.Set`）
+- **冷启动**：`config.Load()` 返回 `*config.Config` → 组合根显式传入各组件构造器与 `NewGateway(cfg, configPath, res)`（无包级全局态，无 `config.Set`；`res` 为 `component.NewResources()` 创建的资源容器）
 - **热更新**：`configWatcher` 轮询构造器传入的配置文件路径 → `config.Load` 重新解析 → `handleConfigUpdate` 校验后存入 `Gateway` 自持的 `atomic.Pointer` 并应用差异
 - **支持热更的参数**：限流阈值、黑名单、过载保护、JWT、灰度、镜像、降级、连接限制、连接级流控
 - **不可热切的开关**：`security/rateLimit/waf/jwtAuth/circuitBreaker` 的 `enabled`（组件与过滤器仅启动时创建，热切会静默 fail-open/fail-stale）——`handleConfigUpdate` 检测到开关变化整单拒绝并告警，要求重启生效；非法配置（含帧缓冲交叉校验 `maxFrameBufSize ≥ maxFrameSize+4`）同样整体拒绝、保留当前配置
