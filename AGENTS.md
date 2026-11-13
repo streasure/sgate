@@ -10,7 +10,7 @@
 ## Architecture
 
 - Package dependency direction is strictly one-way: `gateway → backend → connection`. Never introduce reverse imports.
-- Shared protocol/frame helpers live in `internal/routes` (used by both gateway and backend).
+- Frame codec helpers are owned by the wire repo: `github.com/streasure/protocol/gateway` (`frame.go`: DecodeClientMessage/PutClientMessage/MarshalClientMessage/NewErrorFrame/IsUDPCmd/ExtractMessageFrame). Business packages must never re-implement frame parsing; `internal/routes` has been removed.
 - Consumer-defined interfaces: `backend.GatewayInterface` (implemented by `*gateway.Gateway`), `connection.LogicClientProvider` (implemented by `*backend.LogicClient`). Do not move these to producer packages.
 - `component.NewContainer()` may only be called in `cmd/gateway/main.go`.
 - Component constructors take `*config.Config` explicitly (the composition root `cmd/gateway/main.go` passes the result of `config.Load`); there is no package-level config state (`config.Get`/`config.Path` must not come back).

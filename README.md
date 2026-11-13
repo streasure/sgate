@@ -66,7 +66,7 @@ sgate 是一个基于 gnet v2 的高性能长连接网关。它夹在**客户端
 │  connection  连接层（账本）          │
 │  ConnectionManager·分片 Map·写合并   │◀── 两层通过消费方接口反向调用，不产生反向依赖
 └──────────────────────────────────┘
-        共享协议帧：internal/routes（gateway 和 backend 都用，防循环依赖）
+        共享协议帧：protocol 仓 gateway/frame.go（wire 契约唯一权威，三端共用）
 ```
 
 ### 1.2 分层结构
@@ -77,7 +77,7 @@ sgate 是一个基于 gnet v2 的高性能长连接网关。它夹在**客户端
 | 接入层 | `internal/gateway` | gnet 事件、登录/登出、消息管道、踢人、维护、过载、监控、UDP 关联 |
 | 后端层 | `internal/backend` | LogicClient、LogicClientPool、StreamManager（分片/合帧）、GRPCServer（flip 流入口） |
 | 连接层 | `internal/connection` | Connection、ConnectionManager（分片存储）、Group、写合并器、session ID 生成/解析 |
-| 共享 | `internal/routes` | 命令码、MessageFrame 编解码——被 gateway 和 backend **共同依赖**，避免循环引用 |
+| 共享 | protocol 仓 `gateway` | 命令码、MessageFrame 编解码（`frame.go`）——wire 契约唯一权威，被各层**共同依赖**，避免循环引用 |
 
 ### 1.3 依赖方向与"消费方定义接口"
 
@@ -897,10 +897,8 @@ internal/connection/      连接层（package connection）
   ws_frame.go               WebSocket 帧编码
   iface.go                  LogicClientProvider、UDPDownlink 接口
 
-internal/routes/          路由与协议帧（gateway 与 backend 共同依赖，防循环）
-  routes.go                 路由常量、命令码、UDP 号段（IsUDPCmd）、帧解析
-  frame.go                  MessageFrame 编解码、错误响应构造
-  logicstream.go            flip 握手元数据
+internal/routes/          【已消亡，P6a】帧编解码下沉 protocol 仓 gateway/frame.go
+  （frame.go 帧编解码/错误帧、routes.go 帧解析/IsUDPCmd、两个测试随迁）
 
 internal/component/       组件容器（Security/Obs/Traffic/Cluster + resources.go 资源容器）
 internal/config/          配置结构、defaults.go 默认值、校验、热更新

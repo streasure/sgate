@@ -11,14 +11,13 @@ import (
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/protobuf/proto"
 )
 
 // udpDatagramSeq 构造带 SeqId 的 UDP 数据报（阶段 2 seq 去重用）。
 func udpDatagramSeq(t *testing.T, cmd int32, body []byte, seq int64) []byte {
 	t.Helper()
-	frame, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: cmd, Data: body, SeqId: seq})
+	frame, err := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: cmd, Data: body, SeqId: seq})
 	if err != nil {
 		t.Fatalf("marshal client message: %v", err)
 	}
@@ -37,18 +36,18 @@ func findErrorFrame(b []byte) (string, bool) {
 		if n <= 0 || off+4+n > len(b) {
 			return "", false
 		}
-		msg, ok := routes.DecodeClientMessage(b[off+4 : off+4+n])
+		msg, ok := protoGw.DecodeClientMessage(b[off+4 : off+4+n])
 		if ok {
 			if msg.Cmd == protoGw.CmdError {
 				var resp commonstruct.ErrorResponse
 				err := proto.Unmarshal(msg.Data, &resp)
-				routes.PutClientMessage(msg)
+				protoGw.PutClientMessage(msg)
 				if err == nil && resp.Error != nil {
 					return resp.Error.Message, true
 				}
 				return "", true
 			}
-			routes.PutClientMessage(msg)
+			protoGw.PutClientMessage(msg)
 		}
 		off += 4 + n
 	}

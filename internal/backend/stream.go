@@ -13,7 +13,6 @@ import (
 	"github.com/streasure/util/uhash"
 
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
@@ -339,7 +338,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				releaseCB(sid, cb)
 				continue
 			}
-			responseData, marshalFrameErr := routes.MarshalClientMessage(&protoGw.StreamData{
+			responseData, marshalFrameErr := protoGw.MarshalClientMessage(&protoGw.StreamData{
 				Cmd:  int32(protoGw.CmdPushBatch),
 				Data: batchData,
 			})
@@ -386,13 +385,13 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			// 序列化提到循环外：每条广播消息只编解码一次，
 			// 原实现放在 ForEach 内会对每个连接重复编解码（O(连接数) 次）。
 			// respData 为只读共享（AppendCoalesced 复制、AsyncWrite 只读引用）。
-			respData, err := routes.MarshalClientMessage(msg)
+			respData, err := protoGw.MarshalClientMessage(msg)
 			if err != nil {
 				return
 			}
 			// UDP 号段广播逐连接 SendByCmd 分流（各会话关联状态独立），
 			// 且不进合批（决策⑤：UDP 不走 coalescer）。
-			isUDP := routes.IsUDPCmd(msg.Cmd)
+			isUDP := protoGw.IsUDPCmd(msg.Cmd)
 			lc.gateway.GetConnectionManager().ForEach(func(conn *connection.Connection) bool {
 				if !isUDP && lc.gateway.GetShardedCoalescer() != nil {
 					lc.gateway.GetShardedCoalescer().AddMulti(conn.ID(), respData, conn)
@@ -409,7 +408,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 		// 先打包再判断会把 UDP 消息裹进 WS 帧；且 UDP 一包一消息，不等批量
 		// 冲刷立即发送（状态消息凑批会毁掉时效）。非批量单条推送同样在此分流，
 		// 下方分支只处理 WS 消息。
-		if routes.IsUDPCmd(msg.Cmd) {
+		if protoGw.IsUDPCmd(msg.Cmd) {
 			conn := lc.gateway.GetConnectionManager().GetConnection(msg.SessionId)
 			if conn == nil {
 				lc.gateway.AddPushDroppedNoConn(1)
@@ -418,7 +417,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			if msg.UserKey != "" {
 				lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
 			}
-			responseData, err := routes.MarshalClientMessage(msg)
+			responseData, err := protoGw.MarshalClientMessage(msg)
 			if err != nil {
 				return
 			}
@@ -444,7 +443,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				if msg.UserKey != "" {
 					lc.gateway.GetConnectionManager().UpdateConnectionUserUUID(msg.SessionId, msg.UserKey)
 				}
-				responseData, err := routes.MarshalClientMessage(msg)
+				responseData, err := protoGw.MarshalClientMessage(msg)
 				if err == nil {
 					if lc.gateway.GetShardedCoalescer() != nil {
 						lc.gateway.GetShardedCoalescer().AddMulti(msg.SessionId, responseData, conn)

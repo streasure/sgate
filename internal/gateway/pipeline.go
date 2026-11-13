@@ -18,7 +18,6 @@ import (
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
 	"github.com/streasure/sgate/internal/obs"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhash"
 )
@@ -496,7 +495,7 @@ func (p *PipelineWorkerPool) runWorker(shard int) {
 // processMessage 在 worker goroutine 中执行协议无关的 pipeline 处理（TCP/WebSocket 统一）。
 func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 	defer func() {
-		routes.PutClientMessage(task.message)
+		protoGw.PutClientMessage(task.message)
 		putMsgBuf(task.data)
 		pipelineTaskPool.Put(task)
 	}()
@@ -510,9 +509,9 @@ func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 		}
 		// UDP 特殊路径：直接发送响应（无 connectionID 查找）
 		if task.isUDP {
-			_ = sendUDPFrame(task.conn, task.udpRemoteAddr, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+			_ = sendUDPFrame(task.conn, task.udpRemoteAddr, protoGw.NewErrorFrame("error", result.Error.Error(), "", ""))
 		} else {
-			_ = p.gw.sendFrameAsync(task.connectionID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+			_ = p.gw.sendFrameAsync(task.connectionID, protoGw.NewErrorFrame("error", result.Error.Error(), "", ""))
 		}
 	}
 	applyAsyncResult(task.conn, task.wsConn, task.isUDP, task.udpRemoteAddr, result)

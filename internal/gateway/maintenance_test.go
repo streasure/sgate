@@ -15,7 +15,6 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -108,7 +107,7 @@ func decodeKickNotify(t *testing.T, b []byte) *protoLogic.KickNotify {
 	if int(n)+4 > len(b) {
 		return nil
 	}
-	msg, ok := routes.DecodeClientMessage(b[4 : 4+n])
+	msg, ok := protoGw.DecodeClientMessage(b[4 : 4+n])
 	if !ok || msg.Cmd != protoGw.CmdKickNotify || len(msg.Data) == 0 {
 		return nil
 	}

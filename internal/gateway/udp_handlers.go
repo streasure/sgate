@@ -8,7 +8,6 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
@@ -55,35 +54,35 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 	}
 
 	// 仅对能解码出合法消息的包继续处理：垃圾包静默丢，控制回包放大倍数
-	message, ok := routes.DecodeClientMessage(data[4:])
+	message, ok := protoGw.DecodeClientMessage(data[4:])
 	if !ok || message.Cmd == 0 {
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.None
 	}
 
 	if !g.udpEnabled() {
 		// 预留通道现状（enabled=false 时行为与 #3 完全一致）
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		n := g.messagesDroppedUnsupported.Add(1)
 		// 采样告警：UDP 高频场景逐包打日志会刷爆日志盘
 		if n == 1 || n%1000 == 0 {
 			tlog.Warn(g.ctx, "udp datagram rejected: transport does not carry business messages addr=%s total=%d", remoteAddr.String(), n)
 		}
-		_ = sendUDPFrame(c, remoteAddr, routes.NewErrorFrame("error", errUDPUnsupported, "", ""))
+		_ = sendUDPFrame(c, remoteAddr, protoGw.NewErrorFrame("error", errUDPUnsupported, "", ""))
 		return gnet.None
 	}
 
 	// MTU 上限（设计 §5.6：单包超限丢弃，避免 IP 分片丢包率飙升）。
 	// 仅开启态校验——关闭态行为必须与 #3 逐字节一致（含超大包回错误帧）。
 	if len(data) > g.udpMaxDatagram() {
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.None
 	}
 
 	if message.Cmd == protoGw.CmdUdpAssociate {
 		g.messagesReceived.Add(1)
 		g.handleAssociate(c, remoteAddr, message)
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.None
 	}
 
@@ -93,7 +92,7 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 	assoc, found := g.udpAssoc.lookupByAddr(remoteAddr.String())
 	if !found {
 		g.udpAssocUnassociatedDrops.Add(1)
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.None
 	}
 	g.messagesReceived.Add(1)
@@ -104,7 +103,7 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 	// 上行 seq 滑动窗口去重（§4.3）：重复/过旧静默丢；seq<=0 视为客户端
 	// 未携带序号（向后兼容），放行不计。
 	if assoc.seqDuplicate(message.SeqId, g.udpSeqWindow()) {
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.None
 	}
 
@@ -127,7 +126,7 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 			udpRemoteAddr: assoc.publicAddr,
 		}
 		if !g.pipelineWorkerPool.Submit(task) {
-			routes.PutClientMessage(task.message)
+			protoGw.PutClientMessage(task.message)
 			putMsgBuf(task.data)
 			pipelineTaskPool.Put(task)
 		}
@@ -136,9 +135,9 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 
 	// 同步路径：worker pool 未启动（测试直建网关）
 	result := g.pipeline.Process(c, data[4:], message, assoc.connID)
-	routes.PutClientMessage(message)
+	protoGw.PutClientMessage(message)
 	if result.Error != nil {
-		_ = sendUDPFrame(c, assoc.publicAddr, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		_ = sendUDPFrame(c, assoc.publicAddr, protoGw.NewErrorFrame("error", result.Error.Error(), "", ""))
 	}
 	// result.Action 忽略：UDP 无连接可关（applyAsyncResult 的 isUDP 分支同义）
 	return gnet.None
@@ -184,7 +183,7 @@ func (g *Gateway) handleAssociate(c gnet.Conn, remoteAddr net.Addr, message *pro
 		g.udpAssoc.deleteByConnID(connID)
 		return
 	}
-	data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdUdpAssociateAck, Data: body, SeqId: message.SeqId})
+	data, err := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdUdpAssociateAck, Data: body, SeqId: message.SeqId})
 	if err != nil {
 		g.udpAssoc.deleteByConnID(connID)
 		return

@@ -17,7 +17,6 @@ import (
 	ws "github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
@@ -388,23 +387,23 @@ func (g *Gateway) processWebSocketFrame(wsConn *WebSocketConnection, opCode WSOp
 func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload []byte) error {
 	g.messagesReceived.Add(1)
 
-	message, ok := routes.DecodeClientMessage(payload)
+	message, ok := protoGw.DecodeClientMessage(payload)
 	if !ok {
 		tlog.Error(g.ctx, "WebSocket message unmarshal failed")
 		// 事件循环内同步写错误帧（快速路径：直接从 wsConn 获取 Connection）
 		if connID := wsConn.ConnectionID(); connID != "" {
 			if conn := g.connectionManager.GetConnection(connID); conn != nil {
-				_ = conn.SendSync(routes.NewErrorFrame("error", "Invalid message format", "invalid message frame", string(payload)))
+				_ = conn.SendSync(protoGw.NewErrorFrame("error", "Invalid message format", "invalid message frame", string(payload)))
 			}
 		}
 		return nil
 	}
 
 	if message.Cmd == 0 {
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		if connID := wsConn.ConnectionID(); connID != "" {
 			if conn := g.connectionManager.GetConnection(connID); conn != nil {
-				_ = conn.SendSync(routes.NewErrorFrame("error", "Invalid message format: missing cmd", "", ""))
+				_ = conn.SendSync(protoGw.NewErrorFrame("error", "Invalid message format: missing cmd", "", ""))
 			}
 		}
 		return nil
@@ -431,27 +430,27 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			g.overloadProtector.RecordDrop(1)
 			g.messagesDroppedOverload.Add(1)
 			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server overload", "")
-			routes.PutClientMessage(message)
+			protoGw.PutClientMessage(message)
 			return ackErr
 		}
 		if g.rateLimiter != nil {
 			if !g.rateLimiter.AllowGlobal() || !g.rateLimiter.Allow("ip", netutil.AddrHost(wsConn.Conn.RemoteAddr())) {
 				g.messagesDroppedRateLimit.Add(1)
 				ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "rate limited", "")
-				routes.PutClientMessage(message)
+				protoGw.PutClientMessage(message)
 				return ackErr
 			}
 		}
 		req := new(protoGw.LoginGateReq)
 		if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
 			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 400, "invalid login gate request", req.ServerId)
-			routes.PutClientMessage(message)
+			protoGw.PutClientMessage(message)
 			return ackErr
 		}
 		// 切维护检查：目标 serverId（或其所属 zone）在维护中 → 拒绝新登录
 		if g.isMaintenanceTarget(req.ServerId) {
 			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 503, "server in maintenance", req.ServerId)
-			routes.PutClientMessage(message)
+			protoGw.PutClientMessage(message)
 			return ackErr
 		}
 		// 拷贝出异步持有的副本后，原解码池消息立即归还（与 TCP 失败路径同策略）。
@@ -463,10 +462,10 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		}
 		if !g.acquireLoginSlot() {
 			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "too many concurrent logins", req.ServerId)
-			routes.PutClientMessage(message)
+			protoGw.PutClientMessage(message)
 			return ackErr
 		}
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		panicutil.Go(g.ctx, "gateway.finishWSLoginGate", func() {
 			defer g.releaseLoginSlot()
 			g.finishWSLoginGate(wsConn, connectionID, msgCopy, req)
@@ -476,7 +475,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 
 	if message.Cmd == protoGw.CmdLogoutGate {
 		action := g.handleWSLogoutGate(wsConn, connectionID, message)
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return action
 	}
 
@@ -493,7 +492,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 			wsConn:       wsConn,
 		}
 		if !g.pipelineWorkerPool.Submit(task) {
-			routes.PutClientMessage(task.message)
+			protoGw.PutClientMessage(task.message)
 			putMsgBuf(task.data)
 			pipelineTaskPool.Put(task)
 		}
@@ -501,14 +500,14 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	}
 
 	result := g.pipeline.Process(wsConn.Conn, payload, message, connectionID)
-	routes.PutClientMessage(message)
+	protoGw.PutClientMessage(message)
 	if result.Error != nil {
 		if result.ProtoMsg != nil {
 			backend.PutStreamData(result.ProtoMsg)
 		}
 		// 事件循环内同步写 WS 错误帧（快速路径：直接从 connectionID 获取 Connection）
 		if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
-			_ = conn.SendSync(routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+			_ = conn.SendSync(protoGw.NewErrorFrame("error", result.Error.Error(), "", ""))
 		}
 	}
 	return nil
@@ -523,7 +522,7 @@ func (g *Gateway) handleWSLogoutGate(wsConn *WebSocketConnection, connectionID s
 	}
 	ackBody, _ := proto.Marshal(&protoGw.LoginGateAck{Code: 0, Message: "ok", SessionId: connectionID})
 	wsConn.State.Store(int32(WSStateClosing))
-	if data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil && connObj != nil {
+	if data, err := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil && connObj != nil {
 		// ack 可靠投递：SendThenClose（WS 路径自动封 0x82 帧）在写完成回调内 Close，
 		// 避免立即 Close 丢 ack（Windows 无 outbound flush）；不可用回退同步 Close。
 		if sendErr := connObj.SendThenClose(data); sendErr == nil {
@@ -542,7 +541,7 @@ func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionI
 	if err != nil {
 		return err
 	}
-	data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: seqID})
+	data, err := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: seqID})
 	if err != nil {
 		return err
 	}
@@ -567,7 +566,7 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 			}
 		}
 		body, _ := proto.Marshal(ackMsg)
-		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		data, _ := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		// 跨协程异步写（统一写出口，framer 自动封帧）
 		_ = g.sendFrameAsync(connectionID, data)
 	}

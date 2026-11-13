@@ -10,7 +10,6 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -71,7 +70,7 @@ func decodeFirstFrame(t *testing.T, b []byte) *protoGw.StreamData {
 	if int(n)+4 > len(b) {
 		t.Fatalf("frame len=%d exceeds written=%d", n, len(b))
 	}
-	msg, ok := routes.DecodeClientMessage(b[4 : 4+n])
+	msg, ok := protoGw.DecodeClientMessage(b[4 : 4+n])
 	if !ok {
 		t.Fatalf("decode frame failed bytes=%v", b[4:4+n])
 	}

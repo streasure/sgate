@@ -15,7 +15,6 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/panicutil"
@@ -343,7 +342,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		})
 	}
 
-	message, ok := routes.DecodeClientMessage(data)
+	message, ok := protoGw.DecodeClientMessage(data)
 	if !ok {
 		return gnet.Close
 	}
@@ -358,7 +357,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	}
 	if cmd == protoGw.CmdLogoutGate {
 		action := g.handleLogoutGate(c, connectionID, message)
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return action
 	}
 
@@ -376,7 +375,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 			wsConn:       nil,
 		}
 		if !g.pipelineWorkerPool.Submit(task) {
-			routes.PutClientMessage(task.message)
+			protoGw.PutClientMessage(task.message)
 			putMsgBuf(task.data)
 			pipelineTaskPool.Put(task)
 		}
@@ -385,12 +384,12 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 
 	// 同步路径：直接在 event loop 中处理
 	result := g.pipeline.Process(c, data, message, connectionID)
-	routes.PutClientMessage(message)
+	protoGw.PutClientMessage(message)
 	if result.Error != nil {
 		if result.ProtoMsg != nil {
 			backend.PutStreamData(result.ProtoMsg)
 		}
-		_ = g.sendFrameSync(connectionID, routes.NewErrorFrame("error", result.Error.Error(), "", ""))
+		_ = g.sendFrameSync(connectionID, protoGw.NewErrorFrame("error", result.Error.Error(), "", ""))
 		return result.Action
 	}
 	return result.Action
@@ -426,7 +425,7 @@ func (g *Gateway) sendFrameSync(connectionID string, data []byte) error {
 
 // sendMsgSync 在事件循环内同步写出 StreamData 消息（序列化 + 封帧）。
 func (g *Gateway) sendMsgSync(connectionID string, msg *protoGw.StreamData) error {
-	data, err := routes.MarshalClientMessage(msg)
+	data, err := protoGw.MarshalClientMessage(msg)
 	if err != nil {
 		return err
 	}

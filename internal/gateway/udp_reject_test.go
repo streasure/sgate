@@ -7,14 +7,13 @@ import (
 
 	"github.com/streasure/protocol/commonstruct"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/protobuf/proto"
 )
 
 // udpDatagram 构造 UDP 数据报：4B 大端长度 + MessageFrame。
 func udpDatagram(t *testing.T, cmd int32, body []byte) []byte {
 	t.Helper()
-	frame, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: cmd, Data: body})
+	frame, err := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: cmd, Data: body})
 	if err != nil {
 		t.Fatalf("marshal client message: %v", err)
 	}
@@ -34,11 +33,11 @@ func decodeErrorFrame(t *testing.T, written []byte) string {
 	if int(n)+4 > len(written) {
 		t.Fatalf("frame len=%d exceeds written=%d", n, len(written))
 	}
-	msg, ok := routes.DecodeClientMessage(written[4 : 4+n])
+	msg, ok := protoGw.DecodeClientMessage(written[4 : 4+n])
 	if !ok {
 		t.Fatalf("decode response frame failed bytes=%v", written[4:4+n])
 	}
-	defer routes.PutClientMessage(msg)
+	defer protoGw.PutClientMessage(msg)
 	if msg.Cmd != protoGw.CmdError {
 		t.Fatalf("resp cmd=%d, want CmdError=%d", msg.Cmd, protoGw.CmdError)
 	}

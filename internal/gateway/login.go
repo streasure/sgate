@@ -12,7 +12,6 @@ import (
 	"github.com/streasure/protocol/enums"
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogin "github.com/streasure/protocol/loginserver"
-	routes "github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/retry"
@@ -106,7 +105,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		ack := &protoGw.LoginGateAck{Code: 503, Message: "server overload", SessionId: connectionID}
 		body, _ := proto.Marshal(ack)
 		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.None
 	}
 	if g.rateLimiter != nil {
@@ -115,7 +114,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 			ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
 			body, _ := proto.Marshal(ack)
 			_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
-			routes.PutClientMessage(message)
+			protoGw.PutClientMessage(message)
 			return gnet.None
 		}
 	}
@@ -128,7 +127,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 			_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		}
 		writeAck(400, "invalid login gate request", req.ServerId)
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.None
 	}
 
@@ -137,7 +136,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		ack := &protoGw.LoginGateAck{Code: 503, Message: "server in maintenance", SessionId: connectionID, ServerId: req.ServerId}
 		body, _ := proto.Marshal(ack)
 		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.Close
 	}
 
@@ -146,7 +145,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		ack := &protoGw.LoginGateAck{Code: 429, Message: "too many concurrent logins", SessionId: connectionID, ServerId: req.ServerId}
 		body, _ := proto.Marshal(ack)
 		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
-		routes.PutClientMessage(message)
+		protoGw.PutClientMessage(message)
 		return gnet.None
 	}
 
@@ -164,7 +163,7 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 	writeAck := func(code int32, text, serverID string) {
 		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
 		body, _ := proto.Marshal(ack)
-		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		data, _ := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		_ = g.sendFrameAsync(connectionID, data)
 	}
 	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, netutil.AddrHost(c.RemoteAddr()), req.ServerId) {

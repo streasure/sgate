@@ -6,7 +6,6 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/internal/connection"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
@@ -33,7 +32,7 @@ func (g *Gateway) pushKickNotify(conn *connection.Connection, p kickNotifyParams
 	if err != nil {
 		return
 	}
-	data, err := routes.MarshalClientMessage(&protoGw.StreamData{
+	data, err := protoGw.MarshalClientMessage(&protoGw.StreamData{
 		Cmd:  protoGw.CmdKickNotify,
 		Data: body,
 	})
@@ -55,7 +54,7 @@ func (g *Gateway) kickConn(conn *connection.Connection, p kickNotifyParams) {
 		Message: p.message,
 	})
 	if err == nil {
-		if data, err := routes.MarshalClientMessage(&protoGw.StreamData{
+		if data, err := protoGw.MarshalClientMessage(&protoGw.StreamData{
 			Cmd:  protoGw.CmdKickNotify,
 			Data: body,
 		}); err == nil {

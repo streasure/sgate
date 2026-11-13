@@ -14,7 +14,6 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
-	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -72,12 +71,12 @@ func decodeClientFrame(t *testing.T, b []byte) *protoGw.StreamData {
 	if n <= 0 || 4+n > len(b) {
 		t.Fatalf("bad frame length %d (len=%d)", n, len(b))
 	}
-	msg, ok := routes.DecodeClientMessage(b[4 : 4+n])
+	msg, ok := protoGw.DecodeClientMessage(b[4 : 4+n])
 	if !ok {
 		t.Fatalf("decode client message failed: %v", b[4:4+n])
 	}
 	out := proto.Clone(msg).(*protoGw.StreamData)
-	routes.PutClientMessage(msg)
+	protoGw.PutClientMessage(msg)
 	return out
 }
 
@@ -111,12 +110,12 @@ func (s *udpDownlinkSpy) lastFrame(t *testing.T) *protoGw.StreamData {
 	if len(s.frames) == 0 {
 		t.Fatal("SendUDP not called")
 	}
-	msg, ok := routes.DecodeClientMessage(s.frames[len(s.frames)-1])
+	msg, ok := protoGw.DecodeClientMessage(s.frames[len(s.frames)-1])
 	if !ok {
 		t.Fatalf("decode udp frame failed: %v", s.frames[len(s.frames)-1])
 	}
 	out := proto.Clone(msg).(*protoGw.StreamData)
-	routes.PutClientMessage(msg)
+	protoGw.PutClientMessage(msg)
 	return out
 }
 

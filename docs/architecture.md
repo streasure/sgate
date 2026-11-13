@@ -100,12 +100,11 @@ Gateway 结构体承载全部接入侧状态：
 | `EncodeWSFrame` | ws_frame.go | WebSocket 帧编码 |
 | `LogicClientProvider` | iface.go | 逻辑服客户端能力接口（消费方定义） |
 
-### 2.4 internal/routes
+### 2.4 帧编解码（internal/routes 已消亡，下沉 protocol 仓）
 
-- `routes.go`：路由解析、`ExtractMessageFrame`、`IsUDPCmd` 号段判定（命令码常量已下沉 protocol 仓 `gateway/cmds.go`）
-- `frame.go`：`DecodeClientMessage` / `MarshalClientMessage` / `MarshalClientError` / `NewErrorResponse`
+- protocol 仓 `gateway/frame.go`：`ExtractMessageFrame`、`IsUDPCmd` 号段判定、`DecodeClientMessage`/`PutClientMessage`、`MarshalClientMessage`/`MarshalClientError`、`NewErrorResponse`/`NewErrorFrame`（命令码常量在 protocol 仓 `gateway/cmds.go`）
 
-routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免循环依赖。
+帧编解码被 gateway、backend、connection 各层共同依赖，统一收在 wire 契约唯一权威的 protocol 仓，业务仓不再自持帧格式实现。
 
 ### 2.5 其他支撑包
 

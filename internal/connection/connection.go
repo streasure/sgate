@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/sgate/internal/routes"
+	protoGw "github.com/streasure/protocol/gateway"
 )
 
 type ConnState int32
@@ -291,7 +291,7 @@ func (c *Connection) touch() {
 // 发送失败 → 回落 WS（降级不丢是硬要求）。号段外直接 WS，与原 Send 等价。
 // 全系统下行调用点只换本方法名，不得在调用点散写 IsUDPCmd 判断。
 func (c *Connection) SendByCmd(cmd int32, data []byte) error {
-	if d := c.udp.Load(); d != nil && routes.IsUDPCmd(cmd) {
+	if d := c.udp.Load(); d != nil && protoGw.IsUDPCmd(cmd) {
 		if err := (*d).SendUDP(c.id, data); err == nil {
 			return nil
 		}

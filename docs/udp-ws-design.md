@@ -101,14 +101,14 @@
 
 ## 4. 协议设计
 
-### 4.1 命令号段与分流规则（`internal/routes/routes.go`）
+### 4.1 命令号段与分流规则（号段在 protocol 仓 `gateway/cmds.go`，判据 `gateway/frame.go` 的 `IsUDPCmd`）
 
-复用 `MessageFrame`，**不为 UDP 引入第二套编解码**（`routes.DecodeClientMessage` 原样可用）。
+复用 `MessageFrame`，**不为 UDP 引入第二套编解码**（protocol 仓 `gateway.DecodeClientMessage` 原样可用）。
 
 **核心规则：按消息性质（命令号段）分流，而非按会话状态分流。** 号段内 = 状态同步类（可丢），号段外 = 指令类（必须可靠）。logic 层完全无感知，只管按 cmd 推送；分流只发生在 sgate。
 
 ```go
-// routes.go —— 号段是三端（客户端/网关/logic）共享的协议契约，定义为常量，
+// protocol 仓 gateway/cmds.go —— 号段是三端（客户端/网关/logic）共享的协议契约，定义为常量，
 // 不放进 yaml：改号段 = 改协议，必须走代码评审，避免实例间配置漂移。
 // 数值沿用 protocol/enums/cmd.proto 既有分段惯例（1,000,000-1,099,999 gateway、
 // 1,100,000-1,199,999 logic），取下一空段 1,200,000-1,299,999。
@@ -138,7 +138,7 @@ func IsUDPCmd(cmd int32) bool {
 | （业务状态同步） | `1200010+` | 双向 | 业务层自定义，按需从 `1200010` 起分配 |
 
 > 现有全部命令（`3`、`1000001~1000004`、`1100001~1100012`、`9000002`）均在区间外，天然不受影响。
-> `1,200,000~1,299,999` 段已核实无占用（sgate `routes.go` 与 `cmd.proto` 均无 12xxxxx 命令）。
+> `1,200,000~1,299,999` 段已核实无占用（protocol 仓 `gateway/cmds.go` 与 `cmd.proto` 均无 12xxxxx 命令）。
 > 分配新命令时：**可靠消息永远 < `CmdUDPRangeStart`，可丢状态消息落在区间内**——此约定写入 `cmd.proto` 分段注释，并加 lint 测试校验已知可靠命令不落入区间。
 
 **三条分流规则（不可混淆）**：
@@ -187,7 +187,7 @@ UDP 数据报 = **4 字节大端长度前缀 + `MessageFrame`**（与 TCP 完全
 
 ## 5. sgate 落点（最小侵入）
 
-**改动集中在 `internal/gateway`（关联表 + 收包路径）与 `internal/routes`（号段常量）；`backend`/`connection` 只做"换方法名"式的最小触碰**（`connection` +1 接口 +1 方法，`backend` 5 处 `Send` → `SendByCmd`），pipeline/ConnectionManager/coalescer/security 零改动，依赖方向 `gateway → backend → connection` 不变。
+**改动集中在 `internal/gateway`（关联表 + 收包路径）与帧编解码侧（号段常量，已随 P6 下沉 protocol 仓 `gateway/frame.go`）；`backend`/`connection` 只做"换方法名"式的最小触碰**（`connection` +1 接口 +1 方法，`backend` 5 处 `Send` → `SendByCmd`），pipeline/ConnectionManager/coalescer/security 零改动，依赖方向 `gateway → backend → connection` 不变。
 
 ### 5.1 新增：关联表 `internal/gateway/udp_assoc.go`
 
@@ -368,8 +368,8 @@ udp:
 
 ### 阶段 1：号段规则与关联建立（可独立合入）
 
-- `routes`：`CmdUDPRangeStart/End` 常量 + `IsUDPCmd` 纯函数 + lint 测试（校验已知可靠命令不在区间内）+ 6 个传输控制命令码
-- `protocol` 仓：`enums/cmd.proto` 增补 UDP 号段分段注释（`1,200,000 - 1,299,999 UDP state sync`）+ 6 个 Udp 命令枚举 + `LoginGateAck.udp_token/udp_port` 字段；`routes/symmetry_test.go` 双表对称守卫同步登记
+- `routes`：`CmdUDPRangeStart/End` 常量 + `IsUDPCmd` 纯函数 + lint 测试（校验已知可靠命令不在区间内）+ 6 个传输控制命令码（P6a 起全部下沉 protocol 仓 `gateway/`）
+- `protocol` 仓：`enums/cmd.proto` 增补 UDP 号段分段注释（`1,200,000 - 1,299,999 UDP state sync`）+ 6 个 Udp 命令枚举 + `LoginGateAck.udp_token/udp_port` 字段；双表对称守卫同步登记（现为 `gateway/cmds_test.go` 与 `gateway/frame_test.go`）
 - `gateway/udp_assoc.go`：关联表 + per-IP 上限 + token 生成/消费 + 空闲淘汰
 - `handleAssociate`：验 token → 建关联 → 回 Ack（回程 `SendTo` 同端口）
 - `OnClose`/`RemoveConnection` 删关联

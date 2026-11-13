@@ -11,7 +11,6 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhttp"
 	"google.golang.org/protobuf/proto"
@@ -133,7 +132,7 @@ func (g *Gateway) handleLogoutGate(_ gnet.Conn, connectionID string, message *pr
 	g.revokeConnJWT(connObj)
 	g.notifyLogicOffline(connObj)
 	ackBody, _ := proto.Marshal(&protoGw.LoginGateAck{Code: 0, Message: "ok", SessionId: connectionID})
-	if data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil {
+	if data, err := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil {
 		// ack 可靠投递：SendThenClose 在写完成回调内 Close（Windows 无 outbound flush，
 		// 立即 Close 会丢 ack）；不可用（连接已空等）回退同步 Close。
 		if sendErr := connObj.SendThenClose(data); sendErr == nil {
