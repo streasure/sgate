@@ -8,7 +8,6 @@ import (
 
 	protocol "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
-	"github.com/streasure/sgate/internal/routes"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -134,7 +133,7 @@ func TestMsgAckClearsWindow(t *testing.T) {
 
 	// 批量确认前两条。
 	s.dispatchMessage(&protocol.StreamData{
-		Cmd: routes.CmdMsgAck, SessionId: "sess-1", Data: ackBody(t, seqs...),
+		Cmd: protocol.CmdMsgAck, SessionId: "sess-1", Data: ackBody(t, seqs...),
 	}, func(*protocol.StreamData) {})
 
 	w := s.reliable.get("sess-1")
@@ -150,7 +149,7 @@ func TestMsgAckClearsWindow(t *testing.T) {
 
 	// 重复 ACK 同批 seq：幂等，计数不涨、剩余不动。
 	s.dispatchMessage(&protocol.StreamData{
-		Cmd: routes.CmdMsgAck, SessionId: "sess-1", Data: ackBody(t, seqs...),
+		Cmd: protocol.CmdMsgAck, SessionId: "sess-1", Data: ackBody(t, seqs...),
 	}, func(*protocol.StreamData) {})
 	w.mu.Lock()
 	remaining = len(w.entries)
@@ -164,7 +163,7 @@ func TestMsgAckClearsWindow(t *testing.T) {
 
 	// 坏负载：只告警不 panic，不消费计数。
 	s.dispatchMessage(&protocol.StreamData{
-		Cmd: routes.CmdMsgAck, SessionId: "sess-1", Data: []byte{0xff, 0xff},
+		Cmd: protocol.CmdMsgAck, SessionId: "sess-1", Data: []byte{0xff, 0xff},
 	}, func(*protocol.StreamData) {})
 	if snap := s.metrics.GetSnapshot(); snap["acked"] != 2 {
 		t.Errorf("acked after bad payload = %d, want 2", snap["acked"])
@@ -197,7 +196,7 @@ func TestReliableRetransmitOnTimeout(t *testing.T) {
 	}
 	// 补 ACK 收尾，验证 ACK 后停止重传。
 	s.dispatchMessage(&protocol.StreamData{
-		Cmd: routes.CmdMsgAck, SessionId: "sess-1", Data: ackBody(t, 1),
+		Cmd: protocol.CmdMsgAck, SessionId: "sess-1", Data: ackBody(t, 1),
 	}, func(*protocol.StreamData) {})
 	w := s.reliable.get("sess-1")
 	w.mu.Lock()
@@ -249,7 +248,7 @@ func TestOfflineClearsReliableWindow(t *testing.T) {
 
 	pushReliableBatched(t, s, cs, 2)
 	s.dispatchMessage(&protocol.StreamData{
-		Cmd: routes.CmdUserOffline, SessionId: "sess-1", UserKey: "user-1",
+		Cmd: protocol.CmdUserOffline, SessionId: "sess-1", UserKey: "user-1",
 	}, func(*protocol.StreamData) {})
 
 	if s.reliable.get("sess-1") != nil {

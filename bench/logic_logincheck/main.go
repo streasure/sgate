@@ -12,7 +12,7 @@ import (
 	"github.com/streasure/sgate/bench/logutil"
 	logic "github.com/streasure/sgate/internal/logic"
 	"github.com/streasure/sgate/internal/obs"
-	"github.com/streasure/sgate/internal/routes"
+
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -39,11 +39,11 @@ func main() {
 		logic.WithEtcd("http://127.0.0.1:2379"),
 		logic.WithShardCount(*shardCount),
 	)
-	svc.RegisterProto(routes.CmdLoginGate, &protocol.LoginGateReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
+	svc.RegisterProto(protocol.CmdLoginGate, &protocol.LoginGateReq{}, 0, func(ctx *logic.Context, req proto.Message) proto.Message {
 		tlog.Info(context.TODO(), "login gate received accountId=%s sessionID=%s", ctx.UserUUID, ctx.ConnectionID)
 		return nil
 	})
-	svc.RegisterProto(routes.CmdLogicLoginReq, &logicproto.LoginReq{}, routes.CmdLogicLoginAck, func(ctx *logic.Context, req proto.Message) proto.Message {
+	svc.RegisterProto(protocol.CmdLogicLoginReq, &logicproto.LoginReq{}, protocol.CmdLogicLoginAck, func(ctx *logic.Context, req proto.Message) proto.Message {
 		login := req.(*logicproto.LoginReq)
 		ack := &logicproto.LoginAck{ServerTime: 1, Version: "logincheck", UserKey: ctx.UserUUID}
 		tlog.Info(context.TODO(), "login request received userId=%s sessionID=%s", login.UserId, ctx.ConnectionID)

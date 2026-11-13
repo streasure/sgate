@@ -39,7 +39,7 @@ func findErrorFrame(b []byte) (string, bool) {
 		}
 		msg, ok := routes.DecodeClientMessage(b[off+4 : off+4+n])
 		if ok {
-			if msg.Cmd == routes.CmdError {
+			if msg.Cmd == protoGw.CmdError {
 				var resp commonstruct.ErrorResponse
 				err := proto.Unmarshal(msg.Data, &resp)
 				routes.PutClientMessage(msg)
@@ -103,7 +103,7 @@ func setupUDPAssoc(t *testing.T, gw *Gateway, ip net.IP, port int, bind bool) (s
 		t.Fatal("issueUDPToken failed")
 	}
 	c := &udpMockConn{addr: &net.UDPAddr{IP: ip, Port: port}}
-	gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, associateBody(t, token)))
+	gw.handleUDPDatagram(c, udpDatagram(t, protoGw.CmdUdpAssociate, associateBody(t, token)))
 	if c.writtenLen() == 0 {
 		t.Fatal("associate ack not written")
 	}

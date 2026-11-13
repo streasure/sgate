@@ -13,15 +13,15 @@ import (
 
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/bench/logutil"
-	"github.com/streasure/sgate/internal/routes"
+
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	cmdLoginGate    = routes.CmdLoginGate
-	cmdLoginGateAck = routes.CmdLoginGateAck
-	cmdPushBatch    = routes.CmdPushBatch
+	cmdLoginGate    = protocol.CmdLoginGate
+	cmdLoginGateAck = protocol.CmdLoginGateAck
+	cmdPushBatch    = protocol.CmdPushBatch
 )
 
 func main() {
@@ -154,7 +154,7 @@ func main() {
 				}
 				// 按消息条数统计：批量推送帧展开 items，其余帧计 1。
 				n := int64(1)
-				if err := proto.Unmarshal(buf, frame); err == nil && frame.Cmd == routes.CmdPushBatch {
+				if err := proto.Unmarshal(buf, frame); err == nil && frame.Cmd == protocol.CmdPushBatch {
 					pb := &protocol.PushBatch{}
 					if perr := proto.Unmarshal(frame.Body, pb); perr == nil {
 						n = int64(len(pb.GetItems()))

@@ -340,7 +340,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				continue
 			}
 			responseData, marshalFrameErr := routes.MarshalClientMessage(&protoGw.StreamData{
-				Cmd:  int32(routes.CmdPushBatch),
+				Cmd:  int32(protoGw.CmdPushBatch),
 				Data: batchData,
 			})
 			*buf = batchData[:0]
@@ -374,7 +374,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 
 		// 内置心跳：flip 模式下 logic 主动拨入后由本侧消费，无需应答
 		// （与 logic 的 builtinCommand 对称），绝不能落入空 SessionId 广播分支。
-		if msg.Cmd == int32(routes.CmdHeartbeatReq) {
+		if msg.Cmd == int32(protoGw.CmdHeartbeatReq) {
 			return
 		}
 

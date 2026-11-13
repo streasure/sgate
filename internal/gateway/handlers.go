@@ -308,7 +308,7 @@ func (g *Gateway) isLogicConnected() bool {
 func (g *Gateway) isPreAuthCommand(cmd int32) bool {
 	// 逻辑登录命令是稳定的协议边界。将其作为内置回退保留，
 	// 以便旧的动态配置在命令范围迁移后不会锁定所有新连接的会话。
-	if cmd == routes.CmdLogicLoginReq {
+	if cmd == protoGw.CmdLogicLoginReq {
 		return true
 	}
 	return slices.Contains(g.getProtection().PreAuthCommands, cmd)
@@ -352,11 +352,11 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 		connObj.TouchActive()
 	}
 	cmd := message.Cmd
-	if cmd == routes.CmdLoginGate {
+	if cmd == protoGw.CmdLoginGate {
 		// LoginGate 消息由 finishLoginGate 异步持有，不归还解码池。
 		return g.handleLoginGate(c, connectionID, message)
 	}
-	if cmd == routes.CmdLogoutGate {
+	if cmd == protoGw.CmdLogoutGate {
 		action := g.handleLogoutGate(c, connectionID, message)
 		routes.PutClientMessage(message)
 		return action

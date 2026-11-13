@@ -80,7 +80,7 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 		return gnet.None
 	}
 
-	if message.Cmd == routes.CmdUdpAssociate {
+	if message.Cmd == protoGw.CmdUdpAssociate {
 		g.messagesReceived.Add(1)
 		g.handleAssociate(c, remoteAddr, message)
 		routes.PutClientMessage(message)
@@ -184,7 +184,7 @@ func (g *Gateway) handleAssociate(c gnet.Conn, remoteAddr net.Addr, message *pro
 		g.udpAssoc.deleteByConnID(connID)
 		return
 	}
-	data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdUdpAssociateAck, Data: body, SeqId: message.SeqId})
+	data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdUdpAssociateAck, Data: body, SeqId: message.SeqId})
 	if err != nil {
 		g.udpAssoc.deleteByConnID(connID)
 		return

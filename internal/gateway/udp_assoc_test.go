@@ -190,7 +190,7 @@ func TestUDPAssociateLifecycle(t *testing.T) {
 		t.Fatal("issue token failed")
 	}
 	c := &udpMockConn{addr: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 40000}}
-	gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, associateBody(t, token)))
+	gw.handleUDPDatagram(c, udpDatagram(t, protoGw.CmdUdpAssociate, associateBody(t, token)))
 
 	// Ack 回写且目标 = ASSOCIATE 源地址
 	if c.writtenLen() == 0 {
@@ -200,8 +200,8 @@ func TestUDPAssociateLifecycle(t *testing.T) {
 		t.Fatalf("ack target = %v, want %v (回程必须发往关联源地址)", got, c.addr)
 	}
 	msg := decodeFirstFrame(t, c.written)
-	if msg.Cmd != routes.CmdUdpAssociateAck {
-		t.Fatalf("resp cmd=%d, want CmdUdpAssociateAck=%d", msg.Cmd, routes.CmdUdpAssociateAck)
+	if msg.Cmd != protoGw.CmdUdpAssociateAck {
+		t.Fatalf("resp cmd=%d, want CmdUdpAssociateAck=%d", msg.Cmd, protoGw.CmdUdpAssociateAck)
 	}
 	ack := &protoGw.UdpAssociateAck{}
 	if err := proto.Unmarshal(msg.Data, ack); err != nil {
@@ -221,7 +221,7 @@ func TestUDPAssociateLifecycle(t *testing.T) {
 
 	// 重放同 token：不再建联、不再回包
 	before := c.writtenLen()
-	gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, associateBody(t, token)))
+	gw.handleUDPDatagram(c, udpDatagram(t, protoGw.CmdUdpAssociate, associateBody(t, token)))
 	if n := c.writtenLen(); n != before {
 		t.Fatalf("replay wrote %d bytes, want 0 (one-shot)", n-before)
 	}
@@ -255,7 +255,7 @@ func TestUDPAssociateRejectedPaths(t *testing.T) {
 			t.Fatalf("issueToken: %v", err)
 		}
 		c := &udpMockConn{addr: &net.UDPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 1000}}
-		gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, associateBody(t, token)))
+		gw.handleUDPDatagram(c, udpDatagram(t, protoGw.CmdUdpAssociate, associateBody(t, token)))
 		if c.writtenLen() != 0 {
 			t.Fatalf("dead session got %d reply bytes, want silent", c.writtenLen())
 		}
@@ -266,7 +266,7 @@ func TestUDPAssociateRejectedPaths(t *testing.T) {
 
 	t.Run("junk_body", func(t *testing.T) {
 		c := &udpMockConn{addr: &net.UDPAddr{IP: net.IPv4(198, 51, 100, 2), Port: 1000}}
-		gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, []byte{0xFF, 0xFF, 0xFF}))
+		gw.handleUDPDatagram(c, udpDatagram(t, protoGw.CmdUdpAssociate, []byte{0xFF, 0xFF, 0xFF}))
 		if c.writtenLen() != 0 {
 			t.Fatalf("junk got %d reply bytes, want silent", c.writtenLen())
 		}
@@ -274,7 +274,7 @@ func TestUDPAssociateRejectedPaths(t *testing.T) {
 
 	t.Run("empty_token", func(t *testing.T) {
 		c := &udpMockConn{addr: &net.UDPAddr{IP: net.IPv4(198, 51, 100, 3), Port: 1000}}
-		gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, associateBody(t, "")))
+		gw.handleUDPDatagram(c, udpDatagram(t, protoGw.CmdUdpAssociate, associateBody(t, "")))
 		if c.writtenLen() != 0 {
 			t.Fatalf("empty token got %d reply bytes, want silent", c.writtenLen())
 		}
@@ -297,7 +297,7 @@ func TestUDPAssociatePerIPLimit(t *testing.T) {
 			t.Fatal("issue token failed")
 		}
 		c := &udpMockConn{addr: &net.UDPAddr{IP: ip, Port: port}}
-		gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, associateBody(t, token)))
+		gw.handleUDPDatagram(c, udpDatagram(t, protoGw.CmdUdpAssociate, associateBody(t, token)))
 		return c.writtenLen() > 0
 	}
 
@@ -330,7 +330,7 @@ func TestUDPAssociateTotalLimit(t *testing.T) {
 			t.Fatal("issue token failed")
 		}
 		c := &udpMockConn{addr: &net.UDPAddr{IP: ip, Port: port}}
-		gw.handleUDPDatagram(c, udpDatagram(t, routes.CmdUdpAssociate, associateBody(t, token)))
+		gw.handleUDPDatagram(c, udpDatagram(t, protoGw.CmdUdpAssociate, associateBody(t, token)))
 		return c.writtenLen() > 0
 	}
 

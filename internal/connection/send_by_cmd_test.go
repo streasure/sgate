@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/panjf2000/gnet/v2"
-	"github.com/streasure/sgate/internal/routes"
+	protoGw "github.com/streasure/protocol/gateway"
 )
 
 // sendCaptureConn 捕获 TCP 路径写出的帧（Connection.Send → AsyncWritev）。
@@ -73,7 +73,7 @@ func TestSendByCmd_UDPCmdInjections(t *testing.T) {
 	c.SetUDPDownlink(d)
 
 	data := []byte("udp-payload")
-	if err := c.SendByCmd(routes.CmdUdpPong, data); err != nil {
+	if err := c.SendByCmd(protoGw.CmdUdpPong, data); err != nil {
 		t.Fatalf("SendByCmd: %v", err)
 	}
 	if d.callCount() != 1 {
@@ -96,7 +96,7 @@ func TestSendByCmd_WSCmdWithInjection(t *testing.T) {
 	d := &fakeDownlink{}
 	c.SetUDPDownlink(d)
 
-	if err := c.SendByCmd(routes.CmdPushBatch, []byte("ws-payload")); err != nil {
+	if err := c.SendByCmd(protoGw.CmdPushBatch, []byte("ws-payload")); err != nil {
 		t.Fatalf("SendByCmd: %v", err)
 	}
 	if d.callCount() != 0 {
@@ -111,7 +111,7 @@ func TestSendByCmd_WSCmdWithInjection(t *testing.T) {
 func TestSendByCmd_NoInjection(t *testing.T) {
 	c, gc := newTestConn("sess-3")
 
-	if err := c.SendByCmd(routes.CmdUdpPong, []byte("fallback")); err != nil {
+	if err := c.SendByCmd(protoGw.CmdUdpPong, []byte("fallback")); err != nil {
 		t.Fatalf("SendByCmd: %v", err)
 	}
 	if gc.frameCount() != 1 {
@@ -125,7 +125,7 @@ func TestSendByCmd_FallbackOnError(t *testing.T) {
 	d := &fakeDownlink{err: errors.New("stale association")}
 	c.SetUDPDownlink(d)
 
-	if err := c.SendByCmd(routes.CmdUdpPong, []byte("must-not-lose")); err != nil {
+	if err := c.SendByCmd(protoGw.CmdUdpPong, []byte("must-not-lose")); err != nil {
 		t.Fatalf("SendByCmd 应回落成功: %v", err)
 	}
 	if d.callCount() != 1 {
@@ -148,7 +148,7 @@ func TestSendByCmd_ConcurrentInjectAndSend(t *testing.T) {
 	})
 	wg.Go(func() {
 		for range 100 {
-			_ = c.SendByCmd(routes.CmdUdpPong, []byte("x"))
+			_ = c.SendByCmd(protoGw.CmdUdpPong, []byte("x"))
 		}
 	})
 	wg.Wait()

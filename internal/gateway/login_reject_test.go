@@ -45,7 +45,7 @@ func loginReqFrame(t *testing.T) *protoGw.StreamData {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	return &protoGw.StreamData{Cmd: routes.CmdLoginGate, SeqId: 1, Data: body}
+	return &protoGw.StreamData{Cmd: protoGw.CmdLoginGate, SeqId: 1, Data: body}
 }
 
 // decodeAck 从 writeFrame 输出（4B 长度 + protobuf 帧）解析 LoginGateAck。

@@ -34,7 +34,7 @@ func (g *Gateway) pushKickNotify(conn *connection.Connection, p kickNotifyParams
 		return
 	}
 	data, err := routes.MarshalClientMessage(&protoGw.StreamData{
-		Cmd:  routes.CmdKickNotify,
+		Cmd:  protoGw.CmdKickNotify,
 		Data: body,
 	})
 	if err != nil {
@@ -56,7 +56,7 @@ func (g *Gateway) kickConn(conn *connection.Connection, p kickNotifyParams) {
 	})
 	if err == nil {
 		if data, err := routes.MarshalClientMessage(&protoGw.StreamData{
-			Cmd:  routes.CmdKickNotify,
+			Cmd:  protoGw.CmdKickNotify,
 			Data: body,
 		}); err == nil {
 			// SendThenClose 内部已注册写完成回调，回调里 Close；

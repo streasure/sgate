@@ -425,7 +425,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		conn.TouchActive()
 	}
 
-	if message.Cmd == routes.CmdLoginGate {
+	if message.Cmd == protoGw.CmdLoginGate {
 		// LoginGate 走捷径不经 pipeline，补齐过载/IP 限流检查（与 TCP 路径一致）
 		if g.overloadProtector != nil && g.overloadProtector.IsOverloaded() {
 			g.overloadProtector.RecordDrop(1)
@@ -474,7 +474,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 		return nil
 	}
 
-	if message.Cmd == routes.CmdLogoutGate {
+	if message.Cmd == protoGw.CmdLogoutGate {
 		action := g.handleWSLogoutGate(wsConn, connectionID, message)
 		routes.PutClientMessage(message)
 		return action
@@ -523,7 +523,7 @@ func (g *Gateway) handleWSLogoutGate(wsConn *WebSocketConnection, connectionID s
 	}
 	ackBody, _ := proto.Marshal(&protoGw.LoginGateAck{Code: 0, Message: "ok", SessionId: connectionID})
 	wsConn.State.Store(int32(WSStateClosing))
-	if data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil && connObj != nil {
+	if data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLogoutGateAck, Data: ackBody, SeqId: message.SeqId}); err == nil && connObj != nil {
 		// ack 可靠投递：SendThenClose（WS 路径自动封 0x82 帧）在写完成回调内 Close，
 		// 避免立即 Close 丢 ack（Windows 无 outbound flush）；不可用回退同步 Close。
 		if sendErr := connObj.SendThenClose(data); sendErr == nil {
@@ -542,7 +542,7 @@ func (g *Gateway) sendWebSocketLoginAck(wsConn *WebSocketConnection, connectionI
 	if err != nil {
 		return err
 	}
-	data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: seqID})
+	data, err := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: seqID})
 	if err != nil {
 		return err
 	}
@@ -567,7 +567,7 @@ func (g *Gateway) finishWSLoginGate(wsConn *WebSocketConnection, connectionID st
 			}
 		}
 		body, _ := proto.Marshal(ackMsg)
-		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		// 跨协程异步写（统一写出口，framer 自动封帧）
 		_ = g.sendFrameAsync(connectionID, data)
 	}

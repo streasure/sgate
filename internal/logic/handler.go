@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	protocol "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -109,12 +108,12 @@ func (s *Server) dispatchMessage(msg *protocol.StreamData, callback func(*protoc
 //   - CmdMsgAck: 可靠推送端到端确认，批量移出未确认窗口
 func (s *Server) builtinCommand(msg *protocol.StreamData) bool {
 	switch msg.Cmd {
-	case routes.CmdHeartbeatReq:
+	case protocol.CmdHeartbeatReq:
 		return true
-	case routes.CmdUserOffline:
+	case protocol.CmdUserOffline:
 		s.Offline(msg.SessionId, msg.UserKey)
 		return true
-	case routes.CmdMsgAck:
+	case protocol.CmdMsgAck:
 		s.handleMsgAck(msg)
 		return true
 	}

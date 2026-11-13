@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
+
 	"google.golang.org/protobuf/proto"
 )
 
@@ -148,7 +148,7 @@ func sendLoginGate(conn net.Conn, uid int64) {
 	}
 	data, _ := proto.Marshal(req)
 	frame := &gateway.MessageFrame{
-		Cmd:  routes.CmdLoginGate,
+		Cmd:  gateway.CmdLoginGate,
 		Body: data,
 	}
 	frameData, _ := proto.Marshal(frame)

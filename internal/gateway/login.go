@@ -109,7 +109,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		g.messagesDroppedOverload.Add(1)
 		ack := &protoGw.LoginGateAck{Code: 503, Message: "server overload", SessionId: connectionID}
 		body, _ := proto.Marshal(ack)
-		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		routes.PutClientMessage(message)
 		return gnet.None
 	}
@@ -118,7 +118,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 			g.messagesDroppedRateLimit.Add(1)
 			ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
 			body, _ := proto.Marshal(ack)
-			_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+			_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 			routes.PutClientMessage(message)
 			return gnet.None
 		}
@@ -129,7 +129,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 		writeAck := func(code int32, text, serverID string) {
 			ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
 			body, _ := proto.Marshal(ack)
-			_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+			_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		}
 		writeAck(400, "invalid login gate request", req.ServerId)
 		routes.PutClientMessage(message)
@@ -140,7 +140,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	if g.isMaintenanceTarget(req.ServerId) {
 		ack := &protoGw.LoginGateAck{Code: 503, Message: "server in maintenance", SessionId: connectionID, ServerId: req.ServerId}
 		body, _ := proto.Marshal(ack)
-		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		routes.PutClientMessage(message)
 		return gnet.Close
 	}
@@ -149,7 +149,7 @@ func (g *Gateway) handleLoginGate(c gnet.Conn, connectionID string, message *pro
 	if !g.acquireLoginSlot() {
 		ack := &protoGw.LoginGateAck{Code: 429, Message: "too many concurrent logins", SessionId: connectionID, ServerId: req.ServerId}
 		body, _ := proto.Marshal(ack)
-		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		routes.PutClientMessage(message)
 		return gnet.None
 	}
@@ -168,7 +168,7 @@ func (g *Gateway) finishLoginGate(c gnet.Conn, connectionID string, message *pro
 	writeAck := func(code int32, text, serverID string) {
 		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
 		body, _ := proto.Marshal(ack)
-		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: routes.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		data, _ := routes.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
 		_ = g.sendFrameAsync(connectionID, data)
 	}
 	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, netutil.AddrHost(c.RemoteAddr()), req.ServerId) {
@@ -263,7 +263,7 @@ func (g *Gateway) notifyLogicOffline(conn *connection.Connection) {
 	}
 	ntf := &protoGw.UserOfflineNtf{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), ServerId: serverID, OfflineTime: time.Now().UnixMilli()}
 	body, _ := proto.Marshal(ntf)
-	data := &protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: routes.CmdUserOffline, Data: body}
+	data := &protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: protoGw.CmdUserOffline, Data: body}
 	// 调用方在 gnet 事件循环/空闲检查协程上：SendMessage 队列满时可能阻塞
 	// （QueuePolicyBlock 无超时），同步发送会拖死事件循环乃至 StopConnectionChecker。
 	// 仅网络入队挪到后台协程；成功后才置幂等标记，失败留给 OnClose 重试。

@@ -26,7 +26,7 @@ func loginReqFrameFor(t *testing.T, serverID string) *protoGw.StreamData {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	return &protoGw.StreamData{Cmd: routes.CmdLoginGate, SeqId: 1, Data: body}
+	return &protoGw.StreamData{Cmd: protoGw.CmdLoginGate, SeqId: 1, Data: body}
 }
 
 // kickMockConn 捕获踢人通知帧（Connection.Send → AsyncWritev）并记录关闭。
@@ -109,7 +109,7 @@ func decodeKickNotify(t *testing.T, b []byte) *protoLogic.KickNotify {
 		return nil
 	}
 	msg, ok := routes.DecodeClientMessage(b[4 : 4+n])
-	if !ok || msg.Cmd != routes.CmdKickNotify || len(msg.Data) == 0 {
+	if !ok || msg.Cmd != protoGw.CmdKickNotify || len(msg.Data) == 0 {
 		return nil
 	}
 	kn := &protoLogic.KickNotify{}

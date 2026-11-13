@@ -29,14 +29,14 @@ import (
 	protocol "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/bench/logutil"
-	"github.com/streasure/sgate/internal/routes"
+
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	cmdLoginGate    = routes.CmdLoginGate
-	cmdLoginGateAck = routes.CmdLoginGateAck
+	cmdLoginGate    = protocol.CmdLoginGate
+	cmdLoginGateAck = protocol.CmdLoginGateAck
 	cmdPush         = 9000001
 )
 
@@ -116,7 +116,7 @@ func (s *sessionAck) flush() {
 		return
 	}
 	frame := &protocol.MessageFrame{
-		Cmd:   routes.CmdMsgAck,
+		Cmd:   protocol.CmdMsgAck,
 		SeqId: s.uplinkSeq.Add(1),
 		Body:  body,
 	}
@@ -309,7 +309,7 @@ func readLoop(sa *sessionAck, totalRecv *atomic.Int64) {
 		if err := proto.Unmarshal(buf, frame); err != nil {
 			continue
 		}
-		if frame.Cmd == routes.CmdPushBatch {
+		if frame.Cmd == protocol.CmdPushBatch {
 			pb := &protocol.PushBatch{}
 			if perr := proto.Unmarshal(frame.Body, pb); perr != nil {
 				continue

@@ -20,14 +20,14 @@ import (
 	"time"
 
 	protocol "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/routes"
+
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	cmdLoginGate    = routes.CmdLoginGate
-	cmdLoginGateAck = routes.CmdLoginGateAck
-	cmdHeartbeatReq = routes.CmdHeartbeatReq
+	cmdLoginGate    = protocol.CmdLoginGate
+	cmdLoginGateAck = protocol.CmdLoginGateAck
+	cmdHeartbeatReq = protocol.CmdHeartbeatReq
 )
 
 type session struct {

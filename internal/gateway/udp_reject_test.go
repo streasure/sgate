@@ -39,8 +39,8 @@ func decodeErrorFrame(t *testing.T, written []byte) string {
 		t.Fatalf("decode response frame failed bytes=%v", written[4:4+n])
 	}
 	defer routes.PutClientMessage(msg)
-	if msg.Cmd != routes.CmdError {
-		t.Fatalf("resp cmd=%d, want CmdError=%d", msg.Cmd, routes.CmdError)
+	if msg.Cmd != protoGw.CmdError {
+		t.Fatalf("resp cmd=%d, want CmdError=%d", msg.Cmd, protoGw.CmdError)
 	}
 	var resp commonstruct.ErrorResponse
 	if err := proto.Unmarshal(msg.Data, &resp); err != nil {

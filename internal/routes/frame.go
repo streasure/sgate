@@ -66,7 +66,7 @@ func MarshalClientError(errMsg *commonstruct.ErrorResponse) []byte {
 		return nil
 	}
 	framed, err := proto.Marshal(&protoGw.MessageFrame{
-		Cmd:  CmdError,
+		Cmd:  protoGw.CmdError,
 		Body: body,
 	})
 	if err != nil {

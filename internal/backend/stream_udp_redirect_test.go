@@ -234,8 +234,8 @@ func TestStreamBatchUDPBypassesPushBatch(t *testing.T) {
 		t.Fatalf("ws frames = %d, want 1 (仅 PushBatch)", len(frames))
 	}
 	batchFrame := decodeClientFrame(t, frames[0])
-	if batchFrame.Cmd != routes.CmdPushBatch {
-		t.Fatalf("ws frame cmd = %d, want CmdPushBatch %d", batchFrame.Cmd, routes.CmdPushBatch)
+	if batchFrame.Cmd != protoGw.CmdPushBatch {
+		t.Fatalf("ws frame cmd = %d, want CmdPushBatch %d", batchFrame.Cmd, protoGw.CmdPushBatch)
 	}
 	var pb protoGw.PushBatch
 	if err := proto.Unmarshal(batchFrame.Data, &pb); err != nil {

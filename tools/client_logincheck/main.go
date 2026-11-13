@@ -17,7 +17,6 @@ import (
 	logicproto "github.com/streasure/protocol/logic"
 	"github.com/streasure/sgate/bench/logutil"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/routes"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -107,14 +106,14 @@ func main() {
 	defer conn.Close()
 
 	gateBody, _ := proto.Marshal(&protocol.LoginGateReq{ServerId: *serverID, UserId: accountID, LoginKey: loginToken})
-	if err := writeFrame(conn, &protocol.MessageFrame{Cmd: routes.CmdLoginGate, SeqId: 1, Body: gateBody}); err != nil {
+	if err := writeFrame(conn, &protocol.MessageFrame{Cmd: protocol.CmdLoginGate, SeqId: 1, Body: gateBody}); err != nil {
 		panic(err)
 	}
 	gateAck, err := readFrame(conn)
 	if err != nil {
 		panic(err)
 	}
-	if gateAck.Cmd != routes.CmdLoginGateAck {
+	if gateAck.Cmd != protocol.CmdLoginGateAck {
 		panic("unexpected LoginGateAck command")
 	}
 	ack := new(protocol.LoginGateAck)
@@ -126,14 +125,14 @@ func main() {
 	}
 
 	loginBody, _ := proto.Marshal(&logicproto.LoginReq{UserId: accountID, LoginKey: loginToken, Channel: 1})
-	if err := writeFrame(conn, &protocol.MessageFrame{Cmd: routes.CmdLogicLoginReq, SeqId: 2, Body: loginBody}); err != nil {
+	if err := writeFrame(conn, &protocol.MessageFrame{Cmd: protocol.CmdLogicLoginReq, SeqId: 2, Body: loginBody}); err != nil {
 		panic(err)
 	}
 	loginAckFrame, err := readFrame(conn)
 	if err != nil {
 		panic(err)
 	}
-	if loginAckFrame.Cmd != routes.CmdLogicLoginAck {
+	if loginAckFrame.Cmd != protocol.CmdLogicLoginAck {
 		panic("unexpected LoginAck command")
 	}
 	loginAck := new(logicproto.LoginAck)
