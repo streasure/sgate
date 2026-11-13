@@ -26,9 +26,8 @@ type ClusterComponent struct {
 	alertWebhook *clusterPkg.AlertWebhook
 }
 
-// NewClusterComponent 创建集群组件，配置从 config.Get() 读取。
-func NewClusterComponent() *ClusterComponent {
-	cfg := config.Get()
+// NewClusterComponent 创建集群组件，配置由组合根（main）在 config.Load 后显式传入。
+func NewClusterComponent(cfg *config.Config) *ClusterComponent {
 	return &ClusterComponent{
 		ctx:      context.Background(),
 		cfg:      *cfg,

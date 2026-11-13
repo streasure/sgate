@@ -112,7 +112,7 @@ routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免�
 | 包 | 职责 |
 | --- | --- |
 | `component` | 组件容器、扁平生命周期、全局资源（`resources.go`） |
-| `config` | 配置结构、默认值、`config.Get()` 热读取 |
+| `config` | 配置结构、默认值、`Load` 解析校验（无包级全局态，由调用方持有） |
 | `security` | 限流、熔断、WAF、JWT、黑白名单 |
 | `traffic` | 灰度、镜像、降级、WASM |
 | `cluster` | etcd 自注册（registerSelf）、配置中心、告警 webhook |
@@ -150,12 +150,13 @@ container.Serve()
 | 400 | Cluster | etcd 自注册、配置中心、告警 webhook（登录发现由 Gateway 自持，不在此组件） |
 | 1000 | Gateway | 接入层最后启动 |
 
-### 3.2 构造函数零参数
+### 3.2 构造器显式收参
 
-所有组件构造函数不接受参数，内部通过 `config.Get()` 读取配置：
+组件构造函数显式接收 `*config.Config`（组合根在 `config.Load` 后传入），不读任何包级全局配置：
 
 ```go
-func NewGateway() *Gateway { ... }           // 无参数
+func NewGateway(cfg *config.Config, configPath string) *Gateway { ... }
+func NewSecurityComponent(cfg *config.Config) *SecurityComponent { ... }
 func NewLogicClient(gateway GatewayInterface) *LogicClient { ... }  // 仅消费方接口
 ```
 
@@ -367,8 +368,8 @@ var _ backend.GatewayInterface = (*Gateway)(nil)
 
 ## 7. 配置与热更新
 
-- **冷启动**：`config.Load()` → 全局 `conf` 指针 → 组件通过 `config.Get()` 读取（无 `config.Set`）
-- **热更新**：`configWatcher` 监听 `config.Path()` 指定文件 → `handleConfigUpdate` 应用差异
+- **冷启动**：`config.Load()` 返回 `*config.Config` → 组合根显式传入各组件构造器与 `NewGateway(cfg, configPath)`（无包级全局态，无 `config.Set`）
+- **热更新**：`configWatcher` 轮询构造器传入的配置文件路径 → `config.Load` 重新解析 → `handleConfigUpdate` 校验后存入 `Gateway` 自持的 `atomic.Pointer` 并应用差异
 - **支持热更的参数**：限流阈值、黑名单、过载保护、JWT、灰度、镜像、降级、连接限制、连接级流控
 - **不可热切的开关**：`security/rateLimit/waf/jwtAuth/circuitBreaker` 的 `enabled`（组件与过滤器仅启动时创建，热切会静默 fail-open/fail-stale）——`handleConfigUpdate` 检测到开关变化整单拒绝并告警，要求重启生效；非法配置（含帧缓冲交叉校验 `maxFrameBufSize ≥ maxFrameSize+4`）同样整体拒绝、保留当前配置
 

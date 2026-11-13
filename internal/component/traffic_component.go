@@ -28,9 +28,8 @@ type TrafficComponent struct {
 	Degradation   *traffic.DegradationManager
 }
 
-// NewTrafficComponent 创建流量组件，配置从 config.Get() 读取。
-func NewTrafficComponent() *TrafficComponent {
-	cfg := config.Get()
+// NewTrafficComponent 创建流量组件，配置由组合根（main）在 config.Load 后显式传入。
+func NewTrafficComponent(cfg *config.Config) *TrafficComponent {
 	return &TrafficComponent{
 		ctx:            context.Background(),
 		canaryCfg:      cfg.Canary,

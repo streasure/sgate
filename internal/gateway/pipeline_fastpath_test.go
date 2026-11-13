@@ -33,7 +33,7 @@ func (fakeLogicClient) SendMessage(*protoGw.StreamData) error { return nil }
 // 安全组件指针，不检查 filterChain。仅启用 jwtAuth（过滤器链非空、安全组件全 nil）
 // 时整条过滤器链被跳过 = JWT 校验被绕过。链非空必须走完整路径并执行过滤器。
 func TestPipelineFastPathSkippedWhenFilterChainNonEmpty(t *testing.T) {
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 	filter := &countingAbortFilter{}
 	fc := types.NewFilterChain()
 	fc.AddFilter(filter)
@@ -64,7 +64,7 @@ func TestPipelineFastPathSkippedWhenFilterChainNonEmpty(t *testing.T) {
 // TestPipelineFastPathEmptyChainStillFast 保底：链为空且无安全组件时仍走快速路径
 // （不调用过滤器，直接转发）。
 func TestPipelineFastPathEmptyChainStillFast(t *testing.T) {
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 	gw.filterChain = types.NewFilterChain() // 空链
 
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user", false)

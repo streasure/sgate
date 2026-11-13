@@ -90,7 +90,7 @@ func associateBody(t *testing.T, token string) []byte {
 
 // TestUDPTokenOneShot 一次性 token：首次消费成功，重放第二个 ASSOCIATE 拿不到。
 func TestUDPTokenOneShot(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "", false)
 	defer gw.connectionManager.RemoveConnection(connID)
@@ -110,7 +110,7 @@ func TestUDPTokenOneShot(t *testing.T) {
 
 // TestUDPTokenExpired 过期 token 拒绝消费；janitor sweep 清除过期残留。
 func TestUDPTokenExpired(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "", false)
 	defer gw.connectionManager.RemoveConnection(connID)
@@ -138,7 +138,7 @@ func TestUDPTokenExpired(t *testing.T) {
 
 // TestUDPTokenRevokedOnReissue 同会话重登录撤销旧 token（旧 token 不得复活）。
 func TestUDPTokenRevokedOnReissue(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "", false)
 	defer gw.connectionManager.RemoveConnection(connID)
@@ -162,7 +162,7 @@ func TestUDPTokenRevokedOnReissue(t *testing.T) {
 // TestIssueUDPTokenGate 开关与 UDP 监听缺失时不下发 token（ack 保持向后兼容）。
 func TestIssueUDPTokenGate(t *testing.T) {
 	// enabled=false（预留通道现状）
-	gwOff := newGateway(minimalConfig())
+	gwOff := newGateway(minimalConfig(), "")
 	defer gwOff.Close()
 	if _, _, ok := gwOff.issueUDPToken("conn-1"); ok {
 		t.Fatal("disabled gateway issued token, want refused")
@@ -171,7 +171,7 @@ func TestIssueUDPTokenGate(t *testing.T) {
 	// enabled=true 但无 type=udp 监听（ASSOCIATE 永远到不了，不发）
 	cfg := udpEnabledConfig()
 	cfg.Transports = []config.Transport{{Port: 48080}} // 去掉 udp
-	gwNoPort := newGateway(cfg)
+	gwNoPort := newGateway(cfg, "")
 	defer gwNoPort.Close()
 	if _, _, ok := gwNoPort.issueUDPToken("conn-1"); ok {
 		t.Fatal("token issued without udp transport, want refused")
@@ -181,7 +181,7 @@ func TestIssueUDPTokenGate(t *testing.T) {
 // TestUDPAssociateLifecycle 关联建立 → 双索引反查 → 回 Ack 目标地址正确 →
 // 会话销毁幂等拆除 → 旧地址反查失效。
 func TestUDPAssociateLifecycle(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "", false)
 
@@ -245,7 +245,7 @@ func TestUDPAssociateLifecycle(t *testing.T) {
 // TestUDPAssociateRejectedPaths 关联拒绝路径全静默：会话已死、垃圾包、缺 token、
 // per-IP 超限——均不回包、不建联。
 func TestUDPAssociateRejectedPaths(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 
 	t.Run("session_dead", func(t *testing.T) {
@@ -285,7 +285,7 @@ func TestUDPAssociateRejectedPaths(t *testing.T) {
 func TestUDPAssociatePerIPLimit(t *testing.T) {
 	cfg := udpEnabledConfig()
 	cfg.UDP.MaxPerIP = 1
-	gw := newGateway(cfg)
+	gw := newGateway(cfg, "")
 	defer gw.Close()
 
 	mkAssoc := func(t *testing.T, ip net.IP, port int) bool {
@@ -318,7 +318,7 @@ func TestUDPAssociatePerIPLimit(t *testing.T) {
 func TestUDPAssociateTotalLimit(t *testing.T) {
 	cfg := udpEnabledConfig()
 	cfg.UDP.MaxAssociations = 1
-	gw := newGateway(cfg)
+	gw := newGateway(cfg, "")
 	defer gw.Close()
 
 	mkAssoc := func(t *testing.T, ip net.IP, port int) bool {
@@ -348,7 +348,7 @@ func TestUDPAssociateTotalLimit(t *testing.T) {
 
 // TestUDPAssocIdleSweep 空闲淘汰：超时关联拆除，活跃关联保留。
 func TestUDPAssocIdleSweep(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "", false)
 	defer gw.connectionManager.RemoveConnection(connID)
@@ -384,7 +384,7 @@ func TestUDPAssocIdleSweep(t *testing.T) {
 
 // TestUDPAssocCreateIdempotentReplace 同会话重复建联幂等替换：计数不涨、旧地址索引拆除。
 func TestUDPAssocCreateIdempotentReplace(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "", false)
 	defer gw.connectionManager.RemoveConnection(connID)
@@ -411,7 +411,7 @@ func TestUDPAssocCreateIdempotentReplace(t *testing.T) {
 // TestUDPDatagramEnabledUnassociatedSilent 开启后未关联的数据包静默丢：
 // 不回错误帧（未授权源地址回包 = 放大面）、不计数（预留通道计数只属于关闭态）。
 func TestUDPDatagramEnabledUnassociatedSilent(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	c := &udpMockConn{addr: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 40), Port: 8000}}
 
@@ -427,7 +427,7 @@ func TestUDPDatagramEnabledUnassociatedSilent(t *testing.T) {
 
 // TestReleaseUDPAssocGateway 会话结束钩子幂等（OnClose/RemoveConnection 两路都调）。
 func TestReleaseUDPAssocGateway(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "", false)
 

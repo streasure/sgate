@@ -71,7 +71,7 @@ func decodeAck(t *testing.T, b []byte) *protoGw.LoginGateAck {
 
 // TestLoginGate_RateLimited429 IP 限流命中 → 429。
 func TestLoginGate_RateLimited429(t *testing.T) {
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 	defer gw.Close()
 
 	// 测试未起 SecurityComponent，直接注入限流器
@@ -101,7 +101,7 @@ func TestLoginGate_RateLimited429(t *testing.T) {
 
 // TestLoginGate_ConcurrentSlotFull429 并发登录槽满 → 429。
 func TestLoginGate_ConcurrentSlotFull429(t *testing.T) {
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 	defer gw.Close()
 
 	for i := cap(gw.loginSlots); i > 0; i-- {

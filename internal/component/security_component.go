@@ -31,9 +31,8 @@ type SecurityComponent struct {
 	circuitBreakerMgr  *security.CircuitBreakerManager
 }
 
-// NewSecurityComponent 创建安全组件，配置从 config.Get() 读取。
-func NewSecurityComponent() *SecurityComponent {
-	cfg := config.Get()
+// NewSecurityComponent 创建安全组件，配置由组合根（main）在 config.Load 后显式传入。
+func NewSecurityComponent(cfg *config.Config) *SecurityComponent {
 	return &SecurityComponent{
 		ctx: context.Background(),
 		cfg: cfg.Security,

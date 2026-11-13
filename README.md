@@ -108,7 +108,7 @@ uperf（GOGC/GOMEMLIMIT 软上限，最先）
 
 三条配套约定：
 
-1. **构造函数零参数**：所有组件 `NewXxx()` 不接收参数，内部通过 `config.Get()` 读配置——组件不携带环境信息，天然可测试。
+1. **构造器显式收参**：组件 `NewXxx(cfg *config.Config)` 由组合根（`cmd/gateway/main.go`）把 `config.Load` 结果传入——无包级全局配置态，组件不携带环境信息，天然可测试。
 2. **全局资源模式**：组件在 Init 阶段把能力写入 `internal/component/resources.go`（如 `setSecurityResources(...)`），Gateway 只能通过导出 getter 读取（如 `component.RateLimiter().Allow(...)`）——写入点收在 component 包内部，读取点全部显式。
 3. **全局过滤器链**：main 里 `types.InitFilterChain()` 初始化一次，组件用 `types.GetFilterChain().AddFilter(...)` 注册，配置 `filterChain.filters` 按名加载 SPI 过滤器。
 
@@ -938,7 +938,7 @@ staticcheck ./...                         # rc=0
 - **日志一律 `github.com/streasure/util/tlog`**（`tlog.Debug/Info/Warn/Error(ctx, ...)`），禁止 `fmt.Print*` / `log.*` 输出日志；`fmt` 仅用于非日志场景（CLI 版本输出、序列化、错误构造）
 - **依赖方向严格单向**：`gateway → backend → connection`，共享帧工具只进 `routes`；反向能力一律走消费方接口
 - **panic 处理用 `panicutil`**（`Go/GoLoop/Recover/Safe`），不手写 recover 模板；tag 约定 `package.component`
-- **`component.NewContainer()` 只能在 `main.go` 调用**；组件构造零参数、经 `config.Get()` 读配置
+- **`component.NewContainer()` 只能在 `main.go` 调用**；组件构造器显式收 `*config.Config`（组合根传入），无包级配置全局态
 - **bench 规则**：`loginValidation.enabled: false`、不调 login HTTP API、每场景独立 main、成功标志是无 auth 失败
 
 ### 12.3 修改协议

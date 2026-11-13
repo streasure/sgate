@@ -208,15 +208,11 @@ func (g *Gateway) AddPushDroppedNoConn(n int64) {
 	g.messagesPushDroppedNoConn.Add(n)
 }
 
-// NewGateway 创建网关实例。配置从 config.Get() 读取（main 必须先 config.Load），
-// 运行时资源由各组件在 Init/Start 中写入 package 级全局变量后读取。
-func NewGateway() *Gateway {
-	cfg := config.Get()
-	if cfg == nil {
-		// fail-fast：main 已保证 Load 成功；半初始化 Gateway 会在 Start 阶段 panic，更难排查
-		panic("gateway: config not loaded, call config.Load first")
-	}
-	return newGateway(cfg)
+// NewGateway 创建网关实例。cfg 由组合根（main）在 config.Load 后显式传入，
+// configPath 为配置文件路径（热更新 watcher 用；测试传空串走默认回退）。
+// 运行时资源由各组件在 Init/Start 中写入后经 component 包 getter 读取。
+func NewGateway(cfg *config.Config, configPath string) *Gateway {
+	return newGateway(cfg, configPath)
 }
 
 // buildTLSConfig 根据配置构建 TLS 配置；证书加载失败时保持无证书（仅记录错误）。
@@ -270,7 +266,7 @@ func (g *Gateway) Init() error {
 	g.configCenter = component.ConfigCenter()
 	g.alertWebhook = component.AlertWebhook()
 	// 反代信任列表（仅 WS XFF 用；配置已 Validate，此处静默跳过非法项）
-	if cfg := config.Get(); cfg != nil {
+	if cfg := g.cfg.Load(); cfg != nil {
 		for _, s := range cfg.Security.TrustedProxies {
 			if p, err := netutil.ParseIPOrPrefix(s); err == nil {
 				g.trustedProxies = append(g.trustedProxies, p)
@@ -506,10 +502,7 @@ func (g *Gateway) tryEnqueueConfig(newCfg *config.Config) {
 }
 
 func (g *Gateway) configWatcher() {
-	// 优先使用 config.Load 记录的真实路径，避免 -conf 与默认路径不一致导致热更新失效
-	if p := config.Path(); p != "" {
-		g.configPath = p
-	}
+	// 配置文件路径由构造器传入（组合根传 -conf 实际路径，测试传空串走默认回退）
 	if g.configPath == "" {
 		g.configPath = "config/gateway.yaml"
 	}
@@ -908,8 +901,12 @@ func (g *Gateway) drainConnections(timeout time.Duration) {
 // ===== construction =====
 
 // newGateway 用已加载并补齐默认值的配置构造网关。
-// 参数仅为 *config.Config，避免 GatewayDeps 单字段间接层。
-func newGateway(cfg *config.Config) *Gateway {
+// 参数仅为 *config.Config + 配置文件路径，避免 GatewayDeps 单字段间接层。
+func newGateway(cfg *config.Config, configPath string) *Gateway {
+	if cfg == nil {
+		// fail-fast：半初始化 Gateway 会在 Start 阶段 panic，更难排查
+		panic("gateway: nil *config.Config passed to constructor")
+	}
 	// 防御：外部传入的 cfg 可能未走 Load（测试/热更新拷贝）
 	cfg.ApplyRuntimeDefaults()
 
@@ -926,6 +923,7 @@ func newGateway(cfg *config.Config) *Gateway {
 		closeDone:         make(chan struct{}),
 		serverID:          cfg.ServerID,
 		zone:              cfg.Zone,
+		configPath:        configPath,
 
 		configUpdateChan:          make(chan *config.Config, 1),
 		overloadProtector:         NewOverloadProtector(cfg.Protection),

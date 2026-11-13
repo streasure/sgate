@@ -20,23 +20,20 @@ func minimalConfig() *config.Config {
 	}
 }
 
-func TestNewGatewayPanicsWithoutConfig(t *testing.T) {
-	// 清空全局配置，确保 Get() 返回 nil
-	// config 包未导出清空接口，通过 Load 失败路径无法清；此处仅在确认未 Load 时跳过
-	if config.Get() != nil {
-		t.Skip("config already loaded in this process; cannot assert nil path")
-	}
+func TestNewGatewayPanicsOnNilConfig(t *testing.T) {
+	// 构造器显式收参后，nil 配置是编程错误——必须 fail-fast panic，
+	// 而不是在 Start 阶段以 nil deref 形式更难排查地崩。
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("NewGateway should panic when config not loaded")
+			t.Fatal("NewGateway(nil) should panic")
 		}
 	}()
-	_ = NewGateway()
+	_ = NewGateway(nil, "")
 }
 
 func TestNewGatewayAppliesDefaultsAndStoresCopy(t *testing.T) {
 	cfg := minimalConfig()
-	gw := newGateway(cfg)
+	gw := newGateway(cfg, "")
 	if gw == nil {
 		t.Fatal("newGateway returned nil")
 	}
@@ -95,7 +92,7 @@ func TestNewGatewayAppliesDefaultsAndStoresCopy(t *testing.T) {
 func TestNewGatewayBuildsTLSConfig(t *testing.T) {
 	cfg := minimalConfig()
 	cfg.TLS.Enabled = false
-	gw := newGateway(cfg)
+	gw := newGateway(cfg, "")
 	if gw.tlsConfig == nil {
 		t.Fatal("tlsConfig should not be nil even when TLS disabled")
 	}
@@ -121,7 +118,7 @@ func TestBuildTLSConfigDisabled(t *testing.T) {
 
 func TestMetricsLogEnabledDefault(t *testing.T) {
 	cfg := minimalConfig()
-	gw := newGateway(cfg)
+	gw := newGateway(cfg, "")
 	defer gw.Close()
 
 	if !gw.metricsLogEnabled() {
@@ -139,7 +136,7 @@ func TestMetricsLogEnabledDefault(t *testing.T) {
 
 func TestTryEnqueueConfigKeepsLatest(t *testing.T) {
 	cfg := minimalConfig()
-	gw := newGateway(cfg)
+	gw := newGateway(cfg, "")
 	defer gw.Close()
 
 	cfg1 := minimalConfig()

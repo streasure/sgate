@@ -28,9 +28,8 @@ type ObservabilityComponent struct {
 	latencyTracker *obs.LatencyTracker
 }
 
-// NewObservabilityComponent 创建可观测性组件，配置从 config.Get() 读取。
-func NewObservabilityComponent() *ObservabilityComponent {
-	cfg := config.Get()
+// NewObservabilityComponent 创建可观测性组件，配置由组合根（main）在 config.Load 后显式传入。
+func NewObservabilityComponent(cfg *config.Config) *ObservabilityComponent {
 	return &ObservabilityComponent{
 		ctx:           context.Background(),
 		otelCfg:       cfg.OTelTracer,

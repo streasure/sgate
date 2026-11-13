@@ -80,11 +80,11 @@ func main() {
 		GcPercent:          cfg.Perf.GcPercent,
 		MemoryLimitPercent: cfg.Perf.MemoryLimitPercent,
 	}))
-	container.Add(comp.NewSecurityComponent())
-	container.Add(comp.NewObservabilityComponent())
-	container.Add(comp.NewTrafficComponent())
-	container.Add(comp.NewClusterComponent())
-	container.Add(gateway.NewGateway())
+	container.Add(comp.NewSecurityComponent(cfg))
+	container.Add(comp.NewObservabilityComponent(cfg))
+	container.Add(comp.NewTrafficComponent(cfg))
+	container.Add(comp.NewClusterComponent(cfg))
+	container.Add(gateway.NewGateway(cfg, *confFiles))
 	if err := container.Serve(); err != nil {
 		// Init/Start 失败必须非零退出，避免容器/进程管理器误判为正常退出
 		tlog.Error(ctx, "gateway serve failed error=%v", err)

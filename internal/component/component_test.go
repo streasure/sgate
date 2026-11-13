@@ -17,7 +17,7 @@ import (
 	"github.com/streasure/sgate/internal/types"
 )
 
-// mustLoadConfig 写最小合法 yaml 并 config.Load（组件构造器要求 config.Get() 非空）。
+// mustLoadConfig 写最小合法 yaml 并 config.Load，返回 cfg 供组件构造器显式传入。
 // extraYAML 追加在最小骨架之后，供各用例覆盖特性开关。
 func mustLoadConfig(t *testing.T, extraYAML string) *config.Config {
 	t.Helper()
@@ -57,7 +57,7 @@ func resetComponentResources(t *testing.T) {
 }
 
 func TestComponents_NameAndOrder(t *testing.T) {
-	mustLoadConfig(t, "")
+	cfg := mustLoadConfig(t, "")
 	tests := []struct {
 		name  string
 		order int
@@ -66,10 +66,10 @@ func TestComponents_NameAndOrder(t *testing.T) {
 			Order() int
 		}
 	}{
-		{"security", 100, NewSecurityComponent()},
-		{"observability", 200, NewObservabilityComponent()},
-		{"traffic", 300, NewTrafficComponent()},
-		{"cluster", 400, NewClusterComponent()},
+		{"security", 100, NewSecurityComponent(cfg)},
+		{"observability", 200, NewObservabilityComponent(cfg)},
+		{"traffic", 300, NewTrafficComponent(cfg)},
+		{"cluster", 400, NewClusterComponent(cfg)},
 	}
 	for _, tt := range tests {
 		if got := tt.comp.Name(); got != tt.name {
@@ -81,7 +81,7 @@ func TestComponents_NameAndOrder(t *testing.T) {
 	}
 }
 
-func TestConstructors_CopyConfigFromGlobal(t *testing.T) {
+func TestConstructors_CopyConfig(t *testing.T) {
 	cfg := mustLoadConfig(t, `
 canary:
   enabled: true
@@ -92,21 +92,21 @@ monitoring:
   disableTracer: true
   pprofAddr: "127.0.0.1:6061"
 `)
-	sec := NewSecurityComponent()
+	sec := NewSecurityComponent(cfg)
 	if !reflect.DeepEqual(sec.cfg, cfg.Security) || !reflect.DeepEqual(sec.waf, cfg.WAF) || !reflect.DeepEqual(sec.jwt, cfg.JWTAuth) {
 		t.Error("SecurityComponent did not copy config sections")
 	}
-	obs := NewObservabilityComponent()
+	obs := NewObservabilityComponent(cfg)
 	if !reflect.DeepEqual(obs.otelCfg, cfg.OTelTracer) || obs.pprofAddr != "127.0.0.1:6061" || !obs.disableTracer {
 		t.Errorf("ObservabilityComponent config copy mismatch: otel=%+v pprof=%q disableTracer=%v",
 			obs.otelCfg, obs.pprofAddr, obs.disableTracer)
 	}
-	tr := NewTrafficComponent()
+	tr := NewTrafficComponent(cfg)
 	if !reflect.DeepEqual(tr.canaryCfg, cfg.Canary) || !reflect.DeepEqual(tr.mirrorCfg, cfg.TrafficMirror) ||
 		!reflect.DeepEqual(tr.degradationCfg, cfg.Degradation) || !reflect.DeepEqual(tr.wasmCfg, cfg.WasmRuntime) {
 		t.Error("TrafficComponent did not copy config sections")
 	}
-	cl := NewClusterComponent()
+	cl := NewClusterComponent(cfg)
 	if cl.grpcPort != 6000 {
 		t.Errorf("ClusterComponent.grpcPort = %d, want 6000", cl.grpcPort)
 	}
@@ -192,9 +192,9 @@ func TestResources_SettersGettersRoundTrip(t *testing.T) {
 func TestSecurityComponent_Init_Disabled(t *testing.T) {
 	resetComponentResources(t)
 	types.InitFilterChain()
-	mustLoadConfig(t, "")
+	cfg := mustLoadConfig(t, "")
 
-	c := NewSecurityComponent()
+	c := NewSecurityComponent(cfg)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -215,7 +215,7 @@ func TestSecurityComponent_Init_Disabled(t *testing.T) {
 func TestSecurityComponent_Init_Enabled(t *testing.T) {
 	resetComponentResources(t)
 	types.InitFilterChain()
-	mustLoadConfig(t, `
+	cfg := mustLoadConfig(t, `
 security:
   enabled: true
   whitelist: ["10.0.0.1"]
@@ -229,7 +229,7 @@ waf:
   enabled: true
 `)
 
-	c := NewSecurityComponent()
+	c := NewSecurityComponent(cfg)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -256,23 +256,23 @@ waf:
 func TestSecurityComponent_Init_JWT(t *testing.T) {
 	resetComponentResources(t)
 	types.InitFilterChain()
-	mustLoadConfig(t, "")
+	cfg := mustLoadConfig(t, "")
 
 	// 组件级 fail-closed：Validate 已拦空 secret，此处直改热更路径的配置字段，
 	// 验证 Init 仍二次兜底拒绝（空 HS256 密钥可伪造任意令牌）。
-	c := NewSecurityComponent()
+	c := NewSecurityComponent(cfg)
 	c.jwt = config.JWTAuthConfig{Enabled: true, Secret: ""}
 	if err := c.Init(); err == nil {
 		t.Fatal("Init() with jwtAuth.enabled and empty secret error = nil, want fail-closed error")
 	}
 
-	mustLoadConfig(t, `
+	cfg2 := mustLoadConfig(t, `
 jwtAuth:
   enabled: true
   secret: "s3cret"
   issuer: "test-issuer"
 `)
-	c = NewSecurityComponent()
+	c = NewSecurityComponent(cfg2)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() with jwt secret error = %v", err)
 	}
@@ -288,12 +288,12 @@ jwtAuth:
 func TestObservabilityComponent_Init(t *testing.T) {
 	resetComponentResources(t)
 	types.InitFilterChain()
-	mustLoadConfig(t, `
+	cfg := mustLoadConfig(t, `
 monitoring:
   disableTracer: true
 `)
 
-	c := NewObservabilityComponent()
+	c := NewObservabilityComponent(cfg)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -316,9 +316,9 @@ monitoring:
 func TestTrafficComponent_Init_Disabled(t *testing.T) {
 	resetComponentResources(t)
 	types.InitFilterChain()
-	mustLoadConfig(t, "")
+	cfg := mustLoadConfig(t, "")
 
-	c := NewTrafficComponent()
+	c := NewTrafficComponent(cfg)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -338,7 +338,7 @@ func TestTrafficComponent_Init_Disabled(t *testing.T) {
 func TestTrafficComponent_Init_AllEnabled(t *testing.T) {
 	resetComponentResources(t)
 	types.InitFilterChain()
-	mustLoadConfig(t, `
+	cfg := mustLoadConfig(t, `
 canary:
   enabled: true
   percent: 100
@@ -357,7 +357,7 @@ degradation:
       fallbackData: "FB"
 `)
 
-	c := NewTrafficComponent()
+	c := NewTrafficComponent(cfg)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -392,9 +392,9 @@ func TestTrafficComponent_Init_WasmModuleValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resetComponentResources(t)
 			types.InitFilterChain()
-			mustLoadConfig(t, "wasmRuntime:\n  enabled: true\n  modules:\n"+tt.modules)
+			cfg := mustLoadConfig(t, "wasmRuntime:\n  enabled: true\n  modules:\n"+tt.modules)
 
-			c := NewTrafficComponent()
+			c := NewTrafficComponent(cfg)
 			if err := c.Init(); err == nil {
 				t.Fatal("Init() with invalid wasm modules error = nil, want fail-fast error")
 			}
@@ -405,9 +405,9 @@ func TestTrafficComponent_Init_WasmModuleValidation(t *testing.T) {
 
 func TestClusterComponent_Init_Disabled(t *testing.T) {
 	resetComponentResources(t)
-	mustLoadConfig(t, "")
+	cfg := mustLoadConfig(t, "")
 
-	c := NewClusterComponent()
+	c := NewClusterComponent(cfg)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -420,7 +420,7 @@ func TestClusterComponent_Init_Disabled(t *testing.T) {
 
 func TestClusterComponent_Init_AlertEnabled(t *testing.T) {
 	resetComponentResources(t)
-	mustLoadConfig(t, `
+	cfg := mustLoadConfig(t, `
 alert:
   enabled: true
   rateLimit: 60
@@ -430,7 +430,7 @@ alert:
       type: generic
 `)
 
-	c := NewClusterComponent()
+	c := NewClusterComponent(cfg)
 	if err := c.Init(); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}

@@ -58,7 +58,7 @@ func decodeErrorFrame(t *testing.T, written []byte) string {
 // 这里应明确拒绝（语义诚实的错误帧 + droppedUnsupported 计数），且不建连接、
 // 不投 pipeline。
 func TestUDPDatagramRejectedWithoutPipeline(t *testing.T) {
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 	c := &kickMockConn{}
 
 	gw.handleUDPDatagram(c, udpDatagram(t, 1100001, []byte("login")))
@@ -79,7 +79,7 @@ func TestUDPDatagramRejectedWithoutPipeline(t *testing.T) {
 // TestUDPDatagramJunkDroppedSilently 垃圾数据报静默丢弃：不回包（控制回包放大）、
 // 不计数（计数只统计能解码的业务消息）。
 func TestUDPDatagramJunkDroppedSilently(t *testing.T) {
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 	c := &kickMockConn{}
 
 	gw.handleUDPDatagram(c, []byte("short"))

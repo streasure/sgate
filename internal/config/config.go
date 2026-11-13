@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/streasure/util/netutil"
@@ -373,8 +372,8 @@ type UDPConfig struct {
 	MaxDatagram      int    `yaml:"maxDatagram"`      // 单数据报上限（MTU 安全值）
 }
 
-var conf atomic.Pointer[Config]
-var confPath atomic.Pointer[string] // 最近一次 Load 的配置文件路径
+// 配置无包级全局态：Load 返回解析结果，由调用方持有（组合根传入组件/网关构造器，
+// 热更新路径经 Gateway 自己的 atomic.Pointer 存储）。配置文件路径同样由调用方持有。
 
 // Validate 校验必填配置项。Load 解析成功后调用。
 func (c *Config) Validate() error {
@@ -649,7 +648,8 @@ func (c *Config) ApplyRuntimeDefaults() {
 	}
 }
 
-// Load 从指定的 YAML 文件加载配置并存入全局变量，返回配置指针。
+// Load 从指定的 YAML 文件加载配置（ApplyRuntimeDefaults + Validate），
+// 返回配置指针；不写任何包级全局态，由调用方持有并传给组件/网关构造器。
 // 顺序与配置热更新（gateway.handleConfigUpdate）一致：解析 → 补默认值 → 校验 → Store。
 func Load(configFiles ...string) (*Config, error) {
 	cfg, err := uconfig.Load[Config](configFiles...)
@@ -660,23 +660,5 @@ func Load(configFiles ...string) (*Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	conf.Store(cfg)
-	if len(configFiles) > 0 && configFiles[0] != "" {
-		p := configFiles[0]
-		confPath.Store(&p)
-	}
 	return cfg, nil
-}
-
-// Get 返回当前全局配置指针。必须在 Load 之后调用。
-func Get() *Config {
-	return conf.Load()
-}
-
-// Path 返回最近一次 Load 使用的配置文件路径（未 Load 时返回空串）。
-func Path() string {
-	if v := confPath.Load(); v != nil {
-		return *v
-	}
-	return ""
 }

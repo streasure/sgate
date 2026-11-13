@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/connection"
 
 	"github.com/panjf2000/gnet/v2"
@@ -61,9 +60,6 @@ func (g *Gateway) loginClient() protoLogin.LoginServiceClient {
 // loginValidationEnabled 读取热更新后的登录校验开关。
 func (g *Gateway) loginValidationEnabled() bool {
 	if cfg := g.cfg.Load(); cfg != nil {
-		return cfg.LoginValidation.Enabled
-	}
-	if cfg := config.Get(); cfg != nil {
 		return cfg.LoginValidation.Enabled
 	}
 	return false

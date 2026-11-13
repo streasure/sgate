@@ -20,7 +20,7 @@ func (failingLogicClient) SendMessage(*protoGw.StreamData) error {
 // messagesDroppedFull，污染 droppedTotal 语义（droppedFull 专指 overload 队列满）。
 // 失败必须只计 messagesFailed（stats.failed）。
 func TestPipelineForwardFailureCountsFailedNotDroppedFull(t *testing.T) {
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 	gw.filterChain = types.NewFilterChain()
 
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user", false)
@@ -49,7 +49,7 @@ func TestPipelineForwardFailureCountsFailedNotDroppedFull(t *testing.T) {
 
 // TestPipelineForwardSuccessCountsForwarded 成功路径转发计数。
 func TestPipelineForwardSuccessCountsForwarded(t *testing.T) {
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 	gw.filterChain = types.NewFilterChain()
 
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user", false)

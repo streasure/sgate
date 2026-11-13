@@ -171,15 +171,3 @@ func TestApplyRuntimeDefaults_Idempotent(t *testing.T) {
 		t.Error("second ApplyRuntimeDefaults changed values (not idempotent)")
 	}
 }
-
-func TestLoadSetsPath(t *testing.T) {
-	// Load 成功路径依赖真实 yaml；此处仅验证 Path 在未 Load 时空串
-	if Path() != "" && confPath.Load() == nil {
-		t.Error("Path() non-empty but confPath not set")
-	}
-}
-
-func TestPathDefaultEmpty(t *testing.T) {
-	// 不调用 Load，Path 应为空（或保留前次 Load 的值；两者都合法）
-	_ = Path()
-}

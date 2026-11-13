@@ -23,7 +23,7 @@ func TestCloseWithRunningEngineNoDeadlock(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 
 	runErr := make(chan error, 1)
 	go func() {
@@ -77,7 +77,7 @@ func TestOnShutdownFirstTriggerNoDeadlock(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
-	gw := newGateway(minimalConfig())
+	gw := newGateway(minimalConfig(), "")
 
 	runErr := make(chan error, 1)
 	go func() {

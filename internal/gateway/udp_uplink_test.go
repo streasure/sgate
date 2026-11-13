@@ -113,7 +113,7 @@ func setupUDPAssoc(t *testing.T, gw *Gateway, ip net.IP, port int, bind bool) (s
 // TestUDPUplinkForwardThroughPipeline 上行走通：关联地址的业务消息以真实 WS connID
 // 进入现有 pipeline，鉴权通过后转发到该会话的 logic，消息归属 connID 不串号。
 func TestUDPUplinkForwardThroughPipeline(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 60), 10000, true)
@@ -162,7 +162,7 @@ func TestUDPUplinkForwardThroughPipeline(t *testing.T) {
 // TestUDPUplinkSessionIsolation 两会话各自关联：addr1 的包只进会话1 的 logic，
 // addr2 的包只进会话2 的 logic（pipelineTask 按反查结果携带真实 connID，不串号）。
 func TestUDPUplinkSessionIsolation(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 
 	connID1, c1 := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 61), 11000, true)
@@ -189,7 +189,7 @@ func TestUDPUplinkSessionIsolation(t *testing.T) {
 // TestUDPUplinkAsyncWorkerPool 异步路径：任务经 pipelineWorkerPool.Submit 分片投递，
 // worker 内以 isUDP 任务完成 pipeline 处理。
 func TestUDPUplinkAsyncWorkerPool(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	// 池由 gw.Close() 停止（closeBody 内已调 Stop，测试不得重复 Stop 否则二次 close）
 	gw.pipelineWorkerPool = NewPipelineWorkerPool(gw, config.PipelineConfig{})
@@ -210,7 +210,7 @@ func TestUDPUplinkAsyncWorkerPool(t *testing.T) {
 // TestUDPUplinkAuthErrorBackToUDP 未绑定会话（未登录）的业务消息：pipeline 鉴权拒绝，
 // 错误帧跟随请求通道回 UDP（错误帧跟随请求通道，不参与号段路由，规则②）。
 func TestUDPUplinkAuthErrorBackToUDP(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 64), 13000, false) // 不绑定 serverID
@@ -241,7 +241,7 @@ func TestUDPUplinkAuthErrorBackToUDP(t *testing.T) {
 // TestUDPUplinkErrorFrameAsyncPath 异步 worker 的 UDP 错误回程
 // （processMessage 的 isUDP 分支 → sendUDPFrame）。
 func TestUDPUplinkErrorFrameAsyncPath(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 	gw.pipelineWorkerPool = NewPipelineWorkerPool(gw, config.PipelineConfig{})
 
@@ -264,7 +264,7 @@ func TestUDPUplinkErrorFrameAsyncPath(t *testing.T) {
 func TestUDPUplinkConnRateLimit(t *testing.T) {
 	cfg := udpEnabledConfig()
 	cfg.Protection.MaxMessagesPerConn = 1
-	gw := newGateway(cfg)
+	gw := newGateway(cfg, "")
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 66), 15000, true)
@@ -341,7 +341,7 @@ func TestUDPSeqDedupWindow(t *testing.T) {
 // TestUDPSeqDedupEndToEnd 端到端：重复 SeqId 的数据报不进 pipeline，
 // 不同 SeqId 正常转发。
 func TestUDPSeqDedupEndToEnd(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 67), 16000, true)
@@ -364,7 +364,7 @@ func TestUDPSeqDedupEndToEnd(t *testing.T) {
 func TestUDPUplinkMTU(t *testing.T) {
 	cfg := udpEnabledConfig()
 	cfg.UDP.MaxDatagram = 100
-	gw := newGateway(cfg)
+	gw := newGateway(cfg, "")
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 68), 17000, true)
@@ -394,7 +394,7 @@ func TestUDPUplinkMTU(t *testing.T) {
 
 // TestUDPUnassociatedDropCounter 未关联源地址丢包计数（§8.4 埋点：源地址漂移旁证）。
 func TestUDPUnassociatedDropCounter(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 
 	c := &udpMockConn{addr: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 69), Port: 18000}}
@@ -413,7 +413,7 @@ func TestUDPUnassociatedDropCounter(t *testing.T) {
 // TestUDPSweepWSAliveMetric §8.4 埋点：关联被空闲淘汰时 WS 会话仍存活 → 计数
 // （stale 关联缺口签名）；会话已死的淘汰不计。
 func TestUDPSweepWSAliveMetric(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 
 	idle := config.DefaultUDPIdleDuration
@@ -452,7 +452,7 @@ func TestUDPSweepWSAliveMetric(t *testing.T) {
 // TestUDPUplinkDoesNotTouchSessionActivity UDP 上行不刷新会话活跃时间——
 // UDP 不参与会话存活判据（设计 §5.7），存活只由 WS 心跳/入站决定。
 func TestUDPUplinkDoesNotTouchSessionActivity(t *testing.T) {
-	gw := newGateway(udpEnabledConfig())
+	gw := newGateway(udpEnabledConfig(), "")
 	defer gw.Close()
 
 	connID, c := setupUDPAssoc(t, gw, net.IPv4(203, 0, 113, 72), 20000, true)

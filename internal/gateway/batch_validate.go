@@ -56,8 +56,6 @@ func (g *Gateway) batchValidateInterval() time.Duration {
 	raw := ""
 	if cfg := g.cfg.Load(); cfg != nil {
 		raw = cfg.LoginValidation.BatchInterval
-	} else if cfg := config.Get(); cfg != nil {
-		raw = cfg.LoginValidation.BatchInterval
 	}
 	return parseBatchInterval(raw)
 }
@@ -65,9 +63,6 @@ func (g *Gateway) batchValidateInterval() time.Duration {
 // batchValidateSize 热读 batchSize；0/非法回退默认 200。
 func (g *Gateway) batchValidateSize() int {
 	if cfg := g.cfg.Load(); cfg != nil && cfg.LoginValidation.BatchSize > 0 {
-		return cfg.LoginValidation.BatchSize
-	}
-	if cfg := config.Get(); cfg != nil && cfg.LoginValidation.BatchSize > 0 {
 		return cfg.LoginValidation.BatchSize
 	}
 	return config.DefaultLoginValidationBatchSize

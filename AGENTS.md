@@ -13,7 +13,7 @@
 - Shared protocol/frame helpers live in `internal/routes` (used by both gateway and backend).
 - Consumer-defined interfaces: `backend.GatewayInterface` (implemented by `*gateway.Gateway`), `connection.LogicClientProvider` (implemented by `*backend.LogicClient`). Do not move these to producer packages.
 - `component.NewContainer()` may only be called in `cmd/gateway/main.go`.
-- Component constructors take no parameters and read config via `config.Get()`.
+- Component constructors take `*config.Config` explicitly (the composition root `cmd/gateway/main.go` passes the result of `config.Load`); there is no package-level config state (`config.Get`/`config.Path` must not come back).
 - Lifecycle order: Security(100) → Obs(200) → Traffic(300) → Cluster(400) → Gateway(1000).
 - Global filter chain: initialize once with `types.InitFilterChain()` in main; components register via `types.GetFilterChain().AddFilter(...)`.
 - Components publish state through exported globals in `internal/component/resources.go`; Gateway reads via getters.

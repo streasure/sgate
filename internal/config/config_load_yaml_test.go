@@ -37,9 +37,6 @@ func TestLoad_RepoGatewayYaml(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(config/gateway.yaml) error = %v", err)
 	}
-	if Path() != p {
-		t.Errorf("Path() = %q, want %q", Path(), p)
-	}
 
 	if c.HttpPort != 8081 {
 		t.Errorf("httpPort = %d, want 8081 (from config/gateway.yaml)", c.HttpPort)
@@ -170,9 +167,6 @@ func TestLoad_RepoBenchGatewayYamls(t *testing.T) {
 			c, err := Load(p)
 			if err != nil {
 				t.Fatalf("Load(%s) error = %v", tt.file, err)
-			}
-			if Path() != p {
-				t.Errorf("Path() = %q, want %q", Path(), p)
 			}
 			if c.HttpPort != 8081 {
 				t.Errorf("httpPort = %d, want 8081", c.HttpPort)
