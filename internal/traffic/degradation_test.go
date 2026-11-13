@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 )
 
 func TestDegradationManager_Metadata(t *testing.T) {
@@ -14,7 +14,7 @@ func TestDegradationManager_Metadata(t *testing.T) {
 	if m.Name() != "degradation" {
 		t.Errorf("Name() = %q, want degradation", m.Name())
 	}
-	if m.Phase() != types.PhaseForward {
+	if m.Phase() != policy.PhaseForward {
 		t.Errorf("Phase() = %v, want PhaseForward", m.Phase())
 	}
 	if m.Priority() != 500 {
@@ -53,7 +53,7 @@ func TestDegradationRule_Defaults(t *testing.T) {
 
 func TestDegradationManager_Process_UnknownRoutePassthrough(t *testing.T) {
 	m := NewDegradationManager(nil)
-	fc := &types.FilterContext{Ctx: context.Background(), Route: "nope", Metadata: map[string]string{}}
+	fc := &policy.FilterContext{Ctx: context.Background(), Route: "nope", Metadata: map[string]string{}}
 	ok, err := m.Process(fc)
 	if err != nil || !ok {
 		t.Fatalf("Process(unknown route) = (%v, %v), want (true, nil)", ok, err)
@@ -73,7 +73,7 @@ func TestDegradationManager_TriggerAndFallback(t *testing.T) {
 	}})
 
 	// 未触发前：透传
-	fc := &types.FilterContext{Ctx: context.Background(), Route: "login", Data: []byte("orig"), Metadata: map[string]string{}}
+	fc := &policy.FilterContext{Ctx: context.Background(), Route: "login", Data: []byte("orig"), Metadata: map[string]string{}}
 	if ok, err := m.Process(fc); err != nil || !ok {
 		t.Fatalf("Process before trigger = (%v, %v)", ok, err)
 	}
@@ -91,7 +91,7 @@ func TestDegradationManager_TriggerAndFallback(t *testing.T) {
 	}
 
 	// 冷却期内：替换为兜底数据
-	fc = &types.FilterContext{Ctx: context.Background(), Route: "login", Data: []byte("orig"), Metadata: map[string]string{}}
+	fc = &policy.FilterContext{Ctx: context.Background(), Route: "login", Data: []byte("orig"), Metadata: map[string]string{}}
 	if ok, err := m.Process(fc); err != nil || !ok {
 		t.Fatalf("Process degraded = (%v, %v)", ok, err)
 	}
@@ -126,7 +126,7 @@ func TestDegradationManager_NoTriggerBelowThreshold(t *testing.T) {
 	if got := m.GetTriggeredCount(); got != 0 {
 		t.Errorf("GetTriggeredCount() = %d, want 0", got)
 	}
-	fc := &types.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
+	fc := &policy.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
 	if ok, _ := m.Process(fc); !ok {
 		t.Fatal("Process = false, want true")
 	}
@@ -154,7 +154,7 @@ func TestDegradationManager_SlidingWindowEvictsOldErrors(t *testing.T) {
 	// 冷却过期后 Process 恢复
 	r := m.rules["api"]
 	r.lastDegrade.Store(time.Now().Add(-time.Hour).Unix())
-	fc := &types.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
+	fc := &policy.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
 	if ok, _ := m.Process(fc); !ok {
 		t.Fatal("Process = false, want true")
 	}
@@ -190,7 +190,7 @@ func TestDegradationManager_CooldownExpiryRecovers(t *testing.T) {
 	}
 
 	// 冷却未过：仍是兜底
-	fc := &types.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
+	fc := &policy.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
 	if ok, _ := m.Process(fc); !ok {
 		t.Fatal("Process = false, want true")
 	}
@@ -200,7 +200,7 @@ func TestDegradationManager_CooldownExpiryRecovers(t *testing.T) {
 
 	// 冷却到期：首次 Process 恢复，不再替换数据
 	r.lastDegrade.Store(time.Now().Add(-2 * time.Hour).Unix())
-	fc = &types.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
+	fc = &policy.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
 	if ok, _ := m.Process(fc); !ok {
 		t.Fatal("Process = false, want true")
 	}
@@ -223,7 +223,7 @@ func TestDegradationManager_DisableEnable(t *testing.T) {
 	m.RecordResult("api", true)
 
 	m.Disable()
-	fc := &types.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
+	fc := &policy.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
 	if ok, err := m.Process(fc); err != nil || !ok {
 		t.Fatalf("Process disabled = (%v, %v), want (true, nil)", ok, err)
 	}
@@ -232,7 +232,7 @@ func TestDegradationManager_DisableEnable(t *testing.T) {
 	}
 
 	m.Enable()
-	fc = &types.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
+	fc = &policy.FilterContext{Ctx: context.Background(), Route: "api", Data: []byte("orig"), Metadata: map[string]string{}}
 	if ok, _ := m.Process(fc); !ok {
 		t.Fatal("Process = false after Enable")
 	}
@@ -261,7 +261,7 @@ func TestDegradationManager_AddRuleZeroValuesNoDivByZero(t *testing.T) {
 		t.Errorf("GetTriggeredCount() = %d, want 1 (100%% errors over default window)", got)
 	}
 
-	fc := &types.FilterContext{Ctx: context.Background(), Route: "hot", Metadata: map[string]string{}}
+	fc := &policy.FilterContext{Ctx: context.Background(), Route: "hot", Metadata: map[string]string{}}
 	if ok, _ := m.Process(fc); !ok {
 		t.Fatal("Process = false, want true")
 	}

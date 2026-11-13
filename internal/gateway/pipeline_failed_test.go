@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 )
 
 // failingLogicClient SendMessage 恒失败的桩。
@@ -21,7 +21,7 @@ func (failingLogicClient) SendMessage(*protoGw.StreamData) error {
 // 失败必须只计 messagesFailed（stats.failed）。
 func TestPipelineForwardFailureCountsFailedNotDroppedFull(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
-	gw.filterChain = types.NewFilterChain()
+	gw.filterChain = policy.NewFilterChain()
 
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user", false)
 	gw.connectionManager.SetConnectionServerID(connID, "logic:zone:1")
@@ -50,7 +50,7 @@ func TestPipelineForwardFailureCountsFailedNotDroppedFull(t *testing.T) {
 // TestPipelineForwardSuccessCountsForwarded 成功路径转发计数。
 func TestPipelineForwardSuccessCountsForwarded(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
-	gw.filterChain = types.NewFilterChain()
+	gw.filterChain = policy.NewFilterChain()
 
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user", false)
 	gw.connectionManager.SetConnectionServerID(connID, "logic:zone:1")

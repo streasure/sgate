@@ -10,7 +10,7 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
@@ -186,11 +186,11 @@ type OTelSpanFilter struct {
 	Tracer *OTelTracer
 }
 
-func (f *OTelSpanFilter) Name() string             { return "otel-tracer" }
-func (f *OTelSpanFilter) Phase() types.FilterPhase { return types.PhaseForward }
-func (f *OTelSpanFilter) Priority() int            { return 50 }
+func (f *OTelSpanFilter) Name() string              { return "otel-tracer" }
+func (f *OTelSpanFilter) Phase() policy.FilterPhase { return policy.PhaseForward }
+func (f *OTelSpanFilter) Priority() int             { return 50 }
 
-func (f *OTelSpanFilter) Process(fc *types.FilterContext) (bool, error) {
+func (f *OTelSpanFilter) Process(fc *policy.FilterContext) (bool, error) {
 	if f.Tracer == nil {
 		return true, nil
 	}
@@ -212,7 +212,7 @@ func (f *OTelSpanFilter) Process(fc *types.FilterContext) (bool, error) {
 }
 
 func init() {
-	types.RegisterFilter("otel-tracer", func(cfg map[string]any) (types.Filter, error) {
+	policy.RegisterFilter("otel-tracer", func(cfg map[string]any) (policy.Filter, error) {
 		c := config.OTelTracerConfig{
 			Endpoint:    gatewayutil.GetString(cfg, "endpoint"),
 			ServiceName: gatewayutil.GetString(cfg, "serviceName"),

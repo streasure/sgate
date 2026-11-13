@@ -14,7 +14,7 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/gatewayutil"
 )
 
@@ -57,15 +57,15 @@ func NewJWTAuthFilter(cfg config.JWTAuthConfig) *JWTAuthFilter {
 	return f
 }
 
-func (f *JWTAuthFilter) Name() string             { return "jwt-auth" }
-func (f *JWTAuthFilter) Phase() types.FilterPhase { return types.PhaseAuth }
-func (f *JWTAuthFilter) Priority() int            { return 100 }
+func (f *JWTAuthFilter) Name() string              { return "jwt-auth" }
+func (f *JWTAuthFilter) Phase() policy.FilterPhase { return policy.PhaseAuth }
+func (f *JWTAuthFilter) Priority() int             { return 100 }
 
 // Process 鉴权处理：从元数据取 token，校验签名+过期+撤销。
 // fail-closed：连接已绑定用户（UserUUID 非空）且无 token → 拒绝；
 // 未绑定（LoginGate 前/未登录帧）→ 放行，由 loginKey/流水线兜底。
 // skipRoutes 支持路由名与 cmd 十进制串两种键。
-func (f *JWTAuthFilter) Process(fc *types.FilterContext) (bool, error) {
+func (f *JWTAuthFilter) Process(fc *policy.FilterContext) (bool, error) {
 	if len(f.skipRoutes) > 0 {
 		if _, ok := f.skipRoutes[fc.Route]; ok {
 			return true, nil
@@ -193,7 +193,7 @@ func (f *JWTAuthFilter) Issue(claims JWTClaims) (string, error) {
 
 // init 自动注册到 SPI 注册表
 func init() {
-	types.RegisterFilter("jwt-auth", func(cfg map[string]any) (types.Filter, error) {
+	policy.RegisterFilter("jwt-auth", func(cfg map[string]any) (policy.Filter, error) {
 		c := config.JWTAuthConfig{
 			Secret:      gatewayutil.GetString(cfg, "secret"),
 			Issuer:      gatewayutil.GetString(cfg, "issuer"),

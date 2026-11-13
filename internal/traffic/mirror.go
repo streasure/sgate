@@ -7,7 +7,7 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhash"
@@ -20,7 +20,7 @@ type TrafficMirror struct {
 	mu         sync.RWMutex
 	percent    int // 镜像比例 0-100
 	sender     *mirrorSender
-	queue      chan *types.FilterContext
+	queue      chan *policy.FilterContext
 	stopCh     chan struct{}
 	stopOnce   sync.Once
 	workersWG  sync.WaitGroup
@@ -35,7 +35,7 @@ func NewTrafficMirror(cfg config.TrafficMirrorConfig) *TrafficMirror {
 	tm := &TrafficMirror{
 		ctx:     context.Background(),
 		percent: cfg.Percent,
-		queue:   make(chan *types.FilterContext, max(cfg.QueueSize, 1024)),
+		queue:   make(chan *policy.FilterContext, max(cfg.QueueSize, 1024)),
 		stopCh:  make(chan struct{}),
 	}
 	if cfg.Enabled {
@@ -67,11 +67,11 @@ type MirrorFilter struct {
 	TM *TrafficMirror
 }
 
-func (mf *MirrorFilter) Name() string             { return "traffic-mirror" }
-func (mf *MirrorFilter) Phase() types.FilterPhase { return types.PhasePostAuth }
-func (mf *MirrorFilter) Priority() int            { return 300 }
+func (mf *MirrorFilter) Name() string              { return "traffic-mirror" }
+func (mf *MirrorFilter) Phase() policy.FilterPhase { return policy.PhasePostAuth }
+func (mf *MirrorFilter) Priority() int             { return 300 }
 
-func (mf *MirrorFilter) Process(fc *types.FilterContext) (bool, error) {
+func (mf *MirrorFilter) Process(fc *policy.FilterContext) (bool, error) {
 	if mf.TM == nil || mf.TM.enabled.Load() == 0 {
 		return true, nil
 	}
@@ -80,7 +80,7 @@ func (mf *MirrorFilter) Process(fc *types.FilterContext) (bool, error) {
 }
 
 // Mirror 异步投递镜像任务
-func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
+func (tm *TrafficMirror) Mirror(fc *policy.FilterContext) {
 	tm.mu.RLock()
 	percent := tm.percent
 	tm.mu.RUnlock()
@@ -93,7 +93,7 @@ func (tm *TrafficMirror) Mirror(fc *types.FilterContext) {
 		return
 	}
 	// 浅拷贝上下文，避免共享可变状态
-	clone := &types.FilterContext{
+	clone := &policy.FilterContext{
 		ConnectionID: fc.ConnectionID,
 		RemoteIP:     fc.RemoteIP,
 		Route:        fc.Route,
@@ -125,7 +125,7 @@ func (tm *TrafficMirror) worker() {
 // 镜像只复制客户端上行：SessionId/Cmd/Data/UserKey/ClientIp 即目标侧重放所需全部字段；
 // Route 是本侧路由键，StreamData 无对应字段（目标侧按 cmd 分发），不透传。
 // 发送失败计入 sendFailed（与队列满丢弃 dropped 分开计），不回压主流程。
-func (tm *TrafficMirror) forward(fc *types.FilterContext) {
+func (tm *TrafficMirror) forward(fc *policy.FilterContext) {
 	if tm.sender == nil {
 		tm.sendFailed.Add(1)
 		return
@@ -167,7 +167,7 @@ func (tm *TrafficMirror) SendFailed() int64 {
 }
 
 func init() {
-	types.RegisterFilter("traffic-mirror", func(cfg map[string]any) (types.Filter, error) {
+	policy.RegisterFilter("traffic-mirror", func(cfg map[string]any) (policy.Filter, error) {
 		c := config.TrafficMirrorConfig{
 			Percent:    gatewayutil.GetInt(cfg, "percent"),
 			TargetAddr: gatewayutil.GetString(cfg, "targetAddr"),

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 )
 
 // wasmFromHex 解析十六进制为 wasm 二进制（测试内嵌最小模块，避免依赖 wat2wasm）。
@@ -118,7 +118,7 @@ func TestNewWasmFilter(t *testing.T) {
 	if w.Name() != "wasm-filter" {
 		t.Errorf("Name() = %q, want wasm-filter", w.Name())
 	}
-	if w.Phase() != types.PhasePostAuth {
+	if w.Phase() != policy.PhasePostAuth {
 		t.Errorf("Phase() = %v, want PhasePostAuth", w.Phase())
 	}
 	if w.Priority() != 250 {
@@ -183,7 +183,7 @@ func TestWasmFilter_Process_Branches(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewWasmFilter error = %v", err)
 			}
-			fc := &types.FilterContext{
+			fc := &policy.FilterContext{
 				Ctx:          t.Context(),
 				ConnectionID: "c1",
 				UserUUID:     "u1",
@@ -222,7 +222,7 @@ func TestWasmFilter_Process_CapturesInput(t *testing.T) {
 	SetWasmRuntime(stub)
 
 	w, _ := NewWasmFilter("mod", "process")
-	fc := &types.FilterContext{
+	fc := &policy.FilterContext{
 		Ctx:          t.Context(),
 		ConnectionID: "c1",
 		UserUUID:     "u1",
@@ -297,7 +297,7 @@ func TestApplyWasmOutput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fc := &types.FilterContext{Route: "orig", UserUUID: "origU", Metadata: map[string]string{}}
+			fc := &policy.FilterContext{Route: "orig", UserUUID: "origU", Metadata: map[string]string{}}
 			applyWasmOutput(fc, tt.out) // 不得 panic
 			if tt.wantR != "" && fc.Route != tt.wantR {
 				t.Errorf("Route = %q, want %q", fc.Route, tt.wantR)
@@ -416,7 +416,7 @@ func TestWasmFilter_WithRealWazeroRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWasmFilter error = %v", err)
 	}
-	fc := &types.FilterContext{Ctx: t.Context(), ConnectionID: "c", Metadata: map[string]string{}}
+	fc := &policy.FilterContext{Ctx: t.Context(), ConnectionID: "c", Metadata: map[string]string{}}
 	ok, err := w.Process(fc)
 	if err != nil {
 		t.Fatalf("Process error = %v", err)

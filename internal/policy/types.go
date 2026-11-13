@@ -1,6 +1,6 @@
 // Package types 定义 gateway 各子包共享的接口与类型，
 // 打破 core ↔ security/traffic 之间的循环依赖。
-package types
+package policy
 
 import (
 	"cmp"

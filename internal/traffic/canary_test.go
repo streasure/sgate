@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/uhash"
 )
 
@@ -36,8 +36,8 @@ func findConnIDWithoutHash(t *testing.T, atLeast int) string {
 	return ""
 }
 
-func newFC(connID, user string) *types.FilterContext {
-	return &types.FilterContext{
+func newFC(connID, user string) *policy.FilterContext {
+	return &policy.FilterContext{
 		Ctx:          context.Background(),
 		ConnectionID: connID,
 		UserUUID:     user,
@@ -50,7 +50,7 @@ func TestCanaryFilter_Metadata(t *testing.T) {
 	if f.Name() != "canary" {
 		t.Errorf("Name() = %q, want canary", f.Name())
 	}
-	if f.Phase() != types.PhasePostAuth {
+	if f.Phase() != policy.PhasePostAuth {
 		t.Errorf("Phase() = %v, want PhasePostAuth", f.Phase())
 	}
 	if f.Priority() != 200 {
@@ -240,7 +240,7 @@ func TestCanaryFilter_NilMetadataHitPanicsGuard(t *testing.T) {
 	// 命中路径要求 fc.Metadata 非 nil（写入 canary 标记）；
 	// 未命中路径不触碰 Metadata，nil map 也应安全。
 	f := NewCanaryFilter(config.CanaryConfig{Percent: 0})
-	fc := &types.FilterContext{Ctx: context.Background(), ConnectionID: "conn-0"}
+	fc := &policy.FilterContext{Ctx: context.Background(), ConnectionID: "conn-0"}
 	ok, err := f.Process(fc)
 	if err != nil || !ok {
 		t.Fatalf("Process(nil metadata, no hit) = (%v, %v), want (true, nil)", ok, err)

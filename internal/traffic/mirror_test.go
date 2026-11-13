@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/uhash"
 )
 
@@ -16,7 +16,7 @@ func newManualMirror(percent, queueCap int) *TrafficMirror {
 	return &TrafficMirror{
 		ctx:     context.Background(),
 		percent: percent,
-		queue:   make(chan *types.FilterContext, queueCap),
+		queue:   make(chan *policy.FilterContext, queueCap),
 		stopCh:  make(chan struct{}),
 	}
 }
@@ -28,7 +28,7 @@ func TestTrafficMirror_Metadata(t *testing.T) {
 	if mf.Name() != "traffic-mirror" {
 		t.Errorf("Name() = %q, want traffic-mirror", mf.Name())
 	}
-	if mf.Phase() != types.PhasePostAuth {
+	if mf.Phase() != policy.PhasePostAuth {
 		t.Errorf("Phase() = %v, want PhasePostAuth", mf.Phase())
 	}
 	if mf.Priority() != 300 {
@@ -47,8 +47,8 @@ func TestTrafficMirror_SampleRateBoundaries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tm := newManualMirror(tt.percent, 16)
-			tm.Mirror(&types.FilterContext{ConnectionID: "conn-0", Metadata: map[string]string{}})
-			tm.Mirror(&types.FilterContext{ConnectionID: "conn-1", Metadata: map[string]string{}})
+			tm.Mirror(&policy.FilterContext{ConnectionID: "conn-0", Metadata: map[string]string{}})
+			tm.Mirror(&policy.FilterContext{ConnectionID: "conn-1", Metadata: map[string]string{}})
 			forwarded, dropped := tm.Stats()
 			wantForwarded := int64(0)
 			if tt.percent == 100 {
@@ -71,8 +71,8 @@ func TestTrafficMirror_DeterministicSampling(t *testing.T) {
 	hitID := findConnIDWithHash(t, percent)
 	missID := findConnIDWithoutHash(t, percent)
 
-	tm.Mirror(&types.FilterContext{ConnectionID: hitID})
-	tm.Mirror(&types.FilterContext{ConnectionID: missID})
+	tm.Mirror(&policy.FilterContext{ConnectionID: hitID})
+	tm.Mirror(&policy.FilterContext{ConnectionID: missID})
 	forwarded, dropped := tm.Stats()
 	if forwarded != 1 {
 		t.Errorf("forwarded = %d, want 1 (only hash<%d connection)", forwarded, percent)
@@ -81,8 +81,8 @@ func TestTrafficMirror_DeterministicSampling(t *testing.T) {
 		t.Errorf("dropped = %d, want 0", dropped)
 	}
 	// 同一连接重复采样结果稳定
-	tm.Mirror(&types.FilterContext{ConnectionID: hitID})
-	tm.Mirror(&types.FilterContext{ConnectionID: missID})
+	tm.Mirror(&policy.FilterContext{ConnectionID: hitID})
+	tm.Mirror(&policy.FilterContext{ConnectionID: missID})
 	if forwarded, _ := tm.Stats(); forwarded != 2 {
 		t.Errorf("forwarded = %d after repeats, want 2", forwarded)
 	}
@@ -91,9 +91,9 @@ func TestTrafficMirror_DeterministicSampling(t *testing.T) {
 func TestTrafficMirror_QueueFullDropsNonBlocking(t *testing.T) {
 	tm := newManualMirror(100, 1) // 队列容量 1，无 worker 消费
 
-	tm.Mirror(&types.FilterContext{ConnectionID: "c1"})
-	tm.Mirror(&types.FilterContext{ConnectionID: "c2"}) // 队列满 → 丢弃计数
-	tm.Mirror(&types.FilterContext{ConnectionID: "c3"}) // 继续丢弃，且不得阻塞
+	tm.Mirror(&policy.FilterContext{ConnectionID: "c1"})
+	tm.Mirror(&policy.FilterContext{ConnectionID: "c2"}) // 队列满 → 丢弃计数
+	tm.Mirror(&policy.FilterContext{ConnectionID: "c3"}) // 继续丢弃，且不得阻塞
 
 	forwarded, dropped := tm.Stats()
 	if forwarded != 1 {
@@ -106,7 +106,7 @@ func TestTrafficMirror_QueueFullDropsNonBlocking(t *testing.T) {
 
 func TestTrafficMirror_ClonesContext(t *testing.T) {
 	tm := newManualMirror(100, 1)
-	orig := &types.FilterContext{
+	orig := &policy.FilterContext{
 		Ctx:          context.Background(),
 		ConnectionID: "c1",
 		RemoteIP:     "10.0.0.1",
@@ -143,12 +143,12 @@ func TestTrafficMirror_ClonesContext(t *testing.T) {
 
 func TestTrafficMirror_UpdatePercent(t *testing.T) {
 	tm := newManualMirror(0, 4)
-	tm.Mirror(&types.FilterContext{ConnectionID: "c1"})
+	tm.Mirror(&policy.FilterContext{ConnectionID: "c1"})
 	if f, _ := tm.Stats(); f != 0 {
 		t.Fatalf("forwarded = %d at percent 0, want 0", f)
 	}
 	tm.UpdatePercent(100)
-	tm.Mirror(&types.FilterContext{ConnectionID: "c1"})
+	tm.Mirror(&policy.FilterContext{ConnectionID: "c1"})
 	if f, _ := tm.Stats(); f != 1 {
 		t.Errorf("forwarded = %d after UpdatePercent(100), want 1", f)
 	}
@@ -157,7 +157,7 @@ func TestTrafficMirror_UpdatePercent(t *testing.T) {
 func TestTrafficMirror_MirrorFilterDisabled(t *testing.T) {
 	// TM 为 nil：直接放行
 	mf := &MirrorFilter{}
-	ok, err := mf.Process(&types.FilterContext{Ctx: context.Background()})
+	ok, err := mf.Process(&policy.FilterContext{Ctx: context.Background()})
 	if err != nil || !ok {
 		t.Fatalf("Process(nil TM) = (%v, %v), want (true, nil)", ok, err)
 	}
@@ -166,7 +166,7 @@ func TestTrafficMirror_MirrorFilterDisabled(t *testing.T) {
 	tm := NewTrafficMirror(config.TrafficMirrorConfig{Enabled: false, Percent: 100})
 	defer tm.Stop()
 	mf = &MirrorFilter{TM: tm}
-	ok, err = mf.Process(&types.FilterContext{Ctx: context.Background(), ConnectionID: "c1"})
+	ok, err = mf.Process(&policy.FilterContext{Ctx: context.Background(), ConnectionID: "c1"})
 	if err != nil || !ok {
 		t.Fatalf("Process(disabled) = (%v, %v), want (true, nil)", ok, err)
 	}
@@ -180,7 +180,7 @@ func TestTrafficMirror_MirrorFilterEnabledEnqueues(t *testing.T) {
 	defer tm.Stop()
 	mf := &MirrorFilter{TM: tm}
 
-	ok, err := mf.Process(&types.FilterContext{Ctx: context.Background(), ConnectionID: "c1", Metadata: map[string]string{}})
+	ok, err := mf.Process(&policy.FilterContext{Ctx: context.Background(), ConnectionID: "c1", Metadata: map[string]string{}})
 	if err != nil || !ok {
 		t.Fatalf("Process(enabled) = (%v, %v), want (true, nil)", ok, err)
 	}
@@ -207,7 +207,7 @@ func TestTrafficMirror_StopIdempotent(t *testing.T) {
 func TestTrafficMirror_WorkersConsumeQueue(t *testing.T) {
 	tm := NewTrafficMirror(config.TrafficMirrorConfig{Enabled: true, Percent: 100, QueueSize: 16})
 	for i := 0; i < 10; i++ {
-		tm.Mirror(&types.FilterContext{ConnectionID: "c", Metadata: map[string]string{}})
+		tm.Mirror(&policy.FilterContext{ConnectionID: "c", Metadata: map[string]string{}})
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -239,7 +239,7 @@ func TestTrafficMirror_MirrorPercentHashConsistentWithCanary(t *testing.T) {
 	tm := newManualMirror(percent, 32)
 	for i := 0; i < 20; i++ {
 		id := "conn-" + string(rune('a'+i))
-		tm.Mirror(&types.FilterContext{ConnectionID: id})
+		tm.Mirror(&policy.FilterContext{ConnectionID: id})
 	}
 	forwarded, _ := tm.Stats()
 	var want int64

@@ -6,7 +6,7 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 )
 
 // countingAbortFilter 记录调用次数并中止链，用于验证过滤器是否被执行。
@@ -14,10 +14,10 @@ type countingAbortFilter struct {
 	calls atomic.Int64
 }
 
-func (f *countingAbortFilter) Name() string             { return "counting-abort" }
-func (f *countingAbortFilter) Phase() types.FilterPhase { return types.PhaseForward }
-func (f *countingAbortFilter) Priority() int            { return 100 }
-func (f *countingAbortFilter) Process(fc *types.FilterContext) (bool, error) {
+func (f *countingAbortFilter) Name() string              { return "counting-abort" }
+func (f *countingAbortFilter) Phase() policy.FilterPhase { return policy.PhaseForward }
+func (f *countingAbortFilter) Priority() int             { return 100 }
+func (f *countingAbortFilter) Process(fc *policy.FilterContext) (bool, error) {
 	f.calls.Add(1)
 	fc.Abort = true
 	return false, nil
@@ -35,7 +35,7 @@ func (fakeLogicClient) SendMessage(*protoGw.StreamData) error { return nil }
 func TestPipelineFastPathSkippedWhenFilterChainNonEmpty(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	filter := &countingAbortFilter{}
-	fc := types.NewFilterChain()
+	fc := policy.NewFilterChain()
 	fc.AddFilter(filter)
 	gw.filterChain = fc
 
@@ -65,7 +65,7 @@ func TestPipelineFastPathSkippedWhenFilterChainNonEmpty(t *testing.T) {
 // （不调用过滤器，直接转发）。
 func TestPipelineFastPathEmptyChainStillFast(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
-	gw.filterChain = types.NewFilterChain() // 空链
+	gw.filterChain = policy.NewFilterChain() // 空链
 
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user", false)
 	gw.connectionManager.SetConnectionServerID(connID, "logic:zone:1")

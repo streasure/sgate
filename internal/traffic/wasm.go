@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/gatewayutil"
 )
 
@@ -64,13 +64,13 @@ func NewWasmFilter(moduleName, funcName string) (*WasmFilter, error) {
 	}, nil
 }
 
-func (w *WasmFilter) Name() string             { return "wasm-filter" }
-func (w *WasmFilter) Phase() types.FilterPhase { return types.PhasePostAuth }
-func (w *WasmFilter) Priority() int            { return 250 }
+func (w *WasmFilter) Name() string              { return "wasm-filter" }
+func (w *WasmFilter) Phase() policy.FilterPhase { return policy.PhasePostAuth }
+func (w *WasmFilter) Priority() int             { return 250 }
 
 // Process 把请求交给 WASM 插件处理
 // 返回码：0 = 放行；非 0 = 中止
-func (w *WasmFilter) Process(fc *types.FilterContext) (bool, error) {
+func (w *WasmFilter) Process(fc *policy.FilterContext) (bool, error) {
 	// 构造输入：route|conn|user|data
 	input := buildWasmInput(fc)
 	out, code, err := w.runtime.Invoke(w.moduleName, w.funcName, input)
@@ -90,7 +90,7 @@ func (w *WasmFilter) Process(fc *types.FilterContext) (bool, error) {
 	return true, nil
 }
 
-func buildWasmInput(fc *types.FilterContext) []byte {
+func buildWasmInput(fc *policy.FilterContext) []byte {
 	// 简单 TLV 编码：route + conn + user + data
 	// 实际 wasm 插件按相同协议解析
 	var buf []byte
@@ -111,7 +111,7 @@ func buildWasmInput(fc *types.FilterContext) []byte {
 	return buf
 }
 
-func applyWasmOutput(fc *types.FilterContext, out []byte) {
+func applyWasmOutput(fc *policy.FilterContext, out []byte) {
 	// 简单解析：第一个字节为 tag，后续为值
 	if len(out) < 3 {
 		return
@@ -146,7 +146,7 @@ func applyWasmOutput(fc *types.FilterContext, out []byte) {
 var ErrWasmRuntimeNotEnabled = fmt.Errorf("wasm runtime is not initialized")
 
 func init() {
-	types.RegisterFilter("wasm-filter", func(cfg map[string]any) (types.Filter, error) {
+	policy.RegisterFilter("wasm-filter", func(cfg map[string]any) (policy.Filter, error) {
 		return NewWasmFilter(gatewayutil.GetString(cfg, "module"), gatewayutil.GetString(cfg, "function"))
 	})
 }

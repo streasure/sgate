@@ -5,14 +5,14 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/obs"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 )
 
 // TestPipelineRecordsLatency 回归：延迟记录曾与 tracer 强耦合（span != nil 才 Record），
 // tracing 关闭时 /stats 的 P50/P95/P99 恒 0。解耦后每条转发消息必须产生非零延迟样本。
 func TestPipelineRecordsLatency(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
-	gw.filterChain = types.NewFilterChain()
+	gw.filterChain = policy.NewFilterChain()
 
 	connID := gw.connectionManager.AddConnection(&kickMockConn{}, "real-user", false)
 	gw.connectionManager.SetConnectionServerID(connID, "logic:zone:1")

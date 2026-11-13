@@ -3,9 +3,9 @@ package component
 import (
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/obs"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
-	"github.com/streasure/sgate/internal/types"
 )
 
 // Resources 运行时资源容器：组合根（main）创建一次并注入全部组件与 Gateway，
@@ -16,7 +16,7 @@ import (
 type Resources struct {
 	// FC 过滤器链：main 创建并按配置 LoadByName 加载 SPI 过滤器，
 	// 组件 Init 注册内置过滤器，Gateway 执行。
-	FC *types.FilterChain
+	FC *policy.FilterChain
 
 	// security（Order 100）Init 写入。
 	WhitelistBlacklist *security.WhitelistBlacklist
@@ -44,5 +44,5 @@ type Resources struct {
 // SPI 注册表在 NewFilterChain 时快照，故须在组件包 init 注册之后调用——
 // 组合根 main 天然满足）。
 func NewResources() *Resources {
-	return &Resources{FC: types.NewFilterChain()}
+	return &Resources{FC: policy.NewFilterChain()}
 }

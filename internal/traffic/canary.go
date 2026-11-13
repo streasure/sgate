@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/uhash"
 )
@@ -35,12 +35,12 @@ func NewCanaryFilter(cfg config.CanaryConfig) *CanaryFilter {
 	return f
 }
 
-func (f *CanaryFilter) Name() string             { return "canary" }
-func (f *CanaryFilter) Phase() types.FilterPhase { return types.PhasePostAuth }
-func (f *CanaryFilter) Priority() int            { return 200 }
+func (f *CanaryFilter) Name() string              { return "canary" }
+func (f *CanaryFilter) Phase() policy.FilterPhase { return policy.PhasePostAuth }
+func (f *CanaryFilter) Priority() int             { return 200 }
 
 // Process 判断是否命中灰度
-func (f *CanaryFilter) Process(fc *types.FilterContext) (bool, error) {
+func (f *CanaryFilter) Process(fc *policy.FilterContext) (bool, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
@@ -99,7 +99,7 @@ func (f *CanaryFilter) UpdateConfig(cfg config.CanaryConfig) {
 }
 
 func init() {
-	types.RegisterFilter("canary", func(cfg map[string]any) (types.Filter, error) {
+	policy.RegisterFilter("canary", func(cfg map[string]any) (policy.Filter, error) {
 		c := config.CanaryConfig{
 			Percent:     gatewayutil.GetInt(cfg, "percent"),
 			TargetRoute: gatewayutil.GetString(cfg, "targetRoute"),

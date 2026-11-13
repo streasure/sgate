@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/tlog"
 )
@@ -71,12 +71,12 @@ func NewDegradationManager(rules []config.DegradationRuleConfig) *DegradationMan
 	return m
 }
 
-func (m *DegradationManager) Name() string             { return "degradation" }
-func (m *DegradationManager) Phase() types.FilterPhase { return types.PhaseForward }
-func (m *DegradationManager) Priority() int            { return 500 }
+func (m *DegradationManager) Name() string              { return "degradation" }
+func (m *DegradationManager) Phase() policy.FilterPhase { return policy.PhaseForward }
+func (m *DegradationManager) Priority() int             { return 500 }
 
 // Process 检查是否应降级（返回兜底而非转发）
-func (m *DegradationManager) Process(fc *types.FilterContext) (bool, error) {
+func (m *DegradationManager) Process(fc *policy.FilterContext) (bool, error) {
 	if m.enabled.Load() == 0 {
 		return true, nil
 	}
@@ -164,7 +164,7 @@ func (m *DegradationManager) AddRule(rc config.DegradationRuleConfig) {
 }
 
 func init() {
-	types.RegisterFilter("degradation", func(cfg map[string]any) (types.Filter, error) {
+	policy.RegisterFilter("degradation", func(cfg map[string]any) (policy.Filter, error) {
 		rules := []config.DegradationRuleConfig{}
 		if v, ok := cfg["rules"]; ok {
 			if arr, ok := v.([]any); ok {

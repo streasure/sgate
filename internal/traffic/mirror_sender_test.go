@@ -8,7 +8,7 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"google.golang.org/grpc"
 )
 
@@ -123,7 +123,7 @@ func TestTrafficMirror_WorkerForwardsToTarget(t *testing.T) {
 	})
 	defer tm.Stop()
 
-	tm.Mirror(&types.FilterContext{
+	tm.Mirror(&policy.FilterContext{
 		ConnectionID: "conn-9", UserUUID: "user-9", Cmd: 77, Data: []byte("body"),
 	})
 	got := recvOne(t, sink)
@@ -142,7 +142,7 @@ func TestTrafficMirror_NoTargetCountsSendFailed(t *testing.T) {
 	tm := NewTrafficMirror(config.TrafficMirrorConfig{Enabled: true, Percent: 100, QueueSize: 16, Workers: 1})
 	defer tm.Stop()
 
-	tm.Mirror(&types.FilterContext{ConnectionID: "conn-1", Cmd: 1})
+	tm.Mirror(&policy.FilterContext{ConnectionID: "conn-1", Cmd: 1})
 	deadline := time.Now().Add(3 * time.Second)
 	for tm.SendFailed() == 0 {
 		if time.Now().After(deadline) {

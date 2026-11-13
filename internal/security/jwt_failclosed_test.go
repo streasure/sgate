@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 )
 
 func newTestJWT() *JWTAuthFilter {
@@ -19,7 +19,7 @@ func newTestJWT() *JWTAuthFilter {
 // TestJWTFailClosed_BoundUserNoTokenReject 绑定用户但无 token → 拒绝（fail-closed）。
 func TestJWTFailClosed_BoundUserNoTokenReject(t *testing.T) {
 	f := newTestJWT()
-	fc := &types.FilterContext{
+	fc := &policy.FilterContext{
 		ConnectionID: "c1",
 		UserUUID:     "s1:u1", // 已登录绑定
 		Metadata:     map[string]string{},
@@ -39,7 +39,7 @@ func TestJWTFailClosed_BoundUserNoTokenReject(t *testing.T) {
 // TestJWTFailClosed_UnboundUserPasses 未绑定（LoginGate 前）无 token → 放行。
 func TestJWTFailClosed_UnboundUserPasses(t *testing.T) {
 	f := newTestJWT()
-	fc := &types.FilterContext{
+	fc := &policy.FilterContext{
 		ConnectionID: "c1",
 		Metadata:     map[string]string{},
 	}
@@ -62,7 +62,7 @@ func TestJWTFailClosed_InvalidTokenReject(t *testing.T) {
 		if tok == "" {
 			continue
 		}
-		fc := &types.FilterContext{
+		fc := &policy.FilterContext{
 			ConnectionID: "c1",
 			UserUUID:     "s1:u1",
 			Metadata:     map[string]string{f.headerName: tok},
@@ -83,7 +83,7 @@ func TestJWTFailClosed_InvalidTokenReject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	fc := &types.FilterContext{
+	fc := &policy.FilterContext{
 		ConnectionID: "c1",
 		UserUUID:     "s1:u1",
 		Metadata:     map[string]string{f.headerName: expired},
@@ -101,7 +101,7 @@ func TestJWTFailClosed_SkipRoutes(t *testing.T) {
 		SkipRoutes: []string{"login_gate", "1000001"},
 	})
 	for _, route := range []string{"login_gate", "1000001"} {
-		fc := &types.FilterContext{
+		fc := &policy.FilterContext{
 			ConnectionID: "c1",
 			UserUUID:     "s1:u1", // 已绑定 + 无 token，若 skip 失败会拒绝
 			Route:        route,

@@ -8,7 +8,7 @@ import (
 	protoGw "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/sgate/internal/logiclink"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/util/netutil"
 )
 
@@ -17,19 +17,19 @@ import (
 // 镜像链路（TrafficMirror.Mirror）会深拷贝后入队；新增过滤器不得在
 // Process 返回后继续持有 fc 或其字段。
 var (
-	filterContextPool = sync.Pool{New: func() any { return &types.FilterContext{} }}
+	filterContextPool = sync.Pool{New: func() any { return &policy.FilterContext{} }}
 	filterMetaPool    = sync.Pool{New: func() any { return make(map[string]string, 2) }}
 )
 
 // getFilterContext 从池中取出并重置过滤器上下文。
-func getFilterContext() *types.FilterContext {
-	fc := filterContextPool.Get().(*types.FilterContext)
-	*fc = types.FilterContext{Metadata: filterMetaPool.Get().(map[string]string)}
+func getFilterContext() *policy.FilterContext {
+	fc := filterContextPool.Get().(*policy.FilterContext)
+	*fc = policy.FilterContext{Metadata: filterMetaPool.Get().(map[string]string)}
 	return fc
 }
 
 // putFilterContext 归还过滤器上下文（含 Metadata 清空入池）。
-func putFilterContext(fc *types.FilterContext) {
+func putFilterContext(fc *policy.FilterContext) {
 	if fc == nil {
 		return
 	}
@@ -37,7 +37,7 @@ func putFilterContext(fc *types.FilterContext) {
 		clear(fc.Metadata)
 		filterMetaPool.Put(fc.Metadata)
 	}
-	*fc = types.FilterContext{}
+	*fc = policy.FilterContext{}
 	filterContextPool.Put(fc)
 }
 
@@ -46,7 +46,7 @@ func putFilterContext(fc *types.FilterContext) {
 // connObj/routeKey 由 pipeline 阶段2/阶段3 查得后传入：热路径每消息一次连接
 // 查找与一次路由键计算，此处复用避免重复开销（同 ID 必得同一连接对象）。
 // connObj 为 nil 时回退 RemoteAddr 解析（仅测试等直调场景）。
-func (g *Gateway) buildFilterContext(c gnet.Conn, connObj *dataplane.Connection, routeKey string, data []byte, connectionID string, cmd int32) *types.FilterContext {
+func (g *Gateway) buildFilterContext(c gnet.Conn, connObj *dataplane.Connection, routeKey string, data []byte, connectionID string, cmd int32) *policy.FilterContext {
 	fc := getFilterContext()
 	fc.Ctx = g.ctx
 	fc.ConnectionID = connectionID
@@ -78,7 +78,7 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, connObj *dataplane.Connection
 		return msg, true
 	}
 	fcx := g.buildFilterContext(c, connObj, routeKey, data, connectionID, cmd)
-	for phase := types.PhasePreAuth; phase <= types.PhaseForward; phase++ {
+	for phase := policy.PhasePreAuth; phase <= policy.PhaseForward; phase++ {
 		if !g.filterChain.RunByPhase(phase, fcx) {
 			g.messagesDroppedFilterChain.Add(1)
 			putFilterContext(fcx)

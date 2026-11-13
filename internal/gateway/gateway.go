@@ -24,10 +24,10 @@ import (
 	"github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
+	"github.com/streasure/sgate/internal/policy"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/sgate/internal/transport"
-	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/panicutil"
@@ -82,7 +82,7 @@ type Gateway struct {
 	grpcServerMu   sync.Mutex // 保护 grpcServer 赋值/读取（启动协程与 Close 竞态）
 
 	// 企业级扩展组件
-	filterChain   *types.FilterChain          // SPI 过滤器链
+	filterChain   *policy.FilterChain         // SPI 过滤器链
 	jwtAuth       *security.JWTAuthFilter     // JWT 鉴权
 	degradation   *traffic.DegradationManager // 降级管理
 	configCenter  cluster.ConfigCenter        // etcd 配置中心

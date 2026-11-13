@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/types"
+	"github.com/streasure/sgate/internal/policy"
 )
 
 func TestJWTAuthFilter_RevokeRejectsToken(t *testing.T) {
@@ -47,7 +47,7 @@ func TestJWTAuthFilter_ProcessSetsJtiAndExpMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	fc := &types.FilterContext{
+	fc := &policy.FilterContext{
 		ConnectionID: "c1",
 		Metadata:     map[string]string{f.headerName: token},
 	}
