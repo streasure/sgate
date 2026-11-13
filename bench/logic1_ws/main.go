@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	logic "github.com/streasure/logic"
 	protocol "github.com/streasure/protocol/gateway"
 	"github.com/streasure/sgate/bench/logutil"
-	logic "github.com/streasure/sgate/internal/logic"
 	"github.com/streasure/sgate/internal/obs"
 
 	"google.golang.org/protobuf/proto"

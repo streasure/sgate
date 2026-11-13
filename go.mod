@@ -7,6 +7,7 @@ require (
 	github.com/gobwas/ws v1.4.0
 	github.com/panjf2000/gnet/v2 v2.9.7
 	github.com/shirou/gopsutil/v3 v3.24.5
+	github.com/streasure/logic v0.0.0
 	github.com/streasure/protocol v1.0.4
 	github.com/streasure/util v1.0.11
 	github.com/tetratelabs/wazero v1.8.0
@@ -67,6 +68,7 @@ require (
 )
 
 replace (
+	github.com/streasure/logic => ../logic
 	github.com/streasure/protocol => ../protocol
 	github.com/streasure/treasure-slog => ../treasure-slog
 	github.com/streasure/util => ../util

@@ -1,6 +1,6 @@
 # sgate 逻辑服接入手册
 
-面向游戏逻辑服（或任意后端业务进程）开发者：如何嵌入 `internal/logic` SDK、接入 sgate 网关、收发消息与实现可靠推送。
+面向游戏逻辑服（或任意后端业务进程）开发者：如何嵌入 `github.com/streasure/logic` SDK、接入 sgate 网关、收发消息与实现可靠推送。
 客户端侧对接见 [client-guide.md](client-guide.md)；架构原理见 [architecture.md](architecture.md)。
 
 参考实现（本仓可运行的最完整逻辑服）：`bench/logic_reliable`（登录处理 + 分组 + `PushReliable` + 指标对账，推荐首选参考）、`bench/logic2_ws` / `logic2_tcp`（下行推送）、`bench/logic1_ws` / `logic1_tcp`（上行接收）。
@@ -21,7 +21,7 @@
 
 1. **flip 模式**：不是网关连你，而是**你的进程主动拨入网关**（gRPC 双向流 `GatewayStream.onData`）。网关地址来自 etcd 发现（网关 `discovery.registerSelf: true` 时注册）或 `gateways` 静态配置。
 2. **连接责任在你侧**：拨入失败/断线由 SDK 自动重拨（`dialer`），网关重启后会自动恢复，无需网关感知你的存在。
-3. **SDK 不参与网关分层依赖**：`internal/logic` 是独立嵌入库，`internal/gateway`、`internal/backend` 均不 import 它——你只需 import 它，与网关之间只有 gRPC + etcd 两个契约。
+3. **SDK 不参与网关分层依赖**：`github.com/streasure/logic` 是独立仓嵌入库（sgate 的 `internal/gateway`、`internal/backend` 均不 import 它）——你只需 import 它，与网关之间只有 gRPC + etcd 两个契约。
 
 ---
 
@@ -34,7 +34,7 @@ import (
     "context"
 
     protocol "github.com/streasure/protocol/gateway"
-    logic "github.com/streasure/sgate/internal/logic"
+    logic "github.com/streasure/logic"
     "github.com/streasure/util/tlog"
     "google.golang.org/protobuf/proto"
 )
@@ -52,7 +52,7 @@ func main() {
     )
 
     // 2. 注册上行处理器（cmd → 请求 protobuf 类型 → 处理函数）
-    svc.RegisterProto(routes.CmdLoginGate, &protocol.LoginGateReq{}, 0,
+    svc.RegisterProto(protocol.CmdLoginGate, &protocol.LoginGateReq{}, 0,
         func(ctx *logic.Context, req proto.Message) proto.Message {
             _ = req.(*protocol.LoginGateReq)
             // ctx.ConnectionID = 会话 ID；ctx.UserUUID = {serverId}:{userId}
@@ -89,7 +89,7 @@ func main() {
 | `WithShardCount(n)` | shardCount | `0` = `NumCPU×8` | 拨入每个网关的流分片数；与网关 `stream.shardCount`（96）对齐 |
 | `WithReliability(cfg)` | reliability.* | 见 §7 | 可靠推送参数，零值字段回退默认 |
 
-其他 `ServiceConfig` 字段（`connGroupCount` 默认 4、`dispatchWorkers`、`streamSendChSize`、`advertiseAddr`、etcd 账号密码等）见 `internal/logic/config.go` 注释。
+其他 `ServiceConfig` 字段（`connGroupCount` 默认 4、`dispatchWorkers`、`streamSendChSize`、`advertiseAddr`、etcd 账号密码等）见 logic 仓 `config.go` 注释。
 
 **etcd 注册**：键 `/services/{belong}/SERVER_TYPE_LOGICSERVER:{zone}/{instanceId}`，地址为 `AdvertiseAddr`（默认取出口 IPv4 + listenPort），lease TTL 10s 自动续期。`ServiceID` 为空则不注册（仅静态 `gateways` 模式可用）。
 

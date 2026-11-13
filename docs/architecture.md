@@ -102,9 +102,8 @@ Gateway 结构体承载全部接入侧状态：
 
 ### 2.4 internal/routes
 
-- `routes.go`：命令码常量（`CmdLoginGate`、`CmdPushBatch` 等）、路由解析、`ExtractMessageFrame`
+- `routes.go`：路由解析、`ExtractMessageFrame`、`IsUDPCmd` 号段判定（命令码常量已下沉 protocol 仓 `gateway/cmds.go`）
 - `frame.go`：`DecodeClientMessage` / `MarshalClientMessage` / `MarshalClientError` / `NewErrorResponse`
-- `logicstream.go`：flip 握手元数据（`MetaLogicID`/`MetaShardIdx` 等）与 `LogicStreamMeta` 解析
 
 routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免循环依赖。
 
@@ -120,9 +119,9 @@ routes 被 gateway 和 backend 共同依赖，承载协议帧编解码，避免�
 | `obs` | 追踪、pprof、健康检查、延迟分位数 |
 | `types` | 过滤器链、公共类型定义 |
 
-### 2.6 internal/logic（逻辑服侧嵌入库，网关不依赖）
+### 2.6 logic SDK（独立仓 github.com/streasure/logic，网关不依赖）
 
-`internal/logic` 是提供给逻辑服进程嵌入的 SDK，`internal/gateway`、`internal/backend` 均不 import 它（不参与上述分层依赖）。它封装：gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）、`Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*` 等）消费；网关侧与之对接的是 `internal/backend` 的 `GRPCServer` flip 流入口。详见 [README §十](../README.md#十逻辑层-api)。
+logic SDK 是提供给逻辑服进程嵌入的 SDK，**已独立为模块 `github.com/streasure/logic`**（自 sgate `internal/logic` 迁出；sgate 的 bench 以 `go.mod` `replace => ../logic` 引用）。`internal/gateway`、`internal/backend` 均不 import 它（不参与上述分层依赖）。它封装：gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）、`Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*` 等）消费；网关侧与之对接的是 `internal/backend` 的 `GRPCServer` flip 流入口。详见 [README §十](../README.md#十逻辑层-api)。
 
 ---
 

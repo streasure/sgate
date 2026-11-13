@@ -782,7 +782,7 @@ Get-Process -Name gateway,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,b
 | `CmdMsgAck` | `1100013` | 可靠推送端到端 ACK（C→L，body 为 `MsgAck{repeated int64 seq_ids}`，批量确认） |
 | `CmdPushBatch` | `9000002` | 网关批量推送 |
 
-**命令号段分配约定**：`1200000~1299999` 为 UDP 通道段（`routes.CmdUDPRangeStart/End`，含段内传输控制命令 `1200000~1200005`），该段消息按号段分流到 UDP 关联通道；**其余号段（含 ≥1300000）一律 WS**。判据："这条消息丢了，客户端能否靠下一帧自愈？"能 → UDP 段（位置/AOI/血条等状态同步）；不能（结算/掉落/交易）→ 留在 WS 段。号段是三端（sgate/logic/客户端）共享的 wire 契约，分配走代码评审与版本发布，**不进 yaml 配置**。
+**命令号段分配约定**：`1200000~1299999` 为 UDP 通道段（`gateway.CmdUDPRangeStart/End`，定义于 protocol 仓 `gateway/cmds.go`，含段内传输控制命令 `1200000~1200005`），该段消息按号段分流到 UDP 关联通道；**其余号段（含 ≥1300000）一律 WS**。判据："这条消息丢了，客户端能否靠下一帧自愈？"能 → UDP 段（位置/AOI/血条等状态同步）；不能（结算/掉落/交易）→ 留在 WS 段。号段是三端（sgate/logic/客户端）共享的 wire 契约，分配走代码评审与版本发布，**不进 yaml 配置**。
 
 ### 9.1 UDP 关联通道（`udp.enabled` 开关，默认关闭）
 
@@ -854,7 +854,7 @@ Broadcast(command, data)                    // 向所有网关广播
 
 **验收实测**（50 连接四场景，详见 roadmap P2-1）：基线 `pushed = acked + droppedOffline` 严格等式；`-drop-ack 10%` 时重传全部补齐、`giveUps=0`；完全不 ACK 时窗口背压不 panic；杀网关断流 `droppedOffline` 如实清窗、重启后新推送全部收齐且去重不重复执行。
 
-**`internal/logic` 的定位**：逻辑服侧的嵌入库，网关侧不引用它（`internal/gateway`、`internal/backend` 均不 import）。它封装 gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）和 `Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓中由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*`、`bench/logic_reliable`）消费，真实逻辑服进程同样以此库嵌入；网关侧与之对接的是 `internal/backend` 的 flip 流入口 `GRPCServer`。**完整对接步骤见 [docs/logic-guide.md](docs/logic-guide.md)**。
+**logic SDK 的定位**：逻辑服侧的嵌入库，已独立为模块 **`github.com/streasure/logic`**（自本仓 `internal/logic` 迁出，sgate 以 `go.mod` `replace => ../logic` 引用），网关侧不引用它（`internal/gateway`、`internal/backend` 均不 import）。它封装 gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）和 `Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓中由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*`、`bench/logic_reliable`）消费，真实逻辑服进程 `import logic "github.com/streasure/logic"` 嵌入；网关侧与之对接的是 `internal/backend` 的 flip 流入口 `GRPCServer`。**完整对接步骤见 [docs/logic-guide.md](docs/logic-guide.md)**。
 
 ---
 
@@ -909,7 +909,6 @@ internal/traffic/         灰度、镜像、降级、WASM
 internal/cluster/         etcd 自注册、配置中心、告警 webhook（无 Leader 选举）
 internal/obs/             监控、追踪、pprof、延迟分位数
 internal/types/           过滤器链、公共类型
-internal/logic/           逻辑服侧嵌入库（网关不依赖，见 §十）
 
 bench/                    每场景独立 main：bench1/2（tcp/ws）、bench_1m、
                           logic1/2（tcp/ws）、logic_reliable、client_ack、
