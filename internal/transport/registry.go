@@ -1,4 +1,4 @@
-package protocol
+package transport
 
 import (
 	"fmt"
@@ -18,10 +18,10 @@ func Register(p Protocol) {
 	defer registryMu.Unlock()
 	name := p.Name()
 	if name == "" {
-		panic("protocol.Register: protocol name cannot be empty")
+		panic("transport.Register: protocol name cannot be empty")
 	}
 	if _, exists := registry[name]; exists {
-		panic(fmt.Sprintf("protocol.Register: protocol %q already registered", name))
+		panic(fmt.Sprintf("transport.Register: protocol %q already registered", name))
 	}
 	registry[name] = p
 }

@@ -24,9 +24,9 @@ import (
 	"github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/obs"
-	"github.com/streasure/sgate/internal/protocol"
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
+	"github.com/streasure/sgate/internal/transport"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/gatewayutil"
 	"github.com/streasure/util/netutil"
@@ -402,9 +402,9 @@ func (g *Gateway) StartServices() error {
 }
 
 func (g *Gateway) startTransports(cfg *config.Config) {
-	for _, transport := range cfg.Transports {
-		port := transport.Port
-		transportType := transport.Type
+	for _, tr := range cfg.Transports {
+		port := tr.Port
+		transportType := tr.Type
 		g.SetTransportType(fmt.Sprintf("%d", port), transportType)
 
 		// 协议插件化：从注册表查找协议实现（tcp/websocket/udp）
@@ -413,7 +413,7 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 		if protoName == "" {
 			protoName = "tcp"
 		}
-		proto := protocol.Get(protoName)
+		proto := transport.Get(protoName)
 		if proto == nil {
 			tlog.Error(g.ctx, "unknown protocol type=%s port=%d (no plugin registered)", protoName, port)
 			continue
@@ -422,7 +422,7 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 		tlog.Info(g.ctx, "starting gateway transport port=%d type=%s", port, protoName)
 		addr := fmt.Sprintf(":%d", port) // 仅用于日志标识
 		panicutil.Go(g.ctx, fmt.Sprintf("gateway.transportRun addr=%s", addr), func() {
-			if err := proto.Start(g, transport, cfg); err != nil {
+			if err := proto.Start(g, tr, cfg); err != nil {
 				tlog.Error(g.ctx, "gateway transport stopped addr=%s error=%v", addr, err)
 			}
 		})
