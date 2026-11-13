@@ -1,115 +1,65 @@
 package gateway
 
 import (
-	"crypto/subtle"
-	"encoding/json"
-	"net/http"
-	"strings"
 	"time"
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/config"
+	"github.com/streasure/sgate/internal/admin"
 	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/util/tlog"
-	"github.com/streasure/util/uhttp"
 	"google.golang.org/protobuf/proto"
 )
 
-func (g *Gateway) adminAuthed(r *http.Request) bool {
+// ============================================================================
+// admin.Backend 实现：管理端 HTTP 面经消费方定义接口回调数据面能力
+// ============================================================================
+
+// AdminToken 实现 admin.Backend：读现役配置的管理端 Bearer 令牌（空 = 关闭）。
+func (g *Gateway) AdminToken() string {
 	cfg := g.cfg.Load()
 	if cfg == nil {
-		return false
+		return ""
 	}
-	token := cfg.Admin.Token
-	if token == "" {
-		return false
-	}
-	auth := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(auth, prefix) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(token)) == 1
+	return cfg.Admin.Token
 }
 
-// adminHandler 包装管理端接口：统一做方法校验与 Bearer 鉴权，handler 只保留业务逻辑。
-func (g *Gateway) adminHandler(method string, h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != method {
-			uhttp.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-			return
-		}
-		if !g.adminAuthed(r) {
-			uhttp.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		h(w, r)
-	}
-}
+// RateLimitEnabled 实现 admin.Backend：限流器是否启用。
+func (g *Gateway) RateLimitEnabled() bool { return g.rateLimiter != nil }
 
-// registerAdminRoutes 在 stats mux 上挂载管理端接口。
-// 封禁端点已移除（单向 Kick 模型：封禁经 loginserver 管理，sgate 仅执行 Kick RPC）。
-func (g *Gateway) registerAdminRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/admin/maintenance", g.adminHandler(http.MethodPost, g.handleAdminMaintenance))
-	mux.HandleFunc("/admin/ratelimit", g.adminHandler(http.MethodPost, g.handleAdminRateLimit))
-}
-
-type rateLimitAdminRequest struct {
-	MaxTokens       int    `json:"maxTokens"`
-	TokenRefresh    string `json:"tokenRefresh"`
-	RouteMaxTokens  int    `json:"routeMaxTokens"`
-	GlobalMaxTokens int    `json:"globalMaxTokens"`
-}
-
-// handleAdminRateLimit 热更限流参数（无需重启）。body 字段缺省 0/"" 表示恢复默认派生值。
-func (g *Gateway) handleAdminRateLimit(w http.ResponseWriter, r *http.Request) {
+// UpdateRateLimit 实现 admin.Backend：应用限流参数并同步现役配置，
+// 返回实际生效值供管理端响应（原 handleAdminRateLimit 业务部分，日志随迁）。
+func (g *Gateway) UpdateRateLimit(tokens int, refresh time.Duration, routeMaxTokens, globalMaxTokens int) (admin.RateLimitOutcome, error) {
 	if g.rateLimiter == nil {
-		uhttp.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "rate limiter not enabled"})
-		return
-	}
-	var req rateLimitAdminRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
-		return
-	}
-	refresh := time.Second
-	if req.TokenRefresh != "" {
-		d, err := time.ParseDuration(req.TokenRefresh)
-		if err != nil || d <= 0 {
-			uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tokenRefresh"})
-			return
-		}
-		refresh = d
-	}
-	tokens := req.MaxTokens
-	if tokens <= 0 {
-		tokens = config.DefaultRateLimitMaxTokens
+		return admin.RateLimitOutcome{}, admin.ErrRateLimiterDisabled
 	}
 	g.rateLimiter.UpdateRate(tokens, refresh)
-	g.rateLimiter.SetRouteMaxTokens(req.RouteMaxTokens)
-	g.rateLimiter.SetGlobalMaxTokens(req.GlobalMaxTokens)
+	g.rateLimiter.SetRouteMaxTokens(routeMaxTokens)
+	g.rateLimiter.SetGlobalMaxTokens(globalMaxTokens)
 
 	// 同步现役配置，避免下次热更/快照回退旧值
 	if cur := g.cfg.Load(); cur != nil {
 		clone := *cur
 		clone.Security.RateLimit.MaxTokens = tokens
 		clone.Security.RateLimit.TokenRefresh = refresh.String()
-		clone.Security.RateLimit.RouteMaxTokens = req.RouteMaxTokens
-		clone.Security.RateLimit.GlobalMaxTokens = req.GlobalMaxTokens
+		clone.Security.RateLimit.RouteMaxTokens = routeMaxTokens
+		clone.Security.RateLimit.GlobalMaxTokens = globalMaxTokens
 		g.cfg.Store(&clone)
 	}
 
 	tlog.Info(g.ctx, "admin rate limit updated maxTokens=%d refresh=%v routeMaxTokens=%d globalMaxTokens=%d",
-		tokens, refresh, req.RouteMaxTokens, req.GlobalMaxTokens)
-	uhttp.WriteJSON(w, http.StatusOK, map[string]any{
-		"ok":              true,
-		"maxTokens":       tokens,
-		"tokenRefresh":    refresh.String(),
-		"routeMaxTokens":  req.RouteMaxTokens,
-		"globalMaxTokens": req.GlobalMaxTokens,
-	})
+		tokens, refresh, routeMaxTokens, globalMaxTokens)
+	return admin.RateLimitOutcome{
+		MaxTokens:       tokens,
+		TokenRefresh:    refresh.String(),
+		RouteMaxTokens:  routeMaxTokens,
+		GlobalMaxTokens: globalMaxTokens,
+	}, nil
 }
+
+// ============================================================================
+// 登出（业务，不属于管理端 HTTP 面）
+// ============================================================================
 
 func (g *Gateway) revokeConnJWT(conn *dataplane.Connection) {
 	jti := conn.GetJWTJti()

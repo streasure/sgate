@@ -14,6 +14,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
+	"github.com/streasure/sgate/internal/admin"
 	"github.com/streasure/sgate/internal/config"
 	"google.golang.org/protobuf/proto"
 )
@@ -125,15 +126,15 @@ func maintenanceConfig() *config.Config {
 }
 
 func maintenanceReq(action, serverID, zone, reason string) *http.Request {
-	body, _ := json.Marshal(maintenanceRequest{Action: action, ServerID: serverID, Zone: zone, Reason: reason})
+	body, _ := json.Marshal(admin.MaintenanceRequest{Action: action, ServerID: serverID, Zone: zone, Reason: reason})
 	r := httptest.NewRequest(http.MethodPost, "/admin/maintenance", bytes.NewReader(body))
 	r.Header.Set("Authorization", "Bearer secret")
 	return r
 }
 
-func decodeMaintenanceResp(t *testing.T, rec *httptest.ResponseRecorder) maintenanceResponse {
+func decodeMaintenanceResp(t *testing.T, rec *httptest.ResponseRecorder) admin.MaintenanceResponse {
 	t.Helper()
-	var resp maintenanceResponse
+	var resp admin.MaintenanceResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
 	}
@@ -283,7 +284,7 @@ func TestHandleAdminMaintenance(t *testing.T) {
 
 	// enable by serverId
 	rec := httptest.NewRecorder()
-	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, maintenanceReq("enable", "s1", "", "upgrade"))
+	adminServe(gw, rec, maintenanceReq("enable", "s1", "", "upgrade"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("enable status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -324,7 +325,7 @@ func TestHandleAdminMaintenance(t *testing.T) {
 
 	// disable 后恢复登录检查
 	rec = httptest.NewRecorder()
-	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, maintenanceReq("disable", "s1", "", ""))
+	adminServe(gw, rec, maintenanceReq("disable", "s1", "", ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("disable status=%d", rec.Code)
 	}
@@ -344,30 +345,30 @@ func TestHandleAdminMaintenance_Validation(t *testing.T) {
 
 	// GET → 405
 	rec := httptest.NewRecorder()
-	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, httptest.NewRequest(http.MethodGet, "/admin/maintenance", nil))
+	adminServe(gw, rec, httptest.NewRequest(http.MethodGet, "/admin/maintenance", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET status=%d want 405", rec.Code)
 	}
 
 	// serverId 与 zone 同时给 → 400
 	rec = httptest.NewRecorder()
-	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, maintenanceReq("enable", "s1", "z1", ""))
+	adminServe(gw, rec, maintenanceReq("enable", "s1", "z1", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("both params status=%d want 400", rec.Code)
 	}
 
 	// 非法 action → 400
 	rec = httptest.NewRecorder()
-	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, maintenanceReq("pause", "s1", "", ""))
+	adminServe(gw, rec, maintenanceReq("pause", "s1", "", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad action status=%d want 400", rec.Code)
 	}
 
 	// 未授权 → 401
-	body, _ := json.Marshal(maintenanceRequest{Action: "enable", ServerID: "s1"})
+	body, _ := json.Marshal(admin.MaintenanceRequest{Action: "enable", ServerID: "s1"})
 	r := httptest.NewRequest(http.MethodPost, "/admin/maintenance", bytes.NewReader(body))
 	rec = httptest.NewRecorder()
-	gw.adminHandler(http.MethodPost, gw.handleAdminMaintenance)(rec, r)
+	adminServe(gw, rec, r)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no auth status=%d want 401", rec.Code)
 	}

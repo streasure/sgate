@@ -1,16 +1,13 @@
 package gateway
 
 import (
-	"encoding/json"
-	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/streasure/sgate/internal/admin"
 	"github.com/streasure/sgate/internal/dataplane"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
-	"github.com/streasure/util/uhttp"
 )
 
 // 切维护（maintenance）：通过 HTTP admin 接口按 serverId 或 zone 将目标服务器置入维护，
@@ -160,47 +157,15 @@ func (g *Gateway) kickConnectionsAsync(matched []*dataplane.Connection, reason s
 	})
 }
 
-// maintenanceRequest /admin/maintenance 请求体。
-type maintenanceRequest struct {
-	Action   string `json:"action"`   // enable | disable
-	ServerID string `json:"serverId"` // 与 zone 二选一
-	Zone     string `json:"zone"`     // 与 serverId 二选一
-	Reason   string `json:"reason"`   // 可选，踢人通知附带原因
-}
-
-// maintenanceResponse /admin/maintenance 响应体。
-type maintenanceResponse struct {
-	OK       bool   `json:"ok"`
-	Action   string `json:"action"`
-	ServerID string `json:"serverId,omitempty"`
-	Zone     string `json:"zone,omitempty"`
-	Reason   string `json:"reason,omitempty"`
-	Matched  int    `json:"matched"`            // 命中的在线连接数
-	Accepted bool   `json:"accepted,omitempty"` // enable：踢人任务已异步受理
-	Removed  bool   `json:"removed,omitempty"`  // disable：标记确实被移除
-}
-
-// handleAdminMaintenance POST /admin/maintenance 切维护接口（方法与鉴权由 adminHandler 统一处理）。
-func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
-	var req maintenanceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
-		return
-	}
-	serverID := strings.TrimSpace(req.ServerID)
-	zone := strings.TrimSpace(req.Zone)
-	if (serverID == "") == (zone == "") {
-		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "serverId or zone required (exactly one)"})
-		return
-	}
+// SetMaintenance 实现 admin.Backend：切维护（打标记 → 快照 → 异步踢人 / 移除标记）。
+// 处理时序保持原语义（必须先标记后踢人，杜绝踢完又被补进来的竞态）：
+// enable 同步打标记 → 快照命中连接 → 异步 worker 并发踢人（通知 → 逻辑服下线 → 断连）。
+func (g *Gateway) SetMaintenance(action, serverID, zone, reason string) (admin.MaintenanceOutcome, error) {
 	if g.maintenance == nil {
-		uhttp.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "maintenance not initialized"})
-		return
+		return admin.MaintenanceOutcome{}, admin.ErrMaintenanceNotInitialized
 	}
-
-	switch strings.ToLower(strings.TrimSpace(req.Action)) {
+	switch action {
 	case "enable":
-		reason := strings.TrimSpace(req.Reason)
 		if reason == "" {
 			reason = "maintenance"
 		}
@@ -212,18 +177,13 @@ func (g *Gateway) handleAdminMaintenance(w http.ResponseWriter, r *http.Request)
 		g.kickConnectionsAsync(matched, reason)
 		tlog.Info(g.ctx, "maintenance enabled action=enable serverId=%s zone=%s reason=%s matched=%d",
 			serverID, zone, reason, len(matched))
-		uhttp.WriteJSON(w, http.StatusOK, maintenanceResponse{
-			OK: true, Action: "enable", ServerID: serverID, Zone: zone,
-			Reason: reason, Matched: len(matched), Accepted: true,
-		})
+		return admin.MaintenanceOutcome{Action: "enable", Matched: len(matched), Reason: reason}, nil
 	case "disable":
 		removed := g.maintenance.disable(serverID, zone)
 		tlog.Info(g.ctx, "maintenance disabled action=disable serverId=%s zone=%s removed=%v",
 			serverID, zone, removed)
-		uhttp.WriteJSON(w, http.StatusOK, maintenanceResponse{
-			OK: true, Action: "disable", ServerID: serverID, Zone: zone, Removed: removed,
-		})
+		return admin.MaintenanceOutcome{Action: "disable", Removed: removed}, nil
 	default:
-		uhttp.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "action must be enable or disable"})
+		return admin.MaintenanceOutcome{}, admin.ErrBadMaintenanceAction
 	}
 }

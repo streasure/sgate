@@ -202,7 +202,7 @@ func (g *Gateway) StartStatsServer(addr string) {
 	mux.HandleFunc("/health", g.ServeHealthHTTP)
 	mux.HandleFunc("/ready", g.ServeHealthHTTP)
 	mux.HandleFunc("/live", g.ServeHealthHTTP)
-	g.registerAdminRoutes(mux)
+	g.adminSrv.Register(mux)
 	srv := &http.Server{Addr: addr, Handler: mux}
 	g.statsServer = srv
 	panicutil.Go(g.ctx, "gateway.statsServer", func() {

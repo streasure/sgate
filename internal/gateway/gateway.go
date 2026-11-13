@@ -20,6 +20,7 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoLogin "github.com/streasure/protocol/loginserver"
+	"github.com/streasure/sgate/internal/admin"
 	"github.com/streasure/sgate/internal/cluster"
 	"github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
@@ -65,7 +66,9 @@ type Gateway struct {
 	protection        atomic.Pointer[config.ProtectionConfig] // 热路径无锁读取
 	grpcCfg           atomic.Pointer[config.GRPCConfig]       // 热更新原子替换
 	streamCfg         atomic.Pointer[config.StreamConfig]     // 热更新原子替换
-	maintenance       *maintenanceState                       // 切维护状态（serverId/zone → reason）
+	// 管理端 HTTP 面（Bearer 鉴权 + 端点注册），经消费方定义的 admin.Backend 回调本实例
+	adminSrv    *admin.Server
+	maintenance *maintenanceState // 切维护状态（serverId/zone → reason）
 	// 安全防护组件
 	whitelistBlacklist *security.WhitelistBlacklist
 	circuitBreakerMgr  *security.CircuitBreakerManager
@@ -944,6 +947,7 @@ func newGateway(cfg *config.Config, configPath string, res *component.Resources)
 	gw.grpcCfg.Store(&stored.GRPC)
 	gw.streamCfg.Store(&stored.Stream)
 	gw.maintenance = newMaintenanceState()
+	gw.adminSrv = admin.New(gw)
 	gw.ctx = ctx
 	gw.ctxCancel = cancel
 	gw.pipeline = NewMessagePipeline(gw)

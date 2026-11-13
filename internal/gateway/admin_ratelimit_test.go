@@ -11,7 +11,14 @@ import (
 	"github.com/streasure/sgate/internal/security"
 )
 
-// TestAdminRateLimitAuth 鉴权失败必须 401。
+// adminServe 经 admin.Server 注册后的 mux 分发请求（覆盖方法校验 + Bearer 鉴权 + 业务 handler）。
+func adminServe(gw *Gateway, rec *httptest.ResponseRecorder, req *http.Request) {
+	mux := http.NewServeMux()
+	gw.adminSrv.Register(mux)
+	mux.ServeHTTP(rec, req)
+}
+
+// TestAdminRateLimitAuth 鉴权失败必须 401（配置无令牌 = 管理端关闭）。
 func TestAdminRateLimitAuth(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
@@ -19,26 +26,23 @@ func TestAdminRateLimitAuth(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/ratelimit", bytes.NewReader([]byte(`{}`)))
 	rr := httptest.NewRecorder()
-	gw.handleAdminRateLimit(rr, req)
-	// 未走 adminHandler 鉴权包装时 handler 本身不校验；验证 adminHandler 包装行为
-	h := gw.adminHandler(http.MethodPost, gw.handleAdminRateLimit)
-	rr2 := httptest.NewRecorder()
-	h(rr2, req)
-	if rr2.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 without Bearer token", rr2.Code)
+	adminServe(gw, rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 without configured token", rr.Code)
 	}
 }
 
 // TestAdminRateLimitApply 热更后 UpdateRate 生效。
 func TestAdminRateLimitApply(t *testing.T) {
-	gw := newTestGateway(minimalConfig())
+	gw := newTestGateway(maintenanceConfig()) // Admin.Token=secret
 	defer gw.Close()
 	gw.rateLimiter = security.NewRateLimiter(100, time.Second)
 
 	body := `{"maxTokens":5000,"tokenRefresh":"2s","routeMaxTokens":20000,"globalMaxTokens":50000}`
 	req := httptest.NewRequest(http.MethodPost, "/admin/ratelimit", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer secret")
 	rr := httptest.NewRecorder()
-	gw.handleAdminRateLimit(rr, req)
+	adminServe(gw, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
@@ -59,13 +63,14 @@ func TestAdminRateLimitApply(t *testing.T) {
 
 // TestAdminRateLimitDisabledRateLimiter 未启用限流返回 503。
 func TestAdminRateLimitDisabledRateLimiter(t *testing.T) {
-	gw := newTestGateway(minimalConfig())
+	gw := newTestGateway(maintenanceConfig())
 	defer gw.Close()
 	gw.rateLimiter = nil
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/ratelimit", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer secret")
 	rr := httptest.NewRecorder()
-	gw.handleAdminRateLimit(rr, req)
+	adminServe(gw, rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rr.Code)
 	}
