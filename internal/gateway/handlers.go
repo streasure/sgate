@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/streasure/sgate/internal/backend"
+	"github.com/streasure/sgate/internal/logiclink"
 
 	"github.com/streasure/sgate/internal/dataplane"
 
@@ -387,7 +387,7 @@ func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action
 	protoGw.PutClientMessage(message)
 	if result.Error != nil {
 		if result.ProtoMsg != nil {
-			backend.PutStreamData(result.ProtoMsg)
+			logiclink.PutStreamData(result.ProtoMsg)
 		}
 		_ = g.sendFrameSync(connectionID, protoGw.NewErrorFrame("error", result.Error.Error(), "", ""))
 		return result.Action

@@ -1,4 +1,4 @@
-package backend
+package logiclink
 
 import (
 	"context"

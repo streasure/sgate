@@ -24,7 +24,7 @@ const (
 
 // mirrorSender 把镜像流量经 protocol GatewayStream.OnData 双向流推给镜像目标。
 //
-// 自含轻量 gRPC 客户端（而非复用 backend.LogicClient）：包依赖方向严格
+// 自含轻量 gRPC 客户端（而非复用 logiclink.LogicClient）：包依赖方向严格
 // gateway → backend → connection，traffic 不得反向 import backend。
 //
 // 镜像目标必须是独立的测试环境 logic：镜像流在目标侧与真实网关无异，会绑定

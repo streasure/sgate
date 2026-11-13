@@ -1,4 +1,4 @@
-package backend
+package logiclink
 
 import (
 	"sync"
@@ -102,7 +102,7 @@ func (pool *LogicClientPool) Attach(meta protoGw.LogicStreamMeta, stream dataStr
 	pool.mu.Unlock()
 
 	if stale != nil {
-		panicutil.Go(client.ctx, "backend.staleClientClose", func() {
+		panicutil.Go(client.ctx, "logiclink.staleClientClose", func() {
 			stale.Close()
 		})
 	}

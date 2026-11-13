@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/sgate/internal/backend"
+	"github.com/streasure/sgate/internal/logiclink"
 
 	"github.com/streasure/sgate/internal/dataplane"
 
@@ -54,8 +54,8 @@ type Gateway struct {
 	configUpdateChan  chan *config.Config
 	messageIntegrity  *MessageIntegrity
 	tracer            *obs.Tracer
-	logicClient       *backend.LogicClient
-	logicClientPool   *backend.LogicClientPool
+	logicClient       *logiclink.LogicClient
+	logicClientPool   *logiclink.LogicClientPool
 	serverID          string
 	overloadProtector *OverloadProtector
 	grpcServer        *ugrpc.Server
@@ -376,14 +376,14 @@ func (g *Gateway) StartServices() error {
 	})
 
 	g.logicClient.SetGateway(g)
-	g.logicClientPool = backend.NewLogicClientPool(g)
+	g.logicClientPool = logiclink.NewLogicClientPool(g)
 
 	// gRPC服务器
 	grpcCfg := g.GetGRPCConfig()
 	grpcPort := fmt.Sprintf(":%d", grpcCfg.Port)
 	tlog.Info(g.ctx, "starting gRPC server port=%s", grpcPort)
 	panicutil.Go(g.ctx, "gateway.grpcBootstrap", func() {
-		if server, err := backend.StartGRPCServer(g, g.logicClientPool, grpcPort, grpcCfg.MaxMessageSize, grpcCfg.WindowSize, cfg.Security.KickInternalToken); err != nil {
+		if server, err := logiclink.StartGRPCServer(g, g.logicClientPool, grpcPort, grpcCfg.MaxMessageSize, grpcCfg.WindowSize, cfg.Security.KickInternalToken); err != nil {
 			tlog.Error(g.ctx, "failed to start gRPC server error=%v", err)
 		} else {
 			g.grpcServerMu.Lock()
@@ -929,7 +929,7 @@ func newGateway(cfg *config.Config, configPath string, res *component.Resources)
 
 		configUpdateChan:          make(chan *config.Config, 1),
 		overloadProtector:         NewOverloadProtector(cfg.Protection),
-		logicClient:               backend.NewLogicClient(nil),
+		logicClient:               logiclink.NewLogicClient(nil),
 		msgRate:                   newMessageRateTracker(60 * time.Second),
 		gatewayID:                 gatewayInstanceID(*cfg),
 		connectionDurationTracker: obs.NewLatencyTracker(10000),
@@ -982,5 +982,5 @@ func gatewayInstanceID(cfg config.Config) string {
 	return fmt.Sprintf("%s-%d-%d", hostname, os.Getpid(), cfg.GRPC.Port)
 }
 
-// 编译期校验：Gateway 实现 backend.GatewayInterface。
-var _ backend.GatewayInterface = (*Gateway)(nil)
+// 编译期校验：Gateway 实现 logiclink.GatewayInterface。
+var _ logiclink.GatewayInterface = (*Gateway)(nil)

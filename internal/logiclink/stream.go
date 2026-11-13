@@ -1,4 +1,4 @@
-package backend
+package logiclink
 
 import (
 	"context"
@@ -137,7 +137,7 @@ func (s *StreamShard) sendBatch(batch []*protoGw.StreamData) {
 	if s.lc != nil {
 		ctx = s.lc.ctx
 	}
-	panicutil.Safe(ctx, fmt.Sprintf("backend.sendBatch shard=%d count=%d", s.index, len(batch)), func() {
+	panicutil.Safe(ctx, fmt.Sprintf("logiclink.sendBatch shard=%d count=%d", s.index, len(batch)), func() {
 		s.sendBatchInner(batch)
 	})
 }
@@ -262,7 +262,7 @@ var (
 // connGroup 代表一条独立的 gRPC 连接及其 gRPC 客户端
 func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 	ctx := lc.ctx
-	defer panicutil.Recover(ctx, "backend.receiveMessages")
+	defer panicutil.Recover(ctx, "logiclink.receiveMessages")
 
 	s.mu.Lock()
 	stream := s.stream
@@ -499,7 +499,7 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			}
 			// 逐条保护：单条消息处理 panic 不得杀死整个接收循环
 			// （整循环只有一个外层 recover，panic 会导致分片接收永久中断）。
-			panicutil.Safe(ctx, fmt.Sprintf("backend.processOne shard=%d", shardIdx), func() {
+			panicutil.Safe(ctx, fmt.Sprintf("logiclink.processOne shard=%d", shardIdx), func() {
 				processOne(m)
 			})
 		}

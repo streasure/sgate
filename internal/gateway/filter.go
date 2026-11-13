@@ -6,8 +6,8 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/backend"
 	"github.com/streasure/sgate/internal/dataplane"
+	"github.com/streasure/sgate/internal/logiclink"
 	"github.com/streasure/sgate/internal/types"
 	"github.com/streasure/util/netutil"
 )
@@ -70,7 +70,7 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, connObj *dataplane.Connection
 	// 与非空链路径最终经 pipeline 阶段5.5 切断别名的结果一致，但省去每消息
 	// 一次 make+copy 分配。UserKey/ClientIp 由 pipeline 阶段5 统一补齐。
 	if g.filterChain == nil || g.filterChain.Len() == 0 {
-		msg := backend.GetStreamData()
+		msg := logiclink.GetStreamData()
 		msg.SessionId = connectionID
 		msg.Data = append(msg.Data[:0], data...)
 		msg.Cmd = cmd
@@ -107,7 +107,7 @@ func (g *Gateway) applyForwardFilters(c gnet.Conn, connObj *dataplane.Connection
 		payload = data
 	}
 	// 构造转发消息（允许过滤器修改 metadata）
-	msg := backend.GetStreamData()
+	msg := logiclink.GetStreamData()
 	msg.SessionId = connectionID
 	msg.Data = payload
 	msg.Cmd = cmd

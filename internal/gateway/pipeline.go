@@ -14,9 +14,9 @@ import (
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
-	"github.com/streasure/sgate/internal/backend"
 	"github.com/streasure/sgate/internal/config"
 	"github.com/streasure/sgate/internal/dataplane"
+	"github.com/streasure/sgate/internal/logiclink"
 	"github.com/streasure/sgate/internal/obs"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uhash"
@@ -205,7 +205,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	if securityDisabled && g.tracer == nil && g.degradation == nil {
 		// 超级快速路径：无安全检查、无追踪
 		remoteIP = ""
-		protoMsg = backend.GetStreamData()
+		protoMsg = logiclink.GetStreamData()
 		protoMsg.SessionId = connectionID
 		protoMsg.UserKey = connObj.GetUserUUID()
 		// 复用池化消息的 Data 缓冲容量（PutStreamData 保留容量），热路径零分配。
@@ -289,7 +289,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 			return PipelineResult{Action: gnet.None}
 		}
 		if protoMsg == nil {
-			protoMsg = backend.GetStreamData()
+			protoMsg = logiclink.GetStreamData()
 			protoMsg.SessionId = connectionID
 			protoMsg.UserKey = connObj.GetUserUUID()
 			protoMsg.ClientIp = remoteIP
@@ -327,7 +327,7 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	// 阶段6：转发到LogicClient（使用阶段2缓存的客户端）
 	var sendErr error
 	if logicClient == nil {
-		sendErr = backend.ErrNotConnected
+		sendErr = logiclink.ErrNotConnected
 	} else {
 		sendErr = logicClient.SendMessage(protoMsg)
 	}
@@ -505,7 +505,7 @@ func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 
 	if result.Error != nil {
 		if result.ProtoMsg != nil {
-			backend.PutStreamData(result.ProtoMsg)
+			logiclink.PutStreamData(result.ProtoMsg)
 		}
 		// UDP 特殊路径：直接发送响应（无 connectionID 查找）
 		if task.isUDP {

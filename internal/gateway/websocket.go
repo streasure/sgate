@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/streasure/sgate/internal/backend"
 	"github.com/streasure/sgate/internal/dataplane"
+	"github.com/streasure/sgate/internal/logiclink"
 
 	ws "github.com/gobwas/ws"
 	"github.com/panjf2000/gnet/v2"
@@ -503,7 +503,7 @@ func (g *Gateway) handleWebSocketDataFrame(wsConn *WebSocketConnection, payload 
 	protoGw.PutClientMessage(message)
 	if result.Error != nil {
 		if result.ProtoMsg != nil {
-			backend.PutStreamData(result.ProtoMsg)
+			logiclink.PutStreamData(result.ProtoMsg)
 		}
 		// 事件循环内同步写 WS 错误帧（快速路径：直接从 connectionID 获取 Connection）
 		if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
