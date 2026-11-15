@@ -87,7 +87,7 @@ func routeKeyFor(cmd int32) string {
 // 失败时，Result.Error非空，调用方应使用协议特定的方法发送错误响应。
 func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.StreamData, connectionID string) PipelineResult {
 	g := p.gw
-	protection := g.getProtection()
+	protection := g.GetProtection()
 
 	// WebSocket 特定：UserKey 映射更新（前置处理，避免影响后续逻辑）
 	if message.UserKey != "" {
@@ -398,7 +398,7 @@ type pipelineTaskData struct {
 	message      *protoGw.StreamData
 	connectionID string
 	// WebSocket 特定字段（TCP 时为 nil）
-	wsConn *WebSocketConnection
+	wsConn *dataplane.WebSocketConnection
 	// UDP 特定字段（阶段 2 由 handleUDPDatagram 填充）
 	isUDP         bool
 	udpRemoteAddr net.Addr // 回程目标（关联的公网地址，sendUDPFrame 用）
@@ -519,12 +519,12 @@ func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 
 // applyAsyncResult 在 worker 中执行 pipeline 返回的 Action（如 Close）。
 // gnet.Conn.Close 是并发安全的；不得在 worker 中使用非 Async 的 Write。
-func applyAsyncResult(conn gnet.Conn, wsConn *WebSocketConnection, isUDP bool, udpRemoteAddr net.Addr, result PipelineResult) {
+func applyAsyncResult(conn gnet.Conn, wsConn *dataplane.WebSocketConnection, isUDP bool, udpRemoteAddr net.Addr, result PipelineResult) {
 	if result.Action != gnet.Close {
 		return
 	}
 	if wsConn != nil {
-		wsConn.State.Store(int32(WSStateClosing))
+		wsConn.State.Store(int32(dataplane.WSStateClosing))
 	}
 	// UDP 无连接，无需关闭
 	if !isUDP {

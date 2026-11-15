@@ -10,23 +10,69 @@ import (
 	"github.com/streasure/sgate/internal/dataplane"
 )
 
-// wsMockConn 记录写出的字节，供断言 close/pong/HTTP 响应。
+// wsMockConn 记录写出的字节，供断言 close/pong/HTTP 响应；
+// Context/Next 模拟 gnet 连接上下文与读事件数据（经 transport OnTraffic 驱动）。
 type wsMockConn struct {
 	gnet.Conn
 	written bytes.Buffer
 	closed  bool
+	ctx     any
+	in      []byte
 }
 
 func (c *wsMockConn) Write(b []byte) (int, error) { return c.written.Write(b) }
 func (c *wsMockConn) Close() error                { c.closed = true; return nil }
 func (c *wsMockConn) RemoteAddr() net.Addr        { return nil }
+func (c *wsMockConn) Context() any                { return c.ctx }
+func (c *wsMockConn) SetContext(v any)            { c.ctx = v }
+func (c *wsMockConn) Next(int) ([]byte, error)    { return c.in, nil }
 
-func newOpenWSConn() (*wsMockConn, *WebSocketConnection) {
+// newWSConn 创建 mock 连接与 WS 会话（上下文已绑定，可直接投递读事件）。
+func newWSConn() (*wsMockConn, *dataplane.WebSocketConnection) {
 	mc := &wsMockConn{}
-	ws := NewWebSocketConnection(mc)
-	ws.State.Store(int32(WSStateOpen))
+	ws := dataplane.NewWebSocketConnection(mc)
+	mc.ctx = ws
+	return mc, ws
+}
+
+// newOpenWSConn 创建已握手完成（State=Open）且带连接标识的 WS 会话。
+func newOpenWSConn() (*wsMockConn, *dataplane.WebSocketConnection) {
+	mc, ws := newWSConn()
+	ws.State.Store(int32(dataplane.WSStateOpen))
 	ws.SetConnectionID("conn-test")
 	return mc, ws
+}
+
+// wsTraffic 经 transport 事件入口投递一次读事件（等价 gnet OnTraffic 调用）。
+func wsTraffic(gw *Gateway, mc *wsMockConn, data []byte) gnet.Action {
+	mc.in = data
+	return gw.transportSrv.OnTraffic(mc)
+}
+
+// buildMaskedFrame 构造 masked 帧：FIN+op, MASK+len, 4B mask + payload
+// （与 transport 包 websocket_frame_test 的同名 helper 同构）。
+func buildMaskedFrame(fin bool, op byte, payload []byte) []byte {
+	if len(payload) >= 65536 {
+		return nil
+	}
+	b0 := op & 0x0F
+	if fin {
+		b0 |= 0x80
+	}
+	n := len(payload)
+	var out []byte
+	out = append(out, b0)
+	if n < 126 {
+		out = append(out, 0x80|byte(n))
+	} else {
+		out = append(out, 0x80|126, byte(n>>8), byte(n))
+	}
+	mask := [4]byte{0x01, 0x02, 0x03, 0x04}
+	out = append(out, mask[:]...)
+	for i, b := range payload {
+		out = append(out, b^mask[i%4])
+	}
+	return out
 }
 
 // wsConnID 返回网关中唯一的 temp 连接 ID（测试清理用）。
@@ -50,8 +96,7 @@ func TestWSHandshake_HalfPacketAccumulation(t *testing.T) {
 		gw.Close()
 	}()
 
-	mc := &wsMockConn{}
-	ws := NewWebSocketConnection(mc)
+	mc, ws := newWSConn()
 
 	handshake := "GET / HTTP/1.1\r\n" +
 		"Host: localhost\r\n" +
@@ -62,17 +107,17 @@ func TestWSHandshake_HalfPacketAccumulation(t *testing.T) {
 
 	// 第一片：不含 \r\n\r\n → 应等待，不关闭
 	cut := len(handshake) / 2
-	if action := gw.handleWebSocketMessage(ws, []byte(handshake[:cut])); action != gnet.None {
+	if action := wsTraffic(gw, mc, []byte(handshake[:cut])); action != gnet.None {
 		t.Fatalf("partial handshake action=%v want None", action)
 	}
 	if mc.closed {
 		t.Fatal("connection closed on partial handshake")
 	}
 	// 第二片：补全 → 握手成功
-	if action := gw.handleWebSocketMessage(ws, []byte(handshake[cut:])); action == gnet.Close {
+	if action := wsTraffic(gw, mc, []byte(handshake[cut:])); action == gnet.Close {
 		t.Fatal("complete handshake closed connection")
 	}
-	if ws.State.Load() != int32(WSStateOpen) {
+	if ws.State.Load() != int32(dataplane.WSStateOpen) {
 		t.Fatalf("state=%d want WSStateOpen", ws.State.Load())
 	}
 	if !bytes.Contains(mc.written.Bytes(), []byte("101")) {
@@ -85,12 +130,11 @@ func TestWSHandshake_OversizedRejected(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
-	mc := &wsMockConn{}
-	ws := NewWebSocketConnection(mc)
+	mc, _ := newWSConn()
 
-	// 单片超限（> maxWSHandshakeSize）或累积超限均应拒绝
-	junk := bytes.Repeat([]byte("A"), maxWSHandshakeSize+1)
-	if action := gw.handleWebSocketMessage(ws, junk); action != gnet.Close {
+	// 单片超限（> transport.maxWSHandshakeSize = 16KB）或累积超限均应拒绝
+	junk := bytes.Repeat([]byte("A"), 16*1024+1)
+	if action := wsTraffic(gw, mc, junk); action != gnet.Close {
 		t.Fatalf("action=%v want Close on oversized handshake", action)
 	}
 }
@@ -100,9 +144,9 @@ func TestWS_UnmaskedFrameRejected(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
-	_, ws := newOpenWSConn()
+	mc, _ := newOpenWSConn()
 	// FIN+binary, len=3, 无 mask 位
-	action := gw.handleWebSocketMessage(ws, []byte{0x82, 0x03, 'a', 'b', 'c'})
+	action := wsTraffic(gw, mc, []byte{0x82, 0x03, 'a', 'b', 'c'})
 	if action != gnet.Close {
 		t.Fatalf("action=%v want Close on unmasked frame", action)
 	}
@@ -113,21 +157,21 @@ func TestWS_FragmentationReassembly(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
-	_, ws := newOpenWSConn()
+	mc, ws := newOpenWSConn()
 
 	// 片1：binary FIN=0, payload "par"
 	// 片2：continuation FIN=1, payload "tial" → 重组后进入 data frame 处理
 	// data frame 解码失败（非 protobuf）→ 回写错误响应而非断连
 	f1 := buildMaskedFrame(false, 0x2, []byte("par"))
 	f2 := buildMaskedFrame(true, 0x0, []byte("tial"))
-	if action := gw.handleWebSocketMessage(ws, append(f1, f2...)); action == gnet.Close {
+	if action := wsTraffic(gw, mc, append(f1, f2...)); action == gnet.Close {
 		t.Fatal("fragmented message closed connection")
 	}
-	if ws.fragging {
+	if ws.Fragging {
 		t.Fatal("fragmentation state not cleared after FIN")
 	}
-	if len(ws.fragBuf) != 0 {
-		t.Fatalf("fragBuf not released: len=%d (capacity may be retained)", len(ws.fragBuf))
+	if len(ws.FragBuf) != 0 {
+		t.Fatalf("fragBuf not released: len=%d (capacity may be retained)", len(ws.FragBuf))
 	}
 }
 
@@ -137,23 +181,23 @@ func TestWS_BufferReuseExactBoundary(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
-	_, ws := newOpenWSConn()
+	mc, ws := newOpenWSConn()
 	frame := buildMaskedFrame(true, 0x2, []byte("x"))
-	if action := gw.handleWebSocketMessage(ws, frame); action == gnet.Close {
+	if action := wsTraffic(gw, mc, frame); action == gnet.Close {
 		t.Fatal("first frame closed")
 	}
 	if cap(ws.Buffer) == 0 {
 		t.Fatal("Buffer capacity dropped after exact consumption (old nil-reset behavior)")
 	}
 	capBefore := cap(ws.Buffer)
-	if action := gw.handleWebSocketMessage(ws, frame); action == gnet.Close {
+	if action := wsTraffic(gw, mc, frame); action == gnet.Close {
 		t.Fatal("second frame closed")
 	}
 	if cap(ws.Buffer) != capBefore {
 		t.Fatalf("cap grew %d -> %d, want reuse", capBefore, cap(ws.Buffer))
 	}
-	if len(ws.Buffer) != 0 || ws.bufOff != 0 {
-		t.Fatalf("buffer not reset: len=%d off=%d", len(ws.Buffer), ws.bufOff)
+	if len(ws.Buffer) != 0 || ws.BufOff != 0 {
+		t.Fatalf("buffer not reset: len=%d off=%d", len(ws.Buffer), ws.BufOff)
 	}
 }
 
@@ -161,14 +205,14 @@ func TestWS_BufferReuseExactBoundary(t *testing.T) {
 func TestWS_BufferLimitRejected(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
-	p := gw.getProtection()
+	p := gw.GetProtection()
 	p.MaxWSBufferSize = 64
 	gw.protection.Store(&p)
 
-	_, ws := newOpenWSConn()
+	mc, ws := newOpenWSConn()
 	// 单帧 payload 128 > maxWSBufferSize 64，append 后超限
 	big := buildMaskedFrame(true, 0x2, make([]byte, 128))
-	if action := gw.handleWebSocketMessage(ws, big); action != gnet.Close {
+	if action := wsTraffic(gw, mc, big); action != gnet.Close {
 		t.Fatalf("action=%v, want Close on oversized WS buffer", action)
 	}
 	if ws.Buffer != nil {
@@ -181,16 +225,16 @@ func TestWS_CoalescedMultiFrames(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
-	_, ws := newOpenWSConn()
+	mc, ws := newOpenWSConn()
 	// 两帧粘包：每帧 payload "ab"（解码失败回写错误响应，不断连）
 	f1 := buildMaskedFrame(true, 0x2, []byte("ab"))
 	f2 := buildMaskedFrame(true, 0x2, []byte("cd"))
 	combined := append(append([]byte(nil), f1...), f2...)
-	if action := gw.handleWebSocketMessage(ws, combined); action == gnet.Close {
+	if action := wsTraffic(gw, mc, combined); action == gnet.Close {
 		t.Fatal("coalesced frames closed connection")
 	}
-	if len(ws.Buffer) != 0 || ws.bufOff != 0 {
-		t.Fatalf("buffer not reset after coalesced consume: len=%d off=%d", len(ws.Buffer), ws.bufOff)
+	if len(ws.Buffer) != 0 || ws.BufOff != 0 {
+		t.Fatalf("buffer not reset after coalesced consume: len=%d off=%d", len(ws.Buffer), ws.BufOff)
 	}
 }
 
@@ -199,19 +243,19 @@ func TestWS_PartialFrameAcrossReads(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
-	_, ws := newOpenWSConn()
+	mc, ws := newOpenWSConn()
 	full := buildMaskedFrame(true, 0x2, []byte("partial"))
-	if action := gw.handleWebSocketMessage(ws, full[:4]); action == gnet.Close {
+	if action := wsTraffic(gw, mc, full[:4]); action == gnet.Close {
 		t.Fatal("partial head closed connection")
 	}
 	if len(ws.Buffer) == 0 {
 		t.Fatal("partial frame must be buffered")
 	}
-	if action := gw.handleWebSocketMessage(ws, full[4:]); action == gnet.Close {
+	if action := wsTraffic(gw, mc, full[4:]); action == gnet.Close {
 		t.Fatal("partial tail closed connection")
 	}
-	if len(ws.Buffer) != 0 || ws.bufOff != 0 {
-		t.Fatalf("buffer not reset after partial reassembly: len=%d off=%d", len(ws.Buffer), ws.bufOff)
+	if len(ws.Buffer) != 0 || ws.BufOff != 0 {
+		t.Fatalf("buffer not reset after partial reassembly: len=%d off=%d", len(ws.Buffer), ws.BufOff)
 	}
 }
 
@@ -220,8 +264,8 @@ func TestWS_UnexpectedContinuationRejected(t *testing.T) {
 	gw := newTestGateway(minimalConfig())
 	defer gw.Close()
 
-	_, ws := newOpenWSConn()
-	action := gw.handleWebSocketMessage(ws, buildMaskedFrame(true, 0x0, []byte("x")))
+	mc, _ := newOpenWSConn()
+	action := wsTraffic(gw, mc, buildMaskedFrame(true, 0x0, []byte("x")))
 	if action != gnet.Close {
 		t.Fatalf("action=%v want Close on unexpected continuation", action)
 	}
@@ -235,13 +279,14 @@ func TestWS_CloseFrameClearsAndClosesTCP(t *testing.T) {
 	mc, ws := newOpenWSConn()
 	gw.wsConnections.Store(ws, struct{}{})
 
-	if err := gw.handleWebSocketCloseFrame(ws); err != nil {
-		t.Fatalf("close frame handler error: %v", err)
+	// 经读事件投递 masked close 帧（status 1000）
+	if action := wsTraffic(gw, mc, buildMaskedFrame(true, 0x8, []byte{0x03, 0xE8})); action == gnet.Close {
+		t.Fatal("close frame handling closed connection")
 	}
 	if !mc.closed {
 		t.Fatal("underlying TCP not closed (FD leak)")
 	}
-	if ws.State.Load() != int32(WSStateClosed) {
+	if ws.State.Load() != int32(dataplane.WSStateClosed) {
 		t.Fatalf("state=%d want WSStateClosed", ws.State.Load())
 	}
 	if _, ok := gw.wsConnections.Load(ws); ok {
@@ -258,16 +303,16 @@ func TestWS_PingUpdatesHeartbeat(t *testing.T) {
 	defer gw.Close()
 
 	mc, ws := newOpenWSConn()
-	before := ws.getLastPingTime()
+	before := ws.GetLastPingTime()
 	time.Sleep(5 * time.Millisecond)
 
-	if err := gw.handleWebSocketPingFrame(ws, []byte("hi")); err != nil {
-		t.Fatalf("ping handler error: %v", err)
+	if action := wsTraffic(gw, mc, buildMaskedFrame(true, 0x9, []byte("hi"))); action == gnet.Close {
+		t.Fatal("ping frame closed connection")
 	}
 	if mc.written.Len() == 0 {
 		t.Fatal("pong frame not written")
 	}
-	if !ws.getLastPingTime().After(before) {
+	if !ws.GetLastPingTime().After(before) {
 		t.Fatal("heartbeat time not refreshed by ping")
 	}
 }

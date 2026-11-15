@@ -1,298 +1,15 @@
 package gateway
 
 import (
-	"context"
-	"encoding/binary"
 	"fmt"
 	"slices"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/streasure/sgate/internal/logiclink"
-
-	"github.com/streasure/sgate/internal/dataplane"
 
 	"github.com/panjf2000/gnet/v2"
 	protoGw "github.com/streasure/protocol/gateway"
+	"github.com/streasure/sgate/internal/dataplane"
+	"github.com/streasure/sgate/internal/logiclink"
 	"github.com/streasure/sgate/internal/security"
-	"github.com/streasure/util/netutil"
-	"github.com/streasure/util/panicutil"
-	"github.com/streasure/util/tlog"
 )
-
-var connContextPool = sync.Pool{
-	New: func() any {
-		return &ConnContext{
-			ConnectionID: "",
-			FrameBuf:     nil,
-		}
-	},
-}
-
-func GetConnContext() *ConnContext {
-	ctx := connContextPool.Get().(*ConnContext)
-	ctx.ConnectionID = ""
-	ctx.FrameBuf = nil
-	ctx.frameOff = 0
-	ctx.LogCtx = nil
-	return ctx
-}
-
-func PutConnContext(ctx *ConnContext) {
-	ctx.ConnectionID = ""
-	ctx.FrameBuf = nil
-	ctx.frameOff = 0
-	ctx.LogCtx = nil
-	connContextPool.Put(ctx)
-}
-
-type ConnContext struct {
-	ConnectionID string
-	// LogCtx 日志上下文（OnOpen 置为 gateway ctx；测试可为 nil，超限日志按需跳过）
-	LogCtx context.Context
-	// FrameBuf 为底层数组（跨消息复用），有效数据 = FrameBuf[frameOff:]。
-	// frameOff 为已消费偏移：置 nil 会让下一次读事件重新分配（实测 ~6B/条），
-	// 中段切片 FrameBuf[n:] 又会丢失数组头部容量；offset 方案两者皆免。
-	FrameBuf []byte
-	frameOff int
-	// proxyHeaderParsed PROXY protocol 头已消费标记（每连接只解析一次首包）
-	proxyHeaderParsed bool
-}
-
-func (g *Gateway) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(g.ctx, "OnOpen panic recovered error=%v", r)
-			action = gnet.Close
-		}
-	}()
-
-	// 连接数限制检查（P0: 防止 OOM 和连接耗尽）
-	remoteIP := netutil.AddrHost(c.RemoteAddr())
-	if !g.connectionManager.CanAccept(remoteIP) {
-		tlog.Warn(g.ctx, "连接数限制，拒绝新连接 remoteIP=%s activeConnections=%d maxConnections=%d ipConnections=%d maxPerIP=%d",
-			remoteIP,
-			g.connectionManager.GetConnectionCount(),
-			g.connectionManager.MaxConnections(),
-			g.connectionManager.GetIPConnectionCount(remoteIP),
-			g.connectionManager.MaxConnectionsPerIP())
-		return nil, gnet.Close
-	}
-
-	localAddr := c.LocalAddr().String()
-	isWS := false
-	g.transportType.Range(func(key, value any) bool {
-		port := key.(string)
-		t := value.(string)
-		if strings.HasSuffix(localAddr, ":"+port) && t == "websocket" {
-			isWS = true
-			return false
-		}
-		return true
-	})
-
-	if isWS {
-		wsConn := NewWebSocketConnection(c)
-		// 立即注册进 connectionManager（WS 专用变体绑定协议身份）：否则未完成
-		// 握手的原始 WS 连接不计入 maxConnections/maxPerIP，可被绕过打满。
-		// 握手/首帧处仅在 ConnectionID 为空时补注册，此处预注册天然幂等。
-		tempUserUUID := "temp_" + dataplane.GenerateConnectionID()
-		connectionID := g.connectionManager.AddConnection(c, tempUserUUID, true)
-		wsConn.SetConnectionID(connectionID)
-		c.SetContext(wsConn)
-		g.wsConnections.Store(wsConn, true)
-	} else {
-		tempUserUUID := "temp_" + dataplane.GenerateConnectionID()
-		connectionID := g.connectionManager.AddConnection(c, tempUserUUID, false)
-		connCtx := GetConnContext()
-		connCtx.ConnectionID = connectionID
-		connCtx.LogCtx = g.ctx
-		c.SetContext(connCtx)
-	}
-
-	g.connectionsTotal.Add(1)
-	g.connectionsActive.Add(1)
-
-	tlog.Debug(g.ctx, "new connection localAddr=%s isWS=%v", localAddr, isWS)
-	return
-}
-
-func (g *Gateway) OnClose(c gnet.Conn, err error) (action gnet.Action) {
-	defer panicutil.Recover(g.ctx, "gateway.OnClose")
-
-	var connectionID string
-	connCtx := c.Context()
-	// OnOpen 仅在成功 SetContext 后才对 connectionsActive 计数，故以
-	// connCtx != nil 作为"已计数"依据（与连接是否已注册管理器无关）。
-	counted := connCtx != nil
-
-	if connCtx != nil {
-		if ctx, ok := connCtx.(*ConnContext); ok {
-			connectionID = ctx.ConnectionID
-			PutConnContext(ctx)
-		} else if wsConn, ok := connCtx.(*WebSocketConnection); ok {
-			connectionID = wsConn.ConnectionID()
-			g.wsConnections.Delete(wsConn)
-			wsConn.State.Store(int32(WSStateClosed))
-		} else if id, ok := connCtx.(string); ok {
-			connectionID = id
-		}
-	}
-
-	if connectionID != "" {
-		if conn := g.connectionManager.GetConnection(connectionID); conn != nil {
-			// P1: 记录连接生命周期指标
-			duration := time.Now().UnixMilli() - conn.CreatedAt
-			g.connectionDurationSum.Add(duration)
-			g.connectionDurationCount.Add(1)
-			g.connectionDurationTracker.Record(time.Duration(duration) * time.Millisecond)
-			g.notifyLogicOffline(conn)
-		}
-		g.releaseUDPAssoc(connectionID) // 会话是根：连接关闭即拆 UDP 关联（幂等）
-		g.connectionManager.RemoveConnection(connectionID)
-		tlog.Debug(g.ctx, "connection closed connectionID=%s error=%v", connectionID, err)
-	}
-	if counted {
-		g.connectionsActive.Add(-1)
-	}
-
-	return
-}
-
-func (g *Gateway) OnTraffic(c gnet.Conn) (action gnet.Action) {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(g.ctx, "OnTraffic panic recovered error=%v", fmt.Sprintf("%v", r))
-			action = gnet.Close
-		}
-	}()
-
-	return g.handleNormalTraffic(c)
-}
-
-func (g *Gateway) handleNormalTraffic(c gnet.Conn) (action gnet.Action) {
-	defer func() {
-		if r := recover(); r != nil {
-			tlog.Error(g.ctx, "handleNormalTraffic panic recovered error=%v", r)
-			action = gnet.Close
-		}
-	}()
-
-	data, err := c.Next(-1)
-	if err != nil {
-		return gnet.Close
-	}
-
-	connCtx := c.Context()
-
-	// UDP 协议分支：无连接状态，每个数据报独立处理
-	// （gnet UDP 不触发 OnOpen，首次 OnTraffic 时 Context 为 nil）
-	if connCtx == nil && c.LocalAddr().Network() == "udp" {
-		return g.handleUDPDatagram(c, data)
-	}
-
-	if connCtx == nil {
-		return gnet.Close
-
-	}
-	if wsConn, ok := connCtx.(*WebSocketConnection); ok {
-		return g.handleWebSocketMessage(wsConn, data)
-	}
-
-	ctx, ok := connCtx.(*ConnContext)
-	if !ok {
-		if len(data) > 3 && data[0] == 'G' && data[1] == 'E' && data[2] == 'T' {
-			wsConn := NewWebSocketConnection(c)
-			c.SetContext(wsConn)
-			g.wsConnections.Store(wsConn, wsConn)
-			return g.handleWebSocketMessage(wsConn, data)
-		}
-		return gnet.Close
-	}
-
-	// PROXY protocol v1：首包以 "PROXY " 开头时解析并取真实客户端 IP。
-	// 仅 TCP 路径（WS 分支已在上方返回）；每连接只处理一次。
-	if cfg := g.cfg.Load(); cfg != nil && cfg.Security.ProxyProtocol && !ctx.proxyHeaderParsed {
-		ctx.proxyHeaderParsed = true
-		if clientIP, headerLen, ok := parseProxyProtocolV1(data); ok {
-			if clientIP != "" && clientIP != netutil.AddrHost(c.RemoteAddr()) {
-				g.connectionManager.UpdateConnectionIP(ctx.ConnectionID, clientIP)
-				tlog.Debug(g.ctx, "proxy protocol resolved real IP conn=%s realIP=%s", ctx.ConnectionID, clientIP)
-			}
-			data = data[headerLen:]
-			if len(data) == 0 {
-				return // 头已消费完，等后续数据
-			}
-		}
-		// 解析失败（非 PROXY 头）：按普通首包继续（不重试）
-	}
-
-	maxFrameBuf := g.getProtection().MaxFrameBufSize
-	maxFrame := g.getProtection().MaxFrameSize
-	if !ctx.feedFrames(data, maxFrameBuf, maxFrame, func(frame []byte) bool {
-		return g.handleTCPRequest(c, frame) != gnet.Close
-	}) {
-		return gnet.Close
-	}
-	return
-}
-
-// feedFrames 将新读取的数据并入帧缓冲（frameOff 偏移复用，见 ConnContext 注释），
-// 依次回调每个完整帧。fn 返回 false（业务断连）或帧非法（长度 0 / 超 maxFrame /
-// 缓冲超限）时返回 false，调用方应关闭连接；返回 true 表示正常（可能仍有残帧待后续读取）。
-func (ctx *ConnContext) feedFrames(data []byte, maxFrameBuf, maxFrame int, fn func(frame []byte) bool) bool {
-	// 已收未消费的逻辑长度；超限断连（防 FrameBuf 无界增长）
-	if len(ctx.FrameBuf)-ctx.frameOff+len(data) > maxFrameBuf {
-		if ctx.LogCtx != nil {
-			tlog.Warn(ctx.LogCtx, "tcp frame buffer overflow, closing connectionID=%s pending=%d incoming=%d maxFrameBufSize=%d",
-				ctx.ConnectionID, len(ctx.FrameBuf)-ctx.frameOff, len(data), maxFrameBuf)
-		}
-		ctx.FrameBuf = nil
-		ctx.frameOff = 0
-		return false
-	}
-	// 有已消费前缀时前移残留，回收底层数组头部容量（append 热路径零重分配）
-	if ctx.frameOff > 0 {
-		logical := len(ctx.FrameBuf) - ctx.frameOff
-		copy(ctx.FrameBuf, ctx.FrameBuf[ctx.frameOff:])
-		ctx.FrameBuf = ctx.FrameBuf[:logical]
-		ctx.frameOff = 0
-	}
-	ctx.FrameBuf = append(ctx.FrameBuf, data...)
-
-	// 使用正常协议路径处理每个完整帧。逻辑流携带每条消息的真实客户端命令；它不定义网关私有的批处理命令。
-	for len(ctx.FrameBuf)-ctx.frameOff >= 4 {
-		frameLen := binary.BigEndian.Uint32(ctx.FrameBuf[ctx.frameOff:])
-		if frameLen == 0 || frameLen > uint32(maxFrame) {
-			if ctx.LogCtx != nil {
-				tlog.Warn(ctx.LogCtx, "tcp frame length invalid, closing connectionID=%s frameLen=%d maxFrameSize=%d",
-					ctx.ConnectionID, frameLen, maxFrame)
-			}
-			ctx.FrameBuf = nil
-			ctx.frameOff = 0
-			return false
-		}
-		totalLen := 4 + int(frameLen)
-		if len(ctx.FrameBuf)-ctx.frameOff < totalLen {
-			// 帧未收全：等待下一次读事件（残留由下次调用前移）
-			return true
-		}
-
-		frameData := ctx.FrameBuf[ctx.frameOff+4 : ctx.frameOff+totalLen]
-		ctx.frameOff += totalLen
-
-		if !fn(frameData) {
-			return false
-		}
-	}
-	// 全部帧消费完：保留底层数组容量（[:0] 而非 nil），下次读事件直接复用
-	if ctx.frameOff == len(ctx.FrameBuf) {
-		ctx.FrameBuf = ctx.FrameBuf[:0]
-		ctx.frameOff = 0
-	}
-	return true
-}
 
 func (g *Gateway) isLogicConnected() bool {
 	if g.logicClientPool != nil && g.logicClientPool.IsConnected() {
@@ -310,7 +27,7 @@ func (g *Gateway) isPreAuthCommand(cmd int32) bool {
 	if cmd == protoGw.CmdLogicLoginReq {
 		return true
 	}
-	return slices.Contains(g.getProtection().PreAuthCommands, cmd)
+	return slices.Contains(g.GetProtection().PreAuthCommands, cmd)
 }
 
 func (g *Gateway) GetLogicClient(serverID string) dataplane.LogicClientProvider {
@@ -320,27 +37,14 @@ func (g *Gateway) GetLogicClient(serverID string) dataplane.LogicClientProvider 
 	return g.logicClientPool.GetClient(serverID)
 }
 
-func (g *Gateway) handleTCPRequest(c gnet.Conn, data []byte) (action gnet.Action) {
+// HandleTCPFrame 处理一条完整 TCP 逻辑帧（transport.Runtime 实现，事件循环内调用）。
+// 连接标识由 transport 侧从 ConnContext 解析后传入（调用点保证来自 feedFrames 回调）。
+func (g *Gateway) HandleTCPFrame(c gnet.Conn, connectionID string, data []byte) (action gnet.Action) {
 	if len(data) == 0 {
 		return
 	}
 
 	g.messagesReceived.Add(1)
-
-	var connectionID string
-	connCtx := c.Context()
-	if ctx, ok := connCtx.(*ConnContext); ok {
-		connectionID = ctx.ConnectionID
-	} else if id, ok := connCtx.(string); ok {
-		connectionID = id
-	} else {
-		tempUserUUID := "temp_" + dataplane.GenerateConnectionID()
-		connectionID = g.connectionManager.AddConnection(c, tempUserUUID, false)
-		c.SetContext(&ConnContext{
-			ConnectionID: connectionID,
-			FrameBuf:     nil,
-		})
-	}
 
 	message, ok := protoGw.DecodeClientMessage(data)
 	if !ok {

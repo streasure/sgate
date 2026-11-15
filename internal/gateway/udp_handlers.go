@@ -48,7 +48,7 @@ func (g *Gateway) handleUDPDatagram(c gnet.Conn, data []byte) gnet.Action {
 		return gnet.None
 	}
 
-	maxFrame := g.getProtection().MaxFrameSize
+	maxFrame := g.GetProtection().MaxFrameSize
 	if frameLen == 0 || frameLen > uint32(maxFrame) {
 		return gnet.None
 	}

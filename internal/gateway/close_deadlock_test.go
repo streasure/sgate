@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"testing"
@@ -27,16 +26,13 @@ func TestCloseWithRunningEngineNoDeadlock(t *testing.T) {
 
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- gnet.Run(gw, fmt.Sprintf("tcp://127.0.0.1:%d", port), gnet.WithTicker(true))
+		runErr <- gnet.Run(gw.transportSrv, fmt.Sprintf("tcp://127.0.0.1:%d", port), gnet.WithTicker(true))
 	}()
 
 	// 等待 OnBoot 注册 engine
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		gw.enginesMu.Lock()
-		n := len(gw.engines)
-		gw.enginesMu.Unlock()
-		if n > 0 {
+		if gw.transportSrv.EngineCount() > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -81,17 +77,14 @@ func TestOnShutdownFirstTriggerNoDeadlock(t *testing.T) {
 
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- gnet.Run(gw, fmt.Sprintf("tcp://127.0.0.1:%d", port), gnet.WithTicker(true))
+		runErr <- gnet.Run(gw.transportSrv, fmt.Sprintf("tcp://127.0.0.1:%d", port), gnet.WithTicker(true))
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		gw.enginesMu.Lock()
-		engines := append([]gnet.Engine(nil), gw.engines...)
-		gw.enginesMu.Unlock()
-		if len(engines) > 0 {
+		if gw.transportSrv.EngineCount() > 0 {
 			// 直接停 engine（不先调 Close），触发 OnShutdown 首触发路径
-			_ = engines[0].Stop(context.Background())
+			gw.transportSrv.StopEngines()
 			break
 		}
 		if time.Now().After(deadline) {
@@ -101,7 +94,7 @@ func TestOnShutdownFirstTriggerNoDeadlock(t *testing.T) {
 	}
 
 	select {
-	case <-gw.closeDone:
+	case <-gw.transportSrv.CloseDone():
 	case <-time.After(10 * time.Second):
 		t.Fatal("OnShutdown first-trigger close did not complete")
 	}

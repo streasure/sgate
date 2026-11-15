@@ -18,7 +18,6 @@ import (
 
 	"github.com/streasure/sgate/internal/dataplane"
 
-	"github.com/panjf2000/gnet/v2"
 	protoLogin "github.com/streasure/protocol/loginserver"
 	"github.com/streasure/sgate/internal/admin"
 	"github.com/streasure/sgate/internal/cluster"
@@ -41,9 +40,6 @@ import (
 type Gateway struct {
 	connectionManager *dataplane.ConnectionManager
 	stopChan          chan struct{}
-	closing           atomic.Bool   // 关闭流程状态：首个调用者执行，其余等待完成
-	closeDone         chan struct{} // 关闭流程完成信号（Close 等待者挂在此）
-	transportType     sync.Map
 	ctx               context.Context
 	ctxCancel         context.CancelFunc // 关闭 g.ctx（closeBody 调用）
 	tlsConfig         *tls.Config
@@ -66,6 +62,9 @@ type Gateway struct {
 	protection        atomic.Pointer[config.ProtectionConfig] // 热路径无锁读取
 	grpcCfg           atomic.Pointer[config.GRPCConfig]       // 热更新原子替换
 	streamCfg         atomic.Pointer[config.StreamConfig]     // 热更新原子替换
+	// transportSrv transport 平面服务端（gnet EventHandler + engine 容器），
+	// 构造时注入本实例为 Runtime；关闭握手与监听启动均委托它。
+	transportSrv *transport.Server
 	// 管理端 HTTP 面（Bearer 鉴权 + 端点注册），经消费方定义的 admin.Backend 回调本实例
 	adminSrv    *admin.Server
 	maintenance *maintenanceState // 切维护状态（serverId/zone → reason）
@@ -79,9 +78,7 @@ type Gateway struct {
 	rateLimiter    *security.RateLimiter
 	waf            *security.WAF
 	latencyTracker *obs.LatencyTracker
-	latencySeq     int64         // 延迟采样序号：每 8 条消息取 1 条计时（QPC 为 syscall，见 pipeline）
-	engines        []gnet.Engine // 所有 transport engine，关闭时逐个 Stop
-	enginesMu      sync.Mutex
+	latencySeq     int64      // 延迟采样序号：每 8 条消息取 1 条计时（QPC 为 syscall，见 pipeline）
 	grpcServerMu   sync.Mutex // 保护 grpcServer 赋值/读取（启动协程与 Close 竞态）
 
 	// 企业级扩展组件
@@ -141,13 +138,8 @@ type Gateway struct {
 	shardedCoalescer          *dataplane.ShardedWriteCoalescer                  // 分片写合并器（推送路径）
 }
 
-// SetTransportType 设置监听端口对应的传输类型。
-func (g *Gateway) SetTransportType(port string, transportType string) {
-	g.transportType.Store(port, transportType)
-}
-
-// getProtection 无锁读取 ProtectionConfig（热路径使用）。
-func (g *Gateway) getProtection() config.ProtectionConfig {
+// GetProtection 无锁读取 ProtectionConfig（热路径使用；transport.Runtime 实现）。
+func (g *Gateway) GetProtection() config.ProtectionConfig {
 	if p := g.protection.Load(); p != nil {
 		return *p
 	}
@@ -328,7 +320,7 @@ func (g *Gateway) Destroy() { g.Close() }
 // 过载保护器、WebSocket心跳检测、配置文件监听
 func (g *Gateway) StartServices() error {
 	cfg := g.cfg.Load()
-	protection := g.getProtection()
+	protection := g.GetProtection()
 	// 压测模式：跳过与压测无关的后台周期任务，避免与热路径争抢调度。
 	benchMode := protection.BenchMode
 
@@ -400,36 +392,8 @@ func (g *Gateway) StartServices() error {
 	g.StartStatsServer(fmt.Sprintf(":%d", cfg.HttpPort))
 
 	// 启动TCP/WebSocket传输层
-	g.startTransports(cfg)
+	g.transportSrv.Start(cfg)
 	return nil
-}
-
-func (g *Gateway) startTransports(cfg *config.Config) {
-	for _, tr := range cfg.Transports {
-		port := tr.Port
-		transportType := tr.Type
-		g.SetTransportType(fmt.Sprintf("%d", port), transportType)
-
-		// 协议插件化：从注册表查找协议实现（tcp/websocket/udp）
-		// 配置 type 为空时默认 tcp（历史兼容）
-		protoName := transportType
-		if protoName == "" {
-			protoName = "tcp"
-		}
-		proto := transport.Get(protoName)
-		if proto == nil {
-			tlog.Error(g.ctx, "unknown protocol type=%s port=%d (no plugin registered)", protoName, port)
-			continue
-		}
-
-		tlog.Info(g.ctx, "starting gateway transport port=%d type=%s", port, protoName)
-		addr := fmt.Sprintf(":%d", port) // 仅用于日志标识
-		panicutil.Go(g.ctx, fmt.Sprintf("gateway.transportRun addr=%s", addr), func() {
-			if err := proto.Start(g, tr, cfg); err != nil {
-				tlog.Error(g.ctx, "gateway transport stopped addr=%s error=%v", addr, err)
-			}
-		})
-	}
 }
 
 // wsHeartbeatChecker 定期清理 WS 心跳超时连接。
@@ -437,7 +401,7 @@ func (g *Gateway) startTransports(cfg *config.Config) {
 // panic 退避重启，单轮异常不终止清理协程。
 func (g *Gateway) wsHeartbeatChecker() {
 	for {
-		interval := time.Duration(g.getProtection().WSCheckInterval) * time.Second
+		interval := time.Duration(g.GetProtection().WSCheckInterval) * time.Second
 		if interval <= 0 {
 			interval = 30 * time.Second // 防 time.NewTimer(0) 忙轮询
 		}
@@ -450,7 +414,7 @@ func (g *Gateway) wsHeartbeatChecker() {
 		}
 
 		// 检查前热读超时值，使 wsHeartbeatTimeout 热更立即生效
-		timeout := time.Duration(g.getProtection().WSHeartbeatTimeout) * time.Second
+		timeout := time.Duration(g.GetProtection().WSHeartbeatTimeout) * time.Second
 		g.runWSHeartbeatCheck(timeout)
 	}
 }
@@ -463,11 +427,11 @@ func (g *Gateway) runWSHeartbeatCheck(timeout time.Duration) {
 
 func (g *Gateway) checkWebSocketConnections(timeout time.Duration) {
 	g.wsConnections.Range(func(key, value any) bool {
-		conn, ok := key.(*WebSocketConnection)
+		conn, ok := key.(*dataplane.WebSocketConnection)
 		if !ok {
 			return true
 		}
-		if time.Since(conn.getLastPingTime()) > timeout {
+		if time.Since(conn.GetLastPingTime()) > timeout {
 			tlog.Warn(g.ctx, "WebSocket connection timeout, closing connectionID=%s", conn.ConnectionID())
 			if connID := conn.ConnectionID(); connID != "" {
 				// 先通知逻辑服离线再关闭/移除，避免 OnClose 时 conn 已查不到而漏发
@@ -688,13 +652,6 @@ func (g *Gateway) handleConfigUpdate(newCfg *config.Config) {
 	tlog.Info(g.ctx, "config updated dynamically")
 }
 
-func (g *Gateway) OnBoot(engine gnet.Engine) (action gnet.Action) {
-	g.enginesMu.Lock()
-	g.engines = append(g.engines, engine)
-	g.enginesMu.Unlock()
-	return
-}
-
 func (g *Gateway) GetConnectionManager() *dataplane.ConnectionManager {
 	return g.connectionManager
 }
@@ -750,7 +707,9 @@ func (g *Gateway) metricsLogEnabled() bool {
 	return !cfg.Monitoring.DisableMetricsLog
 }
 
-func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
+// OnTick 实现 transport.Runtime：每秒采样消息速率并按开关打印指标日志。
+// 由 transport.Server.OnTick（gnet Ticker）回调。
+func (g *Gateway) OnTick() {
 	// 每秒滚动采样消息速率（Stats/Health 依赖；原先仅在 Stats 调用时采样，单独查 /health 会失真）
 	if g.msgRate != nil {
 		g.msgRate.record(time.Now(), g.messagesReceived.Load())
@@ -758,46 +717,17 @@ func (g *Gateway) OnTick() (delay time.Duration, action gnet.Action) {
 	if g.metricsLogEnabled() {
 		g.logMetrics()
 	}
-	return 1 * time.Second, gnet.None
 }
 
-// OnShutdown 在 gnet engine 关闭流程中被回调（事件循环 goroutine 上执行）。
-// 必须先摘除该 engine（Close 会对所有 engine 调 Stop，与正在回调的 engine 互等死锁），
-// 且绝不能在此等待关闭流程完成：Close 可能正持有关闭状态并阻塞在 engines[i].Stop
-// 的 inShutdown 轮询上（gnet 需等本回调返回才置位），等待将形成互锁。
-func (g *Gateway) OnShutdown(engine gnet.Engine) {
-	g.enginesMu.Lock()
-	for i, e := range g.engines {
-		if e == engine {
-			g.engines = append(g.engines[:i], g.engines[i+1:]...)
-			break
-		}
-	}
-	g.enginesMu.Unlock()
-
-	if g.closing.CompareAndSwap(false, true) {
-		// 首触发（engine 自行关闭、无人调用过 Close）：在独立协程执行，
-		// 本回调立即返回，让 gnet 完成 inShutdown 置位。
-		panicutil.Go(g.ctx, "gateway.closeAsync", func() {
-			defer close(g.closeDone)
-			g.closeBody()
-		})
-	}
-}
-
-// Close 执行一次性关闭流程：首个调用者同步执行，其余调用者等待其完成。
-// 不能用 sync.Once：gnet 的 Stop 需等事件循环回调 OnShutdown 返回后才置 inShutdown，
-// 若 OnShutdown 重入 Once.Do，将与持有 Once 的 Stop 轮询互锁（优雅退出挂死）。
+// Close 执行一次性关闭流程（委托 transport 关闭握手：首个触发者同步执行，
+// 其余等待完成）。不能用 sync.Once：gnet 的 Stop 需等事件循环回调 OnShutdown
+// 返回后才置 inShutdown，若 OnShutdown 重入 Once.Do，将与持有 Once 的 Stop
+// 轮询互锁（优雅退出挂死）。握手实现见 transport.Server.RequestClose。
 func (g *Gateway) Close() {
-	if !g.closing.CompareAndSwap(false, true) {
-		<-g.closeDone
-		return
-	}
-	defer close(g.closeDone)
-	g.closeBody()
+	g.transportSrv.RequestClose()
 }
 
-// closeBody 关闭流程主体（Close/OnShutdown 已置 closing，仅执行一次）。
+// closeBody 关闭流程主体（transport.Runtime.Shutdown 实现；关闭握手保证仅执行一次）。
 func (g *Gateway) closeBody() {
 	close(g.stopChan)
 	if g.ctxCancel != nil {
@@ -814,12 +744,7 @@ func (g *Gateway) closeBody() {
 	})
 
 	// 阶段1：停止接受新连接（所有 transport engine）
-	g.enginesMu.Lock()
-	engines := append([]gnet.Engine(nil), g.engines...)
-	g.enginesMu.Unlock()
-	for i := range engines {
-		_ = engines[i].Stop(context.Background())
-	}
+	g.transportSrv.StopEngines()
 
 	// 阶段2：排空进行中的消息（最多2分钟）
 	drainTimeout := 2 * time.Minute
@@ -924,7 +849,6 @@ func newGateway(cfg *config.Config, configPath string, res *component.Resources)
 	gw := &Gateway{
 		connectionManager: dataplane.NewConnectionManager(cfg.Protection.MaxConnections, cfg.Protection.MaxConnectionsPerIP),
 		stopChan:          make(chan struct{}),
-		closeDone:         make(chan struct{}),
 		serverID:          cfg.ServerID,
 		zone:              cfg.Zone,
 		configPath:        configPath,
@@ -950,6 +874,8 @@ func newGateway(cfg *config.Config, configPath string, res *component.Resources)
 	gw.adminSrv = admin.New(gw)
 	gw.ctx = ctx
 	gw.ctxCancel = cancel
+	// transport 平面服务端：注入本实例为 Runtime（编译期断言见 transport_runtime.go）
+	gw.transportSrv = transport.NewServer(ctx, gw)
 	gw.pipeline = NewMessagePipeline(gw)
 	gw.loginSlots = make(chan struct{}, 256)
 	gw.udpAssoc = newUDPAssocTable()

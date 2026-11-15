@@ -46,7 +46,7 @@ func TestNewGatewayAppliesDefaultsAndStoresCopy(t *testing.T) {
 	}
 
 	// 零值 protection 应被补齐
-	p := gw.getProtection()
+	p := gw.GetProtection()
 	if p.MaxFrameSize != config.DefaultMaxFrameSize {
 		t.Errorf("MaxFrameSize = %d, want %d", p.MaxFrameSize, config.DefaultMaxFrameSize)
 	}
