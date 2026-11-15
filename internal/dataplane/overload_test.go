@@ -29,7 +29,7 @@ func TestSmoothEMA(t *testing.T) {
 	}
 }
 
-func newTestProtector(t *testing.T, observeOnly bool, cpuThreshold float64) *OverloadProtector {
+func newTestProtector(t *testing.T, dropOnOverload bool, cpuThreshold float64) *OverloadProtector {
 	t.Helper()
 	proc, err := process.NewProcess(int32(os.Getpid()))
 	if err != nil {
@@ -37,8 +37,7 @@ func newTestProtector(t *testing.T, observeOnly bool, cpuThreshold float64) *Ove
 	}
 	return &OverloadProtector{
 		cpuThreshold:   cpuThreshold,
-		dropOnOverload: true,
-		observeOnly:    observeOnly,
+		dropOnOverload: dropOnOverload,
 		checkInterval:  200 * time.Millisecond,
 		stopChan:       make(chan struct{}),
 		lastCheckTime:  time.Now().Add(-time.Second), // 保证首个 check() deltaWall>0
@@ -46,29 +45,29 @@ func newTestProtector(t *testing.T, observeOnly bool, cpuThreshold float64) *Ove
 	}
 }
 
-// TestOverloadObserveOnly benchMode：采样但不置过载标志（压测不因过载丢消息）。
-func TestOverloadObserveOnly(t *testing.T) {
-	op := newTestProtector(t, true, 0)
+// TestOverloadNoDropWhenDisabled dropOnOverload=false（压测旁路）：采样但不置过载标志。
+func TestOverloadNoDropWhenDisabled(t *testing.T) {
+	op := newTestProtector(t, false, 0)
 	// 预置高平滑值：首个 check() 的 EMA 由 prev 平滑而来 → 必然 > 阈值 0
 	high := 50.0
 	op.cpuPercent.Store(&high)
 
 	op.check()
 	if op.IsOverloaded() {
-		t.Fatal("observeOnly must never set overload flag")
+		t.Fatal("dropOnOverload=false must never set overload flag")
 	}
 	cpu, _, overloaded, _ := op.Stats()
 	if overloaded {
-		t.Fatal("Stats.overloaded must be false in observeOnly")
+		t.Fatal("Stats.overloaded must be false when drop disabled")
 	}
 	if cpu <= 0 {
 		t.Fatalf("cpu sample = %v, want > 0 (EMA from prev)", cpu)
 	}
 }
 
-// TestOverloadDropsWhenNotObserveOnly 对照：非 observe-only 超阈值必须置标志。
-func TestOverloadDropsWhenNotObserveOnly(t *testing.T) {
-	op := newTestProtector(t, false, 0)
+// TestOverloadSetsFlagWhenEnabled 对照：dropOnOverload=true 超阈值必须置标志。
+func TestOverloadSetsFlagWhenEnabled(t *testing.T) {
+	op := newTestProtector(t, true, 0)
 	high := 50.0
 	op.cpuPercent.Store(&high)
 
@@ -80,7 +79,7 @@ func TestOverloadDropsWhenNotObserveOnly(t *testing.T) {
 
 // TestOverloadBelowThreshold 平滑值低于阈值不触发。
 func TestOverloadBelowThreshold(t *testing.T) {
-	op := newTestProtector(t, false, 90)
+	op := newTestProtector(t, true, 90)
 	low := 1.0
 	op.cpuPercent.Store(&low)
 

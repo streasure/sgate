@@ -344,17 +344,18 @@ func (g *Engine) validateSecurityWiring(cfg *config.Config) error {
 func (g *Engine) StartBusiness() {
 	cfg := g.cfg.Load()
 	protection := g.GetProtection()
-	// 压测模式：跳过与压测无关的后台周期任务，避免与热路径争抢调度。
-	benchMode := protection.BenchMode
 
-	// 过载采样器始终启动：benchMode 下为 observe-only（见 OverloadProtector.observeOnly），
-	// 保证 /stats 的 cpuPercent/memPercent 有值；benchMode 仅跳过 WS 心跳检测。
+	// 过载采样器始终启动：保证 /stats 的 cpuPercent/memPercent 有值；
+	// 是否拦截由 protection.dropOnOverload 控制（压测关拦截，采样展示保留）。
 	g.overloadProtector.Start()
-	if !benchMode {
+	// WS 心跳超时清理（monitoring.disableWSHeartbeatCheck=true 关闭：压测等
+	// 不需要后台扫描的场景，避免与热路径争抢调度）
+	if !cfg.Monitoring.DisableWSHeartbeatCheck {
 		panicutil.GoLoop(g.ctx, "dataplane.wsHeartbeatChecker", g.wsHeartbeatChecker)
-		// 封禁收敛 P2：BatchValidate 周期安全网（enabled=false/batchInterval<=0 时内部自停）
-		g.startBatchValidateSweep()
 	}
+	// 封禁收敛 P2：BatchValidate 周期安全网（loginValidation.enabled=false /
+	// batchInterval<=0 时内部自停，无需外层开关）
+	g.startBatchValidateSweep()
 	g.messageIntegrity = NewMessageIntegrity(30000)
 
 	if cfg.Pipeline.AsyncEnabled {
@@ -364,7 +365,9 @@ func (g *Engine) StartBusiness() {
 	// 初始化分片写合并器（推送路径：logic → client）
 	g.shardedCoalescer = NewShardedWriteCoalescer(g.connectionManager, 16)
 
-	if !benchMode {
+	// 连接空闲检查（monitoring.disableConnectionChecker=true 关闭：压测等场景，
+	// 空闲连接不被自动回收）
+	if !cfg.Monitoring.DisableConnectionChecker {
 		connCheckInterval := gatewayutil.ParseDurationDefault(protection.ConnCheckInterval, 5*time.Minute)
 		if connCheckInterval <= 0 {
 			connCheckInterval = 5 * time.Minute

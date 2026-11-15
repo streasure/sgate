@@ -120,8 +120,11 @@ func TestLoad_RepoBenchGatewayYamls(t *testing.T) {
 				if !c.Stream.BatchPush {
 					t.Error("stream.batchPush = false in batch-on.yaml, want true")
 				}
-				if !c.Protection.BenchMode {
-					t.Error("protection.benchMode = false in batch-on.yaml, want true")
+				if !c.Monitoring.DisableWSHeartbeatCheck || !c.Monitoring.DisableConnectionChecker {
+					t.Error("monitoring background checks not disabled in batch-on.yaml, want both true")
+				}
+				if c.Protection.DropOnOverload {
+					t.Error("protection.dropOnOverload = true in batch-on.yaml, want false (bypass)")
 				}
 				if c.Security.RateLimit.Enabled {
 					t.Error("rateLimit.enabled = true in batch-on.yaml, want false")
@@ -134,8 +137,11 @@ func TestLoad_RepoBenchGatewayYamls(t *testing.T) {
 				if c.Stream.BatchPush {
 					t.Error("stream.batchPush = true in batch-off.yaml, want false")
 				}
-				if !c.Protection.BenchMode {
-					t.Error("protection.benchMode = false in batch-off.yaml, want true")
+				if !c.Monitoring.DisableWSHeartbeatCheck || !c.Monitoring.DisableConnectionChecker {
+					t.Error("monitoring background checks not disabled in batch-off.yaml, want both true")
+				}
+				if c.Protection.DropOnOverload {
+					t.Error("protection.dropOnOverload = true in batch-off.yaml, want false (bypass)")
 				}
 			},
 		},
@@ -148,8 +154,11 @@ func TestLoad_RepoBenchGatewayYamls(t *testing.T) {
 				if c.Security.RateLimit.MaxTokens != 2000000 {
 					t.Errorf("rateLimit.maxTokens = %d, want 2000000", c.Security.RateLimit.MaxTokens)
 				}
-				if !c.Protection.BenchMode {
-					t.Error("protection.benchMode = false in rate-limit.yaml, want true")
+				if !c.Monitoring.DisableWSHeartbeatCheck || !c.Monitoring.DisableConnectionChecker {
+					t.Error("monitoring background checks not disabled in rate-limit.yaml, want both true")
+				}
+				if c.Protection.DropOnOverload {
+					t.Error("protection.dropOnOverload = true in rate-limit.yaml, want false (bypass)")
 				}
 			},
 		},

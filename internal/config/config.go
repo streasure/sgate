@@ -83,6 +83,12 @@ type MonitoringConfig struct {
 	// 关闭后消息管道走超级快速路径（跳过安全链/过滤器链的追踪分支），热路径分配大幅下降。
 	// 仅需日志级排障时开启；压测与生产吞吐场景应为 true。默认 false=开启（兼容旧行为）。
 	DisableTracer bool `yaml:"disableTracer"`
+	// DisableWSHeartbeatCheck 关闭 WS 心跳超时清理协程（压测等不需要后台扫描的
+	// 场景，避免与热路径争抢调度；连接不再因心跳超时被回收）。默认 false=启用。
+	DisableWSHeartbeatCheck bool `yaml:"disableWSHeartbeatCheck"`
+	// DisableConnectionChecker 关闭连接空闲检查器（压测等场景；空闲连接不再被
+	// 自动回收，由客户端断开或进程退出兜底）。默认 false=启用。
+	DisableConnectionChecker bool `yaml:"disableConnectionChecker"`
 }
 
 // JWTAuthConfig JWT 鉴权配置
@@ -248,7 +254,7 @@ type RateLimitConfig struct {
 	// 高吞吐生产需调大或关闭限流，否则 route 维度先成为天花板。
 	RouteMaxTokens int `yaml:"routeMaxTokens"`
 	// GlobalMaxTokens 全局硬顶（单令牌桶，每消息 1 次 CAS）；0 = maxTokens*10。
-	// 兜底 overload 未运行（benchMode/未配 dropOnOverload）时的全局总量控制。
+	// 兜底 overload 未运行（未配 dropOnOverload）时的全局总量控制。
 	GlobalMaxTokens int `yaml:"globalMaxTokens"`
 }
 
@@ -347,10 +353,6 @@ type ProtectionConfig struct {
 	ConnIdleTimeout     string  `yaml:"connIdleTimeout"`
 	VerifyInbound       bool    `yaml:"verifyInbound"`
 	PreAuthCommands     []int32 `yaml:"preAuthCommands"`
-	// BenchMode 压测模式：关闭与压测无关的后台周期任务（过载保护检查、
-	// 限流桶清理、WS 心跳清理、连接空闲检查），避免其与热路径争抢调度。
-	// 仅用于压测/性能测量，生产保持 false。
-	BenchMode bool `yaml:"benchMode"`
 }
 
 // Transport 网络传输配置（历史 protocol 字段全仓零读取已删；

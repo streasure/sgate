@@ -25,15 +25,16 @@ monitoring:
   pprofAddr: "127.0.0.1:6060"
   disableTracer: true   # 压测关闭分布式追踪（避免每消息 Span 分配）
   disableMetricsLog: true   # 压测关闭每秒 metrics 日志
+  disableWSHeartbeatCheck: true  # 压测关闭 WS 心跳超时清理
+  disableConnectionChecker: true  # 压测关闭连接空闲检查
 
 
 stream:
   batchPush: false      # 本组压测差异：关闭 batch 推送
 
 protection:
-  benchMode: true       # 压测模式：关闭过载检查/WS心跳/连接空闲检查等后台周期任务
   cpuThreshold: 92
-  dropOnOverload: true
+  dropOnOverload: false  # 压测旁路过载拦截（cpu/mem 采样与 /stats 展示保留）
 
 security:
   enabled: true

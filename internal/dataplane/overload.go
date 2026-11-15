@@ -30,7 +30,6 @@ import (
 type OverloadProtector struct {
 	cpuThreshold   float64
 	dropOnOverload bool
-	observeOnly    bool // benchMode：只采样 CPU/内存供 /stats 展示，绝不置过载标志（不丢消息）
 	overloadFlag   atomic.Int32
 	checkInterval  time.Duration
 	stopChan       chan struct{}
@@ -84,7 +83,6 @@ func NewOverloadProtector(cfg config.ProtectionConfig) *OverloadProtector {
 	op := &OverloadProtector{
 		cpuThreshold:   cpuThreshold,
 		dropOnOverload: cfg.DropOnOverload,
-		observeOnly:    cfg.BenchMode,
 		checkInterval:  checkInterval,
 		stopChan:       make(chan struct{}),
 		proc:           proc,
@@ -167,9 +165,9 @@ func (op *OverloadProtector) check() {
 		}
 	}
 
-	// observeOnly（benchMode）时只采样不置标志：/stats 有 cpuPercent/memPercent，
-	// 但 IsOverloaded() 恒 false，压测不因过载丢消息。
-	if overloaded && op.dropOnOverload && !op.observeOnly {
+	// 拦截仅在 dropOnOverload 开启时生效：关闭（压测等）时只采样不置标志，
+	// /stats 有 cpuPercent/memPercent，IsOverloaded() 恒 false，不丢消息。
+	if overloaded && op.dropOnOverload {
 		op.overloadFlag.Store(1)
 		now := time.Now().UnixMilli()
 		lastLog := op.lastLogTime.Load()
