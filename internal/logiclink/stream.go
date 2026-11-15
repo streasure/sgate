@@ -155,7 +155,7 @@ func (s *StreamShard) sendBatchInner(batch []*protoGw.StreamData) {
 			s.lc.gateway.AddPushDroppedNoConn(int64(len(batch)))
 		}
 		for _, m := range batch {
-			PutStreamData(m)
+			protoGw.PutStreamData(m)
 		}
 		return
 	}
@@ -175,7 +175,7 @@ func (s *StreamShard) sendBatchInner(batch []*protoGw.StreamData) {
 		}
 	}
 	for _, m := range batch {
-		PutStreamData(m)
+		protoGw.PutStreamData(m)
 	}
 }
 
@@ -225,7 +225,7 @@ func (s *StreamShard) stop() {
 			select {
 			case m := <-s.sendCh:
 				if m != nil {
-					PutStreamData(m)
+					protoGw.PutStreamData(m)
 					dropped++
 				}
 			default:

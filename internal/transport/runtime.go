@@ -58,3 +58,6 @@ type Runtime interface {
 	// Shutdown 触发业务整体关闭流程（关闭握手的首个触发者：主动 Close 或 OnShutdown）。
 	Shutdown()
 }
+
+// 编译期校验：数据面引擎实现本接口（gateway 壳经嵌入提升复用同一实现）。
+var _ Runtime = (*dataplane.Engine)(nil)

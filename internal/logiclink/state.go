@@ -2,6 +2,8 @@ package logiclink
 
 import (
 	"errors"
+
+	"github.com/streasure/sgate/internal/dataplane"
 )
 
 type LogicConnectionState int32
@@ -24,7 +26,9 @@ func (s LogicConnectionState) String() string {
 
 // 错误定义
 var (
-	ErrNotConnected      = errors.New("未连接到逻辑服")
+	// ErrNotConnected 与 dataplane 共享同一哨兵值（dataplane 消费方 errors.Is 判定，
+	// 依赖方向 logiclink → dataplane 单向，见 dataplane/iface.go）。
+	ErrNotConnected      = dataplane.ErrNotConnected
 	ErrConnectionClosing = errors.New("连接正在关闭")
 	ErrQueueFull         = errors.New("发送队列已满")
 	ErrSendTimeout       = errors.New("发送超时")

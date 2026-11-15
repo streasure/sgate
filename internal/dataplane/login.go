@@ -1,0 +1,271 @@
+package dataplane
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/panjf2000/gnet/v2"
+	"github.com/streasure/protocol/enums"
+	protoGw "github.com/streasure/protocol/gateway"
+	protoLogin "github.com/streasure/protocol/loginserver"
+	"github.com/streasure/util/netutil"
+	"github.com/streasure/util/panicutil"
+	"github.com/streasure/util/retry"
+	"github.com/streasure/util/tlog"
+	"github.com/streasure/util/udiscovery"
+	"google.golang.org/protobuf/proto"
+)
+
+// InitLoginService 按 etcd 发现注册 loginserver 客户端句柄（发现由网关自持）。
+// 实例增删由 etcd watch 自动驱动建连/摘除；etcd 不可达时启动失败
+// （与旧版共享 discovery 启动失败语义一致）。
+func (g *Engine) InitLoginService() error {
+	cfg := g.cfg.Load()
+	svc, err := udiscovery.Dial(protoLogin.NewLoginServiceClient, udiscovery.ClientSpec{
+		Belong:        cfg.Belong,
+		ServerType:    enums.ServerType_SERVER_TYPE_LOGINSERVER,
+		Zone:          cfg.Zone,
+		Etcd:          cfg.Uetcd(),
+		AddressFilter: netutil.ValidAddrPort,
+	})
+	if err != nil {
+		return fmt.Errorf("init login service %s/%s: %w", cfg.Belong, cfg.Zone, err)
+	}
+	g.loginServerMu.Lock()
+	g.loginService = svc
+	g.loginServerMu.Unlock()
+	tlog.Info(g.ctx, "login service ready serviceID=%s", svc.ServiceID())
+	return nil
+}
+
+// loginClient 取校验用 loginserver 客户端：测试注入的覆盖客户端优先（生产恒为 nil），
+// 生产路径经句柄随机取一台健康实例；无实例返回 nil（调用方 fail-closed）。
+func (g *Engine) loginClient() protoLogin.LoginServiceClient {
+	g.loginServerMu.RLock()
+	injected := g.loginServerClient
+	svc := g.loginService
+	g.loginServerMu.RUnlock()
+	if injected != nil {
+		return injected
+	}
+	c, _ := svc.Pick() // nil 句柄安全
+	return c
+}
+
+// loginValidationEnabled 读取热更新后的登录校验开关。
+func (g *Engine) loginValidationEnabled() bool {
+	if cfg := g.cfg.Load(); cfg != nil {
+		return cfg.LoginValidation.Enabled
+	}
+	return false
+}
+
+// validateLoginKey 校验 LoginGate 的 loginKey。
+// loginValidation.enabled=false：永远放行（压测/免登）。
+// loginValidation.enabled=true：必须走 loginserver；空 loginKey 也不能绕过；
+// 无 loginserver 连接或 gRPC 失败时一律拒绝（fail-closed）。
+// 会话上下文（sgate_id/conn_id/client_ip）随请求携带，loginserver 校验通过后写三键会话缓存。
+func (g *Engine) validateLoginKey(userID, loginKey, connectionID, clientIP, serverID string) bool {
+	if !g.loginValidationEnabled() {
+		return true
+	}
+	client := g.loginClient()
+	if client == nil {
+		tlog.Warn(g.ctx, "login validation enabled but loginserver not connected accountId=%s", userID)
+		return false
+	}
+	ctx, cancel := context.WithTimeout(g.ctx, 3*time.Second)
+	defer cancel()
+	ack, err := client.ValidateLoginToken(ctx, &protoLogin.ValidateLoginTokenReq{
+		AccountId:  userID,
+		LoginToken: loginKey,
+		SgateId:    g.GetServerID(),
+		ConnId:     connectionID,
+		ClientIp:   clientIP,
+		ServerId:   serverID,
+	})
+	if err != nil {
+		tlog.Warn(g.ctx, "validate login token failed accountId=%s error=%v", userID, err)
+		return false
+	}
+	return ack.Valid
+}
+
+func (g *Engine) handleLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData) gnet.Action {
+	// LoginGate 走捷径不经 pipeline，此处补齐过载/IP 限流检查。
+	// 成功路径由 finishLoginGate 异步持有 message（不归还解码池）；
+	// 所有同步拒绝路径回写 ack 后立即归还，避免解码池对象泄漏到 GC。
+	if g.overloadProtector != nil && g.overloadProtector.IsOverloaded() {
+		g.overloadProtector.RecordDrop(1)
+		g.messagesDroppedOverload.Add(1)
+		ack := &protoGw.LoginGateAck{Code: 503, Message: "server overload", SessionId: connectionID}
+		body, _ := proto.Marshal(ack)
+		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		protoGw.PutClientMessage(message)
+		return gnet.None
+	}
+	if g.rateLimiter != nil {
+		if !g.rateLimiter.AllowGlobal() || !g.rateLimiter.Allow("ip", netutil.AddrHost(c.RemoteAddr())) {
+			g.messagesDroppedRateLimit.Add(1)
+			ack := &protoGw.LoginGateAck{Code: 429, Message: "rate limited", SessionId: connectionID}
+			body, _ := proto.Marshal(ack)
+			_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+			protoGw.PutClientMessage(message)
+			return gnet.None
+		}
+	}
+
+	req := new(protoGw.LoginGateReq)
+	if err := proto.Unmarshal(message.Data, req); err != nil || req.ServerId == "" {
+		writeAck := func(code int32, text, serverID string) {
+			ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
+			body, _ := proto.Marshal(ack)
+			_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		}
+		writeAck(400, "invalid login gate request", req.ServerId)
+		protoGw.PutClientMessage(message)
+		return gnet.None
+	}
+
+	// 切维护检查：目标 serverId（或其所属 zone）在维护中 → 拒绝新登录
+	if g.isMaintenanceTarget(req.ServerId) {
+		ack := &protoGw.LoginGateAck{Code: 503, Message: "server in maintenance", SessionId: connectionID, ServerId: req.ServerId}
+		body, _ := proto.Marshal(ack)
+		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		protoGw.PutClientMessage(message)
+		return gnet.Close
+	}
+
+	// 并发登录上限：满则快速拒绝，防无限起 finishLoginGate 协程
+	if !g.acquireLoginSlot() {
+		ack := &protoGw.LoginGateAck{Code: 429, Message: "too many concurrent logins", SessionId: connectionID, ServerId: req.ServerId}
+		body, _ := proto.Marshal(ack)
+		_ = g.sendMsgSync(connectionID, &protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		protoGw.PutClientMessage(message)
+		return gnet.None
+	}
+
+	// 校验与绑定在 worker 中执行，避免同步 gRPC 阻塞 event loop。
+	// 成功后在 worker 中回写 LoginGateAck（改用 sendFrameAsync 跨协程调用）。
+	panicutil.Go(g.ctx, "dataplane.finishLoginGate", func() {
+		defer g.releaseLoginSlot()
+		g.finishLoginGate(c, connectionID, message, req)
+	})
+	return gnet.None
+}
+
+// finishLoginGate 在后台协程完成 loginKey 校验、连接绑定与 ack 回写。
+func (g *Engine) finishLoginGate(c gnet.Conn, connectionID string, message *protoGw.StreamData, req *protoGw.LoginGateReq) {
+	writeAck := func(code int32, text, serverID string) {
+		ack := &protoGw.LoginGateAck{Code: code, Message: text, SessionId: connectionID, ServerId: serverID}
+		body, _ := proto.Marshal(ack)
+		data, _ := protoGw.MarshalClientMessage(&protoGw.StreamData{Cmd: protoGw.CmdLoginGateAck, Data: body, SeqId: message.SeqId})
+		_ = g.sendFrameAsync(connectionID, data)
+	}
+	if !g.validateLoginKey(req.UserId, req.LoginKey, connectionID, netutil.AddrHost(c.RemoteAddr()), req.ServerId) {
+		writeAck(401, "invalid login key", req.ServerId)
+		return
+	}
+	// 二次切维护检查（worker 路径，防标记在快照后置入的竞态）
+	if g.isMaintenanceTarget(req.ServerId) {
+		writeAck(503, "server in maintenance", req.ServerId)
+		return
+	}
+	g.connectionManager.SetConnectionServerID(connectionID, req.ServerId)
+	userUUID := req.UserId
+	if userUUID == "" {
+		userUUID = connectionID
+	}
+	fullUUID := req.ServerId + ":" + userUUID
+
+	// P1: 主动关闭同用户的旧连接（重连场景），防止资源泄漏
+	if oldConnID, exists := g.connectionManager.GetUserConnection(fullUUID); exists && oldConnID != connectionID {
+		if oldConn := g.connectionManager.GetConnection(oldConnID); oldConn != nil {
+			tlog.Info(g.ctx, "检测到重复登录，关闭旧连接 oldConnectionID=%s newConnectionID=%s userUUID=%s",
+				oldConnID,
+				connectionID,
+				fullUUID)
+			g.notifyLogicOffline(oldConn)
+			if oldConn.Conn != nil {
+				oldConn.Conn.Close()
+			}
+		}
+	}
+
+	// 保持选中的逻辑服在网关侧的身份标识中，以防止逻辑分片之间的会话索引冲突。
+	g.connectionManager.UpdateConnectionUserUUID(connectionID, fullUUID)
+	// 登录账号索引（KickService KickAccounts 用；userConnections 键是 fullUUID 而非裸账号）
+	if req.UserId != "" {
+		g.connectionManager.SetConnectionAccountID(connectionID, req.UserId)
+	}
+	// loginKey 留存（周期 BatchValidate 安全网重校验用）
+	if req.LoginKey != "" {
+		g.connectionManager.SetConnectionLoginKey(connectionID, req.LoginKey)
+	}
+	writeAck(0, "ok", req.ServerId)
+
+	// 异步转发登录 StreamData 给逻辑服。
+	connObj := g.connectionManager.GetConnection(connectionID)
+	if connObj != nil {
+		forwardMsg := &protoGw.StreamData{
+			SessionId: connectionID,
+			UserKey:   connObj.GetUserUUID(),
+			Data:      append([]byte(nil), message.Data...),
+			Cmd:       message.Cmd,
+			SeqId:     message.SeqId,
+		}
+		g.forwardLoginAsync(req.ServerId, forwardMsg, "login forward to logic timed out serverID=%s")
+	}
+}
+
+// errLogicClientUnavailable 逻辑服客户端尚未就绪（重试中间态）。
+var errLogicClientUnavailable = errors.New("logic client unavailable")
+
+// forwardLoginAsync 异步转发登录消息到逻辑服：最多 20 次、间隔 100ms，
+// 全部失败时按 warnFormat（唯一参数 serverID）打点。TCP/WS 登录共用。
+func (g *Engine) forwardLoginAsync(serverID string, msg *protoGw.StreamData, warnFormat string) {
+	panicutil.Go(g.ctx, "dataplane.forwardLoginAsync", func() {
+		err := retry.Do(g.ctx, 20, 100*time.Millisecond, func() error {
+			lc := g.GetLogicClient(serverID)
+			if lc == nil {
+				return errLogicClientUnavailable
+			}
+			return lc.SendMessage(msg)
+		})
+		if err != nil {
+			tlog.Warn(g.ctx, warnFormat, serverID)
+		}
+	})
+}
+
+func (g *Engine) notifyLogicOffline(conn *Connection) {
+	// 幂等标记 = 已送达（非已尝试）：显式路径与 OnClose 可能都触发，
+	// 已成功发送过的连接直接跳过；发送失败不置位，后续路径可重试。
+	if conn.OfflineNotified() {
+		return
+	}
+	serverID := conn.GetServerID()
+	if serverID == "" {
+		return
+	}
+	client := g.GetLogicClient(serverID)
+	if client == nil {
+		return
+	}
+	ntf := &protoGw.UserOfflineNtf{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), ServerId: serverID, OfflineTime: time.Now().UnixMilli()}
+	body, _ := proto.Marshal(ntf)
+	data := &protoGw.StreamData{SessionId: conn.ID(), UserKey: conn.GetUserUUID(), Cmd: protoGw.CmdUserOffline, Data: body}
+	// 调用方在 gnet 事件循环/空闲检查协程上：SendMessage 队列满时可能阻塞
+	// （QueuePolicyBlock 无超时），同步发送会拖死事件循环乃至 StopConnectionChecker。
+	// 仅网络入队挪到后台协程；成功后才置幂等标记，失败留给 OnClose 重试。
+	panicutil.Go(g.ctx, "dataplane.notifyLogicOffline", func() {
+		if err := client.SendMessage(data); err != nil {
+			tlog.Warn(g.ctx, "offline notify enqueue failed, left for retry connectionID=%s serverID=%s error=%v",
+				conn.ID(), serverID, err)
+			return
+		}
+		conn.MarkOfflineNotified()
+	})
+}

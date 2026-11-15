@@ -1,0 +1,139 @@
+package dataplane
+
+import (
+	"context"
+	"testing"
+
+	"github.com/streasure/sgate/internal/component"
+	"github.com/streasure/sgate/internal/config"
+)
+
+func minimalConfig() *config.Config {
+	return &config.Config{
+		HttpPort:   8081,
+		Belong:     "default",
+		ServerID:   "gateway-test",
+		ServerType: "Gateway",
+		Zone:       "default",
+		Transports: []config.Transport{{Port: 48080}},
+		GRPC:       config.GRPCConfig{Port: 50051},
+		Cluster:    config.ClusterConfig{NodeID: "node-test"},
+	}
+}
+
+// newTestEngine 以空资源容器构造数据面引擎（dataplane 包测试均不调 Init/Start，
+// 容器仅满足构造期注入；组件写入路径由 component 包测试覆盖）。
+func newTestEngine(cfg *config.Config) *Engine {
+	return NewEngine(context.Background(), cfg, "", component.NewResources(), "")
+}
+
+func TestNewEnginePanicsOnNilConfig(t *testing.T) {
+	// 构造器显式收参后，nil 配置是编程错误——必须 fail-fast panic，
+	// 而不是在 Start 阶段以 nil deref 形式更难排查地崩。
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("NewEngine(nil) should panic")
+		}
+	}()
+	_ = NewEngine(context.Background(), nil, "", component.NewResources(), "")
+}
+
+func TestNewEngineAppliesDefaultsAndStoresCopy(t *testing.T) {
+	cfg := minimalConfig()
+	gw := newTestEngine(cfg)
+	if gw == nil {
+		t.Fatal("NewEngine returned nil")
+	}
+
+	// 零值 protection 应被补齐
+	p := gw.GetProtection()
+	if p.MaxFrameSize != config.DefaultMaxFrameSize {
+		t.Errorf("MaxFrameSize = %d, want %d", p.MaxFrameSize, config.DefaultMaxFrameSize)
+	}
+	if p.WSHeartbeatTimeout != config.DefaultWSHeartbeatTimeoutSec {
+		t.Errorf("WSHeartbeatTimeout = %d, want %d", p.WSHeartbeatTimeout, config.DefaultWSHeartbeatTimeoutSec)
+	}
+
+	// grpc/stream 快照应有默认值
+	if got := gw.GetGRPCConfig(); got.Port != config.DefaultGRPCPort {
+		t.Errorf("GRPC port = %d, want %d", got.Port, config.DefaultGRPCPort)
+	}
+	if got := gw.GetStreamConfig(); got.SendChannelSize != config.DefaultGatewayStreamSendChannelSize {
+		t.Errorf("stream sendChannelSize = %d, want %d", got.SendChannelSize, config.DefaultGatewayStreamSendChannelSize)
+	}
+
+	// 应存指针副本：改入参 cfg 不影响内部存储
+	cfg.ServerID = "mutated"
+	stored := gw.cfg.Load()
+	if stored == nil {
+		t.Fatal("gw.cfg not stored as *config.Config")
+	}
+	if stored.ServerID == "mutated" {
+		t.Error("internal config shares caller pointer (should be a copy)")
+	}
+	if stored.ServerID != "gateway-test" {
+		t.Errorf("stored ServerID = %q, want gateway-test", stored.ServerID)
+	}
+
+	// 基础字段
+	if gw.GetServerID() != "gateway-test" {
+		t.Errorf("GetServerID = %q", gw.GetServerID())
+	}
+	if gw.pipeline == nil {
+		t.Error("pipeline not initialized")
+	}
+	if gw.connectionManager == nil {
+		t.Error("connectionManager not initialized")
+	}
+	if gw.stopChan == nil {
+		t.Error("stopChan not initialized")
+	}
+	if cap(gw.configUpdateChan) != 1 {
+		t.Errorf("configUpdateChan cap = %d, want 1", cap(gw.configUpdateChan))
+	}
+
+	// 避免泄漏：Close 走一次（closeOnce 保护）
+	gw.Close()
+}
+
+func TestMetricsLogEnabledDefault(t *testing.T) {
+	cfg := minimalConfig()
+	gw := newTestEngine(cfg)
+	defer gw.Close()
+
+	if !gw.metricsLogEnabled() {
+		t.Error("default should enable metrics log (DisableMetricsLog=false)")
+	}
+
+	// 热更关闭
+	cfg2 := minimalConfig()
+	cfg2.Monitoring.DisableMetricsLog = true
+	gw.cfg.Store(cfg2)
+	if gw.metricsLogEnabled() {
+		t.Error("DisableMetricsLog=true should disable metrics log")
+	}
+}
+
+func TestTryEnqueueConfigKeepsLatest(t *testing.T) {
+	cfg := minimalConfig()
+	gw := newTestEngine(cfg)
+	defer gw.Close()
+
+	cfg1 := minimalConfig()
+	cfg1.ServerID = "v1"
+	cfg2 := minimalConfig()
+	cfg2.ServerID = "v2"
+
+	gw.tryEnqueueConfig(cfg1)
+	gw.tryEnqueueConfig(cfg2) // 通道 cap=1，应丢弃 v1 保留 v2
+
+	got := <-gw.configUpdateChan
+	if got.ServerID != "v2" {
+		t.Errorf("got ServerID=%q, want v2 (latest wins)", got.ServerID)
+	}
+	select {
+	case extra := <-gw.configUpdateChan:
+		t.Errorf("unexpected extra config: %v", extra)
+	default:
+	}
+}

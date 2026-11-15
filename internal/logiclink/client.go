@@ -366,7 +366,7 @@ func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 		if len(mq.queue) >= mq.maxSize {
 			oldest := mq.queue[0]
 			mq.queue = mq.queue[1:]
-			PutStreamData(oldest) // 丢弃归池，否则池无法复用被丢消息的缓冲
+			protoGw.PutStreamData(oldest) // 丢弃归池，否则池无法复用被丢消息的缓冲
 		}
 		mq.queue = append(mq.queue, msg)
 		mq.cond.Signal()
@@ -377,7 +377,7 @@ func (mq *StreamMessageQueue) Enqueue(msg *protoGw.StreamData) error {
 		if len(mq.queue) >= mq.maxSize {
 			oldest := mq.queue[0]
 			mq.queue = mq.queue[1:]
-			PutStreamData(oldest)
+			protoGw.PutStreamData(oldest)
 		}
 		mq.queue = append(mq.queue, msg)
 		mq.cond.Signal()
@@ -411,7 +411,7 @@ func (mq *StreamMessageQueue) RequeueFront(msg *protoGw.StreamData) {
 	if len(mq.queue) >= mq.maxSize {
 		oldest := mq.queue[0] // 与 Drop/Backpressure 一致：丢最旧
 		mq.queue = mq.queue[1:]
-		PutStreamData(oldest)
+		protoGw.PutStreamData(oldest)
 	}
 	mq.queue = append(mq.queue, nil)
 	copy(mq.queue[1:], mq.queue[:len(mq.queue)-1])
@@ -445,7 +445,7 @@ func (mq *StreamMessageQueue) Flush(lc *LogicClient) {
 		lc.mu.RUnlock()
 
 		if closing {
-			PutStreamData(msg)
+			protoGw.PutStreamData(msg)
 			return
 		}
 
