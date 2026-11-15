@@ -9,14 +9,18 @@
 
 ## Architecture
 
-- Package dependency direction is strictly one-way: `gateway → backend → connection`. Never introduce reverse imports.
-- Frame codec helpers are owned by the wire repo: `github.com/streasure/protocol/gateway` (`frame.go`: DecodeClientMessage/PutClientMessage/MarshalClientMessage/NewErrorFrame/IsUDPCmd/ExtractMessageFrame). Business packages must never re-implement frame parsing; `internal/routes` has been removed.
-- Consumer-defined interfaces: `backend.GatewayInterface` (implemented by `*gateway.Gateway`), `connection.LogicClientProvider` (implemented by `*backend.LogicClient`). Do not move these to producer packages.
+- Package dependency direction is strictly one-way and follows plane boundaries (package = plane): `transport → dataplane ← logiclink`, with the control shell `control` composing all three (embeds `*dataplane.Engine`, holds `*transport.Server` and logiclink concrete types). The composition root `cmd/gateway/main.go` wires everything. Never introduce reverse imports: `dataplane` must NOT import `transport`/`logiclink` (it only holds consumer-defined interface views), no plane may import `control`.
+- Frame codec helpers are owned by the wire repo: `github.com/streasure/protocol/gateway` (`frame.go`: DecodeClientMessage/PutClientMessage/MarshalClientMessage/NewErrorFrame/IsUDPCmd/ExtractMessageFrame; `streampool.go`: StreamData object pool). Business packages must never re-implement frame parsing; `internal/routes` has been removed.
+- Consumer-defined interfaces (defined by consumer, implemented across planes; do not move to producer packages):
+  - `transport.Runtime` (transport defines; `*dataplane.Engine` implements; asserted in transport, promoted through `control.Controller` embedding)
+  - `dataplane.LogicClientProvider` / `dataplane.LogicLinkPool` / `dataplane.LogicLink` / `dataplane.UDPDownlink` (dataplane defines; `*logiclink.LogicClient(Pool)` implements; injected by `control` at Start)
+  - `logiclink.GatewayInterface` (logiclink defines; `*control.Controller` implements)
+  - `admin.Backend` (admin defines; `*dataplane.Engine` implements)
 - `component.NewContainer()` may only be called in `cmd/gateway/main.go`.
 - Component constructors take `*config.Config` explicitly (the composition root `cmd/gateway/main.go` passes the result of `config.Load`); there is no package-level config state (`config.Get`/`config.Path` must not come back).
-- Lifecycle order: Security(100) → Obs(200) → Traffic(300) → Cluster(400) → Gateway(1000).
-- Runtime resources are injected: the composition root creates one `*component.Resources` (filter chain `FC` included) via `component.NewResources()` and passes it to every component constructor and `NewGateway`; components write `res.XXX` / `res.FC.AddFilter` in `Init` (Order-sequenced), Gateway reads `g.res` in its `Init`. No package-level resource globals, no exported getters, no `types.InitFilterChain`/`types.GetFilterChain` (only init-time `types.RegisterFilter` SPI registration remains).
-- New code must pass `gofmt`, `go build ./...`, `go vet ./...`, and `go test ./... -count=1`.
+- Lifecycle order: Security(100) → Obs(200) → Traffic(300) → Cluster(400) → Control(1000).
+- Runtime resources are injected: the composition root creates one `*component.Resources` (filter chain `FC` included) via `component.NewResources()` and passes it to every component constructor and `control.New`; components write `res.XXX` / `res.FC.AddFilter` in `Init` (Order-sequenced), the Engine reads `g.res` in its `Init`. No package-level resource globals, no exported getters, no `types.InitFilterChain`/`types.GetFilterChain` (only init-time `policy.RegisterFilter` SPI registration remains).
+- New code must pass `gofmt`, `go build ./...`, `go vet ./...`, `go test ./... -count=1`, and `staticcheck ./...`.
 
 ## Panic Recovery
 
@@ -25,7 +29,7 @@
   - `panicutil.GoLoop(ctx, tag, loopFn)` — long-running loop; panic logs + restarts after 1s backoff; normal `return` (stop signal) ends the loop. Loop must own its stop condition (`stopChan` etc.); close/cleanup channels only on the normal-return path (restart must not double-close).
   - `panicutil.Recover(ctx, tag)` — `defer` in synchronous callbacks (gnet/gRPC handlers) that only need logging.
   - `panicutil.Safe(ctx, tag, fn)` — per-iteration guard inside a loop (one message / one check); panic does not kill the outer loop.
-- Tag convention: `package.component` (e.g. `gateway.wsHeartbeatChecker`, `backend.receiveMessages`); may append static-ish context (`backend.sendBatch shard=%d count=%d`).
+- Tag convention: `package.component` (e.g. `dataplane.wsHeartbeatChecker`, `logiclink.receiveMessages`); may append static-ish context (`logiclink.sendBatch shard=%d count=%d`).
 - Hand-written recover is allowed ONLY when panic must affect a return value beyond logging (e.g. gnet `action = gnet.Close`, SendMessage converting send-on-closed-channel panic into `error`).
 
 ## Benchmarks

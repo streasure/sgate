@@ -61,7 +61,7 @@ func main() {
 		cfg.HttpPort, control.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
 
-	// 运行时资源容器：组件 Init 内写入、Gateway Init 读取（替代包级全局量）。
+	// 运行时资源容器：组件 Init 内写入、Engine Init 读取（control 壳嵌入，替代包级全局量）。
 	// 过滤器链随容器创建，按配置加载 SPI 过滤器（filterChain.enabled=false 时不加载）。
 	res := comp.NewResources()
 	if cfg.FilterChain.Enabled {
