@@ -13,114 +13,138 @@
 └────────────────────────┬────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────┐
-│              internal/gateway (接入层)                    │
-│  Gateway struct · gnet handlers · login · websocket      │
-│  pipeline · filter · monitor · overload · integrity      │
-└────────────────────────┬────────────────────────────────┘
-                         │ 依赖
-┌────────────────────────▼────────────────────────────────┐
-│              internal/backend (后端层)                    │
-│  LogicClient · LogicClientPool · StreamManager           │
-│  GRPCServer · GatewayInterface                            │
-└────────────────────────┬────────────────────────────────┘
-                         │ 依赖
-┌────────────────────────▼────────────────────────────────┐
-│            internal/connection (连接层)                   │
-│  Connection · ConnectionManager · Group · ShardedMap      │
-│  ShardedWriteCoalescer · EncodeWSFrame · Providers        │
-└─────────────────────────────────────────────────────────┘
+│              internal/control (控制面壳)                  │
+│  Controller 嵌入 Engine · transport/gRPC/TLS 装配        │
+│  StartServices · closeBody 关闭相位编排                   │
+└──────┬───────────────────────────────┬──────────────────┘
+       │ 嵌入/装配                      │ 持具体类型并注入消费方接口
+┌──────▼───────────────┐   ┌───────────▼──────────────────┐
+│ internal/dataplane   │   │ internal/transport            │
+│ (数据面 Engine)       │◄──│ (传输面)                       │
+│ 登录/管道/安全链/统计   │RT │ gnet 事件 · 帧编解码 · 状态机   │
+│ ConnectionManager    │   │ 关闭握手 · PROXY protocol      │
+└──────▲───────────────┘   └──────────────────────────────┘
+       │ 消费方接口（LogicClientProvider/LogicLinkPool）
+┌──────┴───────────────┐
+│ internal/logiclink   │
+│ (逻辑链路面)           │
+│ LogicClient · Pool · │
+│ Stream · GRPCServer  │
+└──────────────────────┘
 ```
 
-**依赖方向（严格单向）：**
+**依赖方向（严格单向，包边界 = 平面边界）：**
 
 ```text
-gateway → backend → connection
-   │         │
-   │         └──→ routes（帧编解码、命令码）
-   └──→ routes, connection, backend, component, config, ...
+transport ──→ dataplane ◄── logiclink
+                  ▲
+                  │ 嵌入 + 持具体类型
+              control（壳）
+                  ▲
+              cmd/gateway（组合根）
+
+公共依赖：各平面 → protocol 仓 gateway（帧编解码、命令码，wire 唯一权威）
+          各平面 → config / component / obs / policy / security / ...
 ```
 
-禁止：`connection` 引用 `backend` 或 `gateway`；`backend` 引用 `gateway`。
+禁止：`dataplane` 引用 `transport` 或 `logiclink`（只持消费方接口视图）；`transport` 直接触碰业务；任何平面反向引用 `control`。
+
+消费方定义接口：`transport.Runtime`（transport 定义、dataplane.Engine 实现）、`dataplane.LogicClientProvider`/`LogicLinkPool`（dataplane 定义、logiclink 实现）、`logiclink.GatewayInterface`（logiclink 定义、control 实现）。
 
 ---
 
 ## 2. 核心包职责
 
-### 2.1 internal/gateway
+### 2.1 internal/control（控制面生命周期壳）
 
-Gateway 结构体承载全部接入侧状态：
+`Controller` 嵌入 `*dataplane.Engine`，自身只负责组合装配：
 
 | 职责 | 文件 | 关键类型/方法 |
 | --- | --- | --- |
-| 生命周期 | gateway.go | `NewGateway(cfg, configPath, res)`, `Init/Start/Destroy`, `StartServices` |
-| gnet 事件 | handlers.go | `OnOpen/OnTraffic/OnClose`（原 conn.go） |
-| 登录 | login.go | `handleLoginGate`、`initLoginService`（loginserver 发现+服务客户端，网关自持）、session 绑定 |
+| 生命周期 | controller.go | `New(cfg, configPath, res)`、`Init/Start/Destroy`、`StartServices` |
+| 关闭编排 | controller.go | `closeBody`：BeginClose→ctxCancel→MarkForwardClosed→StopEngines→排空→逻辑链路→安全组件→gRPC→数据面→统计 |
+| transport 装配 | controller.go | `transport.NewServer(ctx, gw)` 注入本实例为 `Runtime`；`RequestClose` 关闭握手 |
+| 逻辑链路注入 | controller.go | Start 期 `SetLogicLink/SetLogicPool` 把 `*logiclink.LogicClient(Pool)` 注入 Engine 的消费方接口视图 |
+| 版本 | version.go | `Version`、`BuildInfo`（ldflags `-X .../internal/control.BuildVersion`） |
+
+**编译期断言**：`var _ transport.Runtime = (*Controller)(nil)`、`var _ logiclink.GatewayInterface = (*Controller)(nil)`（实现漂移即编译失败）。
+
+### 2.2 internal/dataplane（数据面）
+
+`Engine` 承载全部业务状态，可独立构造（测试/嵌入场景，收尾走 `Close`）：
+
+| 职责 | 文件 | 关键类型/方法 |
+| --- | --- | --- |
+| 基座 | engine.go | `NewEngine(ctx, cfg, configPath, res, version)`、`StartBusiness`、关闭相位（BeginClose/DrainConnections/Shutdown*）、`SetShutdownHook/SetLogicLink/SetLogicPool` |
+| 帧分派 | handlers.go | `HandleTCPFrame/HandleWSFrame`、`isLogicConnected`、`GetLogicClient` |
+| 登录 | login.go | `handleLoginGate`、`InitLoginService`（loginserver 发现+服务客户端，网关自持）、session 绑定 |
 | 登出/管理端 | admin.go | `handleLogoutGate`（JWT Revoke+通知逻辑服+`SendThenClose` 可靠投递 ack 后断连）、`POST /admin/ratelimit`（Bearer，`admin.token` 空=关闭） |
 | 维护模式 | maintenance.go | `handleAdminMaintenance`：按 serverId/zone 置维护，阻断新登录并踢出在线玩家（路由在 admin.go 注册） |
 | 踢人执行器 | kick.go | `kickConn`/`pushKickNotify`：loginserver 单向下发 KickAccounts/KickIP 的本地执行端（sgate 无封禁存储）；KickAccounts 按账号索引踢**全部**在线连接（同账号多逻辑服连接不漏踢） |
 | 登录周期校验 | batch_validate.go | BatchValidate 周期安全网（`loginValidation.batchInterval`，P2） |
-| WebSocket | websocket.go | 握手升级、帧编解码 |
+| WebSocket | websocket.go / wsconn.go / ws_frame.go | WS 会话对象、帧编码（握手在 transport 平面） |
 | 消息管道 | pipeline.go | 认证→安全→过滤→转发 |
 | 过滤器 | filter.go | FilterContext 池、`g.filterChain.RunByPhase` 分阶段执行（链由 `res.FC` 注入） |
 | 监控 | monitor.go | `/stats`、配置热更新 |
-| 过载保护 | overload.go | `OverloadProtector`、CPU 阈值 |
+| 过载保护 | overload.go | `OverloadProtector`、CPU 阈值、`dropOnOverload` 拦截 |
 | 完整性 | integrity.go | `MessageIntegrity`（时间戳、按 connectionID 分 16 片去重，防全局锁串行化热路径） |
-| 版本 | version.go | `Version`、`BuildInfo` |
+| 连接管理 | connection.go / manager.go / group.go / sharded_map.go / coalescer.go | Connection、ConnectionManager、分组、分片 Map、写合并器、session ID 生成/解析 |
+| 传输回调 | transport_runtime.go | `transport.Runtime` 实现（准入/注册/帧回调/关闭钩子） |
+| 消费方接口 | iface.go | `LogicClientProvider`、`LogicLink`、`LogicLinkPool`、`UDPDownlink` |
+| UDP 关联 | udp_*.go | assoc/uplink/send/reject/handlers |
 
-**GatewayInterface 实现**：gateway 包通过编译期断言确保 `*Gateway` 实现 `backend.GatewayInterface`，供 backend 反向调用（查连接、取配置、推送计数等），避免 backend→gateway 的包依赖。
+### 2.3 internal/transport（传输面）
 
-### 2.2 internal/backend
+| 类型/职责 | 文件 | 说明 |
+| --- | --- | --- |
+| `Server` | server.go | gnet EventHandler、engine 容器、端口→传输类型表、关闭握手（`RequestClose`/CAS 防互锁） |
+| `Runtime` | runtime.go | 传输面定义、数据面实现的消费方接口（准入/注册/帧分派/关闭） |
+| TCP 切帧 | tcp.go | 4 字节长度前缀 |
+| WS 握手/帧 | websocket.go / ws_handler.go | 握手升级、半包累积 16KB 上限、close/ping/pong 状态机、masked 帧校验 |
+| 连接上下文 | conn_context.go | 协议身份解析 |
+| PROXY protocol | proxy_protocol.go | 反代源地址还原 |
+
+### 2.4 internal/logiclink（逻辑链路面）
 
 | 类型 | 文件 | 职责 |
 | --- | --- | --- |
 | `LogicClient` | client.go | 单逻辑服连接：流分片、发送、断线缓存 |
-| `LogicClientPool` | pool.go | 多逻辑服管理：接入、负载均衡、地址缓存 |
-| `StreamManager` / `StreamShard` | stream.go | gRPC 流分片：按 session 分片降低锁竞争，StreamBatch 合帧 |
+| `LogicClientPool` | pool.go | 多逻辑服管理：接入、负载均衡、地址缓存、`ZoneOf` |
+| `Stream` / `StreamShard` | stream.go | gRPC 流分片：按 session 分片降低锁竞争，StreamBatch 合帧 |
 | `LogicConnectionState` 等 | state.go | 连接状态机、`Err*` 错误定义 |
 | `GRPCServer` | grpc_server.go | 逻辑服 flip 流入口、Gateway/Kick unary RPC |
-| `GatewayInterface` | iface.go | backend 对 gateway 的能力依赖（消费方定义接口） |
+| `GatewayInterface` | iface.go | logiclink 对网关的能力依赖（消费方定义接口） |
 
 **连接模型选型**（发现侧接入统一走 util 的 `ugrpc.Source` 插件契约，胶水在 `util/udiscovery`）：
 
 | 场景 | 选择 | 说明 |
 | --- | --- | --- |
-| 逻辑服连接（分片、按 serverID 路由、会话粘性） | `LogicClientPool`（backend 自有） | flip 模式：logic 主动拨入，地址来自握手元数据，非 etcd 拨号 |
-| 无状态服务、单连接多实例负载均衡（如 loginserver 校验） | `ugrpc.ServiceClient`（`udiscovery.DialEtcdService`） | resolver 热切换地址，round_robin；`gateway/login.go initLoginService` 即此形态 |
+| 逻辑服连接（分片、按 serverID 路由、会话粘性） | `LogicClientPool`（logiclink 自有） | flip 模式：logic 主动拨入，地址来自握手元数据，非 etcd 拨号 |
+| 无状态服务、单连接多实例负载均衡（如 loginserver 校验） | `ugrpc.ServiceClient`（`udiscovery.DialEtcdService`） | resolver 热切换地址，round_robin；`dataplane/login.go InitLoginService` 即此形态 |
 | etcd 拨号、每实例一条连接、按 instanceID 路由 | `ugrpc.Pool.Attach(source)` | 同一 `Source()` 可多路消费（sgate 现未使用，供扩展） |
 
-### 2.3 internal/connection
+### 2.5 帧编解码（internal/routes 已消亡，下沉 protocol 仓）
 
-| 类型 | 文件 | 职责 |
-| --- | --- | --- |
-| `Connection` | connection.go | 客户端连接：session、状态、消息速率计数 |
-| `ConnectionManager` | manager.go | 分片存储、账号→连接集合索引（KickAccounts）、`ForEach`、空闲连接清理；session ID 生成/解析（`GenerateConnectionID`/`ParseSessionGateway`，自描述 ID §4.6） |
-| `ConnectionGroup` | group.go | 组成员管理（广播/组播） |
-| `ShardedMap` | sharded_map.go | 分片并发 Map（降低锁竞争） |
-| `ShardedWriteCoalescer` | coalescer.go | 推送路径分片写合并（批量优化） |
-| `EncodeWSFrame` | ws_frame.go | WebSocket 帧编码 |
-| `LogicClientProvider` | iface.go | 逻辑服客户端能力接口（消费方定义） |
+- protocol 仓 `gateway/frame.go`：`ExtractMessageFrame`、`IsUDPCmd` 号段判定、`DecodeClientMessage`/`PutClientMessage`、`MarshalClientMessage`/`MarshalClientError`、`NewErrorResponse`/`NewErrorFrame`（命令码常量在 protocol 仓 `gateway/cmds.go`）；下行 `StreamData` 对象池在 `gateway/streampool.go`
 
-### 2.4 帧编解码（internal/routes 已消亡，下沉 protocol 仓）
+帧编解码被 transport、dataplane、logiclink 各平面共同依赖，统一收在 wire 契约唯一权威的 protocol 仓，业务仓不再自持帧格式实现。
 
-- protocol 仓 `gateway/frame.go`：`ExtractMessageFrame`、`IsUDPCmd` 号段判定、`DecodeClientMessage`/`PutClientMessage`、`MarshalClientMessage`/`MarshalClientError`、`NewErrorResponse`/`NewErrorFrame`（命令码常量在 protocol 仓 `gateway/cmds.go`）
-
-帧编解码被 gateway、backend、connection 各层共同依赖，统一收在 wire 契约唯一权威的 protocol 仓，业务仓不再自持帧格式实现。
-
-### 2.5 其他支撑包
+### 2.6 其他支撑包
 
 | 包 | 职责 |
 | --- | --- |
 | `component` | 组件容器、扁平生命周期、资源容器（`resources.go` 的 `*Resources`，组合根注入） |
 | `config` | 配置结构、默认值、`Load` 解析校验（无包级全局态，由调用方持有） |
+| `policy` | 过滤器链 FilterChain、SPI 工厂注册（`RegisterFilter`） |
+| `admin` | 管理端 HTTP 面：Bearer 鉴权、`/admin/*` 端点注册（业务经 `admin.Backend` 回调） |
 | `security` | 限流、熔断、WAF、JWT、黑白名单 |
 | `traffic` | 灰度、镜像、降级、WASM |
 | `cluster` | etcd 自注册（registerSelf）、配置中心、告警 webhook |
 | `obs` | 追踪、pprof、健康检查、延迟分位数 |
-| `types` | 过滤器链、公共类型定义 |
 
-### 2.6 logic SDK（独立仓 github.com/streasure/logic，网关不依赖）
+### 2.7 logic SDK（独立仓 github.com/streasure/logic，网关不依赖）
 
-logic SDK 是提供给逻辑服进程嵌入的 SDK，**已独立为模块 `github.com/streasure/logic`**（自 sgate `internal/logic` 迁出；sgate 的 bench 以 `go.mod` `replace => ../logic` 引用）。`internal/gateway`、`internal/backend` 均不 import 它（不参与上述分层依赖）。它封装：gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）、`Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*` 等）消费；网关侧与之对接的是 `internal/backend` 的 `GRPCServer` flip 流入口。详见 [README §十](../README.md#十逻辑层-api)。
+logic SDK 是提供给逻辑服进程嵌入的 SDK，**已独立为模块 `github.com/streasure/logic`**（自 sgate `internal/logic` 迁出；sgate 的 bench 以 `go.mod` `replace => ../logic` 引用）。`internal/dataplane`、`internal/logiclink` 均不 import 它（不参与上述分层依赖）。它封装：gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）、`Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*` 等）消费；网关侧与之对接的是 `internal/logiclink` 的 `GRPCServer` flip 流入口。详见 [README §十](../README.md#十逻辑层-api)。
 
 ---
 
@@ -137,7 +161,7 @@ container.Add(comp.NewSecurityComponent(cfg, res))      // Order 100
 container.Add(comp.NewObservabilityComponent(cfg, res)) // Order 200
 container.Add(comp.NewTrafficComponent(cfg, res))       // Order 300
 container.Add(comp.NewClusterComponent(cfg, res))       // Order 400
-container.Add(gateway.NewGateway(cfg, *confFiles, res)) // Order 1000
+container.Add(control.New(cfg, *confFiles, res))      // Order 1000
 container.Serve()
 ```
 
@@ -148,22 +172,23 @@ container.Serve()
 | 100 | Security | 安全链先就绪 |
 | 200 | Obs | 日志/追踪/指标 |
 | 300 | Traffic | 流量治理 |
-| 400 | Cluster | etcd 自注册、配置中心、告警 webhook（登录发现由 Gateway 自持，不在此组件） |
-| 1000 | Gateway | 接入层最后启动 |
+| 400 | Cluster | etcd 自注册、配置中心、告警 webhook（登录发现由 dataplane 自持，不在此组件） |
+| 1000 | Control | 生命周期壳最后启动（装配 transport/gRPC/逻辑链路） |
 
 ### 3.2 构造器显式收参
 
 组件构造函数显式接收 `*config.Config` 与 `*component.Resources`（组合根在 `config.Load`、`NewResources` 后传入），不读任何包级全局配置与全局资源：
 
 ```go
-func NewGateway(cfg *config.Config, configPath string, res *component.Resources) *Gateway { ... }
+func New(cfg *config.Config, configPath string, res *component.Resources) *Controller { ... } // control
+func NewEngine(ctx context.Context, cfg *config.Config, ...) *Engine { ... }                  // dataplane
 func NewSecurityComponent(cfg *config.Config, res *Resources) *SecurityComponent { ... }
 func NewLogicClient(gateway GatewayInterface) *LogicClient { ... }  // 仅消费方接口
 ```
 
 ### 3.3 资源容器注入
 
-组合根用 `component.NewResources()` 创建一个 `*component.Resources`（`resources.go`，内含过滤器链 `FC` 与 13 项资源字段）并注入全部组件构造器与 `NewGateway`；组件在 Init 阶段按 Order 写入，Gateway（Order 1000）在自己的 Init 读取——无包级全局量、无导出 getter：
+组合根用 `component.NewResources()` 创建一个 `*component.Resources`（`resources.go`，内含过滤器链 `FC` 与 13 项资源字段）并注入全部组件构造器与 `control.New`；组件在 Init 阶段按 Order 写入，Engine（Order 1000 的壳嵌入）在自己的 Init 读取——无包级全局量、无导出 getter：
 
 ```go
 // 组合根创建并注入（cmd/gateway/main.go）
@@ -173,12 +198,12 @@ res := comp.NewResources()
 c.res.WhitelistBlacklist = c.whitelistBlacklist
 c.res.FC.AddFilter(c.jwtAuth)
 
-// Gateway 读取（gateway.go Init）
+// Engine 读取（dataplane/engine.go Init）
 g.rateLimiter = res.RateLimiter
 ```
 
-例外：loginserver 发现不经资源容器——`Gateway.Start` 经 `udiscovery.DialEtcdService` 自持
-（`login.go initLoginService`），`closeBody` 对称关闭。
+例外：loginserver 发现不经资源容器——`control.Start` 调 `Engine.InitLoginService` 经 `udiscovery.Dial` 自持
+（`dataplane/login.go`），`closeBody` 对称关闭。
 
 ### 3.4 过滤器链（随资源容器注入）
 
@@ -193,7 +218,7 @@ for _, fi := range cfg.FilterChain.Filters {
 c.res.FC.AddFilter(myFilter)
 ```
 
-`types.InitFilterChain`/`types.GetFilterChain` 已删除；仅保留 init 期 `types.RegisterFilter`（SPI 工厂注册表，`NewFilterChain` 构造时快照）。
+`types.InitFilterChain`/`types.GetFilterChain` 已删除；仅保留 init 期 `policy.RegisterFilter`（SPI 工厂注册表，`NewFilterChain` 构造时快照）。
 
 ---
 
@@ -202,27 +227,27 @@ c.res.FC.AddFilter(myFilter)
 ### 4.1 上行：客户端 → 逻辑服
 
 ```text
-1. gnet OnTraffic (handlers.go)
-2. TCP: 长度前缀切帧 / WS: 帧解析 (handlers.go / websocket.go)
-3. decode MessageFrame (routes.ExtractMessageFrame)
-4. MessagePipeline (pipeline.go)
-   ├─ 过载检查 (overload)
-   ├─ 认证/会话 (login)
+1. gnet OnTraffic (transport/server.go)
+2. TCP: 长度前缀切帧 / WS: 帧解析 (transport/tcp.go · ws_handler.go)
+3. decode MessageFrame (protoGw.ExtractMessageFrame，protocol 仓)
+4. MessagePipeline (dataplane/pipeline.go)
+   ├─ 过载检查 (dataplane/overload)
+   ├─ 认证/会话 (dataplane/login)
    ├─ 安全链 (security: 限流/WAF/JWT)
-   ├─ 过滤器链 (types.FilterChain)
+   ├─ 过滤器链 (policy.FilterChain)
    └─ 连接级流控 (Connection.CheckAndIncrementMsgRate)
-5. LogicClientProvider.SendMessage (connection iface)
-6. StreamShard 按 session 分片入队 (backend/stream)
+5. LogicClientProvider.SendMessage (dataplane 消费方接口)
+6. StreamShard 按 session 分片入队 (logiclink/stream)
 7. gRPC stream.Send → Logic
 ```
 
 ### 4.2 下行：逻辑服 → 客户端
 
 ```text
-1. GRPCServer.OnData (backend/grpc_server)
+1. GRPCServer.OnData (logiclink/grpc_server)
 2. 查找连接: connectionManager.Get(sessionID)
-3. 编码: routes.MarshalClientMessage / EncodeWSFrame
-4. 可选批量: ShardedWriteCoalescer 合并写 (connection/coalescer)
+3. 编码: protoGw.MarshalClientMessage / EncodeWSFrame
+4. 可选批量: ShardedWriteCoalescer 合并写 (dataplane/coalescer)
 5. gnet 异步写回客户端
 ```
 
@@ -258,7 +283,7 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
   → 并发登录槽 (loginSlots，满则 429)
   → worker 协程 finishLoginGate（避免阻塞 event loop）
       ├─ loginValidation.enabled=true 时经 loginserver ValidateLoginToken（失败 401，fail-closed）
-      │    （loginserver 地址经 etcd 发现：initLoginService 单连接 + round_robin 热切换）
+      │    （loginserver 地址经 etcd 发现：InitLoginService 单连接 + round_robin 热切换）
       ├─ 绑定 userUUID = {serverId}:{userId}、踢旧连接
       ├─ Client ← CmdLoginGateAck(1000002)（code=0 成功）
       └─ 原始 LoginGate StreamData 带 SessionId/UserKey 异步转发 logic
@@ -273,7 +298,7 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
 
 - gnet UDP **不触发 `OnOpen`**（源码层面每个数据报新建 conn 对象），`ConnectionManager` 中不存在、也无法存在对应连接
 - 曾把 `"udp_"+remoteAddr` 当 connectionID 投进 pipeline，必然 `unknown connection`——一次必然失败的完整往返（连 LoginGate 都过不去），且全仓无 UDP 测试
-- 现在关闭态在源 IP 限速 + 帧校验 + 解码之后**明确拒绝**：回一帧 `udp transport not supported`（垃圾包静默丢，控制回包放大），计数 `droppedUnsupported` 计入 `/stats` 的 `droppedTotal`；不建连接、不投 pipeline（回归：`internal/gateway/udp_reject_test.go`）
+- 现在关闭态在源 IP 限速 + 帧校验 + 解码之后**明确拒绝**：回一帧 `udp transport not supported`（垃圾包静默丢，控制回包放大），计数 `droppedUnsupported` 计入 `/stats` 的 `droppedTotal`；不建连接、不投 pipeline（回归：`internal/dataplane/udp_reject_test.go`）
 
 **工作方式**（开启态）：
 
@@ -285,17 +310,17 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
    → 回 ASSOCIATE_OK → conn.SetUDPDownlink(gw) 注入下行通道
 4. 上行：UDP 包按源地址反查真实 connID → seq 滑动窗口去重 → 以真实 connID 投现有
    worker pool，复用 pipeline 全链路（鉴权/限流/过滤器/转发不变，帧体与 TCP/WS 逐字节一致）
-5. 下行：backend 各调用点只换 SendByCmd —— connection.SendByCmd 是全系统唯一分流点
+5. 下行：logiclink 各调用点只换 SendByCmd —— Connection.SendByCmd 是全系统唯一分流点
    （号段内 && 有关联 && 新鲜 → sendUDPFrame，否则回落 WS，降级不丢）；
    UDP 消息不进 PushBatch、不走 coalescer（一包一消息，逐条发）
 6. WS 断开 / UDP 空闲超时（janitor，默认 60s）→ 删除关联；NAT 保活靠客户端 15s 周期发包
 ```
 
-**依赖方向**：`connection` 定义 `UDPDownlink` 接口（consumer-defined，同 `LogicClientProvider` 模式），`*gateway.Gateway` 实现并在 ASSOCIATE 成功时注入——`gateway → backend → connection` 单向依赖不变；号段判断收敛在 `routes.IsUDPCmd`（纯函数，热路径一次区间比较）。
+**依赖方向**：`dataplane` 定义 `UDPDownlink` 接口（consumer-defined，同 `LogicClientProvider` 模式），`*dataplane.Engine` 实现并在 ASSOCIATE 成功时注入——`transport → dataplane ← logiclink` 单向依赖不变；号段判断收敛在 `protoGw.IsUDPCmd`（protocol 仓纯函数，热路径一次区间比较）。
 
 **安全与工程要点**：token 一次性消费防重放、per-IP/总量双上限防关联表耗尽、未关联数据报静默丢弃（反放大：回包 ≤ 来包，垃圾包零回包）、seq 去重窗口、MTU ≤ 1400B 避免 IP 分片、下行新鲜度条件（`now-lastSeen ≤ idleTimeout/2` 才走 UDP，stale 黑洞窗口砍半且不发起注定投向死地址的 SendTo）。**存活判据只看 WS**：UDP 丢包不断线，弱网玩家不被误踢。
 
-**测试**：`udp_reject_test.go`（关闭态拒绝）、`udp_assoc_test.go`（token 一次性/过期/撤销、关联生命周期、per-IP 与总量上限、空闲清扫、幂等替换）、`udp_uplink_test.go`（pipeline 转发/会话隔离/seq 去重/MTU/埋点）、`udp_send_test.go`（下行分流/新鲜度/回落/-race）、`backend/stream_udp_redirect_test.go`（批量绕过/广播分流/coalescer 绕过）、`connection/send_by_cmd_test.go`（唯一分流点）。
+**测试**：`udp_reject_test.go`（关闭态拒绝）、`udp_assoc_test.go`（token 一次性/过期/撤销、关联生命周期、per-IP 与总量上限、空闲清扫、幂等替换）、`udp_uplink_test.go`（pipeline 转发/会话隔离/seq 去重/MTU/埋点）、`udp_send_test.go`（下行分流/新鲜度/回落/-race）、`logiclink/stream_udp_redirect_test.go`（批量绕过/广播分流/coalescer 绕过）、`dataplane/send_by_cmd_test.go`（唯一分流点）。
 
 ### 4.6 自描述 session ID（跨网关定位）
 
@@ -308,7 +333,7 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
       ↑ config serverID（与 etcd 注册 instanceID 同一标识）
 
 生成：connection.GenerateConnectionID（唯一入口，addConnection 调用）
-      newGateway 构造时 connection.SetSessionGatewayID(cfg.ServerID) 注入一次
+      NewEngine 构造时 dataplane.SetSessionGatewayID(cfg.ServerID) 注入一次
 定位：connection.ParseSessionGateway(id) 解析出 serverID
       → 现有 etcd 服务发现 {belong}/SERVER_TYPE_SGATE:{zone}/{serverId} 取地址
 ```
@@ -321,7 +346,7 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
 
 **为什么不建 etcd 表（决策记录）**：消费方盘点——logic 推送靠 flip 模式内存 `sessions` 表（单 zone 已解决）、loginserver 踢人靠 Redis 三键索引 `sess:conn:{sgateId}:{connId}`（已有），etcd 建表无真实消费方；"网关重启需客户端重连"是 TCP 连接本性，属 P3-3 滚动升级，本项不解决也不声称解决。跨 zone 映射存储延后到 P3-2 有真实消费方再定（届时本格式与解析仍可复用）。
 
-**测试**：`connection/session_id_test.go`（跨网关不重号、进程内 1000 条唯一、含下划线/数字结尾 serverID 往返、旧格式与非法输入返回空、未设置退化旧格式）。
+**测试**：`dataplane/session_id_test.go`（跨网关不重号、进程内 1000 条唯一、含下划线/数字结尾 serverID 往返、旧格式与非法输入返回空、未设置退化旧格式）。
 
 ---
 
@@ -359,24 +384,30 @@ Client → CmdLoginGate(1000001) LoginGateReq（LoginGate 走捷径，不经 pip
 
 | 接口 | 定义位置 | 实现方 | 消费方 |
 | --- | --- | --- | --- |
-| `GatewayInterface` | backend/iface.go | `*gateway.Gateway` | LogicClient、GRPCServer、Pools |
-| `LogicClientProvider` | connection/iface.go | `*backend.LogicClient` | pipeline、Connection 缓存 |
+| `Runtime` | transport/runtime.go | `*dataplane.Engine`（壳经嵌入提升同一实现） | transport Server（准入/注册/帧分派/关闭握手） |
+| `LogicClientProvider` | dataplane/iface.go | `*logiclink.LogicClient` | pipeline、Connection 缓存 |
+| `LogicLinkPool` | dataplane/iface.go | `*logiclink.LogicClientPool` | Engine（control Start 期注入） |
+| `GatewayInterface` | logiclink/iface.go | `*control.Controller` | LogicClient、GRPCServer、Pools |
+| `Backend` | admin/ | `*dataplane.Engine` | 管理端维护/限流回调 |
 
-**好处**：backend 不 import gateway，避免循环依赖；测试时可 mock。
+**好处**：dataplane 不 import transport/logiclink，control 之外无反向依赖，避免循环依赖；测试时可 mock。
 
 ### 6.2 编译期断言
 
 ```go
-// gateway/gateway.go
-var _ backend.GatewayInterface = (*Gateway)(nil)
+// transport/runtime.go
+var _ Runtime = (*dataplane.Engine)(nil)
+// control/controller.go
+var _ transport.Runtime = (*Controller)(nil)
+var _ logiclink.GatewayInterface = (*Controller)(nil)
 ```
 
 ---
 
 ## 7. 配置与热更新
 
-- **冷启动**：`config.Load()` 返回 `*config.Config` → 组合根显式传入各组件构造器与 `NewGateway(cfg, configPath, res)`（无包级全局态，无 `config.Set`；`res` 为 `component.NewResources()` 创建的资源容器）
-- **热更新**：`configWatcher` 轮询构造器传入的配置文件路径 → `config.Load` 重新解析 → `handleConfigUpdate` 校验后存入 `Gateway` 自持的 `atomic.Pointer` 并应用差异
+- **冷启动**：`config.Load()` 返回 `*config.Config` → 组合根显式传入各组件构造器与 `control.New(cfg, configPath, res)`（无包级全局态，无 `config.Set`；`res` 为 `component.NewResources()` 创建的资源容器）
+- **热更新**：`configWatcher` 轮询构造器传入的配置文件路径 → `config.Load` 重新解析 → `handleConfigUpdate` 校验后存入 `Engine` 自持的 `atomic.Pointer` 并应用差异
 - **支持热更的参数**：限流阈值、黑名单、过载保护、JWT、灰度、镜像、降级、连接限制、连接级流控
 - **不可热切的开关**：`security/rateLimit/waf/jwtAuth/circuitBreaker` 的 `enabled`（组件与过滤器仅启动时创建，热切会静默 fail-open/fail-stale）——`handleConfigUpdate` 检测到开关变化整单拒绝并告警，要求重启生效；非法配置（含帧缓冲交叉校验 `maxFrameBufSize ≥ maxFrameSize+4`）同样整体拒绝、保留当前配置
 
@@ -389,7 +420,7 @@ var _ backend.GatewayInterface = (*Gateway)(nil)
 | 新过滤器 | 实现 `types.Filter`，在配置 `filterChain.filters` 中加载 |
 | 新组件 | 实现 `Name/Order/Init/Start/Destroy`，在 main `container.Add` |
 | 新推送策略 | 替换/包装 `ShardedWriteCoalescer` 或调整 `batchPush` |
-| 新路由 | `routes` 添加命令码 + pipeline/handler 注册处理函数 |
+| 新路由 | protocol 仓添加命令码 + dataplane pipeline/handler 注册处理函数 |
 
 ---
 

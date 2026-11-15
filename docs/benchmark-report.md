@@ -75,7 +75,7 @@
 | 60s 保持期 | active=16,071 **零掉线**、droppedTotal=0 |
 | 保持期内存 | RSS 1,341 → 1,342MB 稳定（每连接约 75KB，进程基线 124MB）、alloc 1,162 → 1,164MB |
 | 保持期 goroutine | 16,364（≈ 每连接 1 个 + 300 基线，Windows gnet 每连接一 goroutine） |
-| 保持期 CPU | ≈ 0.3%（心跳/batch 校验被 benchMode 跳过） |
+| 保持期 CPU | ≈ 0.3%（WS 心跳/连接空闲检查被 disable 开关停用，batch 校验因 `loginValidation.enabled: false` 自停） |
 
 **结论**：Windows 下 16K 即单机连接天花板（端口池硬限制）；网关侧 16K 保持零资源漂移。更大规模需 Linux（epoll）。
 
@@ -178,7 +178,7 @@ gateway 与 logic 之间的 gRPC stream 若共享单条 TCP 连接，HTTP/2 协�
 |------|---------|------|
 | 堆 inuse | 50MB | 实际使用 |
 | gnet accept 缓冲区 | 31MB | 481 个对象 |
-| StreamManager | 15MB | 26 个分片 |
+| Stream（原 StreamManager） | 15MB | 26 个分片 |
 | logger 缓冲区 | 2MB | treasure-slog |
 | goroutine 栈 | ~500MB | 770 个 goroutine（Windows gnet） |
 | Go 虚拟内存保留 | ~800MB | 不归还 OS（正常行为） |

@@ -124,7 +124,7 @@ message ErrorResponse {
 | **TCP** | 发送任意帧（含 `CmdHeartbeatReq`）刷新活跃时间 | 超过 `connIdleTimeout`（默认 5m，`config/gateway.yaml` 为 30s）无数据 → 断开 |
 | UDP | 每 15s 发一次业务包或 `CmdUdpPing` | 关联空闲 `idleTimeout`（默认 60s，连丢 4 次保活才淘汰） |
 
-**关于 `CmdHeartbeatReq(1100010)`**：它会通过管道但**网关不转发给逻辑服、也不产生应答**（`backend/stream.go` 消费、`logic` builtin 同样消费）——它只是"我还活着"的信号，**不要等待 ack**。推荐：WS 客户端直接用协议层 ping（浏览器自动），TCP 客户端周期发任意小帧或 `CmdHeartbeatReq`。
+**关于 `CmdHeartbeatReq(1100010)`**：它会通过管道但**网关不转发给逻辑服、也不产生应答**（`logiclink/stream.go` 消费、`logic` builtin 同样消费）——它只是"我还活着"的信号，**不要等待 ack**。推荐：WS 客户端直接用协议层 ping（浏览器自动），TCP 客户端周期发任意小帧或 `CmdHeartbeatReq`。
 
 **建议节奏**：ping 间隔 ≤ 30s（timeout 的一半以内），确保偶发丢包不触发超时踢线。
 

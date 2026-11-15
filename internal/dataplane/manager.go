@@ -51,7 +51,7 @@ type ConnectionManager struct {
 var connectionIDCounter atomic.Uint64
 
 // sessionGatewayID 会话 ID 中嵌入的网关身份（config serverID，与 etcd 注册
-// instanceID 同一标识）。newGateway 构造时 SetSessionGatewayID 设置一次，
+// instanceID 同一标识）。NewEngine 构造时 SetSessionGatewayID 设置一次，
 // 之后本进程生成的所有 ID 均带该段——自描述 session ID（roadmap P3-1）。
 var sessionGatewayID atomic.Value // string；零值 Load 返回 nil
 

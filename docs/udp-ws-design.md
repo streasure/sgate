@@ -177,7 +177,7 @@ message UdpPong          { int64 ts = 1; int64 server_ts = 2; }
 
 ### 4.3 线上帧格式
 
-UDP 数据报 = **4 字节大端长度前缀 + `MessageFrame`**（与 TCP 完全一致，单数据报 = 单帧）。现有 `routes.DecodeClientMessage` / `MarshalClientMessage` 直接复用。
+UDP 数据报 = **4 字节大端长度前缀 + `MessageFrame`**（与 TCP 完全一致，单数据报 = 单帧）。现有 `protoGw.DecodeClientMessage` / `MarshalClientMessage`（protocol 仓）直接复用。
 
 - 单包 ≤ 1400B（含前缀），避免 IP 分片
 - 上行 `seq` 由客户端 per-session 递增，服务器滑动窗口去重（窗口 1024）
@@ -187,9 +187,9 @@ UDP 数据报 = **4 字节大端长度前缀 + `MessageFrame`**（与 TCP 完全
 
 ## 5. sgate 落点（最小侵入）
 
-**改动集中在 `internal/gateway`（关联表 + 收包路径）与帧编解码侧（号段常量，已随 P6 下沉 protocol 仓 `gateway/frame.go`）；`backend`/`connection` 只做"换方法名"式的最小触碰**（`connection` +1 接口 +1 方法，`backend` 5 处 `Send` → `SendByCmd`），pipeline/ConnectionManager/coalescer/security 零改动，依赖方向 `gateway → backend → connection` 不变。
+**改动集中在 `internal/dataplane`（关联表 + 收包路径）与帧编解码侧（号段常量，已随 P6 下沉 protocol 仓 `gateway/frame.go`）；`logiclink` 只做"换方法名"式的最小触碰**（dataplane `UDPDownlink` +1 接口 +1 方法，logiclink 5 处 `Send` → `SendByCmd`），pipeline/ConnectionManager/coalescer/security 零改动，依赖方向 `transport → dataplane ← logiclink` 不变。
 
-### 5.1 新增：关联表 `internal/gateway/udp_assoc.go`
+### 5.1 新增：关联表 `internal/dataplane/udp_assoc.go`
 
 ```go
 // udpAssociation 一个 WS 会话的 UDP 关联。生命周期严格挂在 WS 会话上。
@@ -254,9 +254,9 @@ handleUDPDatagram(c, data)
 下行已知 cmd 的调用点共 5 处（`SendToClient`、`BroadcastAll`、`stream` 单条、`stream` 广播、`stream` 批量累积）。**不得在每处写 `if IsUDPCmd`**——判断逻辑收敛到一个方法，调用点只换方法名：
 
 ```go
-// connection 包：全系统唯一分流点
+// dataplane 包：全系统唯一分流点
 func (c *Connection) SendByCmd(cmd int32, data []byte) error {
-    if c.udp != nil && routes.IsUDPCmd(cmd) {   // 两级判断：号段内 && 有关联
+    if c.udp != nil && protoGw.IsUDPCmd(cmd) {   // 两级判断：号段内 && 有关联
         if err := c.udp.SendUDP(c.id, data); err == nil {
             return nil
         }
@@ -277,12 +277,12 @@ func (c *Connection) SendByCmd(cmd int32, data []byte) error {
 
 回落 WS 是零成本兜底：关联表生命周期严格挂在 WS 会话上（§5.4），**能走到"UDP 发送失败"这一步时 WS 会话大概率还活着**——回落只是回到默认基线通道（类比 CDN 挂了回源站）。顺序也不乱：下行状态带 `stateVer` 单调递增，客户端只认更大版本、不看来源通道，从哪条到达都行。
 
-**依赖方向**：`connection` 定义 `UDPDownlink` 接口（consumer-defined interface，同 `LogicClientProvider` 模式），`*gateway.Gateway` 实现并注入 —— **不产生反向依赖**，`routes.IsUDPCmd` 是纯函数无状态，热路径一次区间比较，开销可忽略。
+**依赖方向**：`dataplane` 定义 `UDPDownlink` 接口（consumer-defined interface，同 `LogicClientProvider` 模式），`*dataplane.Engine` 实现并注入 —— **不产生反向依赖**，`protoGw.IsUDPCmd` 是纯函数无状态，热路径一次区间比较，开销可忽略。
 
-> 依赖核查：`connection → routes` 是**新增依赖边**，已验证 `routes` 不 import sgate 内任何包（`go list -deps` 确认仅依赖 protocol/grpc），无环；`routes` 本就是 gateway/backend 共享的最底层协议包，connection 引入它符合分层方向 `gateway → backend → connection`，routes 位于其下。
+> 依赖核查：`dataplane → protocol 仓 gateway` 是**既有依赖边**，已验证 protocol 仓不 import sgate 内任何包（`go list -deps` 确认仅依赖 protocol/grpc），无环；`protocol/gateway` 本就是 transport/dataplane/logiclink 共享的最底层协议包（wire 契约唯一权威），dataplane 引入它符合分层方向。
 
 ```go
-// connection 包定义
+// dataplane 包定义
 type UDPDownlink interface {
     SendUDP(sessionID string, frame []byte) error // 无关联返回 errNoUDPAssoc
 }
@@ -360,7 +360,7 @@ udp:
 - ❌ 不给 UDP 单独建会话（关联挂在 WS 会话上）
 - ❌ 不引入第二套帧编解码（复用 `MessageFrame`）
 - ❌ 不让 UDP 参与会话存活判据（不断线）
-- ❌ 不动 `backend` 的业务逻辑、不改 `connection` 的 WS/TCP 主路径（只加可选注入点）
+- ❌ 不动 `logiclink` 的业务逻辑、不改 `dataplane` 的 WS/TCP 主路径（只加可选注入点）
 
 ---
 
@@ -368,9 +368,9 @@ udp:
 
 ### 阶段 1：号段规则与关联建立（可独立合入）
 
-- `routes`：`CmdUDPRangeStart/End` 常量 + `IsUDPCmd` 纯函数 + lint 测试（校验已知可靠命令不在区间内）+ 6 个传输控制命令码（P6a 起全部下沉 protocol 仓 `gateway/`）
+- protocol 仓 `gateway/`：`CmdUDPRangeStart/End` 常量 + `IsUDPCmd` 纯函数 + lint 测试（校验已知可靠命令不在区间内）+ 6 个传输控制命令码（P6a 起全部下沉 protocol 仓）
 - `protocol` 仓：`enums/cmd.proto` 增补 UDP 号段分段注释（`1,200,000 - 1,299,999 UDP state sync`）+ 6 个 Udp 命令枚举 + `LoginGateAck.udp_token/udp_port` 字段；双表对称守卫同步登记（现为 `gateway/cmds_test.go` 与 `gateway/frame_test.go`）
-- `gateway/udp_assoc.go`：关联表 + per-IP 上限 + token 生成/消费 + 空闲淘汰
+- `dataplane/udp_assoc.go`：关联表 + per-IP 上限 + token 生成/消费 + 空闲淘汰
 - `handleAssociate`：验 token → 建关联 → 回 Ack（回程 `SendTo` 同端口）
 - `OnClose`/`RemoveConnection` 删关联
 - config：`udp` 段 + Validate（**只有 `enabled`/超时/上限，不含号段**）
@@ -387,11 +387,11 @@ udp:
 
 ### 阶段 3：下行号段分流
 
-- `connection`：`UDPDownlink` 接口 + `SetUDPDownlink` + **`SendByCmd` 唯一分流点**
+- `dataplane`：`UDPDownlink` 接口 + `SetUDPDownlink` + **`SendByCmd` 唯一分流点**
 - `SendByCmd` 内**新鲜度条件**（§8.5）：`now - lastSeen ≤ idleTimeout/2` 才走 UDP，否则直接 WS（stale 黑洞窗口砍半，零新配置）
 - 5 个已知 cmd 调用点改 `SendByCmd`（只换方法名）；`SendToUser` 保持 `Send`
 - `stream` 批量：**入 batch 前按号段分流**，UDP 消息不进 `PushBatch`、不走 coalescer
-- `gateway`：实现 `SendUDP`（查 `byConnID` → 新鲜度检查 → `sendUDPFrame`），ASSOCIATE 成功时注入
+- `dataplane`：Engine 实现 `SendUDP`（查 `byConnID` → 新鲜度检查 → `sendUDPFrame`），ASSOCIATE 成功时注入
 
 **测试**：号段内消息走 `SendTo`、号段外走 WS、**同会话混合流量（结算走 WS + 状态走 UDP）互不串道**、无关联时回落 WS 不丢消息、**stale 关联（lastSeen 超过 idleTimeout/2）直接走 WS 不尝试 SendTo**、批量开启时 UDP 消息仍逐条走 UDP、广播逐连接判断、`-race` 下并发下行安全。
 

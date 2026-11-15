@@ -44,8 +44,8 @@
 
 ### 架构
 
-- 包依赖方向单向无环：`gateway → backend → connection`；共享帧工具位于 `routes`
-- 分层：`internal/gateway`（Gateway/handlers/pipeline）、`internal/backend`（LogicClient/Pool/Stream/GRPCServer）、`internal/connection`（Connection/Manager/Group/Coalescer）
+- 包依赖方向单向无环（包边界=平面边界）：`transport → dataplane ← logiclink`，控制壳 `control` 组合三者；共享帧工具位于 protocol 仓 `gateway`
+- 分层：`internal/transport`（gnet 事件/帧编解码/状态机）、`internal/dataplane`（Engine：登录/管道/连接管理/安全链）、`internal/logiclink`（LogicClient/Pool/Stream/GRPCServer）、`internal/control`（生命周期壳）
 
 ---
 

@@ -21,7 +21,7 @@
 
 1. **flip 模式**：不是网关连你，而是**你的进程主动拨入网关**（gRPC 双向流 `GatewayStream.onData`）。网关地址来自 etcd 发现（网关 `discovery.registerSelf: true` 时注册）或 `gateways` 静态配置。
 2. **连接责任在你侧**：拨入失败/断线由 SDK 自动重拨（`dialer`），网关重启后会自动恢复，无需网关感知你的存在。
-3. **SDK 不参与网关分层依赖**：`github.com/streasure/logic` 是独立仓嵌入库（sgate 的 `internal/gateway`、`internal/backend` 均不 import 它）——你只需 import 它，与网关之间只有 gRPC + etcd 两个契约。
+3. **SDK 不参与网关分层依赖**：`github.com/streasure/logic` 是独立仓嵌入库（sgate 的 `internal/dataplane`、`internal/logiclink` 均不 import 它）——你只需 import 它，与网关之间只有 gRPC + etcd 两个契约。
 
 ---
 

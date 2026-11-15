@@ -52,7 +52,7 @@ go build -o bench\churn30\churn30.exe .\bench\churn30
 ## 测量条件
 
 - 100 连接、单轮 10s、64B 载荷；登录仅 LoginGate（`loginValidation.enabled: false`）。
-- 压测网关用 `config/bench/batch-off.yaml` / `config/bench/batch-on.yaml`：`security.rateLimit.enabled: false`（限流关）、`protection.benchMode: true`（跳过 WS 心跳/连接空闲等后台任务，过载保护 observe-only）。
+- 压测网关用 `config/bench/batch-off.yaml` / `config/bench/batch-on.yaml`：`security.rateLimit.enabled: false`（限流关）、`dropOnOverload: false`（旁路过载拦截，采样展示保留）、`disableWSHeartbeatCheck`/`disableConnectionChecker: true`（跳过 WS 心跳/连接空闲等后台任务）。
 - 网关：`shardCount=96`、`connGroupCount=4`、`sendChannelSize=65536`、`disableTracer`、`disableMetricsLog`。
 - 逻辑服 96 流（`NumCPU*8`）；logic2 `push-size=64`、`push-workers=12`、`expected-members=0`（登录即开推）。
 - bench2 用 `config/bench/batch-on.yaml` / `config/bench/batch-off.yaml` 切换 `batchPush: true|false`。
@@ -136,7 +136,7 @@ bench1_tcp 100 连接下扫（以 `/stats.forwarded` 为准，客户端发送速
 ### CPU / 过载指标
 
 - Windows 进程 CPU 时间量化 ~15.6ms，单点采样频繁 delta=0；`cpuPercent` 用 EMA 平滑（~1s 时间常数）。空闲时为 0 是正确行为。
-- `protection.benchMode: true` 时过载保护为 observe-only：采样 cpu/mem 供 `/stats` 展示，不置过载标志、不丢消息。
+- `dropOnOverload: false`（压测旁路）时过载保护只采样：cpu/mem 供 `/stats` 展示，不置过载标志、不丢消息。
 - 转发失败计入 `/stats.failed`，不计入 `droppedTotal`（后者专指 overload 队列满等网关主动丢弃）。
 
 ### 读缓冲复用
