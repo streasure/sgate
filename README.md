@@ -681,6 +681,8 @@ go build -o bin\bench_1m.exe     .\bench\bench_1m
 .\bin\gateway.exe -conf config\bench\batch-on.yaml -logger config\log\bench.yaml
 
 # 逻辑服（-expected-members 0 = 登录即开推；非 0 会等满员再 sleep 10s）
+# ⚠ 0 仅限本节 100 连接小场景：15K 满载下行必须 -expected-members 15000，
+#   否则登录期开推 + bench 登录期不读消息 → 无界积压 → OOM（见 docs/benchmark-report.md「满载复验」）
 .\bin\logic2_ws.exe -port 50061 -id logic2-ws -push-size 64 -expected-members 0 -push-workers 12
 
 # 客户端
@@ -708,7 +710,7 @@ Windows 临时端口池（49152 起共 16384 个）是本机硬天花板，更�
 | `-login-batch` | `100` | 批量并发登录批大小（bench1_tcp 为串行登录，15K 约 4s） |
 | `-server-id` | — | 登录绑定的 logic 实例 ID（bench2 用） |
 | `-push-size` | `64` | 推送载荷字节数 |
-| `-expected-members` | `0` | 等组员达到该数再推；**压测必须 0**（非 0 会满员后再等 10s） |
+| `-expected-members` | `0` | 等组员达到该数再推（满员后 sleep 10s）；100 连接小场景用 0，**15K 满载下行必须 15000**（0 会在登录期开推且 bench 登录期不读，无界积压直至 OOM，见 benchmark-report「满载复验」） |
 | `-push-workers` | `128` | logic 推送工作协程数 |
 | `-shardCount` | `0` | logic→网关流数，`0`=`NumCPU×8` |
 | `-batch` / `-stay` | `200` / `30s` | bench_1m 每批建连数 / 保持时长 |

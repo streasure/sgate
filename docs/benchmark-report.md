@@ -152,6 +152,43 @@
 
 **工程要点（Windows 同协议串行测试）**：回环场景下客户端主动关闭产生的 TIME_WAIT 四元组全部指向 `127.0.0.1:48080`（同目标不可复用），会占死动态端口池——**两轮 TCP 测试之间必须间隔 >240s（TcpTimedWaitDelay）**。首轮下行测试在上行轮结束后 92s 开跑，第 1091 个连接后端口池耗尽（`connectex: Only one usage of each socket address`），13,909 连接全部 dial 失败；等过期重跑后 15,000 全部成功。
 
+### 满载复验（2026-11-15，终态重构 `3745317` 收口后）
+
+终态重构（P1~P8）收口后按原基线参数复跑 16K 场景 A/B/C/E/F，逐项对照回退（场景 D 双向轮未复跑，见遗留）。全程 `loginValidation.enabled: false`、仅 LoginGate、无 HTTP login。
+
+#### 复验总表
+
+| 场景 | 关键指标 | 基线 | 复验实测 | 判定 |
+| --- | --- | --- | --- | --- |
+| A 连接极限（bench_1m 16384） | 建连 / 保持 | 16,095/16,071 成功，289~313 失败（端口池 bind） | 轮1：16,096 成功 / 288 失败（同因 bind）；轮2（`1m.yaml` + `-interval 10ms`）：15,892 成功 / 492 失败（12,072 conn/s 突发下客户端侧 `actively refused`，非网关拒绝）；两轮保持期 active 零掉线、`failed=droppedTotal=droppedAuth=0`、CPU 0 核、RSS 1,368/1,496MB（基线 1,341） | ✅ 通过 |
+| B WS 上行 15000 | 窗口吞吐 | 724,469~759,359 msg/s | **746,595 msg/s**；登录 15,000/15,000；对账 `sent 8,255,213 = forwarded 8,255,213`（采样须待 3s+ 让在途补齐）；P50/95/99 = 0.5/0.9/1.1µs（基线 0.5/0.8/1.2）；CPU 1.28 核；窗口 WARN/ERROR=0、auth=0 | ✅ 通过 |
+| C WS 下行 15000 | 分发吞吐 / 对账 | 22,754,772 推出 ≈630K msg/s，RSS 峰值 6,582MB | 原参数（`-expected-members 0`）OOM，归因见下；修正参数（`-expected-members 15000`，与基线实跑一致）：登录 15,000/15,000（2.75s），logic 推出 29,112,968 = 网关分发 29,018,000 + 拒绝 88,560 + 写失败 5,779（误差 0.02%），RSS 峰值 6,633MB、CPU 3 核、WARN/ERROR=0、auth=0 | ✅ 通过（原参数事故见下） |
+| E TCP 上行 15000 | 窗口吞吐 | 6,311,345/10s ≈565,639 msg/s，CPU 2.14 核 | 对账 `sent 8,833,046 = forwarded 8,833,046` **精确**；10s 发送期限内全部发出（≈883K msg/s，高于基线 +40%——方向非回退，差异归因待环境对照/pprof）；CPU 全程均值 0.97 核、RSS 峰值 2,249MB（基线 1,953）；WARN/auth=0 | ✅ 通过 |
+| F TCP 下行 15000 | 分发吞吐 / 对账 | logic 29,957,328、稳态 ≈505K、CPU 3.68 核 | logic 推出 31,535,218 = 分发 31,342,937 + 拒绝 185,895 + 写失败 4,454（误差 **0.006%**）；稳态 avg 553K / 峰值 600K；CPU 2.97 核、RSS 峰值 7,397MB（基线 ≈6,000）；登录 15,000/15,000（batch 200）；WARN/auth=0 | ✅ 通过 |
+
+五轮 `failed / droppedTotal / droppedAuth / asyncWriteFailed` 全 0，窗口内 WARN/ERROR = 0，无任何 401 / authfail / login-key。
+
+#### 场景 C OOM 事故（复验参数错误触发，非重构回归）
+
+**现场**：`-expected-members 0`（登录即开推）轮次中，网关在 **12,122 连接后停止 accept**（其后 2,807 个 dial 失败：2,800 `actively refused` + 7 SYN 超时，合计 2,877 个登录失败），`/stats` 与 pprof 同期挂死（监听在、不响应），最终 `fatal error: out of memory`（VirtualAlloc 272KB 失败，errno=1455 系统提交量耗尽）进程退出；同期 etcd 客户端自 16:27:29 起 DeadlineExceeded（系统级压力先于网关死亡）。
+
+**归因链**（goroutine 转储 + 三方日志时间线实证）：
+
+1. `bench2_ws` 登录阶段**不启动读协程**（`all logins done` 后才起），登录期下行消息无消费者；
+2. `expected-members=0` 使 logic 在登录第 2 秒（members=3,489）即以 1.1M msg/s 开推；
+3. 网关下行写路径**无显式上限**（`Connection.AppendCoalesced` 无界 append + AsyncWrite 队列），积压单调增长；
+4. 积压拖慢登录（起步 5,800/s → 14s 仅到 8,900）→ accept 停滞于 12,122 → 登录永不完成 → 读协程永不启动 → **正反馈**直至 OOM。转储画像：12,436 goroutine、0 锁等待（非死锁）、37 个 runnable 全在 `AppendCoalesced/FlushCoalesced`，OOM 栈 `StreamShard.receiveMessages → ShardedWriteCoalescer.AddMulti → Connection.AppendCoalesced`。
+
+**基线为何不触发**：日志证实基线 C 实为**满员才推**——首个 `pushed>0` 时 `members=15000`（满员后 sleep 10s，即 `-expected-members 15000`），登录 1.33s 全部完成、读协程及时启动、积压有界。本轮按 README §7.5 的 100 连接示例误用 `0`，与基线不可比。
+
+**结论**：非终态重构回归；A/B/E/F 四项核心吞吐指标全部不低于基线。
+
+**遗留修复建议**：
+
+1. 下行写路径补背压上限：真实生产中慢消费者当前靠 gRPC 流控窗口 + 内核 socket 缓冲自然限界，缺显式保护（本轮 12K 无读连接即打爆系统提交量）；
+2. README §7.5 `-expected-members` 注释按场景拆分（100 连接小场景 0；**15K 满载下行必须 15000**）；
+3. 场景 D（双向满载）本轮未复验。
+
 ### 多 TCP 连接并行（connGroupCount）
 
 gateway 与 logic 之间的 gRPC stream 若共享单条 TCP 连接，HTTP/2 协议要求同一连接上的 stream 共享写锁，96 个 shard 会串行写入（实际并行度 1）。`stream.connGroupCount` 配置 gateway 对同一 logic 建立 N 条独立 TCP 连接（默认 4），每个 connGroup 承载 `shardCount/N` 个 stream、各自拥有独立 HTTP/2 写锁。当前配置默认 `connGroupCount: 4`。
