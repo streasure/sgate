@@ -33,7 +33,7 @@ GIT_TAG="${GIT_TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo dev)}"
 
 # 编译
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译 sgate version=$GIT_TAG..."
-go build -ldflags "-X github.com/streasure/sgate/internal/gateway.BuildVersion=$GIT_TAG" -o sgate ./cmd/gateway
+go build -ldflags "-X github.com/streasure/sgate/internal/control.BuildVersion=$GIT_TAG" -o sgate ./cmd/gateway
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 编译完成"
 
 # 启动

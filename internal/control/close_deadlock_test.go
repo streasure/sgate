@@ -1,4 +1,4 @@
-package gateway
+package control
 
 import (
 	"fmt"
@@ -22,7 +22,7 @@ func TestCloseWithRunningEngineNoDeadlock(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
-	gw := newTestGateway(minimalConfig())
+	gw := newTestController(minimalConfig())
 
 	runErr := make(chan error, 1)
 	go func() {
@@ -73,7 +73,7 @@ func TestOnShutdownFirstTriggerNoDeadlock(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
-	gw := newTestGateway(minimalConfig())
+	gw := newTestController(minimalConfig())
 
 	runErr := make(chan error, 1)
 	go func() {

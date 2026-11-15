@@ -1,4 +1,4 @@
-package gateway
+package control
 
 import (
 	"context"
@@ -13,7 +13,7 @@ func minimalConfig() *config.Config {
 		HttpPort:   8081,
 		Belong:     "default",
 		ServerID:   "gateway-test",
-		ServerType: "Gateway",
+		ServerType: "Controller",
 		Zone:       "default",
 		Transports: []config.Transport{{Port: 48080}},
 		GRPC:       config.GRPCConfig{Port: 50051},
@@ -21,28 +21,28 @@ func minimalConfig() *config.Config {
 	}
 }
 
-// newTestGateway 以空资源容器构造网关壳（gateway 包测试均不调 Init/Start，
+// newTestController 以空资源容器构造网关壳（gateway 包测试均不调 Init/Start，
 // 容器仅满足构造期注入；组件写入路径由 component 包测试覆盖）。
 // 业务半区断言见 dataplane 包 engine_test.go。
-func newTestGateway(cfg *config.Config) *Gateway {
-	return newGateway(cfg, "", component.NewResources())
+func newTestController(cfg *config.Config) *Controller {
+	return newController(cfg, "", component.NewResources())
 }
 
-func TestNewGatewayPanicsOnNilConfig(t *testing.T) {
+func TestNewControllerPanicsOnNilConfig(t *testing.T) {
 	// 构造器显式收参后，nil 配置是编程错误——必须 fail-fast panic，
 	// 而不是在 Start 阶段以 nil deref 形式更难排查地崩。
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("NewGateway(nil) should panic")
+			t.Fatal("New(nil) should panic")
 		}
 	}()
-	_ = NewGateway(nil, "", component.NewResources())
+	_ = New(nil, "", component.NewResources())
 }
 
-func TestNewGatewayBuildsTLSConfig(t *testing.T) {
+func TestNewControllerBuildsTLSConfig(t *testing.T) {
 	cfg := minimalConfig()
 	cfg.TLS.Enabled = false
-	gw := newTestGateway(cfg)
+	gw := newTestController(cfg)
 	if gw.tlsConfig == nil {
 		t.Fatal("tlsConfig should not be nil even when TLS disabled")
 	}

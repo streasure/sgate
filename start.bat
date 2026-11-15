@@ -34,7 +34,7 @@ if "%GIT_TAG%"=="" set GIT_TAG=dev
 
 :: 编译
 echo [%date% %time%] 编译 sgate version=%GIT_TAG%...
-go build -ldflags "-X github.com/streasure/sgate/internal/gateway.BuildVersion=%GIT_TAG%" -o sgate.exe .\cmd\gateway
+go build -ldflags "-X github.com/streasure/sgate/internal/control.BuildVersion=%GIT_TAG%" -o sgate.exe .\cmd\gateway
 if %ERRORLEVEL% neq 0 (
     echo [%date% %time%] 编译失败
     exit /b 1

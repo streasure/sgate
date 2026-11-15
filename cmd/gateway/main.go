@@ -10,7 +10,7 @@ import (
 
 	comp "github.com/streasure/sgate/internal/component"
 	"github.com/streasure/sgate/internal/config"
-	"github.com/streasure/sgate/internal/gateway"
+	"github.com/streasure/sgate/internal/control"
 	"github.com/streasure/util/component"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/uperf"
@@ -30,7 +30,7 @@ func main() {
 	flag.Parse()
 	if *showVer {
 		// CLI 版本输出：tlog 尚未初始化，属非日志输出（AGENTS 允许 fmt）
-		fmt.Fprintf(os.Stdout, "sgate gateway version: %s\n", gateway.Version)
+		fmt.Fprintf(os.Stdout, "sgate gateway version: %s\n", control.Version)
 		return
 	}
 
@@ -58,7 +58,7 @@ func main() {
 	}
 
 	tlog.Info(ctx, "gateway starting http port:%d version=%s cpu=%d GOMAXPROCS=%d",
-		cfg.HttpPort, gateway.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
+		cfg.HttpPort, control.Version, runtime.NumCPU(), runtime.GOMAXPROCS(runtime.NumCPU()),
 	)
 
 	// 运行时资源容器：组件 Init 内写入、Gateway Init 读取（替代包级全局量）。
@@ -84,7 +84,7 @@ func main() {
 	container.Add(comp.NewObservabilityComponent(cfg, res))
 	container.Add(comp.NewTrafficComponent(cfg, res))
 	container.Add(comp.NewClusterComponent(cfg, res))
-	container.Add(gateway.NewGateway(cfg, *confFiles, res))
+	container.Add(control.New(cfg, *confFiles, res))
 	if err := container.Serve(); err != nil {
 		// Init/Start 失败必须非零退出，避免容器/进程管理器误判为正常退出
 		tlog.Error(ctx, "gateway serve failed error=%v", err)

@@ -1,4 +1,4 @@
-package gateway
+package control
 
 // Version 服务器对外/内部版本号（默认）。
 const Version = "v1.0.1"
