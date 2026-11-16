@@ -752,7 +752,7 @@ Get-Process -Name gateway,logic1_tcp,logic1_ws,logic2_tcp,logic2_ws,bench1_tcp,b
 | **A 连接极限** | TCP | 16,071~16,095 / 16,384（失败全为 Windows 端口池耗尽，非网关拒绝）；建连+登录 **6,583~6,605 conn/s**；60s 保持**零掉线**；RSS 1,341→1,342MB（**~75KB/连接**）；保持期 CPU ≈0.3% |
 | **B 上行** | WS ×15K | **724,469 ~ 759,359 msg/s**；客户端 sent 与网关 forwarded 逐条对上；管道延迟 P50 0.5µs / P99 1.2µs；洪峰 CPU ≈3 核 |
 | **C 下行** | WS ×15K | 三方精确闭合 `22,754,772 = pushedToClient 22,635,259 + pushDroppedNoConn 113,029 + Send失败 6,484`；logic 稳态 **≈630K msg/s**；RSS 峰值 6,582MB（alloc 809MB）回落 467MB；业务零丢弃 |
-| **D 对称双向** | WS 7500+7500 | 上行 370,145 msg/s（fwd=sent 分毫不差）+ 下行 ≈600K；重叠窗口总吞吐 **≈667K（最佳 788K）msg/s**；网关 CPU 仅 2.6 核；下行对账误差 0.02% |
+| **D 对称双向** | WS 7500+7500 | 上行 370,145 msg/s（fwd=sent 分毫不差）+ 下行 ≈600K；重叠窗口总吞吐 **≈667K（最佳 788K）msg/s**；网关 CPU 仅 2.6 核；下行对账误差 0.02%。**2026-11-16 复验**：上行 326,240（fwd=sent 精确）+ 下行推出 ≈770K、重叠 ≈1.04M msg/s、对账差 0.0095%、CPU 3.49 核、RSS 峰值 9,106MB、零丢弃 |
 | **E TCP 上行** | TCP ×15K | **565,639 msg/s**（窗口 628K）；sent 6,311,345 = forwarded 精确；CPU 2.14 核；RSS 1,953MB |
 | **F TCP 下行** | TCP ×15K | logic 稳态 **≈505K msg/s**（网关分发 ≈476K）；三方对账误差 0.013%；CPU 3.68 核；15000/15000 零失败 |
 

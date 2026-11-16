@@ -1,6 +1,6 @@
 # sgate 路线图
 
-本文档为工程现状能力清单与待办事项，供后续迭代参考。架构细节见 [`architecture.md`](architecture.md)。
+本文档为工程现状能力清单与待办事项，供后续迭代参考。架构细节见 [`architecture.md`](architecture.md)。受外部条件（Linux 环境 / 外部仓 / 多 zone 网络）阻塞的事项集中记录在仓库根目录 [`todo.md`](../todo.md)。
 
 ---
 
