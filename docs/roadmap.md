@@ -106,7 +106,8 @@
 3. **UDP：WS 会话 + UDP 关联通道**（阶段 1~3 已合入，默认关闭零行为变化）
    - 已完成：定位预留通道（`8f01d71`）→ 设计稿定稿（`6f97c84`）→ 阶段 1 关联表/token/ASSOCIATE（`d04d854`）→ 阶段 2 上行走通 + 弱网埋点（`430216e`）→ 阶段 3 下行号段分流唯一分流点 `SendByCmd`（`0c537ba`）；安全复核三项（反放大、token 过期、per-IP/总量表耗尽）测试齐备
    - 关联细节：号段 `1200000~1299999`、`udp.enabled` 默认 false、降级不丢、新鲜度条件、stale 埋点（详见 [docs/udp-ws-design.md](udp-ws-design.md) 与 architecture §4.4）
-   - 待做：**阶段 4 压测数据**（UDP 关联建立 QPS、上行 msg/s、下行 stateVer 延迟分位数、与 WS 基线对比 + 弱网模拟）——需 Linux 环境，与 P2-4 打包进行
+   - 阶段 4 压测工具已具备（`bench/udputil` + `bench/udp_uplink` + `bench/udp_downlink` + `bench/logic_udp` + `config/bench/udp-on.yaml`，三方对账：客户端发送 → 网关 `/stats` forwarded → logic `/counters`）；Windows 冒烟通过 + 入口天花板归因已写入 [docs/benchmark-report.md](benchmark-report.md)「UDP 阶段 4（Windows 冒烟）」
+   - 待做：**Linux 正式压测数据**（关联 QPS、上行 msg/s、下行 stateVer 延迟分位数、与 WS 基线对比 + 弱网模拟）——Windows 只能证明协议链路与对账口径正确，吞吐受 gnet Windows UDP 单 reader 入口天花板（≈280~300K datagrams/s）限制，需 Linux 环境，与 P2-4 打包进行
 
 4. **Linux CI 与压测基线**
    - 问题：Windows 本地连接天花板约 16K，百万连接与吞吐压测无法在本机复现

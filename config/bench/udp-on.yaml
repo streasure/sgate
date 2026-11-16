@@ -1,0 +1,68 @@
+# 压测（UDP 关联通道开启）：batch-on 的 UDP 变体。
+# Bench 规则见 AGENTS.md：loginValidation 必须 false，禁 login HTTP API。
+# 配套工具：bench/logic_udp（logic 侧）+ bench/udp_uplink（上行）+ bench/udp_downlink（下行）。
+httpPort: 8081
+belong: "default"
+serverId: "gateway-1"
+serverType: "Gateway"
+zone: "default"
+
+etcd:
+  endpoints: ["http://127.0.0.1:2379"]
+
+discovery:
+  registerSelf: true
+
+transports:
+  - port: 48080
+  - port: 48081
+    type: websocket
+  - port: 48082
+    type: udp      # udp.enabled=true 的前提（Validate fail-fast）
+
+grpc:
+  port: 50051
+  windowSize: 67108864
+
+monitoring:
+  pprofAddr: "127.0.0.1:6060"
+  disableTracer: true   # 压测关闭分布式追踪（避免每消息 Span 分配）
+  disableMetricsLog: true   # 压测关闭每秒 metrics 日志
+  disableWSHeartbeatCheck: true  # 压测关闭 WS 心跳超时清理
+  disableConnectionChecker: true  # 压测关闭连接空闲检查
+
+stream:
+  batchPush: true       # 与 WS 基线同口径（UDP 号段消息入批前分流，不受此开关影响）
+
+protection:
+  cpuThreshold: 92
+  dropOnOverload: false  # 压测旁路过载拦截（cpu/mem 采样与 /stats 展示保留）
+
+security:
+  enabled: true
+  rateLimit:
+    enabled: false      # 压测关闭限流：UDP 收包路径逐包做限流检查会主导耗时
+  circuitBreaker:
+    enabled: false
+
+# 压测：必须关闭登录校验（AGENTS.md Benchmarks）
+loginValidation:
+  enabled: false
+
+# WS+UDP 关联通道（docs/udp-ws-design.md）。
+# maxPerIP 必须调大：本机压测全部来自 127.0.0.1，默认 4 会立刻打满导致 ASSOCIATE 静默失败。
+udp:
+  enabled: true
+  associateTimeout: "30s"   # 一次性 token 有效期（登录下发 → ASSOCIATE 消费）
+  idleTimeout: "60s"        # 关联空闲淘汰；下行新鲜度阈值 = idleTimeout/2 = 30s
+  maxPerIP: 100000
+  maxAssociations: 100000
+  seqWindow: 1024           # 上行 seq 去重窗口（压测客户端必须串行取号，否则乱序会被判过旧）
+  maxDatagram: 1400         # 单包上限，bench/udputil.MaxDatagram 与之对齐
+
+waf:
+  enabled: false
+
+pipeline:
+  asyncEnabled: false      # 与 batch-on/WS 基线同口径，保证 UDP 与 WS 对比公平
+  workerQueueSize: 262144  # 覆盖默认 65536；仅 asyncEnabled=true 时生效

@@ -218,6 +218,44 @@
 
 **判定**：非终态重构引入的协议不对称；基线「反直觉现象」条目改判为**环境/轮次方差主导的历史单轮差异**，原候选原因（bench 读写循环、TCP 写路径、gnet 事件循环）在 profile 中无对应热点。
 
+### UDP 阶段 4（Windows 冒烟，2026-11-16）
+
+阶段 4 压测工具落地（代码独立于网关，仅经 `/stats`、`/counters` 与协议仓 wire 帧交互）：
+
+| 组件 | 职责 |
+| --- | --- |
+| `bench/udputil` | 共享客户端工具：WS 登录取一次性 `udp_token` → ASSOCIATE 建联 → 4 字节长度头数据报收发、`/stats`/`/counters` 拉取与分位数统计；wire 帧一律经协议仓 `MarshalClientMessage`/`DecodeClientMessage` |
+| `bench/udp_uplink` | 关联建立 QPS/时延 + 上行 msg/s + **三方对账**（sent → gatewayForwarded → logicReceived） |
+| `bench/udp_downlink` | 下行 stateVer 时延分位数 + WS 回落对照 + delivery 对账（logicPushed → clientReceived） |
+| `bench/logic_udp` | logic 侧 LoginGate 登记 + `CmdUdpAction` 计数 + `CmdUdpState` 推送（snapshot 前 8 字节写 UnixNano 作时延起点）+ `/counters` HTTP 端点 |
+| `config/bench/udp-on.yaml` | batch-on 的 UDP 变体：`udp.enabled: true` + `maxPerIP: 100000`（本机全 127.0.0.1，默认 4 必打满）+ `asyncEnabled: false`（与 WS 基线同口径） |
+
+**冒烟结论（协议链路 + 对账口径，i5-10400F Windows 本机）**：
+
+- 登录 100/100、ASSOCIATE 100/100、`udpUnassociatedDrops=0`；8 会话下行 `wsState=0`（健康关联零回落）、`badDatagram=0`、`outOfOrder=0`。
+- 上行单会话对账 `sent 727,334 → forwarded 727,328`（diff 6，0.001%，取样间隙在途），网关侧零丢。
+- 上行 100 会话三段对账：`sent 6,189,884 → gatewayForwarded 2,443,901（ingressLoss 60.5%）→ logicReceived 2,444,059（linkLoss≈0）`——**丢包全部发生在 UDP 入口收包，网关→logic 链路零丢**。
+- 下行 100 会话 delivery 对账：`logicPushed 103,000 = gateway pushedToClient 103,000`，客户端收到 103,099（viaUdp 103,097 / wsFallback 2，负 loss = 取样间隙在途）。
+- 下行时延（logic → 网关 gRPC → UDP 下行全链路，snapshot 内嵌 UnixNano 口径）：8 会话 avg 43.9µs / p50 53.5 / p95 93.5 / p99 189.7 / max 1,019µs；100 会话 avg 615.2µs / p50 532.3 / p95 1,404.1 / p99 1,719.4 / max 4,110µs（推送循环串行遍历组成员，成员数抬升单条排队时延）。
+- 关联建立：8 并发 ≈14.5K QPS、100 并发 21.0K~30.9K QPS（窗口为并发爬坡窗口；ACK 成批到达使时延样本趋同，QPS 才是有效指标）。
+
+**入口天花板归因（sync/async A/B）**：
+
+| 配置 | 客户端发送 | 网关 received | 入口丢包 |
+| --- | --- | --- | --- |
+| `asyncEnabled: false`（100 会话） | 638K msg/s | 284K datagrams/s | 57.8% |
+| `asyncEnabled: true`（100 会话） | 606K msg/s | 277K datagrams/s | 56.4% |
+
+两档几乎相同 → **瓶颈不在 pipeline 同步/异步，而在 gnet Windows UDP 单 reader goroutine（`acceptor_windows.go ListenUDP`）+ eventloop channel**，Windows 入口天花板 ≈ **280~300K datagrams/s**。Linux 下 `WithMulticore` 才能真正多 reader 分片，正式吞吐数据须在 Linux 复测（P2-4）。
+
+**口径要点（复跑必读）**：
+
+1. 上行 `seq` 用 `MessageFrame.SeqId`（网关去重判据），**每会话单发送者串行取号**——并发取号会乱序超出 `seqWindow=1024` 被判过旧静默丢；
+2. 下行必须保活（`UdpAction` 节拍 < `idleTimeout/2` = 30s），否则关联 stale、下行回落 WS；
+3. 客户端 socket 需 4MB 收发缓冲，否则客户端侧丢包污染对账；
+4. 一次性 `udp_token` 30s 有效且消费即作废，ASSOCIATE 失败须重新登录；
+5. Windows 临时端口池 16,384 是连接天花板，与 WS 基线测试同一约束。
+
 ### 多 TCP 连接并行（connGroupCount）
 
 gateway 与 logic 之间的 gRPC stream 若共享单条 TCP 连接，HTTP/2 协议要求同一连接上的 stream 共享写锁，96 个 shard 会串行写入（实际并行度 1）。`stream.connGroupCount` 配置 gateway 对同一 logic 建立 N 条独立 TCP 连接（默认 4），每个 connGroup 承载 `shardCount/N` 个 stream、各自拥有独立 HTTP/2 写锁。当前配置默认 `connGroupCount: 4`。
