@@ -29,6 +29,16 @@
       「满载复验 → 遗留修复建议 1」，**待决定是否排期**。
 - [ ] **场景 D 关闭风暴期 `/stats` 采样超时**（基线既有现象，本轮复验未复现采样超时，
       但关闭期写失败计数 `asyncWriteFailed` 仍存在）：与上一条同源，随背压方案一并处理。
+- [ ] **logicserver 实施（阶段 1~4）**：骨架方案已定稿
+      [`docs/logicserver-design.md`](docs/logicserver-design.md)（独立服务、实现在 `E:\logic`
+      仓、SDK+服务同仓、replace 不打 tag）；待排期开工。
+- [ ] **logic SDK 版本治理**：tag + changelog、`replace => ../logic` 切 `require` 的时机
+      （方案阶段 5 前置）；当前决策是不打 tag 走 replace，改 SDK 必须同轮跑 sgate 五门禁。
+- [ ] **跨仓集成冒烟基线**：`sgate + loginserver + logicserver + bench` 四进程对账冒烟，
+      checkout 各兄弟仓钉同一批 commit；与下方 Linux CI（P2-4）打包推进。
+- [ ] **loginserver 包级 `GetConfig` 改显式传参**：**仅当出现实际痛点**（如测试需注入不同
+      配置）才动，不主动排期（童子军军规，见 logicserver-design §7.3）；新仓 logicserver
+      一律显式传参。
 
 ## 3. 需要外部仓（客户端仓不在本机）
 
