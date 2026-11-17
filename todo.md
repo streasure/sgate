@@ -29,12 +29,14 @@
       「满载复验 → 遗留修复建议 1」，**待决定是否排期**。
 - [ ] **场景 D 关闭风暴期 `/stats` 采样超时**（基线既有现象，本轮复验未复现采样超时，
       但关闭期写失败计数 `asyncWriteFailed` 仍存在）：与上一条同源，随背压方案一并处理。
-- [ ] **logicserver 实施（阶段 1 完成，2~4 待排期）**：骨架方案见
+- [ ] **logicserver 实施（阶段 1、2 完成，3~4 待排期）**：骨架方案见
       [`docs/logicserver-design.md`](docs/logicserver-design.md)（独立服务、实现在 `E:\logic`
-      仓、SDK+服务同仓、replace 不打 tag）。阶段 1 已完成（2026-11-17，logic 仓 `8ea8750`）：
-      `cmd/logicserver` + `internal/config`（显式传参）+ `internal/handler`（LoginGate 入组 +
-      LoginReq/LoginAck 骨架应答）+ `config/*.yaml`；两仓五门禁绿，端到端验收
-      （etcd 注册 → flip → bench1 100/100 登录、1.37M 消息）全过。余阶段 2~4。
+      仓、SDK+服务同仓、replace 不打 tag）。已完成：
+      阶段 1（logic 仓 `8ea8750`）`cmd/logicserver` + `internal/config`（显式传参）+
+      `internal/handler`（LoginGate 入组 + LoginReq/LoginAck 骨架应答）+ `config/*.yaml`；
+      阶段 2（logic 仓 `68d6b59`）配置 4 件套压测侧 + `scripts/` + `docs/architecture.md`
+      + README 运行说明。两阶段验收均过（两仓五门禁绿、etcd 注册/flip/bench1 端到端、
+      常规与压测配置均可起）。余阶段 3（`/counters`+探针+drain）、4（sgate 文档配套+跨仓冒烟）。
 - [ ] **logic SDK 版本治理**：tag + changelog、`replace => ../logic` 切 `require` 的时机
       （方案阶段 5 前置）；当前决策是不打 tag 走 replace，改 SDK 必须同轮跑 sgate 五门禁。
 - [ ] **跨仓集成冒烟基线**：`sgate + loginserver + logicserver + bench` 四进程对账冒烟，
