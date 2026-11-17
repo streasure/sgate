@@ -95,11 +95,12 @@ flag: -conf / -logger / -version          // 对齐 loginserver/sgate 惯例
 tlog.Init(*loggerConf); defer tlog.Close() // 日志最先，全程 tlog
 cfg := config.Load(*conf)                  // 显式传参，validate required
 svc := logic.NewService(
-    logic.WithListenPort(cfg.Ports.GrpcAddr),
-    logic.WithServiceID(cfg.ServerId),
-    logic.WithServerType("Logic"),         // etcd 键 {belong}/SERVER_TYPE_LOGICSERVER:{zone}
+    logic.WithListenPort(strconv.Itoa(cfg.Ports.GrpcPort)),
+    logic.WithServiceID(cfg.ServerID),
+    logic.WithServerType(cfg.ServerType),     // etcd 键 {belong}/SERVER_TYPE_LOGICSERVER:{zone}
+    logic.WithBelong(cfg.Belong),
     logic.WithZone(cfg.Zone),
-    logic.WithEtcd(cfg.Etcd.Endpoint),
+    logic.WithEtcdEndpoints(cfg.Etcd.Endpoints...), // 注册与发现同源，首项回退单端点
     logic.WithShardCount(cfg.ShardCount),
     logic.WithReliability(cfg.Reliability), // 可靠推送窗口/重传参数进配置
 )
@@ -258,7 +259,7 @@ tlog.Init → config.LoadConfig → component.NewContainer
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
 | 0 | 本稿评审（不动代码） | ✅ 已过（2026-11-17，§1 五条照准 + 三处最佳实践修订） |
-| 1 | `E:\logic` 建 `cmd/logicserver` + `internal/config` 最小可运行骨架（echo/登录入组 handler，模式照 `bench/logic2_ws`） | 五门禁绿；本机起服 → etcd 注册 → sgate flip 接入 → bench1 打通 |
+| 1 | `E:\logic` 建 `cmd/logicserver` + `internal/config` 最小可运行骨架（登录入组 + LoginReq/LoginAck 应答 handler，模式照 `bench/logic2_ws`；无协议 echo 命令码，不自造 wire 契约） | ✅ 已过（2026-11-17，logic `8ea8750`）：logic/sgate 两仓五门禁绿；etcd 注册键实查存在、flip 建立、bench1_ws 100/100 登录 0 失败 1.37M 消息、handler 侧 `login gate bound`×100 且 0 unregistered |
 | 2 | 配置 4 件套 + `scripts/` + `docs/architecture.md` + README 补运行说明 | 压测配置可起、常规配置可起 |
 | 3 | `internal/metrics` `/counters` 端点 + 业务在途宽限的优雅 drain | 停机无挂死、无丢弃；`/stats`↔`/counters` 对账闭合 |
 | 4 | sgate 侧文档配套（§3.6）+ 跨仓冒烟脚本（§4.3） | 四进程冒烟一键过 |
