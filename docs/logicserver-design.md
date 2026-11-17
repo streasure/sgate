@@ -261,7 +261,7 @@ tlog.Init → config.LoadConfig → component.NewContainer
 | 0 | 本稿评审（不动代码） | ✅ 已过（2026-11-17，§1 五条照准 + 三处最佳实践修订） |
 | 1 | `E:\logic` 建 `cmd/logicserver` + `internal/config` 最小可运行骨架（登录入组 + LoginReq/LoginAck 应答 handler，模式照 `bench/logic2_ws`；无协议 echo 命令码，不自造 wire 契约） | ✅ 已过（2026-11-17，logic `8ea8750`）：logic/sgate 两仓五门禁绿；etcd 注册键实查存在、flip 建立、bench1_ws 100/100 登录 0 失败 1.37M 消息、handler 侧 `login gate bound`×100 且 0 unregistered |
 | 2 | 配置 4 件套 + `scripts/` + `docs/architecture.md` + README 补运行说明 | ✅ 已过（2026-11-17，logic `68d6b59`）：常规与压测两套配置均可起（`start.bat`/`start-linux.sh` 实跑、etcd 注册键实查存在）、压测日志 error 级生效（常规日志零新增）、`bash -n` 通过、五门禁绿 |
-| 3 | `internal/metrics` `/counters` 端点 + 业务在途宽限的优雅 drain | 停机无挂死、无丢弃；`/stats`↔`/counters` 对账闭合 |
+| 3 | `internal/metrics` `/counters` 端点 + 业务在途宽限的优雅 drain | ✅ 已过（2026-11-17，logic `7050dc1`）：logic/sgate 两仓五门禁绿（新增 probe/metrics/handler/config 6 个测试文件）；实机三态探针（未接流 503 `no gateway stream` → 接流 200 `ready: ok` → drain 窗口 503 `draining` 捕捉）；batch-off 配置对账两轮闭合 `totalPushed=100==pushedToClient=100`、`sessions=100==activeConnections=100`、登录 100/100；优雅停机 156ms（`drain complete inFlight=0 pendingReliable=0 dropped=0` → stopped → metrics stopped）、etcd 注册键实查已删、网关侧 `shard receive error`×96 与 logic `gateway stream exited`×96 对应。注：batch-on 配置下 `pushedToClient=0` 是合批缓冲未刷（100 条摊 96 shard 凑不满 128），非丢失，对账须用 batch-off |
 | 4 | sgate 侧文档配套（§3.6）+ 跨仓冒烟脚本（§4.3） | 四进程冒烟一键过 |
 | 5 | （延后）tag 发版治理 | 触发条件：logic SDK 出现第二个仓外消费者 |
 
