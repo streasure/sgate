@@ -206,7 +206,7 @@
 
 **遗留修复建议**：
 
-1. 下行写路径补背压上限：真实生产中慢消费者当前靠 gRPC 流控窗口 + 内核 socket 缓冲自然限界，缺显式保护（本轮 12K 无读连接即打爆系统提交量）；
+1. ~~下行写路径补背压上限~~ → **已修复**（2026-11-18）：单连接在途写 2MB + 全局安全阀 1GB（公平份额）+ 合批缓冲硬顶 64KB，超限**先延迟后丢弃**，丢弃计数 `/stats pushDroppedBackpressure`、在途字节 gauge `pendingWriteBytes`；测试 `internal/dataplane/backpressure_test.go`，详见 todo.md「下行写路径背压上限」；
 2. README §7.5 `-expected-members` 注释按场景拆分（100 连接小场景 0；**15K 满载下行必须 15000**）；
 3. ~~场景 D（双向满载）本轮未复验~~ → 已于 2026-11-16 补跑，见下「场景 D 复验」。
 

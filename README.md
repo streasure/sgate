@@ -146,7 +146,8 @@ uperf（GOGC/GOMEMLIMIT 软上限，最先）
 3. 编码：protoGw.MarshalClientMessage（protocol 仓）/ EncodeWSFrame
 4. 可选合并：ShardedWriteCoalescer 短窗口合并为一次系统调用；
    batchPush=true 时多条打包成 PushBatch（9000002）
-5. gnet 异步写回客户端（写失败计入 /stats 的 asyncWriteFailed）
+5. gnet 异步写回客户端（写失败计入 /stats 的 asyncWriteFailed；在途写超预算被拒
+   计入 pushDroppedBackpressure，见 1.9-6 有界背压）
 ```
 
 **每一步都可能丢**（gRPC 流断、无连接、异步写失败），但每一步的"成功"都不等于客户端收到——这就是 1.7 三个关键设计要解决的问题。
@@ -227,7 +228,7 @@ session ID 由网关生成，格式 **`conn_{serverID}_{UnixNano}_{counter}`**�
 3. **契约进代码、行为进配置**：命令号段、seq 语义是三端共享 wire 契约（protocol 仓 `gateway` 常量）；阈值/开关/时长进 yaml
 4. **复杂度有明确归宿**：协议归 protocol 仓、可靠性状态归 logic SDK、连接账本归 `dataplane`、UDP 归一个分流点——每坨复杂度只允许住在一个房间
 5. **默认安全**：token 空=接口关闭（fail-closed）、登录校验 fail-closed、非法配置整体拒绝保留当前值
-6. **如实计数**：每种丢弃都有独立计数器（droppedTotal/pushDroppedNoConn/asyncWriteFailed/…），对账能精确闭合
+6. **如实计数**：每种丢弃都有独立计数器（droppedTotal/pushDroppedNoConn/pushDroppedBackpressure/asyncWriteFailed/…），对账能精确闭合；下行写路径**有界背压**（每连接在途 2MB + 全局安全阀 1GB + 合批缓冲硬顶 64KB，超限先延迟后丢弃并计 pushDroppedBackpressure）
 
 详细包职责、数据流与扩展点见 [`docs/architecture.md`](docs/architecture.md)。
 
@@ -682,7 +683,8 @@ go build -o bin\bench_1m.exe     .\bench\bench_1m
 
 # 逻辑服（-expected-members 0 = 登录即开推；非 0 会等满员再 sleep 10s）
 # ⚠ 0 仅限本节 100 连接小场景：15K 满载下行必须 -expected-members 15000，
-#   否则登录期开推 + bench 登录期不读消息 → 无界积压 → OOM（见 docs/benchmark-report.md「满载复验」）
+#   否则登录期开推 + bench 登录期不读消息 → 积压触下行背压（有界：延迟后丢弃并计
+#   pushDroppedBackpressure，不再 OOM，见 docs/benchmark-report.md「满载复验」）
 .\bin\logic2_ws.exe -port 50061 -id logic2-ws -push-size 64 -expected-members 0 -push-workers 12
 
 # 客户端
@@ -710,7 +712,7 @@ Windows 临时端口池（49152 起共 16384 个）是本机硬天花板，更�
 | `-login-batch` | `100` | 批量并发登录批大小（bench1_tcp 为串行登录，15K 约 4s） |
 | `-server-id` | — | 登录绑定的 logic 实例 ID（bench2 用） |
 | `-push-size` | `64` | 推送载荷字节数 |
-| `-expected-members` | `0` | 等组员达到该数再推（满员后 sleep 10s）；100 连接小场景用 0，**15K 满载下行必须 15000**（0 会在登录期开推且 bench 登录期不读，无界积压直至 OOM，见 benchmark-report「满载复验」） |
+| `-expected-members` | `0` | 等组员达到该数再推（满员后 sleep 10s）；100 连接小场景用 0，**15K 满载下行必须 15000**（0 会在登录期开推且 bench 登录期不读，积压触下行背压——有界延迟后丢弃并计 `pushDroppedBackpressure`，不再 OOM；对账口径仍会失真，见 benchmark-report「满载复验」） |
 | `-push-workers` | `128` | logic 推送工作协程数 |
 | `-shardCount` | `0` | logic→网关流数，`0`=`NumCPU×8` |
 | `-batch` / `-stay` | `200` / `30s` | bench_1m 每批建连数 / 保持时长 |

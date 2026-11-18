@@ -88,6 +88,11 @@ type statsPayload struct {
 	DroppedTotal          int64 `json:"droppedTotal"`
 	PushedToClient        int64 `json:"pushedToClient"`
 	PushDroppedNoConn     int64 `json:"pushDroppedNoConn"`
+	// 下行写背压（有界化，benchmark-report 场景 C 遗留修复 1）：
+	// backpressure 拒绝/丢弃的下行帧数（直发拒绝 + 合批缓冲丢新，batch 合帧按帧计）；
+	// pendingWriteBytes 为全局在途写 gauge（安全阀读数，健康态远低于 1GB 上限）。
+	PushDroppedBackpressure int64 `json:"pushDroppedBackpressure"`
+	PendingWriteBytes       int64 `json:"pendingWriteBytes"`
 	// 异步写客户端失败（gnet 完成回调收到 err）：端到端 ACK 观测的一环，
 	// 与 logic 侧 giveUps/droppedOffline 互补，覆盖"网关异步写失败"丢包点。
 	AsyncWriteFailed  int64   `json:"asyncWriteFailed"`
@@ -139,31 +144,33 @@ func (g *Engine) StartStatsServer(addr string) {
 		dropAuth := g.messagesDroppedAuth.Load()
 		dropUnsupported := g.messagesDroppedUnsupported.Load()
 		stats := statsPayload{
-			Received:              g.messagesReceived.Load(),
-			Forwarded:             g.messagesForwarded.Load(),
-			MessagesFailed:        g.messagesFailed.Load(),
-			DroppedOverload:       dropOverload,
-			DroppedFull:           dropFull,
-			DroppedNoLogicNotConn: dropNoLogicNotConn,
-			DroppedBlacklist:      dropBlacklist,
-			DroppedRateLimit:      dropRateLimit,
-			DroppedWAF:            dropWAF,
-			DroppedCircuit:        dropCircuit,
-			DroppedIntegrity:      dropIntegrity,
-			DroppedFilterChain:    dropFilterChain,
-			DroppedAuth:           dropAuth,
-			DroppedUnsupported:    dropUnsupported,
-			DroppedTotal:          dropOverload + dropFull + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth + dropUnsupported,
-			PushedToClient:        g.messagesPushedToClient.Load(),
-			PushDroppedNoConn:     g.messagesPushDroppedNoConn.Load(),
-			AsyncWriteFailed:      AsyncWriteFailures(),
-			Overloaded:            overloaded,
-			CPUPercent:            cpuPct,
-			MemPercent:            memPct,
-			OverloadDropped:       dropped,
-			ActiveConnections:     g.connectionsActive.Load(),
-			UDPSweptWSSurviving:   g.udpAssocSweptWSSurviving.Load(),
-			UDPUnassociatedDrops:  g.udpAssocUnassociatedDrops.Load(),
+			Received:                g.messagesReceived.Load(),
+			Forwarded:               g.messagesForwarded.Load(),
+			MessagesFailed:          g.messagesFailed.Load(),
+			DroppedOverload:         dropOverload,
+			DroppedFull:             dropFull,
+			DroppedNoLogicNotConn:   dropNoLogicNotConn,
+			DroppedBlacklist:        dropBlacklist,
+			DroppedRateLimit:        dropRateLimit,
+			DroppedWAF:              dropWAF,
+			DroppedCircuit:          dropCircuit,
+			DroppedIntegrity:        dropIntegrity,
+			DroppedFilterChain:      dropFilterChain,
+			DroppedAuth:             dropAuth,
+			DroppedUnsupported:      dropUnsupported,
+			DroppedTotal:            dropOverload + dropFull + dropNoLogicNotConn + dropBlacklist + dropRateLimit + dropWAF + dropCircuit + dropIntegrity + dropFilterChain + dropAuth + dropUnsupported,
+			PushedToClient:          g.messagesPushedToClient.Load(),
+			PushDroppedNoConn:       g.messagesPushDroppedNoConn.Load(),
+			PushDroppedBackpressure: BackpressureDrops(),
+			PendingWriteBytes:       PendingWriteTotal(),
+			AsyncWriteFailed:        AsyncWriteFailures(),
+			Overloaded:              overloaded,
+			CPUPercent:              cpuPct,
+			MemPercent:              memPct,
+			OverloadDropped:         dropped,
+			ActiveConnections:       g.connectionsActive.Load(),
+			UDPSweptWSSurviving:     g.udpAssocSweptWSSurviving.Load(),
+			UDPUnassociatedDrops:    g.udpAssocUnassociatedDrops.Load(),
 		}
 		if g.waf != nil {
 			stats.WAFBlocked = g.waf.GetBlockedCount()

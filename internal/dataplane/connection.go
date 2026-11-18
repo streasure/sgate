@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -58,6 +59,10 @@ type Connection struct {
 	coalescedData   []byte  // [4-byte len][payload] 累积格式
 	coalescedBufPtr *[]byte // 指向 coalescerBufPool 的 buffer，用于归还
 	coalescedCount  int     // 累积消息数
+
+	// 下行写背压：已入队 gnet 异步写、尚未完成回调的本连接字节数
+	//（reserveWrite/writeDone 维护，与全局 pendingWriteTotal 成对）。
+	pendingWriteBytes atomic.Int64
 }
 
 // newConnection 创建新的连接对象，初始化基本属性和状态。
@@ -277,6 +282,102 @@ func AsyncWriteCallback(_ gnet.Conn, err error) error {
 	return nil
 }
 
+// ============================================================================
+// 下行写背压（有界化）—— benchmark-report「场景 C OOM」遗留修复建议 1
+// ============================================================================
+//
+// 无界增长的两处：AppendCoalesced 合批缓冲（慢消费者不读 → flush 积压）
+// 与 gnet 异步写队列（kernel 缓冲满 → 完成回调迟迟不触发，队列单调增长）。
+// 裁定语义（先延迟后丢弃 + 两级上限）：
+//   - 每连接在途写 ≤ maxConnPendingWrite：超限时 flush 延迟（缓冲原样保留、
+//     下轮重试），直发返回 ErrWriteBackpressure（计数后交调用方处理）；
+//   - 全局在途写超过 maxGlobalPendingWrite（安全阀）时，只约束已超过公平
+//     份额 pendingValveShare（= 全局上限/活跃连接数，flushLoop 每轮发布）
+//     的连接——慢连接囤积被切，份额以下的健康连接不被饿死；
+//   - 合批缓冲 ≤ maxCoalescedBytes：延迟后仍满才丢新消息（计数）。
+//
+// 总量上界 ≈ maxGlobalPendingWrite + 活跃连接数 × maxCoalescedBytes，
+// 即"12K 无读连接"场景内存封顶约 1~2GB，不再打爆系统提交量。
+const (
+	maxConnPendingWrite   = 2 << 20  // 2MB：单连接在途（异步写未完成）字节上限
+	maxCoalescedBytes     = 64 << 10 // 64KB：单连接合批缓冲硬顶（超则丢新）
+	maxGlobalPendingWrite = 1 << 30  // 1GB：全局在途安全阀（慢连接集群兜底）
+)
+
+var (
+	// pendingWriteTotal 全局在途写字节（安全阀读数，与各连接 pendingWriteBytes 成对增减）。
+	pendingWriteTotal atomic.Int64
+	// backpressureDrops 背压拒绝的下行帧数（直发拒绝 + 合批缓冲丢新；
+	// batchPush 合帧按帧计，一帧可含多条消息）。/stats pushDroppedBackpressure。
+	backpressureDrops atomic.Int64
+	// pendingValveShare 阀触发时的单连接公平份额：flushLoop 每轮按活跃
+	// 连接数发布；零值（coalescer 未启动）回退为每连接上限（阀不生效）。
+	pendingValveShare atomic.Int64
+)
+
+// ErrWriteBackpressure 下行在途写超预算，本条消息被拒绝（已计 backpressureDrops）。
+// 调用方按普通发送失败处理：kick 等关键路径已有回退（直连关闭），
+// 应答路径由客户端超时重试兜底。
+var ErrWriteBackpressure = errors.New("downlink write backpressure: pending budget exceeded")
+
+// BackpressureDrops 返回背压拒绝/丢弃的下行帧数（/stats 观测）。
+func BackpressureDrops() int64 { return backpressureDrops.Load() }
+
+// PendingWriteTotal 返回全局在途写字节（/stats gauge 观测）。
+func PendingWriteTotal() int64 { return pendingWriteTotal.Load() }
+
+// reserveWrite 预留在途写字节：乐观相加后判定，超预算则回滚并返回 false。
+// 并发发送在判定窗口内的瞬时超调 = 并发发送数，不影响上界结论。
+// 超预算 = 每连接上限，或全局安全阀已触发且本连接超过公平份额。
+func (c *Connection) reserveWrite(n int64) bool {
+	local := c.pendingWriteBytes.Add(n)
+	global := pendingWriteTotal.Add(n)
+	share := pendingValveShare.Load()
+	if share <= 0 || share > maxConnPendingWrite {
+		share = maxConnPendingWrite
+	}
+	if local > maxConnPendingWrite || (global > maxGlobalPendingWrite && local > share) {
+		c.pendingWriteBytes.Add(-n)
+		pendingWriteTotal.Add(-n)
+		return false
+	}
+	return true
+}
+
+// writeDone 归还在途字节：异步写完成回调（成功或失败）或入队失败回滚时调用。
+// gnet 契约：AsyncWrite 返回 nil ⇒ 回调必达（含写失败/连接关闭）；返回非
+// nil ⇒ 未入队、回调不触发——两条路互斥，不会重复归还（进程退出时回调
+// 可能不触发，但此时进程正在退出，计数无意义）。
+func (c *Connection) writeDone(n int64) {
+	c.pendingWriteBytes.Add(-n)
+	pendingWriteTotal.Add(-n)
+}
+
+// writeCallback 包装异步写完成回调：先归还在途字节，再执行 next。
+func (c *Connection) writeCallback(n int64, next gnet.AsyncCallback) gnet.AsyncCallback {
+	return func(g gnet.Conn, err error) error {
+		c.writeDone(n)
+		if next != nil {
+			return next(g, err)
+		}
+		return nil
+	}
+}
+
+// asyncWrite 直发统一入口：预算预留 → 入队 → 失败回滚。
+// do 封装实际入队差异（AsyncWrite/AsyncWritev），next 为完成回调的后续动作。
+func (c *Connection) asyncWrite(n int64, do func(gnet.AsyncCallback) error, next gnet.AsyncCallback) error {
+	if !c.reserveWrite(n) {
+		backpressureDrops.Add(1)
+		return ErrWriteBackpressure
+	}
+	if err := do(c.writeCallback(n, next)); err != nil {
+		c.writeDone(n) // 未入队，回调不触发，回滚预留
+		return err
+	}
+	return nil
+}
+
 // touch 更新连接的最后活跃时间，每64次调用才实际更新一次以减少原子操作开销。
 func (c *Connection) touch() {
 	seq := c.activitySeq.Add(1)
@@ -301,6 +402,7 @@ func (c *Connection) SendByCmd(cmd int32, data []byte) error {
 }
 
 // Send 向客户端发送数据，根据协议自动封帧（TCP 4字节前缀 / WS binary 帧）。
+// 在途写超预算时返回 ErrWriteBackpressure（消息被拒并计数），不做无限排队。
 func (c *Connection) Send(data []byte) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
@@ -309,12 +411,16 @@ func (c *Connection) Send(data []byte) error {
 	// 内联异步封帧逻辑
 	if c.isWebSocket {
 		frame := EncodeWSFrame(0x82, data)
-		return c.Conn.AsyncWrite(frame, AsyncWriteCallback)
+		return c.asyncWrite(int64(len(frame)), func(cb gnet.AsyncCallback) error {
+			return c.Conn.AsyncWrite(frame, cb)
+		}, AsyncWriteCallback)
 	}
 	// TCP 快速路径：4字节长度前缀 + payload
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
-	return c.Conn.AsyncWritev([][]byte{header[:], data}, AsyncWriteCallback)
+	return c.asyncWrite(int64(4+len(data)), func(cb gnet.AsyncCallback) error {
+		return c.Conn.AsyncWritev([][]byte{header[:], data}, cb)
+	}, AsyncWriteCallback)
 }
 
 // SendMulti 发送已组装好的合并数据。
@@ -323,18 +429,23 @@ func (c *Connection) SendMulti(combined []byte) error {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	return c.Conn.AsyncWrite(combined, AsyncWriteCallback)
+	return c.asyncWrite(int64(len(combined)), func(cb gnet.AsyncCallback) error {
+		return c.Conn.AsyncWrite(combined, cb)
+	}, AsyncWriteCallback)
 }
 
 // SendMultiWithCallback 发送合并数据，写入完成后执行回调函数。
 // WebSocket 与 TCP 均执行回调：coalescer 依赖回调归还池化缓冲，
 // WS 分支曾丢弃回调导致缓冲永不归还。
+// 超预算返回 ErrWriteBackpressure（不入队、不执行回调）。
 func (c *Connection) SendMultiWithCallback(combined []byte, cb func()) error {
 	if c.Conn == nil {
 		return fmt.Errorf("connection is nil")
 	}
 	c.touch()
-	return c.Conn.AsyncWrite(combined, func(_ gnet.Conn, err error) error {
+	return c.asyncWrite(int64(len(combined)), func(gcb gnet.AsyncCallback) error {
+		return c.Conn.AsyncWrite(combined, gcb)
+	}, func(_ gnet.Conn, err error) error {
 		// coalescer 合并写同样计入 async 写失败（唯一观测点）。
 		recordAsyncWriteFailure(err)
 		if cb != nil {
@@ -361,12 +472,16 @@ func (c *Connection) SendThenClose(data []byte) error {
 	// 内联异步封帧逻辑
 	if c.isWebSocket {
 		frame := EncodeWSFrame(0x82, data)
-		return c.Conn.AsyncWrite(frame, closeAfterWrite)
+		return c.asyncWrite(int64(len(frame)), func(cb gnet.AsyncCallback) error {
+			return c.Conn.AsyncWrite(frame, cb)
+		}, closeAfterWrite)
 	}
 	// TCP 快速路径
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
-	return c.Conn.AsyncWritev([][]byte{header[:], data}, closeAfterWrite)
+	return c.asyncWrite(int64(4+len(data)), func(cb gnet.AsyncCallback) error {
+		return c.Conn.AsyncWritev([][]byte{header[:], data}, cb)
+	}, closeAfterWrite)
 }
 
 // SendSync 在事件循环内同步写出一条消息（Writev TCP / Write WS）。
@@ -399,9 +514,16 @@ func (c *Connection) Close() error {
 
 // AppendCoalesced 将一条消息追加到连接的 coalescing buffer。
 // 由 receiveMessages 单协程调用，per-Connection 锁几乎无竞争。
+// 返回 false = 缓冲已达硬顶（flush 被背压延迟所致），本条被丢弃并计数
+// （backpressureDrops）——先延迟后丢弃的最后一步，防止为兜底延迟而失守内存。
+// 缓冲为空时首条不设限：单条大消息（可超硬顶）放行，上限只约束攒积。
 func (c *Connection) AppendCoalesced(payload []byte) bool {
 	c.coalescedMu.Lock()
 	defer c.coalescedMu.Unlock()
+	if len(c.coalescedData) > 0 && len(c.coalescedData)+4+len(payload) > maxCoalescedBytes {
+		backpressureDrops.Add(1)
+		return false
+	}
 	if c.coalescedBufPtr == nil {
 		bufPtr := coalescerBufPool.Get().(*[]byte)
 		c.coalescedBufPtr = bufPtr
@@ -415,12 +537,28 @@ func (c *Connection) AppendCoalesced(payload []byte) bool {
 	return true
 }
 
+// hasCoalesced 是否仍有未 flush 的攒积数据（flush 延迟后的重试判据）。
+func (c *Connection) hasCoalesced() bool {
+	c.coalescedMu.Lock()
+	defer c.coalescedMu.Unlock()
+	return c.coalescedCount > 0
+}
+
 // FlushCoalesced 将累积的数据通过 AsyncWrite 发送，然后重置 buffer。
 // 返回成功推送的消息数。IO 在锁外执行，不阻塞 AppendCoalesced。
 // 通过 Framer.WrapCoalesced 转换为线上格式：TCP 零拷贝原样发送，WS 重封为帧序列。
+// 预算判定在换出缓冲之前：在途写超限 → 返回 0 且缓冲原样保留（只延迟不丢），
+// 由 coalescer 重新标脏、下轮 flush 重试。
 func (c *Connection) FlushCoalesced() int64 {
 	c.coalescedMu.Lock()
 	if c.coalescedCount == 0 {
+		c.coalescedMu.Unlock()
+		return 0
+	}
+	n := int64(len(c.coalescedData))
+	// 在途写预算预留（每连接上限 / 全局安全阀份额）：失败 = 延迟本轮。
+	// 在锁内完成"读尺寸 + 预留"，避免换出后预留失败导致缓冲数据丢失。
+	if !c.reserveWrite(n) {
 		c.coalescedMu.Unlock()
 		return 0
 	}
@@ -440,6 +578,7 @@ func (c *Connection) FlushCoalesced() int64 {
 			data = wsData
 		}
 		// 解析失败时 data 保持原缓冲（罕见异常路径，WS 客户端收到裸 TCP 格式）
+		// 注：预留按重封前尺寸计（WS 帧头 ~10B/条的差额远小于 MB 级上限）。
 	}
 	// TCP 路径：data 已是 [len][payload]* 格式，零拷贝直接发送
 
@@ -458,9 +597,15 @@ func (c *Connection) FlushCoalesced() int64 {
 			coalescerBufPool.Put(bufPtr)
 		}
 	}
-	if err := c.SendMultiWithCallback(data, putBack); err != nil {
-		// 未入队：回调不会执行，同步归还缓冲并按未发送计（消息已丢，
+	if err := c.Conn.AsyncWrite(data, c.writeCallback(n, func(_ gnet.Conn, err error) error {
+		// coalescer 合并写同样计入 async 写失败（唯一观测点）。
+		recordAsyncWriteFailure(err)
+		putBack()
+		return nil
+	})); err != nil {
+		// 未入队：回调不会执行，回滚预算预留 + 同步归还缓冲（消息已丢，
 		// 但 coalescedCount 已在锁内清零，调用方以返回值记推送量）
+		c.writeDone(n)
 		putBack()
 		return 0
 	}

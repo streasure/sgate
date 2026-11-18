@@ -46,16 +46,23 @@ func newWriteCoalescer() *writeCoalescer {
 }
 
 // addMulti 将一条消息追加到连接的 coalescing buffer，并将连接标记为 dirty。
+// 返回 false = 背压丢弃（缓冲硬顶，AppendCoalesced 内已计数），不标脏。
 func (wc *writeCoalescer) addMulti(connID string, payload []byte, conn *Connection) bool {
-	conn.AppendCoalesced(payload)
+	if !conn.AppendCoalesced(payload) {
+		return false
+	}
+	wc.markDirty(connID)
+	return true
+}
 
+// markDirty 将连接标记为有未 flush 数据（幂等，dedup 走 dirtySet）。
+func (wc *writeCoalescer) markDirty(connID string) {
 	wc.mu.Lock()
 	if _, exists := wc.dirtySet[connID]; !exists {
 		wc.dirty = append(wc.dirty, connID)
 		wc.dirtySet[connID] = struct{}{}
 	}
 	wc.mu.Unlock()
-	return true
 }
 
 func (wc *writeCoalescer) shouldFlush(totalCount int) bool {
@@ -80,8 +87,14 @@ func (wc *writeCoalescer) flush(cm *ConnectionManager) int64 {
 	var pushed int64
 	for _, connID := range dirty {
 		conn := cm.GetConnection(connID)
-		if conn != nil {
-			pushed += conn.FlushCoalesced()
+		if conn == nil {
+			continue
+		}
+		pushed += conn.FlushCoalesced()
+		if conn.hasCoalesced() {
+			// 背压延迟：flush 因在途写超限被拒、数据仍在缓冲 → 重新标脏，
+			// 下轮重试（否则"只剩这批延迟数据"的连接会滞留到下条推送才唤醒）。
+			wc.markDirty(connID)
 		}
 	}
 	return pushed
@@ -111,8 +124,24 @@ func NewShardedWriteCoalescer(cm *ConnectionManager, shardCount int) *ShardedWri
 	for i := range shardCount {
 		sw.shards[i] = newWriteCoalescer()
 	}
+	publishValveShare(cm) // 首轮前先有份额（零值回退每连接上限，见 reserveWrite）
 	sw.wg.Go(sw.flushLoop)
 	return sw
+}
+
+// publishValveShare 按活跃连接数发布全局安全阀的单连接公平份额：
+// share = 全局上限 / 活跃连接数（夹在每连接上限内）。阀触发时只约束
+// 超过份额的连接，份额以下的健康连接不受慢连接囤积影响。
+func publishValveShare(cm *ConnectionManager) {
+	active := int64(cm.GetConnectionCount())
+	if active < 1 {
+		active = 1
+	}
+	share := maxGlobalPendingWrite / active
+	if share > maxConnPendingWrite {
+		share = maxConnPendingWrite
+	}
+	pendingValveShare.Store(share)
 }
 
 func (sw *ShardedWriteCoalescer) getShard(connID string) *writeCoalescer {
@@ -136,6 +165,7 @@ func (sw *ShardedWriteCoalescer) flushLoop() {
 			}
 			return
 		case <-ticker.C:
+			publishValveShare(sw.cm) // 份额随活跃连接数变化刷新（每轮一次，O(1)）
 			// 统计所有分片的总 dirty 数量，决定是否需要 flush
 			totalDirty := 0
 			for _, s := range sw.shards {

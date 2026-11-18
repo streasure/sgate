@@ -23,12 +23,16 @@
 
 ## 2. 需要决策 / 排期（本仓可做，尚未实施）
 
-- [ ] **下行写路径背压上限**：`Connection.AppendCoalesced` 无界 append + AsyncWrite 队列无上限。
-      场景 C OOM 事故根因（12K 无读连接即打爆系统提交量）；生产中慢消费者目前只靠
-      gRPC 流控窗口 + 内核 socket 缓冲自然限界。修复建议见 benchmark-report
-      「满载复验 → 遗留修复建议 1」，**待决定是否排期**。
-- [ ] **场景 D 关闭风暴期 `/stats` 采样超时**（基线既有现象，本轮复验未复现采样超时，
-      但关闭期写失败计数 `asyncWriteFailed` 仍存在）：与上一条同源，随背压方案一并处理。
+- [x] **下行写路径背压上限**（已完成，本仓实现）：`Connection.AppendCoalesced` 无界 append +
+      AsyncWrite 队列无上限是场景 C OOM 事故根因（12K 无读连接即打爆系统提交量）。
+      已按裁定落地「**先延迟后丢弃 + 每连接/全局两级上限**」：单连接在途写 2MB、
+      全局安全阀 1GB（按活跃连接数公平份额约束，慢连接不饿死健康连接）、
+      合批缓冲硬顶 64KB；flush 超限只延迟（缓冲保留、重标脏下轮重试），直发超限
+      返回 `ErrWriteBackpressure`，丢弃计数 `/stats pushDroppedBackpressure`、
+      在途字节 gauge `pendingWriteBytes`。测试 `internal/dataplane/backpressure_test.go`。
+- [~] **场景 D 关闭风暴期 `/stats` 采样超时**（基线既有现象，本轮复验未复现采样超时，
+      但关闭期写失败计数 `asyncWriteFailed` 仍存在）：与上一条同源，背压已随上一条
+      落地，**待复验**（重跑场景 D 确认关闭期不再积压）。
 - [ ] **logicserver 实施（阶段 1~3 完成，4 待排期）**：骨架方案见
       [`docs/logicserver-design.md`](docs/logicserver-design.md)（独立服务、实现在 `E:\logic`
       仓、SDK+服务同仓、replace 不打 tag）。已完成：

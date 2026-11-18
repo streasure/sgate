@@ -352,8 +352,10 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				continue
 			}
 			if lc.gateway.GetShardedCoalescer() != nil {
-				lc.gateway.GetShardedCoalescer().AddMulti(cb.items[0].SessionId, responseData, cb.conn)
-				lc.gateway.AddPushedToClient(int64(len(cb.items)))
+				if lc.gateway.GetShardedCoalescer().AddMulti(cb.items[0].SessionId, responseData, cb.conn) {
+					lc.gateway.AddPushedToClient(int64(len(cb.items)))
+				}
+				// 拒绝 = 背压丢弃（dataplane 已计 pushDroppedBackpressure），不计 pushed
 			} else if sendErr := cb.conn.Send(responseData); sendErr != nil {
 				tlog.Warn(ctx, "batch push to client failed sessionID=%s error=%v", cb.items[0].SessionId, sendErr)
 			} else {
@@ -394,8 +396,10 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 			isUDP := protoGw.IsUDPCmd(msg.Cmd)
 			lc.gateway.GetConnectionManager().ForEach(func(conn *dataplane.Connection) bool {
 				if !isUDP && lc.gateway.GetShardedCoalescer() != nil {
-					lc.gateway.GetShardedCoalescer().AddMulti(conn.ID(), respData, conn)
-					lc.gateway.AddPushedToClient(1)
+					if lc.gateway.GetShardedCoalescer().AddMulti(conn.ID(), respData, conn) {
+						lc.gateway.AddPushedToClient(1)
+					}
+					// 拒绝 = 背压丢弃（dataplane 已计 pushDroppedBackpressure），不计 pushed
 				} else if sendErr := conn.SendByCmd(msg.Cmd, respData); sendErr == nil {
 					lc.gateway.AddPushedToClient(1)
 				}
@@ -446,8 +450,10 @@ func (s *StreamShard) receiveMessages(lc *LogicClient, shardIdx int) {
 				responseData, err := protoGw.MarshalClientMessage(msg)
 				if err == nil {
 					if lc.gateway.GetShardedCoalescer() != nil {
-						lc.gateway.GetShardedCoalescer().AddMulti(msg.SessionId, responseData, conn)
-						lc.gateway.AddPushedToClient(1)
+						if lc.gateway.GetShardedCoalescer().AddMulti(msg.SessionId, responseData, conn) {
+							lc.gateway.AddPushedToClient(1)
+						}
+						// 拒绝 = 背压丢弃（dataplane 已计 pushDroppedBackpressure），不计 pushed
 					} else if sendErr := conn.SendByCmd(msg.Cmd, responseData); sendErr != nil {
 						tlog.Warn(ctx, "push to client failed sessionID=%s cmd=%d error=%v", msg.SessionId, msg.Cmd, sendErr)
 					} else {
