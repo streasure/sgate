@@ -297,11 +297,18 @@ func AsyncWriteCallback(_ gnet.Conn, err error) error {
 //   - 合批缓冲 ≤ maxCoalescedBytes：延迟后仍满才丢新消息（计数）。
 //
 // 总量上界 ≈ maxGlobalPendingWrite + 活跃连接数 × maxCoalescedBytes，
-// 即"12K 无读连接"场景内存封顶约 1~2GB，不再打爆系统提交量。
+// 即"12K 无读连接"场景内存封顶约 4GB，不再打爆系统提交量。
+//
+// 硬顶取 256KB 的实机标定（2026-11-18，batch-off 100 连接实测）：64KB 时
+// 硬顶先于在途预算成为瓶颈——flush 实际节奏 ~10ms/分片，停摆 100ms 即攒
+// 68KB（bench 稳态 680KB/s/连接），登录期少成员吃全量推送时单连接可超
+// 6.4MB/s，两者都把健康连接打到 64KB 顶（实测丢弃 2~4%）。256KB 覆盖
+// ~375ms 停摆与 25MB/s 突发；真正的慢消费者仍由在途预算（2MB/连接）
+// 先拦截——硬顶只是最后防线，不应先于预算触发。
 const (
-	maxConnPendingWrite   = 2 << 20  // 2MB：单连接在途（异步写未完成）字节上限
-	maxCoalescedBytes     = 64 << 10 // 64KB：单连接合批缓冲硬顶（超则丢新）
-	maxGlobalPendingWrite = 1 << 30  // 1GB：全局在途安全阀（慢连接集群兜底）
+	maxConnPendingWrite   = 2 << 20   // 2MB：单连接在途（异步写未完成）字节上限
+	maxCoalescedBytes     = 256 << 10 // 256KB：单连接合批缓冲硬顶（超则丢新）
+	maxGlobalPendingWrite = 1 << 30   // 1GB：全局在途安全阀（慢连接集群兜底）
 )
 
 var (

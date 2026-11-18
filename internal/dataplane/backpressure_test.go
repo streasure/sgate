@@ -49,20 +49,20 @@ func TestAppendCoalescedHardCap(t *testing.T) {
 	saveWriteState(t)
 
 	c := newConnection("bp-cap", mockConn{}, "u", "1.2.3.4:1", false)
-	payload := make([]byte, 8192) // 单条 8KB（4+8192=8196B/条），64KB 顶攒7 条
+	payload := make([]byte, 8192) // 单条 8KB（4+8192=8196B/条），256KB 顶攒 31 条
 
 	var accepted int
-	for range 32 {
+	for range 64 {
 		if c.AppendCoalesced(payload) {
 			accepted++
 		}
 	}
-	const wantAccepted = 7 // 7×8196=57372 ≤ 65536；第 8 条 65568 > 65536 → 拒
+	const wantAccepted = 31 // 31×8196=254,076 ≤ 262,144；第 32 条 262,272 > 262,144 → 拒
 	if accepted != wantAccepted {
 		t.Fatalf("accepted=%d want %d", accepted, wantAccepted)
 	}
-	if got := BackpressureDrops(); got != 32-wantAccepted {
-		t.Fatalf("drops=%d want %d", got, 32-wantAccepted)
+	if got := BackpressureDrops(); got != 64-wantAccepted {
+		t.Fatalf("drops=%d want %d", got, 64-wantAccepted)
 	}
 	if !c.hasCoalesced() {
 		t.Fatal("buffer should retain accepted messages")
@@ -77,7 +77,7 @@ func TestAppendCoalescedHardCap(t *testing.T) {
 
 	// 空缓冲首条超顶放行：上限只约束攒积，不截断单条大消息
 	big := newConnection("bp-cap-big", mockConn{}, "u", "1.2.3.4:1", false)
-	if !big.AppendCoalesced(make([]byte, 100<<10)) {
+	if !big.AppendCoalesced(make([]byte, maxCoalescedBytes+4096)) {
 		t.Fatal("first message on empty buffer must be accepted regardless of size")
 	}
 	if big.AppendCoalesced([]byte("x")) {

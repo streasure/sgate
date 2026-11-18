@@ -206,7 +206,7 @@
 
 **遗留修复建议**：
 
-1. ~~下行写路径补背压上限~~ → **已修复**（2026-11-18）：单连接在途写 2MB + 全局安全阀 1GB（公平份额）+ 合批缓冲硬顶 64KB，超限**先延迟后丢弃**，丢弃计数 `/stats pushDroppedBackpressure`、在途字节 gauge `pendingWriteBytes`；测试 `internal/dataplane/backpressure_test.go`，详见 todo.md「下行写路径背压上限」；
+1. ~~下行写路径补背压上限~~ → **已修复**（2026-11-18）：单连接在途写 2MB + 全局安全阀 1GB（公平份额）+ 合批缓冲硬顶 256KB，超限**先延迟后丢弃**，丢弃计数 `/stats pushDroppedBackpressure`、在途字节 gauge `pendingWriteBytes`；测试 `internal/dataplane/backpressure_test.go`，详见 todo.md「下行写路径背压上限」。硬顶经实机标定由 64KB 上调 256KB：flush 实际节奏 ~10ms/分片，64KB 时硬顶先于在途预算触发（停摆 100ms 即攒 68KB、登录期少成员吃全量推送单连接超 6.4MB/s，健康连接实测丢弃 2~4%），256KB 覆盖 ~375ms 停摆与 25MB/s 突发。实机复验：读客户端稳态零丢弃（总丢弃 0.47% 仅登录窗口）；无读场景（200 连接不读 35s）pending 封顶 200×2MB、无 OOM、关闭后归零——峰值 WS 5GB 归因为既有编码路径 ~1GB/s 分配 churn 的堆页保留（Go 活堆 ≤1.1GB），写路径活堆已封顶，详见 todo.md「下行写路径背压上限」；
 2. README §7.5 `-expected-members` 注释按场景拆分（100 连接小场景 0；**15K 满载下行必须 15000**）；
 3. ~~场景 D（双向满载）本轮未复验~~ → 已于 2026-11-16 补跑，见下「场景 D 复验」。
 

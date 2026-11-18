@@ -27,9 +27,18 @@
       AsyncWrite 队列无上限是场景 C OOM 事故根因（12K 无读连接即打爆系统提交量）。
       已按裁定落地「**先延迟后丢弃 + 每连接/全局两级上限**」：单连接在途写 2MB、
       全局安全阀 1GB（按活跃连接数公平份额约束，慢连接不饿死健康连接）、
-      合批缓冲硬顶 64KB；flush 超限只延迟（缓冲保留、重标脏下轮重试），直发超限
+      合批缓冲硬顶 256KB（64KB 经实机标定偏小：flush 节奏 ~10ms 下停摆/超订
+      会先于在途预算打到顶，健康连接实测丢弃 2~4%，故上调）；flush 超限只延迟（缓冲保留、重标脏下轮重试），直发超限
       返回 `ErrWriteBackpressure`，丢弃计数 `/stats pushDroppedBackpressure`、
       在途字节 gauge `pendingWriteBytes`。测试 `internal/dataplane/backpressure_test.go`。
+      实机验证（2026-11-18，batch-off）：①读客户端 100 连接 10s——稳态 6.3M 消息
+      零丢弃，仅登录窗口超订丢 46,434/9.77M=0.47%（64KB 时 3.5~4% 且稳态持续丢）；
+      ②无读场景 200 连接 35s（OOM 主场景缩比）——`pendingWriteBytes` 封顶
+      418,561,114≈200×2MB、缓冲触顶后丢弃持续计数、关闭后归零无泄漏、`/stats`
+      全程响应、无 OOM；③heap 归因——峰值 WS 5GB 中 Go 活堆 ≤1.1GB（含预算内
+      pending ≤419MB），其余为 ~1GB/s 分配 churn（累计 31GB：proto 编解码、
+      WS reframe、`fmt.Sprintf`）的堆页保留/GC headroom（既有编码路径行为，
+      测试结束活堆回落 117MB、WS 758MB），写路径预算已封顶。
 - [~] **场景 D 关闭风暴期 `/stats` 采样超时**（基线既有现象，本轮复验未复现采样超时，
       但关闭期写失败计数 `asyncWriteFailed` 仍存在）：与上一条同源，背压已随上一条
       落地，**待复验**（重跑场景 D 确认关闭期不再积压）。

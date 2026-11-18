@@ -228,7 +228,7 @@ session ID 由网关生成，格式 **`conn_{serverID}_{UnixNano}_{counter}`**�
 3. **契约进代码、行为进配置**：命令号段、seq 语义是三端共享 wire 契约（protocol 仓 `gateway` 常量）；阈值/开关/时长进 yaml
 4. **复杂度有明确归宿**：协议归 protocol 仓、可靠性状态归 logic SDK、连接账本归 `dataplane`、UDP 归一个分流点——每坨复杂度只允许住在一个房间
 5. **默认安全**：token 空=接口关闭（fail-closed）、登录校验 fail-closed、非法配置整体拒绝保留当前值
-6. **如实计数**：每种丢弃都有独立计数器（droppedTotal/pushDroppedNoConn/pushDroppedBackpressure/asyncWriteFailed/…），对账能精确闭合；下行写路径**有界背压**（每连接在途 2MB + 全局安全阀 1GB + 合批缓冲硬顶 64KB，超限先延迟后丢弃并计 pushDroppedBackpressure）
+6. **如实计数**：每种丢弃都有独立计数器（droppedTotal/pushDroppedNoConn/pushDroppedBackpressure/asyncWriteFailed/…），对账能精确闭合；下行写路径**有界背压**（每连接在途 2MB + 全局安全阀 1GB + 合批缓冲硬顶 256KB，超限先延迟后丢弃并计 pushDroppedBackpressure）
 
 详细包职责、数据流与扩展点见 [`docs/architecture.md`](docs/architecture.md)。
 
