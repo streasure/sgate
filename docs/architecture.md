@@ -144,7 +144,7 @@ transport ──→ dataplane ◄── logiclink
 
 ### 2.7 logic SDK（独立仓 github.com/streasure/logic，网关不依赖）
 
-logic SDK 是提供给逻辑服进程嵌入的 SDK，**已独立为模块 `github.com/streasure/logic`**（自 sgate `internal/logic` 迁出；sgate 的 bench 以 `go.mod` `replace => ../logic` 引用）。`internal/dataplane`、`internal/logiclink` 均不 import 它（不参与上述分层依赖）。它封装：gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）、`Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*` 等）消费；网关侧与之对接的是 `internal/logiclink` 的 `GRPCServer` flip 流入口。详见 [README §十](../README.md#十逻辑层-api)。
+logic SDK 是提供给逻辑服进程嵌入的 SDK，**已独立为模块 `github.com/streasure/logic`**（自 sgate `internal/logic` 迁出；sgate 的 bench 以 `go.mod` `replace => ../logic` 引用）。`internal/dataplane`、`internal/logiclink` 均不 import 它（不参与上述分层依赖）。它封装：gRPC 服务端（注册 `GatewayStream` 服务）、etcd 注册（键 `{belong}/SERVER_TYPE_LOGICSERVER:{zone}`）、`Dialer` flip 拨入（logic 主动连网关，地址来自 etcd 发现或 `gateways` 静态配置），对外提供 `logic.NewService(...)` / `svc.Server()`。本仓由 bench 模拟逻辑服（`bench/logic1_*`、`bench/logic2_*` 等）消费；网关侧与之对接的是 `internal/logiclink` 的 `GRPCServer` flip 流入口。**logicserver 服务实现在 logic 仓 `cmd/logicserver`**（SDK + 服务同仓，骨架方案见 [logicserver-design.md](logicserver-design.md)）；sgate 不依赖它，跨仓只经 etcd 发现 + gRPC flip 流对接。详见 [README §十](../README.md#十逻辑层-api)。
 
 ---
 

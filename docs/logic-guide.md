@@ -236,6 +236,10 @@ snap := svc.Server().PushMetricsSnapshot()
 - **重连语义**：网关重启 → 你的 dialer 自动重拨、流重建；期间发出的 `PushToConnection` 会失败（断线缓存/丢弃由网关侧策略决定），关键消息用 `PushReliable` 覆盖窗口内、断流后清窗由业务重连拉取补齐
 - **pprof**（可选）：`obs.StartPProfServer("127.0.0.1:6061")`（bench logic 均支持 `-pprof` flag）
 
+### 8.1 运行服务（logicserver）
+
+SDK 嵌入的服务实现位于**独立仓 `github.com/streasure/logic`**（`E:\logic`，与 SDK 同仓）：`cmd/logicserver` 组合根 + `config/*.yaml`（常规/压测 4 件套）+ `scripts/start.bat|start-linux.sh`。运行方式与探针（`/healthz` `/readyz` `/counters`）、优雅 drain、对账口径见 [logic 仓 README「运行 logicserver」](https://github.com/streasure/logic#运行-logicserver)；装配与包边界规则见其 `docs/architecture.md`。sgate 侧四进程端到端冒烟脚本为 `scripts/smoke-logicserver.ps1`（loginserver → gateway → logicserver → bench1，对账断言见脚本头注释）。
+
 ---
 
 ## 9. 联调检查清单

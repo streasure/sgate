@@ -7,6 +7,7 @@
 - sgate 与 logic 之间为 gRPC 双向流（flip：logic 拨入 sgate，`shardCount` 条流按 session 哈希分片）；同一 session 恒走同一条流（保证有序，压测只需保证 stream 通信性能）。
 - bench/logic 严禁做无用回包校验；bench 中除 LoginGate 外的协议 recv 直接丢弃，logic 收到的消息全部丢弃。
 - 压测配置禁止登录校验（`loginValidation.enabled: false`）；authfail 出现即为 sgate 登录校验或 bench/logic 误处理，不是预期行为。
+- `bench/logic1_*` / `bench/logic2_*` 的定位：**logic SDK 官方示例 + 集成测试替身**（sgate 侧唯一消费 SDK 的地方），真实逻辑服服务从其模式 fork——参考实现是 logic 仓 `cmd/logicserver`（见 `docs/logic-guide.md` §8.1）；SDK 导出面 additive-only 纪律的回归对象即本目录的编译。
 
 ## bench1：客户端 → sgate → 逻辑服（上行转发）
 

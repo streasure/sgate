@@ -16,7 +16,9 @@
         + `config/bench/udp-on.yaml`（三方对账口径已验证，见 benchmark-report「UDP 阶段 4」）。
       - 阻塞原因：Windows 入口天花板 ≈280~300K datagrams/s（gnet Windows UDP 单 reader
         goroutine，`acceptor_windows.go`），sync/async A/B 已归因，Linux 多 reader 未验证。
-- [ ] **Linux CI 与压测基线**：构建 + 吞吐/连接数回归阈值固化。
+- [ ] **Linux CI 与压测基线**：构建 + 吞吐/连接数回归阈值固化；依赖方向检查挂
+      `scripts/check-deps.sh`（sgate 平面边界 + 跨仓零反向，已 ALL PASS）、
+      跨仓冒烟挂 `scripts/smoke-logicserver.ps1`（需四兄弟仓 checkout + etcd/MySQL/Redis 服务）。
       Windows 连接天花板 16,384（临时端口池），百万连接与 epoll 差异无法本机复现。
 - [ ] **网关纯上限钉死**：多机部署（网关独占 CPU + 真实网卡）。
       本机四轮 + 六项复验一致证明瓶颈在压测工具两端（CPU ≤3.8/12 核）。
@@ -42,7 +44,7 @@
 - [~] **场景 D 关闭风暴期 `/stats` 采样超时**（基线既有现象，本轮复验未复现采样超时，
       但关闭期写失败计数 `asyncWriteFailed` 仍存在）：与上一条同源，背压已随上一条
       落地，**待复验**（重跑场景 D 确认关闭期不再积压）。
-- [ ] **logicserver 实施（阶段 1~3 完成，4 待排期）**：骨架方案见
+- [ ] **logicserver 实施（阶段 1~4 完成，5 待排期）**：骨架方案见
       [`docs/logicserver-design.md`](docs/logicserver-design.md)（独立服务、实现在 `E:\logic`
       仓、SDK+服务同仓、replace 不打 tag）。已完成：
       阶段 1（logic 仓 `8ea8750`）`cmd/logicserver` + `internal/config`（显式传参）+
@@ -50,15 +52,21 @@
       阶段 2（logic 仓 `68d6b59`）配置 4 件套压测侧 + `scripts/` + `docs/architecture.md`
       + README 运行说明；阶段 3（logic 仓 `7050dc1`）`internal/metrics`
       （/counters+/healthz+/readyz）+ `internal/probe` readiness + handler drain 门 +
-      组合根 Start/信号/drainWait 优雅停机 + `ports.metricsAddr`/`drainGrace` 配置。
-      三阶段验收均过（两仓五门禁绿、etcd 注册/flip/bench1 端到端、常规与压测配置
-      均可起、探针三态、batch-off 对账闭合、156ms 优雅停机 + etcd 注销）。
-      余阶段 4（sgate 文档配套+跨仓冒烟）。对账口径：batch-on 配置合批缓冲未刷
+      组合根 Start/信号/drainWait 优雅停机 + `ports.metricsAddr`/`drainGrace` 配置；
+      阶段 4（sgate）`scripts/smoke-logicserver.ps1` 四进程冒烟（两轮 12/12 断言 PASS）+
+      `scripts/check-deps.sh` 依赖方向检查（ALL PASS）+ §3.6 三处文档配套
+      （architecture.md §2.7、logic-guide.md §8.1、Bench.md bench/logic_* 定位）。
+      四阶段验收均过（两仓五门禁绿、etcd 注册/flip/bench1 端到端、常规与压测配置
+      均可起、探针三态、batch-off 对账闭合、156ms 优雅停机 + etcd 注销、
+      四进程冒烟一键过）。余阶段 5（tag 治理，触发条件=SDK 第二个仓外消费者，
+      设计案标注延后）。对账口径：batch-on 配置合批缓冲未刷
       不计 pushedToClient，对账须用 batch-off。
 - [ ] **logic SDK 版本治理**：tag + changelog、`replace => ../logic` 切 `require` 的时机
       （方案阶段 5 前置）；当前决策是不打 tag 走 replace，改 SDK 必须同轮跑 sgate 五门禁。
-- [ ] **跨仓集成冒烟基线**：`sgate + loginserver + logicserver + bench` 四进程对账冒烟，
-      checkout 各兄弟仓钉同一批 commit；与下方 Linux CI（P2-4）打包推进。
+- [~] **跨仓集成冒烟基线**（脚本已落地，待 Linux CI 接入）：`scripts/smoke-logicserver.ps1`
+      四进程对账冒烟已实跑通过（loginserver → gateway → logicserver → bench1_ws，
+      12 断言 PASS、版本钉扎 `logs/smoke_versions.txt`），本机手动一键可用；
+      余下是接入 Linux CI（与下方 P2-4 打包）+ 各兄弟仓钉同一批 commit 的自动化。
 - [ ] **loginserver 包级 `GetConfig` 改显式传参**：**仅当出现实际痛点**（如测试需注入不同
       配置）才动，不主动排期（童子军军规，见 logicserver-design §7.3）；新仓 logicserver
       一律显式传参。

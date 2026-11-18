@@ -165,6 +165,11 @@ loginserver --(gRPC Kick, 单向)-->  sgate               # 踢人执行
 
 ### 4.3 跨仓集成冒烟（当前 CI 缺口）
 
+> **落地状态（2026-11-18，阶段 4）**：脚本已实现并实跑通过——sgate `scripts/smoke-logicserver.ps1`
+> （四进程一键起停 + 12 项 `/stats`↔`/counters` 对账断言 + 版本钉扎清单 `logs/smoke_versions.txt`，
+> 两轮全绿）、依赖方向检查 `scripts/check-deps.sh`（平面边界 + 跨仓零反向，ALL PASS）。
+> 余下缺口 = **接入 Linux CI**（todo.md 第 1 节 P2-4）。
+
 - sgate CI 跑不到真实 logicserver；补法：把现有 bench 工具链固化成冒烟脚本——
   `gateway + loginserver + logicserver(新) + bench1/client` 四进程起停 + `/stats`↔`/counters` 对账。
 - 材料现成：`bench/logic_*`（服务范例）、`bench/client_*`、`bench/udp_*`、`config/bench/*`。
@@ -262,7 +267,7 @@ tlog.Init → config.LoadConfig → component.NewContainer
 | 1 | `E:\logic` 建 `cmd/logicserver` + `internal/config` 最小可运行骨架（登录入组 + LoginReq/LoginAck 应答 handler，模式照 `bench/logic2_ws`；无协议 echo 命令码，不自造 wire 契约） | ✅ 已过（2026-11-17，logic `8ea8750`）：logic/sgate 两仓五门禁绿；etcd 注册键实查存在、flip 建立、bench1_ws 100/100 登录 0 失败 1.37M 消息、handler 侧 `login gate bound`×100 且 0 unregistered |
 | 2 | 配置 4 件套 + `scripts/` + `docs/architecture.md` + README 补运行说明 | ✅ 已过（2026-11-17，logic `68d6b59`）：常规与压测两套配置均可起（`start.bat`/`start-linux.sh` 实跑、etcd 注册键实查存在）、压测日志 error 级生效（常规日志零新增）、`bash -n` 通过、五门禁绿 |
 | 3 | `internal/metrics` `/counters` 端点 + 业务在途宽限的优雅 drain | ✅ 已过（2026-11-17，logic `7050dc1`）：logic/sgate 两仓五门禁绿（新增 probe/metrics/handler/config 6 个测试文件）；实机三态探针（未接流 503 `no gateway stream` → 接流 200 `ready: ok` → drain 窗口 503 `draining` 捕捉）；batch-off 配置对账两轮闭合 `totalPushed=100==pushedToClient=100`、`sessions=100==activeConnections=100`、登录 100/100；优雅停机 156ms（`drain complete inFlight=0 pendingReliable=0 dropped=0` → stopped → metrics stopped）、etcd 注册键实查已删、网关侧 `shard receive error`×96 与 logic `gateway stream exited`×96 对应。注：batch-on 配置下 `pushedToClient=0` 是合批缓冲未刷（100 条摊 96 shard 凑不满 128），非丢失，对账须用 batch-off |
-| 4 | sgate 侧文档配套（§3.6）+ 跨仓冒烟脚本（§4.3） | 四进程冒烟一键过 |
+| 4 | sgate 侧文档配套（§3.6）+ 跨仓冒烟脚本（§4.3）+ 依赖方向检查进 CI 材料 | ✅ 已过（2026-11-18，sgate 脚本两件套）：①`scripts/smoke-logicserver.ps1` 四进程（loginserver → gateway → logicserver → bench1_ws）一键冒烟两轮全过（含构建轮 + `-SkipBuild` 轮），12/12 断言 PASS——登录 100/100 零失败、双侧连接/会话水位 100、registered、gatewayStreams=96、`totalPushed==pushedToClient=100`、`totalFailed=0`、`droppedTotal=0`、`failed=0`、`received≥客户端发送`、loginserver 存活；版本钉扎清单 `logs/smoke_versions.txt`（五仓 HEAD）；就绪门顺序=等 `/live`（`/health` 含 Logic connected 判据，起 logic 前恒 503）→ logic `/readyz` 200 → `/health` healthy；②`scripts/check-deps.sh` 依赖方向检查 ALL PASS（sgate 平面边界 4 条 + 跨仓零反向 8 条），Git Bash 实跑通过，供 Linux CI 接入；③§3.6 三处文档落地（architecture.md §2.7 归属句、logic-guide.md §8.1 运行服务、Bench.md bench/logic_* 定位）。**注**：冒烟脚本须 UTF-8 带 BOM（PS5.1 无 BOM 按 GBK 解析会吃中文字符串引号） |
 | 5 | （延后）tag 发版治理 | 触发条件：logic SDK 出现第二个仓外消费者 |
 
 每阶段：单独中文提交（写明验证结论）、五门禁全绿、**推送经用户确认**。
