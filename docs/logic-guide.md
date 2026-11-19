@@ -239,7 +239,7 @@ snap := svc.Server().PushMetricsSnapshot()
 - **日志**：统一 `github.com/streasure/util/tlog`（`tlog.Info(ctx, "fmt %v", ...)`），禁止 `fmt.Print*` / `log.*`（AGENTS.md 规范）
 - **启动顺序**：etcd → 网关 → 你的进程（或反之——拨入自动重试，顺序不敏感）
 - **优雅停止**：`svc.Stop()`（停拨入 → 清流 → 5s 限时 GracefulStop，超时强杀），务必在 SIGINT/SIGTERM 处理里调用
-- **重连语义**：网关重启 → 你的 dialer 自动重拨、流重建；期间发出的 `PushToConnection` 会失败（断线缓存/丢弃由网关侧策略决定），关键消息用 `PushReliable` 覆盖窗口内、断流后清窗由业务重连拉取补齐
+- **重连语义**：网关重启 → 你的 dialer 自动重拨（1s 起步 ×2 封顶 30s）、流重建；期间发出的 `PushToConnection` 会失败（断线缓存/丢弃由网关侧策略决定），关键消息用 `PushReliable` 覆盖窗口内、断流后清窗由业务重连拉取补齐。**你的进程崩溃/重启**时网关不断客户端连接，上行进网关有界队列、恢复后补发：直推按上行到达自动重绑会话免重登，**分组绑定不自动恢复（组播需重登）**，内存业务态即失——完整契约（含「无跨实例会话重路由」等首版取舍）见 logic 仓 `docs/architecture.md` §9 故障契约
 - **pprof**（可选）：`obs.StartPProfServer("127.0.0.1:6061")`（bench logic 均支持 `-pprof` flag）
 
 ### 8.1 运行服务（logicserver）
