@@ -111,6 +111,12 @@ type ProtoHandler func(ctx *logic.Context, req proto.Message) proto.Message
 - `respCmd`：handler 返回非 nil 时，SDK 自动 marshal 并以 `respCmd` 回包给客户端；**返回 nil 或 `respCmd=0` 表示不回包**
 - 未注册的 cmd：先走内置命令（§4.2），否则告警 `received unregistered cmd` 丢弃
 
+> ⚠️ **应答 `user_key` 会触发网关改绑**：应答消息若带非空 `user_key`（如 `LoginAck.user_key`），
+> SDK 用它覆盖响应 `StreamData.UserKey`，网关收到后执行 `UpdateConnectionUserUUID`
+> **改绑连接身份**。默认应答请留空或回显 `ctx.UserUUID`（fullUUID `{gatewayServerId}:{userId}`）；
+> 填裸 `userId` 会让网关把身份键改写成裸键——按 fullUUID 查重的重复登录踢旧连接失效，
+> 跨逻辑分片同 userId 的会话索引也会互撞。仅在业务确实要重映射身份时才填自定义值。
+
 ### 4.2 上下文 `logic.Context`
 
 | 字段 | 含义 |
