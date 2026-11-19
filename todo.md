@@ -41,9 +41,18 @@
       pending ≤419MB），其余为 ~1GB/s 分配 churn（累计 31GB：proto 编解码、
       WS reframe、`fmt.Sprintf`）的堆页保留/GC headroom（既有编码路径行为，
       测试结束活堆回落 117MB、WS 758MB），写路径预算已封顶。
-- [~] **场景 D 关闭风暴期 `/stats` 采样超时**（基线既有现象，本轮复验未复现采样超时，
-      但关闭期写失败计数 `asyncWriteFailed` 仍存在）：与上一条同源，背压已随上一条
-      落地，**待复验**（重跑场景 D 确认关闭期不再积压）。
+- [x] **场景 D 关闭风暴期 `/stats` 采样超时**（2026-11-19 背压落地后复验**通过**，**缩比 4000+4000**：
+      首次按满载 7500+7500 尝试时系统提交量余量仅 15.6GB（后台常驻占 37GB，不动），
+      幽灵推送期 errno=1455 环境 OOM 打死 logic2（非代码回归，与场景 C OOM 事故同型）；
+      缩比轮参数与原 D 同构 batch-on、上行 10s / 下行 45s）：`/stats` 全程 204 样本
+      **零超时**（关闭风暴两窗口延迟 max 69ms，基线曾连续 4 次超时）；`pendingWriteBytes`
+      max 12.8MB → **收尾归 0（关闭期不再积压）**；`droppedTotal=failed=0`、auth=0
+      （authfail/login-key/unauthorized 粗扫 0，粗匹配 53 条系 sessionID 时间戳数字含
+      「401」子串的误伤）；下行对账 logic 38,633,069 = pushedToClient 38,533,614 +
+      noConn 91,066 + awf 653 + bpd 21（差 7,715 = 0.020%，同基线口径差）；
+      上行 sent 2,622,246 = forwarded 2,622,246 精确（260K msg/s、登录 4000/4000 零失败）；
+      `asyncWriteFailed=653` 仍存在 = 客户端到点关闭后的在途写失败计数（与基线同口径，
+      非过载、由 pending 归零证明非积压）；RSS 峰 4,806MB（缩比量级）。
 - [x] **logicserver 实施（阶段 1~5 全部完成）**：骨架方案见
       [`docs/logicserver-design.md`](docs/logicserver-design.md)（独立服务、实现在 `E:\logic`
       仓、SDK+服务同仓、`replace` 仍不切 `require`）。已完成：
