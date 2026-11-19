@@ -44,9 +44,9 @@
 - [~] **场景 D 关闭风暴期 `/stats` 采样超时**（基线既有现象，本轮复验未复现采样超时，
       但关闭期写失败计数 `asyncWriteFailed` 仍存在）：与上一条同源，背压已随上一条
       落地，**待复验**（重跑场景 D 确认关闭期不再积压）。
-- [ ] **logicserver 实施（阶段 1~4 完成，5 待排期）**：骨架方案见
+- [x] **logicserver 实施（阶段 1~5 全部完成）**：骨架方案见
       [`docs/logicserver-design.md`](docs/logicserver-design.md)（独立服务、实现在 `E:\logic`
-      仓、SDK+服务同仓、replace 不打 tag）。已完成：
+      仓、SDK+服务同仓、`replace` 仍不切 `require`）。已完成：
       阶段 1（logic 仓 `8ea8750`）`cmd/logicserver` + `internal/config`（显式传参）+
       `internal/handler`（LoginGate 入组 + LoginReq/LoginAck 骨架应答）+ `config/*.yaml`；
       阶段 2（logic 仓 `68d6b59`）配置 4 件套压测侧 + `scripts/` + `docs/architecture.md`
@@ -55,14 +55,19 @@
       组合根 Start/信号/drainWait 优雅停机 + `ports.metricsAddr`/`drainGrace` 配置；
       阶段 4（sgate）`scripts/smoke-logicserver.ps1` 四进程冒烟（两轮 12/12 断言 PASS）+
       `scripts/check-deps.sh` 依赖方向检查（ALL PASS）+ §3.6 三处文档配套
-      （architecture.md §2.7、logic-guide.md §8.1、Bench.md bench/logic_* 定位）。
-      四阶段验收均过（两仓五门禁绿、etcd 注册/flip/bench1 端到端、常规与压测配置
+      （architecture.md §2.7、logic-guide.md §8.1、Bench.md bench/logic_* 定位）；
+      阶段 5（logic 仓 `d6ffe60` + tag `v0.1.0`）发版治理三件套（详见下条）。
+      五阶段验收均过（两仓五门禁绿、etcd 注册/flip/bench1 端到端、常规与压测配置
       均可起、探针三态、batch-off 对账闭合、156ms 优雅停机 + etcd 注销、
-      四进程冒烟一键过）。余阶段 5（tag 治理，触发条件=SDK 第二个仓外消费者，
-      设计案标注延后）。对账口径：batch-on 配置合批缓冲未刷
+      四进程冒烟一键过、apidiff 五路径实测）。对账口径：batch-on 配置合批缓冲未刷
       不计 pushedToClient，对账须用 batch-off。
-- [ ] **logic SDK 版本治理**：tag + changelog、`replace => ../logic` 切 `require` 的时机
-      （方案阶段 5 前置）；当前决策是不打 tag 走 replace，改 SDK 必须同轮跑 sgate 五门禁。
+- [~] **logic SDK 版本治理**（阶段 5 已落地，切换待触发）：logic 仓 `d6ffe60` +
+      annotated tag `v0.1.0`（本地未推送）——`CHANGELOG.md` 基线条目、
+      `scripts/apidiff.sh` 导出面兼容性门禁（go-apidiff，基准=最近 tag → HEAD，
+      五路径实测：无指引/相等 PASS/仅 additive PASS/破坏 FAIL/默认 PASS）、
+      logic README「版本治理」段（0.x bump 规则、tag 流程、`replace => require`
+      切换时机）。`replace => ../logic` 暂不切 `require`，触发条件 = tag 推远端 +
+      第二个仓外消费者；改 SDK 仍须同轮跑 sgate 五门禁。
 - [~] **跨仓集成冒烟基线**（脚本已落地，待 Linux CI 接入）：`scripts/smoke-logicserver.ps1`
       四进程对账冒烟已实跑通过（loginserver → gateway → logicserver → bench1_ws，
       12 断言 PASS、版本钉扎 `logs/smoke_versions.txt`），本机手动一键可用；

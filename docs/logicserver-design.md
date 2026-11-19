@@ -128,7 +128,10 @@ svc.Run()                                   // Start + SIGINT/SIGTERM → 优雅
 - **约束（接受的代价）**：
   1. CI/他机必须**同级目录 checkout**（或 `go.work`），否则 replace 断链——跨仓集成冒烟（§4.3）本就需要同级布局；
   2. SDK API 变更**即刻影响** sgate bench：改 SDK 必须同轮跑 sgate 五门禁 + 相关 bench 编译；
-  3. 发版治理（tag + changelog）延后，记入 `todo.md` 候选项（§7）；
+  3. 发版治理（tag + changelog）延后，记入 `todo.md` 候选项（§7）
+     ——**已落地 2026-11-19**（阶段 5）：logic `d6ffe60` + tag `v0.1.0` +
+     `CHANGELOG.md` + `scripts/apidiff.sh` 导出面门禁，见 §6 阶段 5；`replace`
+     仍不切 `require`（切换时机见 logic README「版本治理」）；
   4. **无 tag 期的 API 纪律（替代语义化版本的安全网）**：SDK 导出面 **additive-only**——
      只增不改不删；确需破坏性变更时，必须同轮修改 sgate `bench/logic_*` 全部编译通过，
      并在提交信息中显式标注"SDK 破坏性变更"；`docs/logic-guide.md` 同步更新。
@@ -268,13 +271,14 @@ tlog.Init → config.LoadConfig → component.NewContainer
 | 2 | 配置 4 件套 + `scripts/` + `docs/architecture.md` + README 补运行说明 | ✅ 已过（2026-11-17，logic `68d6b59`）：常规与压测两套配置均可起（`start.bat`/`start-linux.sh` 实跑、etcd 注册键实查存在）、压测日志 error 级生效（常规日志零新增）、`bash -n` 通过、五门禁绿 |
 | 3 | `internal/metrics` `/counters` 端点 + 业务在途宽限的优雅 drain | ✅ 已过（2026-11-17，logic `7050dc1`）：logic/sgate 两仓五门禁绿（新增 probe/metrics/handler/config 6 个测试文件）；实机三态探针（未接流 503 `no gateway stream` → 接流 200 `ready: ok` → drain 窗口 503 `draining` 捕捉）；batch-off 配置对账两轮闭合 `totalPushed=100==pushedToClient=100`、`sessions=100==activeConnections=100`、登录 100/100；优雅停机 156ms（`drain complete inFlight=0 pendingReliable=0 dropped=0` → stopped → metrics stopped）、etcd 注册键实查已删、网关侧 `shard receive error`×96 与 logic `gateway stream exited`×96 对应。注：batch-on 配置下 `pushedToClient=0` 是合批缓冲未刷（100 条摊 96 shard 凑不满 128），非丢失，对账须用 batch-off |
 | 4 | sgate 侧文档配套（§3.6）+ 跨仓冒烟脚本（§4.3）+ 依赖方向检查进 CI 材料 | ✅ 已过（2026-11-18，sgate 脚本两件套）：①`scripts/smoke-logicserver.ps1` 四进程（loginserver → gateway → logicserver → bench1_ws）一键冒烟两轮全过（含构建轮 + `-SkipBuild` 轮），12/12 断言 PASS——登录 100/100 零失败、双侧连接/会话水位 100、registered、gatewayStreams=96、`totalPushed==pushedToClient=100`、`totalFailed=0`、`droppedTotal=0`、`failed=0`、`received≥客户端发送`、loginserver 存活；版本钉扎清单 `logs/smoke_versions.txt`（五仓 HEAD）；就绪门顺序=等 `/live`（`/health` 含 Logic connected 判据，起 logic 前恒 503）→ logic `/readyz` 200 → `/health` healthy；②`scripts/check-deps.sh` 依赖方向检查 ALL PASS（sgate 平面边界 4 条 + 跨仓零反向 8 条），Git Bash 实跑通过，供 Linux CI 接入；③§3.6 三处文档落地（architecture.md §2.7 归属句、logic-guide.md §8.1 运行服务、Bench.md bench/logic_* 定位）。**注**：冒烟脚本须 UTF-8 带 BOM（PS5.1 无 BOM 按 GBK 解析会吃中文字符串引号） |
-| 5 | （延后）tag 发版治理 | 触发条件：logic SDK 出现第二个仓外消费者 |
+| 5 | tag 发版治理 + apidiff（原「延后」，触发条件=SDK 第二个仓外消费者，经裁定提前实施） | ✅ 已过（2026-11-19，logic `d6ffe60` + annotated tag `v0.1.0`，本地不推送）：①`CHANGELOG.md` v0.1.0 基线条目（SDK 迁出导出面 + `WithBelong`/`WithEtcdEndpoints` + logicserver 阶段 1~3）；②`scripts/apidiff.sh` 导出面兼容性门禁（基准=最近 tag → HEAD、`internal/*` 跳过、退出码 0=兼容/1=不兼容/2=环境错），go-apidiff 五路径实测——无 tag exit 2 指引正确、`7050dc1→HEAD` API 相等 PASS、`994735b→HEAD` 仅 additive PASS（检出 6 项新增、internal 正确跳过）、`HEAD→994735b` 破坏 FAIL exit 1 + §3.5 规则 4 指引、`v0.1.0→HEAD` 默认路径 PASS；③README「版本治理」段（additive-only 纪律、0.x bump 规则、tag 流程、`replace => require` 切换时机）；④logic 五门禁绿。踩坑沉淀：Windows 必须 `go install github.com/joelanford/go-apidiff@main`（≤v0.8.3 缺 `//go:build`，Go 1.26 编译不过）；tag 中文 message 须 `-F` 文件（PowerShell 内联 `-m` 按 ANSI 损坏中文）；go-apidiff 连带清理 gitignored untracked（`bin/`/`logs/`，可重建，已写进脚本头与 README）。**注**：`replace` 仍不切 `require`（等 tag 推远端 + 第二个仓外消费者，时机见 logic README） |
 
 每阶段：单独中文提交（写明验证结论）、五门禁全绿、**推送经用户确认**。
 
 ## 7. 待办候选（已按此口径补进 `todo.md`）
 
-1. logic SDK 版本治理（tag + changelog，replace 切 require 的时机）——阶段 5 前置；
+1. logic SDK 版本治理（tag + changelog，replace 切 require 的时机）——阶段 5 前置
+   （✅ 已落地 2026-11-19，见 §6 阶段 5；require 切换待触发条件）；
 2. 跨仓集成冒烟基线（§4.3，与 Linux CI P2-4 打包）；
 3. loginserver 包级 `GetConfig` 改显式传参——**仅当出现实际痛点（如测试需注入不同配置）才动，
    不主动排期**；新仓（logicserver）一律显式传参，旧代码不为风格买单（童子军军规）。
