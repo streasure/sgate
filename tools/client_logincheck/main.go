@@ -128,16 +128,38 @@ func main() {
 	if err := writeFrame(conn, &protocol.MessageFrame{Cmd: protocol.CmdLogicLoginReq, SeqId: 2, Body: loginBody}); err != nil {
 		panic(err)
 	}
-	loginAckFrame, err := readFrame(conn)
-	if err != nil {
-		panic(err)
+	// 读到 LoginAck 为止：登录窗口内可能先到逻辑服异步下行（欢迎推送等），
+	// 跳过非目标帧；读超时兜底防 LoginAck 丢失时永久阻塞。
+	var loginAckFrame *protocol.MessageFrame
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			panic(err)
+		}
+		f, err := readFrame(conn)
+		if err != nil {
+			panic(err)
+		}
+		if f.Cmd == protocol.CmdLogicLoginAck {
+			loginAckFrame = f
+			break
+		}
+		tlog.Info(context.TODO(), "skip frame before LoginAck cmd=%d", f.Cmd)
 	}
-	if loginAckFrame.Cmd != protocol.CmdLogicLoginAck {
-		panic("unexpected LoginAck command")
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		panic(err)
 	}
 	loginAck := new(logicproto.LoginAck)
 	if err := proto.Unmarshal(loginAckFrame.Body, loginAck); err != nil {
 		panic(err)
 	}
-	tlog.Info(context.TODO(), "login flow succeeded accountId=%s userKey=%s version=%s", accountID, loginAck.UserKey, loginAck.Version)
+	// 断言逻辑服登录业务应答：会话身份回显 + 账号快照（建号产物）。
+	if loginAck.User == nil {
+		panic("LoginAck.user = nil, want 账号快照")
+	}
+	if loginAck.User.NickName != accountID {
+		panic(fmt.Errorf("LoginAck.user.nickName = %q, want 账号 %q", loginAck.User.NickName, accountID))
+	}
+	tlog.Info(context.TODO(), "login flow succeeded accountId=%s userKey=%s nickName=%s version=%s",
+		accountID, loginAck.UserKey, loginAck.User.NickName, loginAck.Version)
 }
