@@ -110,6 +110,8 @@ type ProtoHandler func(ctx *logic.Context, req proto.Message) proto.Message
 
 - `reqProto`：该 cmd 的请求 protobuf **实例**（SDK 按类型反射解码 `StreamData.Data`，带对象池）
 - `respCmd`：handler 返回非 nil 时，SDK 自动 marshal 并以 `respCmd` 回包给客户端；**返回 nil 或 `respCmd=0` 表示不回包**
+
+> 📌 **登录失败语义**：`LoginAck.code`（additive，0 = 成功，非 0 = 被拒，常量见 `protocol/logic/codes.go`，HTTP 风格数值）+ `message` 说明原因；失败应答 `user/user_key` 置空（不回快照、不触发改绑）。客户端应断言 `code==0` 再读 `user`，不要把「无应答」当唯一失败信号。
 - 未注册的 cmd：先走内置命令（§4.2），否则告警 `received unregistered cmd` 丢弃
 
 > ⚠️ **应答 `user_key` 会触发网关改绑**：应答消息若带非空 `user_key`（如 `LoginAck.user_key`），

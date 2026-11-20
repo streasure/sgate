@@ -153,7 +153,11 @@ func main() {
 	if err := proto.Unmarshal(loginAckFrame.Body, loginAck); err != nil {
 		panic(err)
 	}
-	// 断言逻辑服登录业务应答：会话身份回显 + 账号快照（建号产物）。
+	// 断言逻辑服登录业务应答：成功码 + 会话身份回显 + 账号快照（建号产物）。
+	if loginAck.Code != logicproto.LoginCodeOK {
+		panic(fmt.Errorf("LoginAck.code = %d (%s), want %d（成功）",
+			loginAck.Code, loginAck.Message, logicproto.LoginCodeOK))
+	}
 	if loginAck.User == nil {
 		panic("LoginAck.user = nil, want 账号快照")
 	}
