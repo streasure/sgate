@@ -87,6 +87,7 @@ func main() {
 | `WithEtcd(endpoint)` | etcdEndpoint | `http://127.0.0.1:2379` | 单节点 etcd（或用 `etcdEndpoints` 列表字段） |
 | `WithGateways(addrs...)` | gateways | 空 | 静态网关 gRPC 地址（`ip:port`），etcd 不可用时的兜底 |
 | `WithShardCount(n)` | shardCount | `0` = `NumCPU×8` | 拨入每个网关的流分片数；与网关 `stream.shardCount`（96）对齐 |
+| `WithGRPCWindowSize(n)` | grpcWindowSize | `0` = SDK 默认 524288 | gRPC 流控窗口字节（服务端与拨入端同用）；`<=0` 不生效，负值在 logicserver 配置层启动期报错。需与网关侧窗口对称时才调大 |
 | `WithReliability(cfg)` | reliability.* | 见 §7 | 可靠推送参数，零值字段回退默认 |
 
 其他 `ServiceConfig` 字段（`connGroupCount` 默认 4、`dispatchWorkers`、`streamSendChSize`、`advertiseAddr`、etcd 账号密码等）见 logic 仓 `config.go` 注释。
@@ -240,7 +241,7 @@ snap := svc.Server().PushMetricsSnapshot()
 - **启动顺序**：etcd → 网关 → 你的进程（或反之——拨入自动重试，顺序不敏感）
 - **优雅停止**：`svc.Stop()`（停拨入 → 清流 → 5s 限时 GracefulStop，超时强杀），务必在 SIGINT/SIGTERM 处理里调用
 - **重连语义**：网关重启 → 你的 dialer 自动重拨（1s 起步 ×2 封顶 30s）、流重建；期间发出的 `PushToConnection` 会失败（断线缓存/丢弃由网关侧策略决定），关键消息用 `PushReliable` 覆盖窗口内、断流后清窗由业务重连拉取补齐。**你的进程崩溃/重启**时网关不断客户端连接，上行进网关有界队列、恢复后补发：直推按上行到达自动重绑会话免重登，**分组绑定不自动恢复（组播需重登）**，内存业务态即失——完整契约（含「无跨实例会话重路由」等首版取舍）见 logic 仓 `docs/architecture.md` §9 故障契约
-- **pprof**（可选）：`obs.StartPProfServer("127.0.0.1:6061")`（bench logic 均支持 `-pprof` flag）
+- **pprof**（可选）：嵌入 SDK 用 `obs.StartPProfServer("127.0.0.1:6061")`（bench logic 均支持 `-pprof` flag）；logicserver 组合根用配置 `pprof: true`（观测 mux 挂 `/debug/pprof/`，默认关，随 `metricsAddr` 同 host）
 
 ### 8.1 运行服务（logicserver）
 
