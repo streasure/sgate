@@ -69,24 +69,16 @@ func TestKickByIPMatchesRemoteHost(t *testing.T) {
 	}
 }
 
-func TestKickByIPCIDRMatchesSubnet(t *testing.T) {
+// TestKickByIPRejectsCIDR 网段/CIDR 不再是合法踢人目标：按非法 IP 处理，踢 0。
+func TestKickByIPRejectsCIDR(t *testing.T) {
 	g := newKickTestGateway()
-	inSubnet := &kickMockConn{}
-	outSubnet := &kickMockConn{}
-	g.connectionManager.AddConnection(inSubnet, "u-in", false)
-	g.connectionManager.AddConnection(outSubnet, "u-out", false)
+	g.connectionManager.AddConnection(&kickMockConn{}, "u1", false)
 
-	// inSubnet/outSubnet RemoteHost 均为 127.0.0.1（mock 固定）
-	// 10.0.0.0/8 不含 127.0.0.1 → 0
+	if n := g.KickByIP("127.0.0.0/8", "blacklist"); n != 0 {
+		t.Fatalf("cidr 127.0.0.0/8 kicked=%d, want 0", n)
+	}
 	if n := g.KickByIP("10.0.0.0/8", "blacklist"); n != 0 {
 		t.Fatalf("cidr 10.0.0.0/8 kicked=%d, want 0", n)
-	}
-	// 127.0.0.0/8 含 127.0.0.1 → 2
-	if n := g.KickByIP("127.0.0.0/8", "blacklist"); n != 2 {
-		t.Fatalf("cidr 127.0.0.0/8 kicked=%d, want 2", n)
-	}
-	if !inSubnet.isClosed() || !outSubnet.isClosed() {
-		t.Fatal("both conns should be closed by 127.0.0.0/8")
 	}
 }
 

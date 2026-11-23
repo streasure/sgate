@@ -5,7 +5,6 @@ import (
 
 	protoGw "github.com/streasure/protocol/gateway"
 	protoLogic "github.com/streasure/protocol/logic"
-	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/tlog"
 	"google.golang.org/protobuf/proto"
 )
@@ -92,14 +91,12 @@ func (g *Engine) KickByAccounts(accountIDs []string, reason string) int {
 }
 
 // KickByIP 按对端 IP 踢本地全部连接，返回踢中数。
-// 目标支持两种形态：
-//   - 纯 IP（如 "1.2.3.4"）→ 规范化为 /32 或 /128 前缀，精确匹配
-//   - CIDR（如 "10.0.0.0/8"）→ 前缀 Contains 匹配（NAT/网段封禁）
+// 仅接受纯 IP 精确匹配（网段/CIDR 不再是合法目标）。
 func (g *Engine) KickByIP(ip, reason string) int {
 	if ip == "" {
 		return 0
 	}
-	prefix, err := netutil.ParseIPOrPrefix(ip)
+	target, err := netip.ParseAddr(ip)
 	if err != nil {
 		tlog.Warn(g.ctx, "kick by ip invalid target ip=%s", ip)
 		return 0
@@ -111,7 +108,7 @@ func (g *Engine) KickByIP(ip, reason string) int {
 		if err != nil {
 			return true
 		}
-		if prefix.Contains(addr) {
+		if addr == target {
 			matched = append(matched, conn)
 		}
 		return true
@@ -119,6 +116,6 @@ func (g *Engine) KickByIP(ip, reason string) int {
 	for _, conn := range matched {
 		g.kickConn(conn, p)
 	}
-	tlog.Info(g.ctx, "kick by ip done ip=%s prefix=%s matched=%d reason=%s", ip, prefix, len(matched), reason)
+	tlog.Info(g.ctx, "kick by ip done ip=%s matched=%d reason=%s", ip, len(matched), reason)
 	return len(matched)
 }

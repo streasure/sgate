@@ -563,7 +563,7 @@ etcd key：`/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`，lease TT
 | --- | --- | --- | --- |
 | `enabled` | bool | `false`（gateway.yaml 显式 `true`） | 安全链总开关 |
 | `kickInternalToken` | string | `""` | KickService（loginserver→sgate）鉴权 token；空=拒绝全部 Kick RPC。与 loginserver `sgate.internalToken` 一致 |
-| `trustedProxies` | []string | `[]`（不信任任何代理头） | **仅 WebSocket**：握手直连对端命中 IP/CIDR 时从 X-Real-IP / X-Forwarded-For 取真实客户端 IP。TCP 无 HTTP 头不支持 |
+| `trustedProxies` | []string | `[]`（不信任任何代理头） | **仅 WebSocket**：握手直连对端命中列表内精确 IP 时从 X-Real-IP / X-Forwarded-For 取真实客户端 IP（仅精确 IP，不支持网段）。TCP 无 HTTP 头不支持 |
 | `rateLimit.enabled` | bool | `false`（gateway.yaml 显式 `true`） | 令牌桶限流 |
 | `rateLimit.maxTokens` | int | `10000` | 每秒令牌数（按 IP/路由）；下扫膝点 ~600K，默认覆盖 NAT 多客户端共享 IP。全局硬顶 = maxTokens×10，路由上限 = maxTokens×4。热更 `POST /admin/ratelimit` |
 | `circuitBreaker.enabled` | bool | `false` | 熔断（连续失败 5 次开、半开成功 3 次恢复、30s 超时） |

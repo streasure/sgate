@@ -22,7 +22,6 @@ import (
 	"github.com/streasure/sgate/internal/security"
 	"github.com/streasure/sgate/internal/traffic"
 	"github.com/streasure/util/gatewayutil"
-	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 	"github.com/streasure/util/udiscovery"
@@ -77,9 +76,9 @@ type Engine struct {
 	canaryFilter  *traffic.CanaryFilter       // 灰度发布
 	trafficMirror *traffic.TrafficMirror      // 流量镜像
 
-	// trustedProxies 反向代理信任前缀（IP/CIDR）：仅 WS 握手解析 XFF/X-Real-IP 时用。
+	// trustedProxies 反向代理信任列表（仅精确 IP）：仅 WS 握手解析 XFF/X-Real-IP 时用。
 	// Init 时从 config.Security.TrustedProxies 解析一次；空列表=不信任任何代理头。
-	trustedProxies []netip.Prefix
+	trustedProxies []netip.Addr
 
 	// 转发统计计数器（用于极限压测时观测 sgate 转发能力）
 	pipeline                           *MessagePipeline
@@ -184,7 +183,7 @@ func (g *Engine) AddPushedToClient(n int64) {
 	g.messagesPushedToClient.Add(n)
 }
 
-// IsTrustedProxy 判断对端 IP 是否在反代信任列表（IP 或 CIDR）。
+// IsTrustedProxy 判断对端 IP 是否在反代信任列表（仅精确 IP 匹配）。
 // 仅 WS 握手解析 XFF 时调用；TCP 无 HTTP 头不走此路径。
 func (g *Engine) IsTrustedProxy(host string) bool {
 	if len(g.trustedProxies) == 0 {
@@ -195,7 +194,7 @@ func (g *Engine) IsTrustedProxy(host string) bool {
 		return false
 	}
 	for _, p := range g.trustedProxies {
-		if p.Contains(addr) {
+		if p == addr {
 			return true
 		}
 	}
@@ -297,8 +296,8 @@ func (g *Engine) Init() error {
 	// 反代信任列表（仅 WS XFF 用；配置已 Validate，此处静默跳过非法项）
 	if cfg := g.cfg.Load(); cfg != nil {
 		for _, s := range cfg.Security.TrustedProxies {
-			if p, err := netutil.ParseIPOrPrefix(s); err == nil {
-				g.trustedProxies = append(g.trustedProxies, p)
+			if addr, err := netip.ParseAddr(s); err == nil {
+				g.trustedProxies = append(g.trustedProxies, addr)
 			}
 		}
 		if err := g.validateSecurityWiring(cfg); err != nil {
