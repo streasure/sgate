@@ -69,6 +69,8 @@ message ErrorResponse {
 | `CmdLogoutGate` | 1000003 | C→S | 登出（网关撤销 JWT、通知逻辑服、可靠投递应答后断连） |
 | `CmdLogoutGateAck` | 1000004 | S→C | 登出应答（收到后连接即将关闭） |
 | `CmdKickNotify` | 1100009 | S→C | 踢下线通知（**先推后断**），body 为 `logic.KickNotify{reason, code, message}` |
+| `CmdLogicLoginReq` | 1100001 | C→S | **业务登录**（LoginGate 之后），body 为 `logic.LoginReq{userId, loginKey, ...}`（§4.1） |
+| `CmdLogicLoginAck` | 1100002 | S→C | 业务登录应答，body 为 `logic.LoginAck{code, message, user, user_key, ...}`（§4.1） |
 | `CmdHeartbeatReq` | 1100010 | C→S | 应用层心跳（见 §5：网关消费、不转发、无应答） |
 | `CmdHeartbeatAck` | 1100011 | — | 预留；当前网关不产生该应答 |
 | `CmdUserOffline` | 1100012 | S→logic | 网关→逻辑服的下线通知（客户端不可见） |
@@ -111,6 +113,30 @@ message ErrorResponse {
 - 登录是异步处理（worker 协程），不要假设 ack 的到达顺序与其他消息严格有序
 - 同一账号重复登录时**旧连接会被踢**（网关绑定新连接）
 - `udp_token`/`udp_port`：网关 `udp.enabled: false` 时为空；开启时用于 §9 的 UDP 关联，30s 内一次性有效
+
+### 4.1 业务登录（LoginReq / LoginAck）
+
+LoginGate（§4）只完成网关准入；进入逻辑服后还需发 `CmdLogicLoginReq(1100001)`
+做业务登录，应答 `CmdLogicLoginAck(1100002)`：
+
+```text
+C→S  CmdLogicLoginReq(1100001)   body = LoginReq{ userId, loginKey, ... }
+S→C  CmdLogicLoginAck(1100002)   body = LoginAck{ code, message, user, user_key, ... }
+```
+
+**`LoginAck.code` 语义**（常量见 protocol 仓 `logic/codes.go`，勿写字面量）：
+
+| code | 含义 | 客户端处理 |
+| ---: | --- | --- |
+| `0` | 成功：`user` 回账号快照、`user_key` 回显连接身份 | 读取 `user` 进入业务态 |
+| `400` | `missing userId`（请求缺账号） | 检查登录参数，走重新登录 |
+
+注意：
+
+- **先断言 `code == 0` 再读 `user`**；失败应答 `user`/`user_key` 为空，不要把
+  「无应答」当唯一失败信号（历史行为是沉默超时，现改为回错误码）
+- 与 `LoginGateAck` 的 code 命名空间**相互独立**（400/401/429/503 是网关准入，
+  `LoginAck.code` 是逻辑服业务登录）
 
 ---
 

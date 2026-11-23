@@ -70,13 +70,13 @@
       均可起、探针三态、batch-off 对账闭合、156ms 优雅停机 + etcd 注销、
       四进程冒烟一键过、apidiff 五路径实测）。对账口径：batch-on 配置合批缓冲未刷
       不计 pushedToClient，对账须用 batch-off。
-- [~] **logic SDK 版本治理**（阶段 5 已落地，切换待触发）：logic 仓 `d6ffe60` +
-      annotated tag `v0.1.0`（本地未推送）——`CHANGELOG.md` 基线条目、
-      `scripts/apidiff.sh` 导出面兼容性门禁（go-apidiff，基准=最近 tag → HEAD，
+- [~] **logic SDK 版本治理**（阶段 5 已落地；**当前裁定：不做 `require` 切换**）：
+      logic 仓 `d6ffe60` + annotated tag `v0.1.0`（本地未推送）——`CHANGELOG.md`
+      基线条目、`scripts/apidiff.sh` 导出面兼容性门禁（go-apidiff，基准=最近 tag → HEAD，
       五路径实测：无指引/相等 PASS/仅 additive PASS/破坏 FAIL/默认 PASS）、
-      logic README「版本治理」段（0.x bump 规则、tag 流程、`replace => require`
-      切换时机）。`replace => ../logic` 暂不切 `require`，触发条件 = tag 推远端 +
-      第二个仓外消费者；改 SDK 仍须同轮跑 sgate 五门禁。
+      logic README「版本治理」段（0.x bump 规则、tag 流程）。依赖一律保持本地
+      `replace`，**不切 `require`、不打 tag、不推送**（推送/发版由用户自做，
+      见全局 skill `streasure-local-workflow`）；改 SDK 仍须同轮跑 sgate 五门禁。
 - [~] **跨仓集成冒烟基线**（脚本已落地，待 Linux CI 接入）：`scripts/smoke-logicserver.ps1`
       四进程对账冒烟已实跑通过（loginserver → gateway → logicserver → bench1_ws，
       12 断言 PASS、版本钉扎 `logs/smoke_versions.txt`），本机手动一键可用；
