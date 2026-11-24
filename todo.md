@@ -8,7 +8,33 @@
 
 ---
 
-## 1. 需要 Linux 环境（与 roadmap P2-4 打包进行）
+## 0. 外部条件与硬件清单（各阻塞项共用，单一事实源）
+
+### 本机现状（全部既有压测结论的取得环境，2026-11 实测）
+
+| 项 | 规格 |
+| --- | --- |
+| CPU | Intel i5-10400F 6C/12T @2.9GHz（网关实测全程 ≤3.8/12 线程，从未饱和） |
+| 内存 | 31.9GB 物理；Windows 提交上限 61GB（页面文件 ≈30GB）；后台常驻 ≈37GB 不可动 → **常态空闲提交量仅 ≈14~16GB** |
+| 网卡 | 1Gbps |
+| 系统 | Windows 10（Build 19045） |
+| 连接天花板 | Windows 临时端口池 49152 起共 **16,384**（场景 A 失败即 bind 耗尽）；gnet Windows UDP 单 reader ≈**280~300K datagrams/s**；每连接一个 goroutine（`eventloop_windows.go` 模拟 epoll） |
+| 依赖服务 | etcd / MySQL / Redis 本机可用；跨仓冒烟另需四兄弟仓 checkout（protocol / util / treasure-slog / logic） |
+
+### 各阻塞项所需外部条件
+
+| 阻塞项（章节） | 环境 | 关键硬件 / 配置要求 | 依据（为什么本机不行） |
+| --- | --- | --- | --- |
+| 满载 7500+7500 场景 D 复验（§2） | **空闲大内存机**（Windows 或 Linux 均可） | 空闲提交量 **≥24GB**（推荐 64GB 内存机，或 32GB 机且后台清空） | 满载全链路同机：gateway RSS 峰 9.9GB + logic2（7500 成员、128 推送协程）+ 双 bench + loginserver + etcd/MySQL/Redis；本机 15.6GB 余量在幽灵推送期触发 errno=1455 打死 logic2 |
+| UDP 阶段 4 正式压测（§1） | **Linux x86_64** | ≥8 核、≥16GB 内存、千兆以上网卡 | gnet Windows UDP 单 reader 天花板 ≈280~300K datagrams/s，Linux 多 reader 未验证；弱网模拟（丢包/乱序/抖动）需 `tc netem` |
+| Linux CI 与压测基线（§1） | **Linux x86_64** | ≥4 核 / ≥8GB；Go 工具链 + bash；可起 etcd/MySQL/Redis；四兄弟仓 checkout | 固化构建/吞吐/连接数回归阈值；`check-deps.sh`（依赖方向）与 `smoke-logicserver.ps1`（四进程对账冒烟）需接入 CI；Windows 16K 连接天花板与 epoll 差异无法本机复现 |
+| 百万连接 / 网关纯上限钉死（§1） | **Linux + 多机** | 网关独占 CPU（≥12 核）+ 真实网卡；压测端（bench/logic/客户端）独立机器；`ulimit -n` ≥1M、`somaxconn` 调优 | 本机四轮 + 六项复验一致证明瓶颈在压测工具两端（CPU ≤3.8/12 核），单机同宿主互相争抢，独占环境才能钉死网关本身上限 |
+| 真实客户端仓对接（§3） | 外部仓 checkout | 客户端仓不在本机；按 [`docs/client-guide.md`](docs/client-guide.md) 对齐 | 可靠消息 ACK + 滑动窗口去重、UDP 关联通道（取 `udp_token` → ASSOCIATE → 数据报收发）的客户端实现 |
+| 多 zone 封禁收敛 / P3 系列（§4） | **多 zone 网络环境** | ≥2 zone 部署 + 跨 zone 网络互通（NAT 场景另需 NAT 设备/地址映射） | 跨 zone 一致性、跨 zone 踢人口径、跨服战路由、断线重连保持均无本机模拟条件 |
+
+---
+
+## 1. 需要 Linux 环境（与 roadmap P2-4 打包进行；硬件/配置要求见 [§0 清单](#0-外部条件与硬件清单各阻塞项共用单一事实源)）
 
 - [ ] **UDP 阶段 4 正式压测数据**：关联建立 QPS、上行 msg/s、下行 stateVer 时延分位数、
       与 WS 基线对比 + 弱网模拟（丢包/乱序/延迟抖动）。
@@ -43,7 +69,8 @@
       测试结束活堆回落 117MB、WS 758MB），写路径预算已封顶。
 - [x] **场景 D 关闭风暴期 `/stats` 采样超时**（2026-11-19 背压落地后复验**通过**，**缩比 4000+4000**：
       首次按满载 7500+7500 尝试时系统提交量余量仅 15.6GB（后台常驻占 37GB，不动），
-      幽灵推送期 errno=1455 环境 OOM 打死 logic2（非代码回归，与场景 C OOM 事故同型）；
+      幽灵推送期 errno=1455 环境 OOM 打死 logic2（非代码回归，与场景 C OOM 事故同型，
+      满载复验机要求见 [§0 清单](#0-外部条件与硬件清单各阻塞项共用单一事实源)）；
       缩比轮参数与原 D 同构 batch-on、上行 10s / 下行 45s）：`/stats` 全程 204 样本
       **零超时**（关闭风暴两窗口延迟 max 69ms，基线曾连续 4 次超时）；`pendingWriteBytes`
       max 12.8MB → **收尾归 0（关闭期不再积压）**；`droppedTotal=failed=0`、auth=0
@@ -85,7 +112,7 @@
       配置）才动，不主动排期（童子军军规，见 logicserver-design §7.3）；新仓 logicserver
       一律显式传参。
 
-## 3. 需要外部仓（客户端仓不在本机）
+## 3. 需要外部仓（客户端仓不在本机；条件见 [§0 清单](#0-外部条件与硬件清单各阻塞项共用单一事实源)）
 
 - [ ] **真实客户端仓对接 #4**：
       - 可靠消息端到端 ACK + 滑动窗口去重（`CmdMsgAck`，阶段 1~4 已完成于 bench 侧：
@@ -93,7 +120,7 @@
       - UDP 关联通道客户端实现（登录取 `udp_token` → ASSOCIATE → 数据报收发 + 保活）。
       - 客户端仓落地时按 `docs/client-guide.md` 对齐。
 
-## 4. 需要外部环境（多 zone / 真实网络）
+## 4. 需要外部环境（多 zone / 真实网络；条件见 [§0 清单](#0-外部条件与硬件清单各阻塞项共用单一事实源)）
 
 - [ ] **封禁收敛遗留**：多 zone 部署下的跨 zone 一致性验证；NAT 场景踢人口径
       （roadmap P2-2）。
