@@ -54,15 +54,28 @@ var (
 var loginBindGrace = 5 * time.Second
 
 // routeKeyCache 命令号到路由键字符串的驻留缓存（熔断/限流/降级按键读取）。
+// 有界：写满 routeKeyCacheMax 后新 cmd 不再驻留（绕过缓存直用 strconv）——
+// 已认证连接可用随机 cmd 无限灌缓存造成内存放大，正常业务 cmd 数远小于上限。
 var routeKeyCache sync.Map
+var routeKeyCacheCount atomic.Int64
+
+// routeKeyCacheMax 驻留缓存条数上限。
+const routeKeyCacheMax = 1 << 16
 
 // routeKeyFor 返回 cmd 的驻留路由键：首次 strconv 分配一次，之后零分配。
+// 缓存写满后退化为每次 strconv 分配（正确性不变，仅多一次小分配）。
 func routeKeyFor(cmd int32) string {
 	if v, ok := routeKeyCache.Load(cmd); ok {
 		return v.(string)
 	}
 	key := strconv.Itoa(int(cmd))
-	actual, _ := routeKeyCache.LoadOrStore(cmd, key)
+	if routeKeyCacheCount.Load() >= routeKeyCacheMax {
+		return key
+	}
+	actual, loaded := routeKeyCache.LoadOrStore(cmd, key)
+	if !loaded {
+		routeKeyCacheCount.Add(1)
+	}
 	return actual.(string)
 }
 
