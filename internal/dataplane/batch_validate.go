@@ -7,6 +7,7 @@ import (
 	"github.com/streasure/sgate/internal/config"
 
 	protoLogin "github.com/streasure/protocol/loginserver"
+	"github.com/streasure/util/netutil"
 	"github.com/streasure/util/panicutil"
 	"github.com/streasure/util/tlog"
 )
@@ -21,7 +22,8 @@ import (
 // 约束：
 //   - 仅 loginValidation.enabled=true 且 batchInterval>0 时运行（热读配置）
 //   - 单次批量 ≤ batchSize（默认 200，loginserver 硬上限 500）
-//   - 校验请求不带 sgate 上下文（loginserver 天然跳过会话写入）
+//   - item 携带 client_ip 供 loginserver 做 IP 黑名单周期兜底；不带 sgate/conn
+//     上下文（loginserver 天然跳过会话写入）
 //   - 单条 RPC 失败按 invalid 处理（fail-closed，下轮再确认）
 //   - 踢人复用 kickConn：KICK_NOTIFY + 逻辑服下线 + 断连
 func (g *Engine) startBatchValidateSweep() {
@@ -71,6 +73,7 @@ func (g *Engine) batchValidateSize() int {
 type batchSweepItem struct {
 	accountID string
 	loginKey  string
+	clientIP  string // 远端 IP（loginserver IP 黑名单周期兜底用）
 	conn      *Connection
 }
 
@@ -91,7 +94,12 @@ func (g *Engine) runBatchValidateSweep() {
 		if aid == "" || key == "" {
 			return true
 		}
-		items = append(items, batchSweepItem{accountID: aid, loginKey: key, conn: conn})
+		items = append(items, batchSweepItem{
+			accountID: aid,
+			loginKey:  key,
+			clientIP:  netutil.Host(conn.GetRemoteAddr()),
+			conn:      conn,
+		})
 		return true
 	})
 	if len(items) == 0 {
@@ -110,7 +118,8 @@ func (g *Engine) runBatchValidateSweep() {
 			req.Items[i] = &protoLogin.ValidateLoginTokenReq{
 				AccountId:  it.accountID,
 				LoginToken: it.loginKey,
-				// 不带 sgate 上下文：loginserver 跳过会话写入，纯校验
+				ClientIp:   it.clientIP,
+				// 不带 sgate/conn 上下文：loginserver 跳过会话写入，纯校验（含 IP 黑名单）
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
