@@ -84,10 +84,9 @@ func (g *Engine) HandleWSData(wsConn *WebSocketConnection, payload []byte) error
 		}
 		// 拷贝出异步持有的副本后，原解码池消息立即归还（与 TCP 失败路径同策略）。
 		msgCopy := &protoGw.StreamData{
-			Cmd:     message.Cmd,
-			SeqId:   message.SeqId,
-			Data:    append([]byte(nil), message.Data...),
-			UserKey: message.UserKey,
+			Cmd:   message.Cmd,
+			SeqId: message.SeqId,
+			Data:  append([]byte(nil), message.Data...),
 		}
 		if !g.acquireLoginSlot() {
 			ackErr := g.sendWebSocketLoginAck(wsConn, connectionID, message.SeqId, 429, "too many concurrent logins", req.ServerId)

@@ -87,12 +87,9 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 	g := p.gw
 	protection := g.GetProtection()
 
-	// WebSocket 特定：UserKey 映射更新（前置处理，避免影响后续逻辑）
-	if message.UserKey != "" {
-		oldUserUUID := "temp_" + connectionID
-		g.connectionManager.UpdateUserConnection(connectionID, oldUserUUID, message.UserKey)
-		tlog.Debug(g.ctx, "received user UUID connectionID=%s userUUID=%s", connectionID, message.UserKey)
-	}
+	// 安全不变量：入站帧 UserKey 恒为空（DecodeClientMessage 先 Reset，只回填
+	// Cmd/SeqId/Data），禁止在鉴权前按帧内 UserKey 改绑身份——身份改绑只走
+	// 可信侧：登录（finishLoginGate/finishWSLoginGate）与 logic 应答（logiclink）。
 
 	// 延迟测量：与 tracer 解耦，tracing 关闭时也计量。
 	// 裸 QPC 粒度 100ns（time.Now 被 runtime 粗化至 ~1.2µs，会把亚微秒延迟截成 0），
@@ -366,11 +363,8 @@ func (p *MessagePipeline) Process(conn gnet.Conn, data []byte, message *protoGw.
 		g.latencyTracker.Record(time.Duration(obs.MonoNowNs() - pipelineStart))
 	}
 
-	// WebSocket 特定：响应字段注入（UserKey/SeqId 回填）
+	// WebSocket 特定：响应字段注入（SeqId 回填；入站帧 UserKey 恒为空，不回填）
 	if protoMsg != nil {
-		if protoMsg.UserKey == "" && message.UserKey != "" {
-			protoMsg.UserKey = message.UserKey
-		}
 		if protoMsg.SeqId == 0 && message.SeqId != 0 {
 			protoMsg.SeqId = message.SeqId
 		}
@@ -498,7 +492,7 @@ func (p *PipelineWorkerPool) processMessage(task *pipelineTaskData) {
 		pipelineTaskPool.Put(task)
 	}()
 
-	// 统一处理路径（ProcessForWS 已合并到 Process，UserKey 映射已内联）
+	// 统一处理路径（ProcessForWS 已合并到 Process；入站 UserKey 恒为空，无映射更新）
 	result := p.gw.pipeline.Process(task.conn, task.data, task.message, task.connectionID)
 
 	if result.Error != nil {

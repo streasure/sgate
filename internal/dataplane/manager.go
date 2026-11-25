@@ -379,11 +379,6 @@ func (cm *ConnectionManager) UpdateConnectionUserUUID(connectionID, userUUID str
 	}
 }
 
-// UpdateUserConnection 更新用户的连接映射。
-func (cm *ConnectionManager) UpdateUserConnection(connectionID, oldUserUUID, newUserUUID string) {
-	cm.UpdateConnectionUserUUID(connectionID, newUserUUID)
-}
-
 func (cm *ConnectionManager) GetConnectionCount() int {
 	return int(cm.count.Load())
 }
