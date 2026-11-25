@@ -98,7 +98,8 @@ func (g *Engine) HandleTCPFrame(c gnet.Conn, connectionID string, data []byte) (
 }
 
 // getOrCreateBreaker 获取或创建指定 route 的熔断器。
-// 未启用（breakerParams 为 nil）或管理器缺失时返回 nil（调用方需判空）。
+// 未启用（breakerParams 为 nil）、管理器缺失或熔断器条数达上限
+// （maxBreakers，防随机 cmd 无界建桶）时返回 nil（调用方需判空）。
 // 参数来自构造/热更时的快照，热路径不做配置解析。
 func (g *Engine) getOrCreateBreaker(route string) *security.CircuitBreaker {
 	if g.circuitBreakerMgr == nil {

@@ -151,9 +151,17 @@ func (cb *CircuitBreaker) Reset() {
 	cb.lastFailureTime.Store(time.Now().UnixNano())
 }
 
-// CircuitBreakerManager 熔断器管理器
+// maxBreakers 熔断器条数上限。routeKey 可来自已认证连接的任意 cmd
+// （routeKeyCache 写满后 bypass 路径仍为每个新 cmd 产出独立字符串），
+// 按需创建若无上界，与 routeKeyCache 同一攻击面换层泄漏。业务 cmd 数
+// 远小于上限；写满后新 name 不再创建（返回 nil = 无熔断，调用方判空后
+// 按放行处理，与未启用同路径），已驻留 name 不受影响。
+const maxBreakers = 1 << 16
+
+// CircuitBreakerManager 熔断器管理器（条数有界，见 maxBreakers）。
 type CircuitBreakerManager struct {
 	breakers sync.Map
+	count    atomic.Int64
 }
 
 func NewCircuitBreakerManager() *CircuitBreakerManager {
@@ -164,9 +172,25 @@ func (cbm *CircuitBreakerManager) GetCircuitBreaker(name string, failureThreshol
 	if actual, ok := cbm.breakers.Load(name); ok {
 		return actual.(*CircuitBreaker)
 	}
+	// 占位后再 LoadOrStore：并发首建各占一个名额，保证计数不越上限
+	//（先查后存的写法在并发下会短暂超限）。
+	for {
+		n := cbm.count.Load()
+		if n >= maxBreakers {
+			return nil
+		}
+		if cbm.count.CompareAndSwap(n, n+1) {
+			break
+		}
+	}
 	breaker := NewCircuitBreaker(name, failureThreshold, successThreshold, timeout)
-	actual, _ := cbm.breakers.LoadOrStore(name, breaker)
-	return actual.(*CircuitBreaker)
+	actual, loaded := cbm.breakers.LoadOrStore(name, breaker)
+	if loaded {
+		// 并发下他人已抢先创建同名条目，释放多占的名额
+		cbm.count.Add(-1)
+		return actual.(*CircuitBreaker)
+	}
+	return breaker
 }
 
 func (cbm *CircuitBreakerManager) GetBreaker(name string) (*CircuitBreaker, bool) {
@@ -177,7 +201,9 @@ func (cbm *CircuitBreakerManager) GetBreaker(name string) (*CircuitBreaker, bool
 }
 
 func (cbm *CircuitBreakerManager) RemoveBreaker(name string) {
-	cbm.breakers.Delete(name)
+	if _, loaded := cbm.breakers.LoadAndDelete(name); loaded {
+		cbm.count.Add(-1)
+	}
 }
 
 // GetTrippedCount 返回所有熔断器累计触发次数
