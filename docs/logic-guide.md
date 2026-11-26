@@ -171,7 +171,7 @@ svc.Server().RegisterUser(userUUID, sessionID)    // 登录处理时建立映射
 svc.Server().UnregisterUser(userUUID)
 svc.Server().GetConnectionIDByUser(userUUID) (string, bool)
 
-svc.Server().JoinGroup(groupID, sessionID) int    // 返回成员数
+svc.Server().JoinGroup(groupID, sessionID) int    // 返回成员数；单会话上限 256，超限新组拒绝返回 0（已在组内重入不占名额）
 svc.Server().LeaveGroup(groupID, sessionID) int
 svc.Server().JoinGroupForUser(userUUID, groupID) error
 svc.Server().LeaveGroupForUser(userUUID, groupID) error
@@ -183,6 +183,8 @@ svc.Server().GetConnectionCount() int             // 当前活跃会话数
 ```
 
 **防泄漏要点**：`Offline` 由网关的 `CmdUserOffline` 自动触发（断线/心跳超时/被踢），会清掉该会话的分组与用户映射——**不要只依赖自己的登出处理**，异常断连路径全靠它。
+
+**组数上限**：单会话组数上限 256（防随机 `groupID` 让 `groups`/`sessionGroups` 无界膨胀到断连才清）。超限 `JoinGroup` 返回 0 且不建组条目；`LeaveGroup`/`Offline` 腾出名额后恢复，已在组内的幂等重入不受影响。
 
 ---
 
