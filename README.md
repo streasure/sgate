@@ -555,6 +555,8 @@ etcd key：`/services/{belong}/SERVER_TYPE_SGATE:{zone}/{instanceId}`，lease TT
 
 `admin.token` 为空 = `/admin/*` 接口关闭（fail-closed）。封禁管理不在 sgate——已收敛到 loginserver ACL API（`/api/v1/acl/blacklist`、`/api/v1/acl/banned-role`），sgate 只执行 loginserver 单向下发的 Kick。
 
+**切维护踢人是一次性动作**：`enable` 打标记（立即拦新登录）→ 快照 → 异步踢一轮，失败/漏踢**不补踢**（无周期兜底，与封禁的 BatchValidate 兜底不同）——漏踢连接保持在线直至断连，或重发 `action=enable` 重新快照再踢。响应 `accepted` 仅表示任务受理，完成情况看 `maintenance kick done matched=... kicked=...` 打点日志；`disable` 只移除标记，不补踢。
+
 ### 6.9 `security` 安全组件
 
 **热切换限制**：`security/rateLimit/waf/jwtAuth/circuitBreaker` 的 `enabled` 开关**仅启动时生效**——组件与过滤器不随热更重建，配置中心改开关会被 `handleConfigUpdate` 整单拒绝（告警 `security enable flags cannot hot-toggle`），需重启。其余参数（限流阈值、黑白名单、JWT secret、过载阈值、连接限制等）支持热更；非法配置（如 `maxFrameBufSize < maxFrameSize+4`）同样整体拒绝、保留当前配置。

@@ -18,6 +18,11 @@ import (
 //  3. 异步：worker 并发执行 踢人通知(CMD_KICK_NOTIFY) → 通知逻辑服下线(CmdUserOffline，
 //     触发 logic 侧会话/推送组清理) → 断开连接（OnClose 兜底移除网关侧推送组并清理映射）
 //  4. 响应 matched/accepted，完成时打点日志
+//
+// 踢人是一次性异步任务：失败/漏踢不补踢——与封禁经 loginserver BatchValidate
+// 的周期兜底不同，维护标记只拦新登录，漏踢连接保持在线直至断连，或重发
+// action=enable 重新快照再踢一轮。响应 accepted 仅表示任务受理，完成情况看
+// `maintenance kick done matched=%d kicked=%d` 打点（kicked 为尝试计数）。
 
 // maintenanceState 切维护标记集合：serverId 维度与 zone 维度二选一（由调用方保证单选）。
 type maintenanceState struct {
