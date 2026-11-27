@@ -108,8 +108,9 @@
       四进程对账冒烟已实跑通过（loginserver → gateway → logicserver → bench1_ws，
       12 断言 PASS、版本钉扎 `logs/smoke_versions.txt`），本机手动一键可用；
       余下是接入 Linux CI（与下方 P2-4 打包）+ 各兄弟仓钉同一批 commit 的自动化。
-- [ ] **loginserver 包级 `GetConfig` 改显式传参**：**仅当出现实际痛点**（如测试需注入不同
-      配置）才动，不主动排期（童子军军规，见 logicserver-design §7.3）；新仓 logicserver
+- [x] **loginserver 包级 `GetConfig` 改显式传参**：已实施（测试注入全局变异是实际
+      痛点）——`LoadConfig` 返回实例、组合根沿构造下发、httphandler `Handler` 结构 +
+      `RegisterRoutes`、rmodel `Repo` 实例、测试全改构造注入；新仓 logicserver
       一律显式传参。
 
 ## 3. 需要外部仓（客户端仓不在本机；条件见 [§0 清单](#0-外部条件与硬件清单各阻塞项共用单一事实源)）
