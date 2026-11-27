@@ -112,6 +112,15 @@
       痛点）——`LoadConfig` 返回实例、组合根沿构造下发、httphandler `Handler` 结构 +
       `RegisterRoutes`、rmodel `Repo` 实例、测试全改构造注入；新仓 logicserver
       一律显式传参。
+- [ ] **transport 协议扩展性演进**（**条件触发，不主动排期**——现无第 4 种协议/新帧
+      格式需求，无消费方的抽象不做）：仅当确定要新增传输协议或帧格式时启动。
+      现状：启动/配置层已插件化（`transport.Protocol`+`Register`，加同类协议=一个
+      文件+yaml）；数据路径三处硬编码是瓶颈——①`Connection.isWebSocket` 布尔在
+      `Send/SendSync/SendThenClose` 内联封帧（热路径，动前先过 bench 门禁）②
+      `OnTraffic` 按类型断言 if/else 分派 ③UDP 无连接旁路（`udp_assoc`/`IsUDPCmd`/
+      `config.UDP`）成套绑定。最小改动路径：→①抽 dataplane 定义的 `Framer` 消费方
+      接口（保内联）②建连时绑定 handler ③无连接通道策略化。QUIC/KCP 类另有 gnet
+      库硬边界（`Protocol.Start` 绑 gnet 事件模型），需适配桥，单独立项。
 
 ## 3. 需要外部仓（客户端仓不在本机；条件见 [§0 清单](#0-外部条件与硬件清单各阻塞项共用单一事实源)）
 
